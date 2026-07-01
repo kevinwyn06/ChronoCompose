@@ -1337,8 +1337,11 @@ class Component extends DCLogic {
           if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
           if(!t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
         else { const id='t'+Math.random().toString(36).slice(2,8);
+          /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
+             An explicit //planned-duration: marker (from a prior export) still wins. Re-imports never touch planned. */
+          const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
           const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:meta.planned!=null?'Exact':'Proportional',
-            start,end,allDay,priority:4,deps:[],pct:0,planned:meta.planned!=null?meta.planned:60,spent:0,goal:meta.goal||'',
+            start,end,allDay,priority:4,deps:[],pct:0,planned:meta.planned!=null?meta.planned:evMins,spent:0,goal:meta.goal||'',
             description:meta.clean||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid});
           tasks.push(nt); byEid[eid]=nt; added++; }
       }); });

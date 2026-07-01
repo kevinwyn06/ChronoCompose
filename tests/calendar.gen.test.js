@@ -132,11 +132,38 @@ test('mergeCalendarEvents: imports a single event as a new task', () => {
   assert.equal(t.calendarId, 'cal1');
   assert.equal(t.start, new Date('2026-07-02T09:00:00Z').getTime());
   assert.equal(t.end, new Date('2026-07-02T10:00:00Z').getTime());
-  // no planned-duration in desc -> Proportional mode + default planned 60
+  // no planned-duration in desc -> Proportional mode; planned = the event's own duration (here 09:00->10:00 = 60m)
   assert.equal(t.type, 'Proportional');
   assert.equal(t.planned, 60);
   // calendar summary becomes a slugged tag
   assert.deepEqual([...t.labels], ['work']);
+});
+
+test('mergeCalendarEvents: timed event -> planned = actual gcal duration in minutes', () => {
+  const c = make();
+  const tasks = [];
+  // 09:00 -> 11:30 = 150 minutes
+  c.mergeCalendarEvents(tasks, results('cal1', [timedEvent({ end:{ dateTime:'2026-07-02T11:30:00Z' } })]), {}, calById('cal1','Work'));
+  const t = tasks[0];
+  assert.equal(t.planned, 150);
+  assert.equal(t.type, 'Proportional'); // no explicit marker -> still Proportional
+});
+
+test('mergeCalendarEvents: all-day event -> planned left blank (0)', () => {
+  const c = make();
+  const tasks = [];
+  const ev = { id:'allday2', status:'confirmed', summary:'Holiday',
+    start:{ date:'2026-07-04' }, end:{ date:'2026-07-05' }, description:'' };
+  c.mergeCalendarEvents(tasks, results('cal1', [ev]), {}, calById('cal1','Work'));
+  assert.equal(tasks[0].planned, 0);
+});
+
+test('mergeCalendarEvents: planned-duration marker overrides the event duration', () => {
+  const c = make();
+  const tasks = [];
+  // 60-minute event, but explicit marker says 02:00 -> marker wins
+  c.mergeCalendarEvents(tasks, results('cal1', [timedEvent({ description:'//planned-duration: 02:00 1' })]), {}, calById('cal1','Work'));
+  assert.equal(tasks[0].planned, 120);
 });
 
 test('mergeCalendarEvents: planned-duration in description -> Exact mode + planned minutes', () => {

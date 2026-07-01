@@ -85,7 +85,7 @@ test('mergeCalendarEvents: meta drives Exact vs Proportional', () => {
   assert.strictEqual(oneoff.eventId, 'single1');
   const plain = tasks.find(t=>t.name==='Plain');
   assert.strictEqual(plain.type, 'Proportional');
-  assert.strictEqual(plain.planned, 60, 'default when no planned-duration');
+  assert.strictEqual(plain.planned, 30, 'no planned-duration marker => planned = event duration (10:00-10:30 = 30m)');
 });
 
 test('mergeCalendarEvents: idempotent re-import (no duplicates)', () => {
