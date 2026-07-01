@@ -2,19 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { make } = require('./_load.js');
 
-test('parseEventMeta parses planned-duration and goal, strips them from clean', () => {
-  const c = make();
-  const r = c.parseEventMeta('//planned-duration: 01:30\n//goal: finish the thing\nsome notes');
-  assert.strictEqual(r.planned, 90);
-  assert.strictEqual(r.goal, 'finish the thing');
-  assert.ok(r.clean.includes('some notes'));
-  assert.ok(!r.clean.includes('planned-duration'));
-  assert.ok(!r.clean.includes('//goal'));
-  const empty = c.parseEventMeta('');
-  assert.deepEqual(empty, { planned:null, goal:'', clean:'' });
-  assert.deepEqual(c.parseEventMeta(undefined), { planned:null, goal:'', clean:'' });
-});
-
 test('rruleToRecur maps Google RRULE to recur model', () => {
   const c = make();
   const daily = c.rruleToRecur(['RRULE:FREQ=DAILY;INTERVAL=2']);
@@ -73,19 +60,20 @@ test('mergeCalendarEvents: recurring collapses to one task with recur + master i
   assert.strictEqual(r.added, 3);
 });
 
-test('mergeCalendarEvents: meta drives Exact vs Proportional', () => {
+test('mergeCalendarEvents: planned = event duration; description markers are ignored', () => {
   const c = make();
   const { results, masters, calById } = calFixtures();
   const tasks = [];
   c.mergeCalendarEvents(tasks, results, masters, calById);
+  // 'One off' description contains legacy //planned-duration:/ //goal: text — we no longer parse it.
   const oneoff = tasks.find(t=>t.name==='One off');
-  assert.strictEqual(oneoff.planned, 90);
-  assert.strictEqual(oneoff.goal, 'x');
-  assert.strictEqual(oneoff.type, 'Exact', 'planned-duration present => Exact');
+  assert.strictEqual(oneoff.planned, 60, 'planned from event duration (10:00-11:00 = 60m), not the marker');
+  assert.strictEqual(oneoff.goal, '', 'goal no longer imported from description marker');
+  assert.strictEqual(oneoff.type, 'Proportional', 'all imported tasks default to Proportional');
   assert.strictEqual(oneoff.eventId, 'single1');
   const plain = tasks.find(t=>t.name==='Plain');
   assert.strictEqual(plain.type, 'Proportional');
-  assert.strictEqual(plain.planned, 30, 'no planned-duration marker => planned = event duration (10:00-10:30 = 30m)');
+  assert.strictEqual(plain.planned, 30, 'planned = event duration (10:00-10:30 = 30m)');
 });
 
 test('mergeCalendarEvents: idempotent re-import (no duplicates)', () => {

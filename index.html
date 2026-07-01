@@ -1285,11 +1285,6 @@ class Component extends DCLogic {
       .catch(e=>this.gcalMsg('List failed: '+e.message));
   }
   toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); }
-  parseEventMeta(desc){ desc=String(desc||''); let planned=null,goal='';
-    const dm=desc.match(/\/\/planned-duration:\s*(\d{1,2}):(\d{2})/); if(dm) planned=parseInt(dm[1])*60+parseInt(dm[2]);
-    const gm=desc.match(/\/\/goal:\s*(.*)/); if(gm) goal=gm[1].trim();
-    const clean=desc.replace(/^\/\/planned-duration:.*$/gm,'').replace(/^\/\/goal:.*$/gm,'').trim();
-    return {planned,goal,clean}; }
   calTag(cal){ return (cal&&cal.summary?cal.summary:'cal').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
   /* Parse a Google RRULE array into our recurrence model (kind/n/days/until). Returns null if none. */
   rruleToRecur(recurrence){
@@ -1331,18 +1326,18 @@ class Component extends DCLogic {
         const start = allDay ? this.parseYMD(st) : new Date(st).getTime();
         let end = en ? (allDay ? this.parseYMD(en) : new Date(en).getTime()) : start;
         if(allDay && end<=start) end = start + this.DAY;
-        const meta=this.parseEventMeta(src.description);
         let t=byEid[eid];
-        if(t){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay; if(meta.planned!=null)t.planned=meta.planned; if(meta.goal)t.goal=meta.goal;
+        if(t){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay;
+          /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
           if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
           if(!t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
         else { const id='t'+Math.random().toString(36).slice(2,8);
           /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
-             An explicit //planned-duration: marker (from a prior export) still wins. Re-imports never touch planned. */
+             goal/description come straight from the event; thereafter they persist locally (no round-trip through GCAL). */
           const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
-          const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:meta.planned!=null?'Exact':'Proportional',
-            start,end,allDay,priority:4,deps:[],pct:0,planned:meta.planned!=null?meta.planned:evMins,spent:0,goal:meta.goal||'',
-            description:meta.clean||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid});
+          const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:'Proportional',
+            start,end,allDay,priority:4,deps:[],pct:0,planned:evMins,spent:0,goal:'',
+            description:src.description||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid});
           tasks.push(nt); byEid[eid]=nt; added++; }
       }); });
     return {added,updated};
@@ -1382,22 +1377,6 @@ class Component extends DCLogic {
       this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById); removed=this.pruneDeletedEvents(tasks,results,ids); });
       this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
     }).catch(e=>this.gcalMsg('Import failed: '+e.message));
-  }
-  gcalExport(){
-    if(!this._token){ this.gcalMsg('Connect first.'); return; }
-    const linked=this.state.tasks.filter(t=>t.eventId&&t.calendarId);
-    if(!linked.length){ this.gcalMsg('No calendar-linked tasks to export.'); return; }
-    Promise.all(linked.map(t=>{
-      const hh=String(Math.floor(t.planned/60)).padStart(2,'0'), mm=String(Math.round(t.planned%60)).padStart(2,'0');
-      const meta=this.parseEventMeta('');
-      return this.gcalFetch('https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(t.calendarId)+'/events/'+encodeURIComponent(t.eventId))
-        .then(ev=>{ const clean=this.parseEventMeta(ev.description).clean;
-          let block='//planned-duration: '+hh+':'+mm+' 1\n'; if(t.goal) block+='//goal: '+t.goal+'\n';
-          const desc=block+(clean?('\n'+clean):'');
-          return this.gcalFetch('https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(t.calendarId)+'/events/'+encodeURIComponent(t.eventId),
-            {method:'PATCH',body:JSON.stringify({description:desc})}); });
-    })).then(()=>this.gcalMsg('Exported '+linked.length+' task(s) to Calendar.'))
-      .catch(e=>this.gcalMsg('Export failed: '+e.message));
   }
   /* ==== /PP-EXT ==== */
 
@@ -1451,8 +1430,7 @@ class Component extends DCLogic {
       h('div',{style:{padding:'2px 0 8px'}}, this.googleSignInBtn()),
       setRow('Import window (days)', inp(g.window||30,v=>this.saveGcal({window:Math.max(1,parseInt(v)||30)}))),
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
-        h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import'),
-        h('button',{className:'pp-tbtn',onClick:()=>this.gcalExport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Export')),
+        h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import')),
       (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
         g.calendars.map(c=>h('label',{key:c.id,style:{display:'flex',alignItems:'center',gap:'7px',padding:'3px 0',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
           h('input',{type:'checkbox',checked:!!(g.selected&&g.selected[c.id]),onChange:()=>this.toggleCalSel(c.id)}),

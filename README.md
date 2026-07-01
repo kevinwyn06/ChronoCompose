@@ -43,14 +43,14 @@ ID**. You create it a single time; after that you just click **Sign in with Goog
 6. Paste it **once** into `config.js` (`googleClientId: "..."`). A Client ID is public and safe to commit —
    only a client *secret* is sensitive, and this browser flow uses none.
 7. In the app: **⚙ Settings → Google Calendar → Sign in with Google** (popup) → approve → tick the
-   calendars you want → **Import** / **Export**.
+   calendars you want → **Import**.
 
 > Prefer not to touch `config.js`? You can instead type the Client ID into the field that appears in
 > Settings when `config.js` has none — but pasting it into `config.js` once means you never type it again.
 
-- **Import** pulls upcoming events into tasks (calendar name → `@tag`; `//planned-duration:` and
-  `//goal:` lines in the event description are parsed into Planned/Goal).
-- **Export** writes `//planned-duration:` and `//goal:` back into each linked event's description.
+- **Import** pulls upcoming events into tasks (calendar name → `@tag`; a new task's **Planned** is the
+  event's duration, all-day events left blank). Import is **one-way** (Calendar → app): your edits to
+  Planned/Goal/notes live in the browser's localStorage and are never overwritten by re-importing.
 
 ## Where things live
 

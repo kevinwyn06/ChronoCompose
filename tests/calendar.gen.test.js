@@ -92,31 +92,6 @@ test('rruleToRecur: date-only UNTIL -> end of that UTC day', () => {
 });
 
 // =======================================================================
-// parseEventMeta  (drives both import parse and export round-trip)
-// =======================================================================
-test('parseEventMeta: parses planned-duration into minutes and strips it', () => {
-  const c = make();
-  const m = c.parseEventMeta('//planned-duration: 01:30 1\nreal notes');
-  assert.equal(m.planned, 90);
-  assert.equal(m.clean, 'real notes');
-});
-
-test('parseEventMeta: parses //goal and strips it', () => {
-  const c = make();
-  const m = c.parseEventMeta('//goal: finish draft\nbody');
-  assert.equal(m.goal, 'finish draft');
-  assert.equal(m.clean, 'body');
-});
-
-test('parseEventMeta: no meta -> planned null, goal empty, clean unchanged', () => {
-  const c = make();
-  const m = c.parseEventMeta('just a description');
-  assert.equal(m.planned, null);
-  assert.equal(m.goal, '');
-  assert.equal(m.clean, 'just a description');
-});
-
-// =======================================================================
 // mergeCalendarEvents — import + upsert
 // =======================================================================
 test('mergeCalendarEvents: imports a single event as a new task', () => {
@@ -132,9 +107,11 @@ test('mergeCalendarEvents: imports a single event as a new task', () => {
   assert.equal(t.calendarId, 'cal1');
   assert.equal(t.start, new Date('2026-07-02T09:00:00Z').getTime());
   assert.equal(t.end, new Date('2026-07-02T10:00:00Z').getTime());
-  // no planned-duration in desc -> Proportional mode; planned = the event's own duration (here 09:00->10:00 = 60m)
+  // Proportional mode; planned = the event's own duration (here 09:00->10:00 = 60m)
   assert.equal(t.type, 'Proportional');
   assert.equal(t.planned, 60);
+  // description is imported verbatim (no marker stripping); goal is not derived from it
+  assert.equal(t.goal, '');
   // calendar summary becomes a slugged tag
   assert.deepEqual([...t.labels], ['work']);
 });
@@ -158,22 +135,17 @@ test('mergeCalendarEvents: all-day event -> planned left blank (0)', () => {
   assert.equal(tasks[0].planned, 0);
 });
 
-test('mergeCalendarEvents: planned-duration marker overrides the event duration', () => {
+test('mergeCalendarEvents: legacy //planned-duration and //goal markers are ignored', () => {
   const c = make();
   const tasks = [];
-  // 60-minute event, but explicit marker says 02:00 -> marker wins
-  c.mergeCalendarEvents(tasks, results('cal1', [timedEvent({ description:'//planned-duration: 02:00 1' })]), {}, calById('cal1','Work'));
-  assert.equal(tasks[0].planned, 120);
-});
-
-test('mergeCalendarEvents: planned-duration in description -> Exact mode + planned minutes', () => {
-  const c = make();
-  const tasks = [];
-  c.mergeCalendarEvents(tasks, results('cal1', [timedEvent({ description:'//planned-duration: 02:00 1\n//goal: ship it' })]), {}, calById('cal1','Work'));
+  // 60-minute event whose description still carries old markers from a prior export.
+  const desc = '//planned-duration: 02:00 1\n//goal: ship it\nreal notes';
+  c.mergeCalendarEvents(tasks, results('cal1', [timedEvent({ description:desc })]), {}, calById('cal1','Work'));
   const t = tasks[0];
-  assert.equal(t.type, 'Exact');
-  assert.equal(t.planned, 120);
-  assert.equal(t.goal, 'ship it');
+  assert.equal(t.type, 'Proportional', 'no Exact-mode inference from markers');
+  assert.equal(t.planned, 60, 'planned from duration, not the 02:00 marker');
+  assert.equal(t.goal, '', 'goal not parsed from marker');
+  assert.equal(t.description, desc, 'description imported verbatim, markers not stripped');
 });
 
 test('mergeCalendarEvents: skips cancelled events', () => {
