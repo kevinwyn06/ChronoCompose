@@ -1,0 +1,10 @@
+{
+  "name": "life-planner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Gantt + daily-timeline planner (replaces the old GAS/Sheets time tracker).",
+  "scripts": {
+    "test": "node --test tests/core.test.js tests/calendar.test.js tests/core.gen.test.js tests/calendar.gen.test.js tests/recurrence.gen.test.js tests/allotment.gen.test.js tests/scheduling.gen.test.js",
+    "build-design": "node tools/build-design-file.js"
+  }
+}

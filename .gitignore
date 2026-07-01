@@ -1,0 +1,25 @@
+# Dependencies (none committed; app loads React/GIS from CDN, tests use Node built-ins)
+node_modules/
+
+# Logs / debug
+npm-debug.log*
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Build / temp output
+dist/
+build/
+tmp/
+*.tmp
+
+# Local env overrides (config.js IS committed on purpose — the OAuth Client ID is public;
+# put anything genuinely secret in a git-ignored file instead)
+.env
+.env.local
+config.local.js
