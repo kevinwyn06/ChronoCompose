@@ -68,6 +68,17 @@ input,select,button{font-family:inherit}
 .pp-num{width:100%;background:transparent;border:1px solid transparent;color:var(--text-num);font-size:12px;padding:2px 4px;border-radius:3px;text-align:right}
 .pp-num:hover{border-color:var(--divider)}
 .pp-num:focus{outline:none;background:var(--focus-bg);border-color:var(--focus-ring)}
+/* PP-EXT: rich-text description editor + rendered output */
+.pp-rich:empty:before{content:attr(data-ph);color:var(--text-faint2)}
+.pp-rich:focus{border-color:var(--focus-ring)!important}
+.pp-rich ul{margin:4px 0;padding-left:22px;list-style:disc}
+.pp-rich ol{margin:4px 0;padding-left:22px;list-style:decimal}
+.pp-rich li{margin:2px 0}
+.pp-rich p{margin:4px 0}
+.pp-rich h1,.pp-rich h2,.pp-rich h3{margin:8px 0 4px;font-weight:700}
+.pp-rich code{background:var(--input-bg);border:1px solid var(--divider);border-radius:4px;padding:0 4px;font-size:0.92em}
+.pp-rich a{color:#5b9bf0;text-decoration:underline}
+/* /PP-EXT */
 .pp-sel{background:var(--input-bg);border:1px solid var(--divider);color:var(--text-num);font-size:12px;padding:2px 4px;border-radius:4px;width:100%}
 .pp-sel:focus{outline:none;border-color:var(--focus-ring)}
 .pp-tbtn{display:flex;align-items:center;gap:5px;height:30px;padding:0 11px;background:var(--btn-bg);border:1px solid var(--divider);color:var(--btn-text);border-radius:6px;font-size:12.5px;font-weight:500;cursor:pointer}
@@ -161,7 +172,8 @@ class Component extends DCLogic {
       colW: pf.colW||{}, colOrder: pf.colOrder||null, colHidden: pf.colHidden||{},
       selCols:[], colMenu:null, rowDrag:null,
       /* PP-EXT state */
-      drawerOpen:false, running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now() };
+      drawerOpen:false, running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      descOpen:{} /* PP-EXT: task ids whose inline description panel is expanded */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -170,7 +182,7 @@ class Component extends DCLogic {
      `freeTime` = reserved personal/leisure minutes (blocks a late-evening slot); `allotMode` today|spread;
      `packFromNow` starts the plan (and pool) at the current time instead of dayStart. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30 }; }
+    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, gcalPollSec:60 }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
   loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
@@ -184,9 +196,12 @@ class Component extends DCLogic {
   loadRun(){ try{ return JSON.parse(localStorage.getItem('pp-run')||'null'); }catch(e){ return null; } }
   saveRun(r){ try{ if(r) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
   normalizeTask(t){
-    return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
+    const nt=Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
+    /* PP-EXT: full-day tasks have no planned time by rule — enforce here so it also migrates existing data on load. */
+    if(nt.allDay){ nt.planned=0; if(!nt.predictManual) nt.predicted=0; }
+    return nt;
   }
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
      UTC, which shifts the day and injects a bogus time (e.g. 17:00) depending on the viewer's timezone. */
@@ -220,14 +235,15 @@ class Component extends DCLogic {
 
   /* ---------- columns ---------- */
   colDefs(){
-    /* PP-EXT: type→Mode; added tags, spent, goal; predicted→"Allot" (computed remaining/allotted time) */
+    /* PP-EXT: type→Mode; added spent; predicted→"Allot" (computed remaining/allotted time).
+       Tags column dropped (tags already render under the task name); Goal column dropped (replaced by the description). */
     return [
       {k:'check',w:50,lock:true},{k:'name',w:236,l:'Task Name'},
-      {k:'type',w:120,l:'Mode'},{k:'tags',w:130,l:'Tags'},
+      {k:'type',w:120,l:'Mode'},
       {k:'start',w:150,l:'Start'},{k:'end',w:150,l:'Due'},
       {k:'dur',w:52,l:'Dur'},{k:'planned',w:78,l:'Planned'},{k:'spent',w:70,l:'Spent'},
       {k:'predicted',w:96,l:'Allot'},
-      {k:'pct',w:104,l:'% Done'},{k:'goal',w:180,l:'Goal'},{k:'cdate',w:150,l:'Completed'}
+      {k:'pct',w:104,l:'% Done'},{k:'cdate',w:150,l:'Completed'}
     ];
   }
   orderedCols(){
@@ -335,6 +351,9 @@ class Component extends DCLogic {
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
     this._tickRun=setInterval(()=>{ if(this.state.running) this.setState({nowTick:Date.now()}); }, 1000);
     this._tickIdle=setInterval(()=>{ if(!this.state.running) this.setState({nowTick:Date.now()}); }, 30000);
+    /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
+       (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
+    this._gcalPoll=setInterval(()=>this.gcalMaybeSync(), 15000);
     /* PP-EXT: first paint renders the full timeline (scroll pos unknown); re-render once mounted so the
        Gantt windows to the viewport (see ganttVWin / renderGantt virtualization). */
     requestAnimationFrame(()=>this.forceUpdate());
@@ -343,7 +362,7 @@ class Component extends DCLogic {
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
-    clearInterval(this._tickRun); clearInterval(this._tickIdle); /* PP-EXT */
+    clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); /* PP-EXT */
   }
 
   /* ---------- history ---------- */
@@ -425,6 +444,72 @@ class Component extends DCLogic {
   setDur(id,key,str){ const m=this.parseDur(str); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t[key]=m; }); }
   setDesc(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.description=val; }); }
   setStartType(id,val){ this.setType(id,val); }
+
+  /* ==== PP-EXT: rich-text (WYSIWYG) description ==== */
+  /* Whitelist-sanitize contentEditable HTML to a safe subset. Descriptions can originate from imported
+     calendar events, so we never render untrusted HTML unfiltered. Strips all attributes except a safe href. */
+  sanitizeHtml(html){
+    html = String(html||'');
+    if(typeof DOMParser==='undefined') return html; /* node/test guard — sanitize only runs in the browser */
+    const ALLOW={B:1,STRONG:1,I:1,EM:1,U:1,S:1,STRIKE:1,UL:1,OL:1,LI:1,P:1,BR:1,A:1,CODE:1,PRE:1,H1:1,H2:1,H3:1,BLOCKQUOTE:1,DIV:1,SPAN:1};
+    const doc=new DOMParser().parseFromString('<body>'+html+'</body>','text/html');
+    const walk=(node)=>{
+      Array.prototype.slice.call(node.childNodes).forEach(ch=>{
+        if(ch.nodeType===1){
+          const tag=ch.tagName;
+          if(!ALLOW[tag]){
+            if(tag==='SCRIPT'||tag==='STYLE'){ ch.remove(); return; }
+            walk(ch); /* keep the (sanitized) children, drop the tag */
+            while(ch.firstChild) node.insertBefore(ch.firstChild, ch);
+            ch.remove(); return;
+          }
+          Array.prototype.slice.call(ch.attributes).forEach(a=>{
+            if(tag==='A' && a.name.toLowerCase()==='href'){ if(/^\s*javascript:/i.test(a.value)) ch.removeAttribute('href'); }
+            else ch.removeAttribute(a.name);
+          });
+          if(tag==='A'){ ch.setAttribute('target','_blank'); ch.setAttribute('rel','noopener noreferrer'); }
+          walk(ch);
+        } else if(ch.nodeType===8){ ch.remove(); } /* comments */
+      });
+    };
+    walk(doc.body);
+    return doc.body.innerHTML.trim();
+  }
+  /* True when a description has real content (ignoring empty tags/whitespace execCommand leaves behind). */
+  hasDesc(html){ const s=String(html||'').replace(/<br\s*\/?>/gi,'').replace(/<[^>]*>/g,'').replace(/&nbsp;/gi,' ').trim(); return !!s; }
+  richCmd(e,cmd){ e.preventDefault(); try{ document.execCommand('styleWithCSS',false,''); }catch(_){}
+    try{ document.execCommand(cmd,false,''); }catch(_){}
+    const el=this._reEl; if(el) this.setDesc(el.getAttribute('data-tid'), this.sanitizeHtml(el.innerHTML)); }
+  /* Commit the currently-focused editor's content (used when a panel is collapsed/closed before blur fires). */
+  flushDesc(){ const el=this._reEl; if(el && el.isConnected){ const id=el.getAttribute('data-tid');
+    if(id){ const html=this.sanitizeHtml(el.innerHTML); const t=this.state.tasks.find(x=>x.id===id); if(t && (t.description||'')!==html) this.setDesc(id, html); } } }
+  /* Reusable WYSIWYG editor: toolbar (B/I/U, bullets, numbers) + a contentEditable surface. Uncontrolled — the
+     ref seeds innerHTML once per task so React never reconciles it away mid-edit; content is committed on blur. */
+  richEditor(t, opts){ const h=React.createElement; opts=opts||{};
+    const tbBtn=(label,cmd,title)=>h('button',{key:cmd,title:title,type:'button',
+      onMouseDown:e=>this.richCmd(e,cmd),
+      style:{minWidth:'26px',height:'24px',padding:'0 6px',fontSize:'12px',fontWeight:700,cursor:'pointer',
+        background:'var(--input-bg)',color:'var(--text-2)',border:'1px solid var(--divider)',borderRadius:'5px'}},label);
+    const toolbar=h('div',{style:{display:'flex',gap:'5px',marginBottom:'7px',flexWrap:'wrap'}},
+      tbBtn('B','bold','Bold'), tbBtn('I','italic','Italic'), tbBtn('U','underline','Underline'),
+      tbBtn('• List','insertUnorderedList','Bullet list'), tbBtn('1. List','insertOrderedList','Numbered list'));
+    const editor=h('div',{key:'re'+t.id, className:'pp-rich', contentEditable:true, suppressContentEditableWarning:true,
+      'data-tid':t.id, 'data-ph':'Add a description…',
+      ref:el=>{ this._reEl=el; if(el && el._initId!==t.id){ el._initId=t.id; el.innerHTML=this.sanitizeHtml(t.description); } },
+      onFocus:e=>{ this._reEl=e.currentTarget; },
+      onBlur:e=>this.setDesc(t.id, this.sanitizeHtml(e.currentTarget.innerHTML)),
+      onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onKeyDown:e=>e.stopPropagation(),
+      style:Object.assign({outline:'none',fontSize:'13.5px',lineHeight:'1.55',color:'var(--text-2)',
+        border:'1px solid var(--divider)',borderRadius:'8px',padding:'10px 12px',minHeight:(opts.minHeight||120)+'px',
+        overflow:'auto',background:'var(--input-bg)'},opts.style||{})});
+    return h('div',{style:opts.wrap||null}, toolbar, editor);
+  }
+  /* Read-only rendered description (sanitized). */
+  renderRichHtml(html, style){ const h=React.createElement;
+    return h('div',{className:'pp-rich', dangerouslySetInnerHTML:{__html:this.sanitizeHtml(html)},
+      style:Object.assign({fontSize:'13px',lineHeight:'1.5',color:'var(--text-2)'},style||{})}); }
+  toggleDescOpen(id){ const d=Object.assign({}, this.state.descOpen); if(d[id]){ this.flushDesc(); delete d[id]; } else d[id]=true; this.setState({descOpen:d}); }
+  /* ==== /PP-EXT ==== */
 
   /* ==== PP-EXT: goal, time-tracking timers, allotted-time (ported Schedule-sheet "Remaining") ==== */
   setGoal(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.goal=val; }); }
@@ -552,7 +637,7 @@ class Component extends DCLogic {
     this.setState({menu:{x:e.clientX,y:e.clientY,ids}});
   }
   openDetail(id){ this.setState({detailId:id, menu:null, selectedIds:[id]}); }
-  closeDetail(){ this.setState({detailId:null}); }
+  closeDetail(){ this.flushDesc(); this.setState({detailId:null}); }
   navDetail(dir){ const ts=this.state.tasks; const i=ts.findIndex(t=>t.id===this.state.detailId); const ni=Math.max(0,Math.min(ts.length-1,i+dir)); this.setState({detailId:ts[ni].id, selectedIds:[ts[ni].id]}); }
   closeMenu(){ this.setState({menu:null}); }
 
@@ -1284,7 +1369,7 @@ class Component extends DCLogic {
         this.setState(s=>({gcal:Object.assign({},s.gcal,{calendars:cals,msg:cals.length+' calendars loaded'})})); })
       .catch(e=>this.gcalMsg('List failed: '+e.message));
   }
-  toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); }
+  toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); this.gcalSyncSoon(); /* PP-EXT: sync on selection change */ }
   calTag(cal){ return (cal&&cal.summary?cal.summary:'cal').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
   /* Parse a Google RRULE array into our recurrence model (kind/n/days/until). Returns null if none. */
   rruleToRecur(recurrence){
@@ -1354,15 +1439,19 @@ class Component extends DCLogic {
     if(removed) tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!removedIds.has(this.depId(d))); });
     return removed;
   }
-  gcalImport(){
+  /* opts.silent → background auto-sync: no "Importing…" spinner, and only commits (touches undo history)
+     when the calendar data actually changed, so idle polling doesn't churn state. */
+  gcalImport(opts){ opts=opts||{};
     const g=this.state.gcal; const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]);
-    if(!this._token){ this.gcalMsg('Connect first.'); return; }
-    if(!ids.length){ this.gcalMsg('Select at least one calendar.'); return; }
+    if(!this._token){ if(!opts.silent) this.gcalMsg('Connect first.'); return; }
+    if(!ids.length){ if(!opts.silent) this.gcalMsg('Select at least one calendar.'); return; }
+    if(this._gcalSyncing) return; /* don't overlap an in-flight sync */
+    this._gcalSyncing=true;
     const timeMin=new Date().toISOString();
     const tmax=new Date(Date.now()+(g.window||30)*this.DAY).toISOString();
     const calById={}; (g.calendars||[]).forEach(c=>calById[c.id]=c);
     const evUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin='+encodeURIComponent(timeMin)+'&timeMax='+encodeURIComponent(tmax);
-    this.gcalMsg('Importing…');
+    if(!opts.silent) this.gcalMsg('Importing…');
     Promise.all(ids.map(cid=>this.gcalFetch(evUrl(cid)).then(d=>({cid,items:d.items||[]}))))
     .then(results=>{
       // Resolve each distinct recurring series' master once (for its RRULE) so occurrences collapse to one task.
@@ -1373,11 +1462,39 @@ class Component extends DCLogic {
         .then(list=>{ const masters={}; list.forEach(x=>{ if(x) masters[x.key]=x.ev; }); return {results,masters}; });
     })
     .then(({results,masters})=>{
-      let r={added:0,updated:0}, removed=0;
-      this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById); removed=this.pruneDeletedEvents(tasks,results,ids); });
-      this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
-    }).catch(e=>this.gcalMsg('Import failed: '+e.message));
+      if(opts.silent){
+        /* apply on a clone; only commit if it changed anything (avoids undo/render churn on idle polls) */
+        const before=JSON.stringify(this.state.tasks);
+        const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
+        const r=this.mergeCalendarEvents(clone,results,masters,calById);
+        const removed=this.pruneDeletedEvents(clone,results,ids);
+        if(JSON.stringify(clone)!==before){
+          this.commit(tasks=>{ tasks.length=0; clone.forEach(t=>tasks.push(t)); });
+          if(r.added||removed) this.gcalMsg('Auto-synced: +'+r.added+' new, −'+removed+' removed.');
+        }
+      } else {
+        let r={added:0,updated:0}, removed=0;
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById); removed=this.pruneDeletedEvents(tasks,results,ids); });
+        this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
+      }
+    }).catch(e=>{ if(!opts.silent) this.gcalMsg('Import failed: '+e.message); })
+      .then(()=>{ this._gcalSyncing=false; });
   }
+  /* Background poll tick (fires on a fixed cadence; gated by the configurable interval + tab visibility + auth). */
+  gcalMaybeSync(){
+    try{
+      if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return;
+      const g=this.state.gcal; if(!g||!g.connected||!this._token) return;
+      const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]); if(!ids.length) return;
+      const sec=Math.max(20, parseInt(this.state.settings&&this.state.settings.gcalPollSec)||60);
+      if(Date.now()-(this._lastGcalSync||0) < sec*1000) return;
+      this._lastGcalSync=Date.now();
+      this.gcalImport({silent:true});
+    }catch(_){}
+  }
+  /* Debounced sync after a settings edit (calendar selection / window change). */
+  gcalSyncSoon(){ if(!this._token) return; clearTimeout(this._gcalSoon);
+    this._gcalSoon=setTimeout(()=>{ this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); }, 800); }
   /* ==== /PP-EXT ==== */
 
   /* ---------- settings ---------- */
@@ -1428,9 +1545,12 @@ class Component extends DCLogic {
                 setRow('OAuth Client ID', inp(g.clientId,v=>this.saveGcal({clientId:v.trim()}),{width:'150px'})),
                 h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},'Tip: paste it into config.js once to skip this field.')),
       h('div',{style:{padding:'2px 0 8px'}}, this.googleSignInBtn()),
-      setRow('Import window (days)', inp(g.window||30,v=>this.saveGcal({window:Math.max(1,parseInt(v)||30)}))),
+      setRow('Import window (days)', inp(g.window||30,v=>{ this.saveGcal({window:Math.max(1,parseInt(v)||30)}); this.gcalSyncSoon(); })),
+      setRow('Auto-sync every (sec)', inp(s.gcalPollSec||60,v=>this.saveSettings({gcalPollSec:Math.max(20,parseInt(v)||60)}))),
+      h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',padding:'0 0 6px'}},
+        'Syncs automatically when connected (on selection/window change and in the background). Import runs one-way; your edits are kept.'),
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
-        h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import')),
+        h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import now')),
       (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
         g.calendars.map(c=>h('label',{key:c.id,style:{display:'flex',alignItems:'center',gap:'7px',padding:'3px 0',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
           h('input',{type:'checkbox',checked:!!(g.selected&&g.selected[c.id]),onChange:()=>this.toggleCalSel(c.id)}),
@@ -1673,9 +1793,16 @@ class Component extends DCLogic {
         title:'Predecessor: '+p.name+(oc!=null?(' (occurrence '+(oc+1)+')'):'')+' · click to remove',
         style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)',borderRadius:'4px',
           padding:'0 4px',cursor:'pointer',whiteSpace:'nowrap'}}, '↳ '+(seqOf[pid]||'')+(oc!=null?('·'+(oc+1)):'')); });
+    /* PP-EXT: inline description disclosure */
+    const descOpen = !!this.state.descOpen[t.id];
+    const descToggle = h('span',{onClick:e=>{e.stopPropagation();this.toggleDescOpen(t.id);}, onMouseDown:e=>e.stopPropagation(),
+      title: descOpen?'Hide description':'Show / edit description',
+      style:{cursor:'pointer',marginRight:'6px',fontSize:'10px',flex:'none',userSelect:'none',
+        color: this.hasDesc(t.description)?this._accent:'var(--text-faint)'}}, descOpen?'▾':'▸');
     const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',minWidth:0,width:'100%'}},
       h('div',{style:{fontSize:'13px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
+        descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
         t.recur?h('span',{style:{marginRight:'5px',fontSize:'11px'},title:'Repeats · '+(t.recur.label||'')},'🔁'):null,
         t.name),
@@ -1748,7 +1875,8 @@ class Component extends DCLogic {
       start:h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */)),
       end:h('span',{style:{fontSize:'11.5px',color:overdue?'#e5484d':'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(t.allDay?dispEnd-1:dispEnd, t.allDay/* PP-EXT */)),
       dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
-      planned:durIn('planned'), spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
+      planned: t.allDay ? h('span',{title:'Full-day task — no planned time',style:{fontSize:'11.5px',color:'var(--text-faint2)'}},'—') : durIn('planned'),
+      spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
       cdate:h('span',{style:{fontSize:'11.5px',color:dispComp?'#79c08e':'var(--text-faint)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispComp)),
     };
     const extras={name:{paddingRight:'6px'}};
@@ -1756,16 +1884,25 @@ class Component extends DCLogic {
     let bsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'');
     if(rd && rd.overIndex===i) bsh = (bsh?bsh+',':'')+'inset 0 2px 0 0 '+this._accent;
     if(rd && rd.overIndex===this.state.tasks.length && i===this.state.tasks.length-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent;
+    /* PP-EXT: inline description panel — an overlay anchored below the row spanning the sheet (non-Gantt) width.
+       Rendered as an overlay (not a layout row) so the side-by-side Gantt bars stay row-aligned. */
+    const descPanel = descOpen ? h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onContextMenu:e=>e.stopPropagation(),
+      style:{position:'absolute',top:'100%',left:0,width:totalW+'px',zIndex:6,cursor:'default',
+        background:'var(--card-bg)',borderTop:'1px solid var(--divider)',borderBottom:'1px solid var(--row-border)',
+        boxShadow:'0 12px 28px rgba(0,0,0,0.38)',padding:'12px 16px 14px'}},
+      this.richEditor(t,{minHeight:110})) : null;
     return h('div',{key:t.id,
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>this.rowPointerDown(e,t.id,i),
       onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
-      style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',
+      style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',position:'relative',
+        zIndex:descOpen?7:'auto',
         opacity:(rd&&rd.ids.includes(t.id))?0.4:1,
         background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
         borderBottom:'1px solid var(--row-border)',
         boxShadow: bsh||'none'}},
-      cols.map(c=>cell(c, content[c.k], extras[c.k]))
+      cols.map(c=>cell(c, content[c.k], extras[c.k])),
+      descPanel
     );
   }
 
@@ -2026,7 +2163,7 @@ class Component extends DCLogic {
     if(anyHidden) items.push(row('▦','Show all columns',()=>{ this.setState({colHidden:{},colMenu:null}); this.savePrefs({colHidden:{}}); }));
     items.push(divider);
     items.push(row('↺','Reset columns',()=>this.resetCols()));
-    const menu=h('div',{onClick:e=>e.stopPropagation(),onContextMenu:e=>e.preventDefault(),
+    const menu=h('div',{onMouseDown:e=>e.stopPropagation()/* PP-EXT: keep the overlay's mousedown from closing the menu before an item's click fires */,onClick:e=>e.stopPropagation(),onContextMenu:e=>e.preventDefault(),
       style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
         borderRadius:'10px',boxShadow:'0 12px 40px rgba(0,0,0,0.55)',padding:'6px 0',zIndex:2100}},
       m.keys&&m.keys.filter(k=>k!=='check').length>1?h('div',{style:{padding:'7px 14px 4px',fontSize:'11px',fontWeight:600,color:'var(--text-mut)'}},keys.length+' columns selected'):null,
@@ -2108,12 +2245,10 @@ class Component extends DCLogic {
       style:{fontSize:'21px',fontWeight:700,color:'var(--text-strong)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
         lineHeight:'1.3',outline:'none',padding:'2px 4px',borderRadius:'4px',flex:1}},t.name);
 
-    const desc=h('div',{className:'pp-edit',contentEditable:true,suppressContentEditableWarning:true,
-      'data-ph':'Description',
-      onBlur:e=>this.setDesc(t.id,e.target.textContent),
-      style:{fontSize:'13.5px',color:t.description?'var(--text-2)':'var(--text-faint2)',marginTop:'14px',marginLeft:'36px',
-        minHeight:'22px',outline:'none',padding:'4px 6px',borderRadius:'5px',whiteSpace:'pre-wrap'}},
-      t.description||'Add a description…');
+    /* PP-EXT: big WYSIWYG rich-text description (replaces the old plain-text line + fake comment box) */
+    const desc=h('div',{style:{marginTop:'16px',marginLeft:'36px'}},
+      h('div',{style:{fontSize:'11px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px',marginBottom:'9px'}},'DESCRIPTION'),
+      this.richEditor(t,{minHeight:200}));
 
     // predecessors list
     const preds=(t.deps||[]).map(d=>{ const pid=this.depId(d); const oc=this.depOcc(d); const p=byId[pid]; if(!p) return null;
@@ -2129,15 +2264,9 @@ class Component extends DCLogic {
       preds.length?h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},preds)
         :h('div',{style:{fontSize:'12.5px',color:'var(--text-faint2)'}},'No predecessors. Drag the dot on a task\u2019s bar in the Gantt to link one.'));
 
-    const commentBox=h('div',{style:{marginTop:'auto',paddingTop:'20px',display:'flex',gap:'10px',alignItems:'center'}},
-      h('div',{style:{width:'30px',height:'30px',borderRadius:'50%',background:'linear-gradient(135deg,#e8602c,#d1453b)',
-        display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:'13px',fontWeight:600,flex:'none'}},'K'),
-      h('div',{style:{flex:1,height:'40px',border:'1px solid var(--divider)',borderRadius:'9px',display:'flex',alignItems:'center',
-        padding:'0 14px',color:'var(--text-faint2)',fontSize:'13px',background:'var(--input-bg)'}},'Comment'));
-
     const main=h('div',{style:{flex:1,display:'flex',flexDirection:'column',padding:'24px 26px',minWidth:0,overflow:'auto'}},
       h('div',{style:{display:'flex',gap:'12px',alignItems:'flex-start'}},circle,title),
-      desc, predBlock, commentBox);
+      predBlock, desc);
 
     // ----- sidebar -----
     const field=(lbl,content,extra)=>h('div',{style:Object.assign({padding:'14px 18px',borderBottom:'1px solid var(--field-divider)'},extra||{})},
@@ -2197,10 +2326,9 @@ class Component extends DCLogic {
       field('Duration',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'#e5615d':(this._schedWarn?'#eb8909':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},
-        field('Planned',durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
+        field('Planned', t.allDay ? valTxt('— (full-day)','var(--text-faint2)') : durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
         field('Spent',spentField,{flex:1})),
       field('Allotted (remaining)',allotField),
-      field('Goal',goalEditor),
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
       field('Priority',prioRow),
       field('Progress',pctBig),

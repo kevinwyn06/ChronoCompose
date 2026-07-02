@@ -50,7 +50,13 @@ ID**. You create it a single time; after that you just click **Sign in with Goog
 
 - **Import** pulls upcoming events into tasks (calendar name → `@tag`; a new task's **Planned** is the
   event's duration, all-day events left blank). Import is **one-way** (Calendar → app): your edits to
-  Planned/Goal/notes live in the browser's localStorage and are never overwritten by re-importing.
+  Planned/notes live in the browser's localStorage and are never overwritten by re-importing.
+- **Auto-sync**: once connected, the app re-imports automatically — when you change the selected calendars
+  or the import window, and in the background while the tab is open (interval configurable in Settings,
+  default 60s). "Import now" forces one immediately. (Instant push on Calendar changes isn't possible from a
+  static client-side app; it would need a server.)
+- **Descriptions** are rich text (bold/italic, bullet + numbered lists). Edit them in a task's detail view,
+  or click the ▸ chevron next to a task name to expand an inline editor beneath the row.
 
 ## Where things live
 
