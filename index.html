@@ -155,6 +155,7 @@ class Component extends DCLogic {
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
     this.GCAL_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped
     this.GCAL_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-event ids kept this long to block re-import
+    this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
     this.barH = 16;
     this.headH = 48;
@@ -192,7 +193,8 @@ class Component extends DCLogic {
      `packFromNow` starts the plan (and pool) at the current time instead of dayStart. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, gcalPollSec:60,
-    gcalTwoWay:false /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */ }; }
+    gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
+    autoArchiveDays:7 /* PP-EXT: auto-archive completed tasks after N days (0 = off) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
   loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
@@ -211,6 +213,7 @@ class Component extends DCLogic {
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
+      archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -392,9 +395,10 @@ class Component extends DCLogic {
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
     this._tickRun=setInterval(()=>{ if(this.state.running){ this.timerHeartbeat(); if(this.state.running) this.setState({nowTick:Date.now()}); } }, 1000);
-    this._tickIdle=setInterval(()=>{ if(!this.state.running) this.setState({nowTick:Date.now()}); }, 30000);
+    this._tickIdle=setInterval(()=>{ if(!this.state.running) this.setState({nowTick:Date.now()}); this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
     /* PP-EXT: a run restored from pp-run may be stale (tab was closed mid-run) — settle it before it accrues */
     this.timerHeartbeat();
+    this.maybeAutoArchive(); /* PP-EXT: sweep long-completed tasks once on load (then hourly via the idle tick) */
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
        (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
     this._gcalPoll=setInterval(()=>this.gcalMaybeSync(), 15000);
@@ -565,6 +569,7 @@ class Component extends DCLogic {
   setGoal(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.goal=val; }); }
   startOfDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
   isActiveToday(t){ // "a task only has allotted time if today ∈ [start,end]" (date-inclusive)
+    if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
     if(!this.isScheduled(t) || t.type==='Milestone' || t.type==='Excluded') return false;
     const today=this.startOfDay(this.state.nowTick||Date.now());
     /* PP-EXT: repeats gate on the current occurrence, not the (possibly long-past) base span, matching the
@@ -664,6 +669,47 @@ class Component extends DCLogic {
     });
     return out;
   }
+  /* ==== PP-EXT: archive vs delete (ROADMAP Phase 3) ====
+     Archive = hidden from board/timeline/allotment, kept in pp-tasks for stats, gcal untouched
+     (computeOutboundOps ignores archivedAt; pruneDeletedEvents skips archived). Delete = permanent
+     (and deletes the linked gcal event via the Phase 2 funnel). */
+  visibleTasks(){
+    const ts=this.state.tasks;
+    if(this.state.showArchived) return ts;
+    return ts.some(t=>t.archivedAt) ? ts.filter(t=>!t.archivedAt) : ts; /* keep identity stable when nothing is archived */
+  }
+  archiveMulti(ids){
+    const now=Date.now();
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=now; }); });
+    this.setState({selectedIds:[]});
+  }
+  unarchiveMulti(ids){
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=null; }); });
+  }
+  /* PURE: archive completed tasks whose completion is older than `days`. Never touches a recurring series
+     that is still live (no until, or until in the future) — its completions are per-occurrence. */
+  sweepAutoArchive(tasks, now, days){
+    if(!(days>0)) return 0;
+    let n=0;
+    tasks.forEach(t=>{
+      if(t.archivedAt) return;
+      if(t.recur && (t.recur.until==null || t.recur.until>now)) return;
+      if(t.pct>=100 && t.completion && (now-t.completion)>days*this.DAY){ t.archivedAt=now; n++; }
+    });
+    return n;
+  }
+  maybeAutoArchive(){
+    const now=Date.now();
+    if(now-(this._lastArchSweep||0) < this.ARCH_SWEEP_MS) return;
+    this._lastArchSweep=now;
+    const days=this.state.settings.autoArchiveDays;
+    if(!(days>0)) return;
+    /* only commit when the sweep will actually change something (don't churn undo history hourly) */
+    const probe=this.state.tasks.map(t=>({...t, recur:t.recur}));
+    if(this.sweepAutoArchive(probe, now, days)>0)
+      this.commit(tasks=>this.sweepAutoArchive(tasks, now, days));
+  }
+  /* ==== /PP-EXT: archive ==== */
   /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
   togglePin(id, which){
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
@@ -1096,14 +1142,18 @@ class Component extends DCLogic {
     const r=this.sheetScrollEl.getBoundingClientRect();
     const y=clientY - r.top - this.headH + this.sheetScrollEl.scrollTop;
     const idx=Math.round(y/this.rowH);
-    return Math.max(0, Math.min(this.state.tasks.length, idx));
+    return Math.max(0, Math.min((this._visTasks||this.state.tasks).length, idx)); /* PP-EXT: rows are the VISIBLE list */
   }
   reorderRows(ids,to){
+    /* PP-EXT: `to` indexes the VISIBLE rows (archived may be hidden) — anchor on the first visible non-moving
+       task at/after `to`, then splice against the full array so hidden tasks keep their positions. */
+    const vis=this._visTasks||this.state.tasks;
+    let anchorId=null; for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
     this.commit(tasks=>{
       const moving=tasks.filter(t=>ids.includes(t.id));
-      const before=tasks.slice(0,to).filter(t=>ids.includes(t.id)).length;
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
-      let ti=Math.max(0,Math.min(tasks.length, to-before));
+      let ti = anchorId==null ? tasks.length : tasks.findIndex(t=>t.id===anchorId);
+      if(ti<0) ti=tasks.length;
       tasks.splice(ti,0,...moving);
     });
     setTimeout(()=>this.persistRowOrder(), 0);
@@ -1339,7 +1389,13 @@ class Component extends DCLogic {
     const showCP = this.props.showCriticalPath !== false;
     this.rowH = this.ROWH[this.state.rowMode] || 40;
     this._accent = accent; this._showCP = showCP;
-    const tasks = this.state.tasks;
+    /* PP-EXT: archived tasks are hidden from the board unless showArchived. The filtered array is cached so
+       its IDENTITY stays stable across renders — the structural memoization below depends on it. */
+    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived){
+      this._visSrcRef=this.state.tasks; this._visArch=!!this.state.showArchived;
+      this._visTasks=this.visibleTasks();
+    }
+    const tasks = this._visTasks;
     /* PP-EXT: the structural caches (CPM, slack, recurrence expansion, timeline range) depend only on the task
        data — which is replaced by a NEW array on every edit/undo/redo/drag. Recompute them only when that array
        identity changes, so timer ticks, hovers, and selection (which keep the same tasks array) skip the costly
@@ -1780,6 +1836,7 @@ class Component extends DCLogic {
       items.forEach(ev=>{ if(ev.status==='cancelled') return; live[cid].add(ev.recurringEventId||ev.id); }); });
     const removedIds=new Set(); let removed=0;
     for(let i=tasks.length-1;i>=0;i--){ const t=tasks[i];
+      if(t.archivedAt) continue; /* PP-EXT: archived tasks are kept for stats even if their event is gone */
       if(t.eventId && t.calendarId && live[t.calendarId] && !live[t.calendarId].has(t.eventId)){ removedIds.add(t.id); tasks.splice(i,1); removed++; } }
     if(removed) tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!removedIds.has(this.depId(d))); });
     return removed;
@@ -1891,6 +1948,10 @@ class Component extends DCLogic {
       setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
       setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
+      /* PP-EXT: auto-archive (ROADMAP Phase 3) */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto-archive done after (days)',
+          this.infoNote('Completed tasks archive automatically after this many days (0 = never). Archived tasks are hidden but kept for stats — see the "N archived" chip under the task list. Live recurring series are never auto-archived.')),
+        inp(s.autoArchiveDays,v=>this.saveSettings({autoArchiveDays:Math.max(0,parseInt(v)||0)}))),
       /* PP-EXT: Google Calendar — one-click sign-in; Client ID comes from config.js (else a field) */
       secTitle('Google Calendar'),
       cfgId ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},'Client ID loaded from config.js')
@@ -2122,8 +2183,17 @@ class Component extends DCLogic {
 
     const rows = tasks.map((t,i)=>this.sheetRow(t,i,cols,totalW,byId));
 
+    /* PP-EXT: archived-tasks chip — count + show/hide toggle (archived rows render dimmed when shown) */
+    const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
+    const archChip = archN ? h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 12px',minWidth:totalW+'px'}},
+      h('span',{onClick:()=>this.setState(s=>({showArchived:!s.showArchived})),
+        title:this.state.showArchived?'Hide archived tasks':'Show archived tasks (kept for stats; never scheduled or synced)',
+        style:{cursor:'pointer',fontSize:'11px',fontWeight:600,color:'var(--text-mut2)',border:'1px solid var(--divider)',
+          borderRadius:'10px',padding:'2px 10px',background:this.state.showArchived?'var(--sel)':'var(--chip-bg)',userSelect:'none'}},
+        (this.state.showArchived?'▾ ':'▸ ')+archN+' archived')) : null;
+
     const inner = h('div',{onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
-      style:{minWidth:totalW+'px'}}, header, ...rows);
+      style:{minWidth:totalW+'px'}}, header, ...rows, archChip);
 
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
@@ -2159,7 +2229,8 @@ class Component extends DCLogic {
       const mrd=this.state.rowDrag;
       let mbsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'inset 3px 0 0 '+mcol);
       if(mrd && mrd.overIndex===i) mbsh+=',inset 0 2px 0 0 '+this._accent;
-      if(mrd && mrd.overIndex===this.state.tasks.length && i===this.state.tasks.length-1) mbsh+=',inset 0 -2px 0 0 '+this._accent;
+      const mvisN=(this._visTasks||this.state.tasks).length; /* PP-EXT */
+      if(mrd && mrd.overIndex===mvisN && i===mvisN-1) mbsh+=',inset 0 -2px 0 0 '+this._accent;
       return h('div',{key:t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
@@ -2283,8 +2354,9 @@ class Component extends DCLogic {
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
     let bsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'');
+    const visN=(this._visTasks||this.state.tasks).length; /* PP-EXT: rows are the visible list (archived may be hidden) */
     if(rd && rd.overIndex===i) bsh = (bsh?bsh+',':'')+'inset 0 2px 0 0 '+this._accent;
-    if(rd && rd.overIndex===this.state.tasks.length && i===this.state.tasks.length-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent;
+    if(rd && rd.overIndex===visN && i===visN-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent; /* PP-EXT */
     /* PP-EXT: inline description panel — an overlay anchored below the row spanning the sheet (non-Gantt) width.
        Rendered as an overlay (not a layout row) so the side-by-side Gantt bars stay row-aligned. */
     const descPanel = descOpen ? h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onContextMenu:e=>e.stopPropagation(),
@@ -2298,7 +2370,7 @@ class Component extends DCLogic {
       onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
       style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         zIndex:descOpen?7:'auto',
-        opacity:(rd&&rd.ids.includes(t.id))?0.4:1,
+        opacity:(rd&&rd.ids.includes(t.id))?0.4:(t.archivedAt?0.45:1)/* PP-EXT: archived rows render dimmed */,
         background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
         borderBottom:'1px solid var(--row-border)',
         boxShadow: bsh||'none'}},
@@ -2607,6 +2679,10 @@ class Component extends DCLogic {
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
       row([ic('⧉'),'Duplicate'],()=>this.duplicateMulti(ids)),
       divider,
+      /* PP-EXT: archive keeps the task (hidden, stats intact, gcal untouched); delete is permanent + deletes the event */
+      tasks.every(t=>t.archivedAt)
+        ? row([ic('\u21a9'),'Unarchive'],()=>this.unarchiveMulti(ids))
+        : row([ic('\u25a3'),'Archive'],()=>this.archiveMulti(ids)),
       row([ic('\u2715'),'Delete',kbd('Del')],()=>this.deleteMulti(ids),{color:'#e5615d'})
     );
 
