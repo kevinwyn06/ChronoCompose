@@ -147,6 +147,10 @@ class Component extends DCLogic {
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
     this.RECUR_BACKOFF = 3;     // occurrences to rewind when estimating the start index
+    /* PP-EXT: timer idle guard + history bounds (see stopTimerAt / snapshot / undo / redo). */
+    this.TIMER_IDLE_MS = 5*60000; // ticks stalled longer than this (sleep / closed tab) auto-stop the timer
+    this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: persist running.beat so a crash credits up to here
+    this.HISTORY_MAX = 200;       // undo/redo depth (applies to BOTH stacks)
     this.rowH = 40;
     this.barH = 16;
     this.headH = 48;
@@ -199,6 +203,7 @@ class Component extends DCLogic {
   normalizeTask(t){
     return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
+      planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -214,6 +219,28 @@ class Component extends DCLogic {
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
      UTC, which shifts the day and injects a bogus time (e.g. 17:00) depending on the viewer's timezone. */
   parseYMD(s){ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s); return m ? new Date(+m[1],+m[2]-1,+m[3]).getTime() : new Date(s).getTime(); }
+  /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
+     collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
+     Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations']; }
+  collectBackup(){ const data={};
+    this.BACKUP_KEYS().forEach(k=>{ const v=localStorage.getItem(k); if(v==null) return;
+      try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
+    return {app:'ChronoCompose', version:1, exportedAt:new Date().toISOString(), data}; }
+  applyBackup(obj){ if(!obj||obj.app!=='ChronoCompose'||!obj.data||typeof obj.data!=='object') throw new Error('Not a ChronoCompose backup file.');
+    let n=0; this.BACKUP_KEYS().forEach(k=>{ if(!(k in obj.data)) return; const v=obj.data[k];
+      try{ localStorage.setItem(k, (v&&typeof v==='object'&&typeof v.__raw==='string')?v.__raw:JSON.stringify(v)); n++; }catch(e){} });
+    return n; }
+  exportBackup(){ try{ const blob=new Blob([JSON.stringify(this.collectBackup(),null,1)],{type:'application/json'});
+    const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+    const d=new Date(); a.download='chronocompose-backup-'+d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')+'.json';
+    a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),5000); }catch(e){ alert('Export failed: '+e.message); } }
+  importBackupFile(file){ if(!file) return; const rd=new FileReader();
+    rd.onload=()=>{ try{ const obj=JSON.parse(rd.result);
+        if(!confirm('Replace ALL current ChronoCompose data with this backup? Current data will be overwritten.')) return;
+        this.applyBackup(obj); location.reload(); }
+      catch(e){ alert('Import failed: '+e.message); } };
+    rd.readAsText(file); }
   /* ==== /PP-EXT ==== */
 
   /* ---------- prefs persistence ---------- */
@@ -357,8 +384,10 @@ class Component extends DCLogic {
     window.addEventListener('mouseup', this._onUp);
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
-    this._tickRun=setInterval(()=>{ if(this.state.running) this.setState({nowTick:Date.now()}); }, 1000);
+    this._tickRun=setInterval(()=>{ if(this.state.running){ this.timerHeartbeat(); if(this.state.running) this.setState({nowTick:Date.now()}); } }, 1000);
     this._tickIdle=setInterval(()=>{ if(!this.state.running) this.setState({nowTick:Date.now()}); }, 30000);
+    /* PP-EXT: a run restored from pp-run may be stale (tab was closed mid-run) — settle it before it accrues */
+    this.timerHeartbeat();
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
        (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
     this._gcalPoll=setInterval(()=>this.gcalMaybeSync(), 15000);
@@ -374,7 +403,7 @@ class Component extends DCLogic {
   }
 
   /* ---------- history ---------- */
-  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>200) this.history.shift(); this.future=[]; }
+  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[]; } /* PP-EXT: named cap */
   commit(fn){
     this.snapshot();
     const tasks = this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
@@ -385,14 +414,14 @@ class Component extends DCLogic {
   }
   undo(){
     if(!this.history.length) return;
-    this.future.push(JSON.stringify(this.state.tasks));
+    this.future.push(JSON.stringify(this.state.tasks)); if(this.future.length>this.HISTORY_MAX) this.future.shift(); /* PP-EXT: cap both stacks — undo/redo cycling grew `future` unbounded */
     const prev = JSON.parse(this.history.pop());
     this.setState({tasks:prev});
     this.saveTasks(prev); /* PP-EXT */
   }
   redo(){
     if(!this.future.length) return;
-    this.history.push(JSON.stringify(this.state.tasks));
+    this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); /* PP-EXT: cap both stacks */
     const nx = JSON.parse(this.future.pop());
     this.setState({tasks:nx});
     this.saveTasks(nx); /* PP-EXT */
@@ -541,12 +570,28 @@ class Component extends DCLogic {
   /* live spent minutes = stored spent + elapsed of the currently-running timer */
   getSpent(t){ let s=t.spent||0; const r=this.state.running; if(r && r.id===t.id) s+=(this.state.nowTick-r.startedAt)/60000; return Math.max(0,s); }
   isRunning(id){ const r=this.state.running; return !!(r && r.id===(id&&id.id!==undefined?id.id:id)); }
-  startTimer(id){ if(this.state.running) this.stopTimer(); const r={id,startedAt:Date.now()}; this.setState({running:r,nowTick:Date.now()}); this.saveRun(r); }
-  stopTimer(){ const r=this.state.running; if(!r) return; const add=Math.max(0,(Date.now()-r.startedAt)/60000);
-    /* PP-EXT: accumulate fractional minutes (fmtDur rounds for display); rounding on every stop lost time
+  startTimer(id){ if(this.state.running) this.stopTimer(); const now=Date.now(); const r={id,startedAt:now,beat:now}; this.setState({running:r,nowTick:now}); this.saveRun(r); }
+  stopTimer(){ this.stopTimerAt(Date.now()); }
+  /* PP-EXT: stop crediting only up to `ts` (clamped to [startedAt, now]). The idle guard uses this so a timer
+     left running through system sleep / a closed tab credits up to the last heartbeat, not all wall-clock time. */
+  stopTimerAt(ts){ const r=this.state.running; if(!r) return;
+    const end=Math.min(Math.max(ts, r.startedAt), Date.now());
+    const add=Math.max(0,(end-r.startedAt)/60000);
+    /* accumulate fractional minutes (fmtDur rounds for display); rounding on every stop lost time
        across many short sessions. */
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===r.id); if(t) t.spent=(t.spent||0)+add; });
     this.setState({running:null}); this.saveRun(null); }
+  /* PP-EXT: heartbeat + idle guard, called from the 1s run tick and once on mount. If ticks stalled longer
+     than TIMER_IDLE_MS (sleep/suspend) or a persisted run's beat is stale (crash/closed tab), auto-stop at the
+     last beat and surface a note; otherwise persist a fresh beat every TIMER_BEAT_MS. */
+  timerHeartbeat(){ const r=this.state.running; if(!r) return;
+    const now=Date.now(); const last=r.beat||r.startedAt;
+    if(now-last>this.TIMER_IDLE_MS){
+      this.stopTimerAt(last);
+      this.setState({timerNote:'Timer auto-stopped (inactivity/sleep) — time credited up to last activity.'});
+    } else if(now-last>=this.TIMER_BEAT_MS){
+      const nr=Object.assign({},r,{beat:now}); this.setState({running:nr}); this.saveRun(nr);
+    } }
   toggleTimer(id){ const r=this.state.running; if(r && r.id===id) this.stopTimer(); else this.startTimer(id); }
 
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
@@ -1364,13 +1409,19 @@ class Component extends DCLogic {
       this._tokenClient = google.accounts.oauth2.initTokenClient({
         client_id:g.clientId, scope:'https://www.googleapis.com/auth/calendar',
         callback:(resp)=>{ if(resp && resp.access_token){ this._token=resp.access_token;
-          this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.'})})); this.gcalListCalendars(); }
+          this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.',lastError:null,needsReauth:false})})); this.gcalListCalendars(); }
           else this.gcalMsg('Authorization failed.'); } });
       this._tokenClient.requestAccessToken({prompt: this._token?'':'consent'});
     }catch(e){ this.gcalMsg('OAuth error: '+e.message); }
   }
   gcalFetch(url,opts){ opts=opts||{}; opts.headers=Object.assign({Authorization:'Bearer '+this._token,'Content-Type':'application/json'},opts.headers||{});
-    return fetch(url,opts).then(r=>{ if(!r.ok) return r.text().then(t=>{throw new Error(r.status+' '+t.slice(0,120));}); return r.status===204?{}:r.json(); }); }
+    return fetch(url,opts).then(r=>{ if(!r.ok) return r.text().then(t=>{const e=new Error(r.status+' '+t.slice(0,120)); e.status=r.status; throw e;}); return r.status===204?{}:r.json(); }); }
+  /* PP-EXT: record a sync failure so silent polls are never invisible (Settings + drawer render lastError);
+     a 401 additionally flags needsReauth — the ~1h GIS token has expired and the user must re-sign-in. */
+  gcalError(e){ this.setState(s=>({gcal:Object.assign({},s.gcal,{lastError:{msg:String(e&&e.message||e),at:Date.now()},
+    needsReauth:(e&&e.status===401)?true:s.gcal.needsReauth})})); }
+  gcalClearError(){ if(this.state.gcal.lastError||this.state.gcal.needsReauth)
+    this.setState(s=>({gcal:Object.assign({},s.gcal,{lastError:null,needsReauth:false})})); }
   gcalListCalendars(){
     this.gcalFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList')
       .then(d=>{ const cals=(d.items||[]).map(c=>({id:c.id,summary:c.summary,color:c.backgroundColor}));
@@ -1485,7 +1536,8 @@ class Component extends DCLogic {
         this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById); removed=this.pruneDeletedEvents(tasks,results,ids); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
       }
-    }).catch(e=>{ if(!opts.silent) this.gcalMsg('Import failed: '+e.message); })
+      this.gcalClearError(); /* PP-EXT: a successful sync clears any stale failure banner */
+    }).catch(e=>{ this.gcalError(e); if(!opts.silent) this.gcalMsg('Import failed: '+e.message); })
       .then(()=>{ this._gcalSyncing=false; });
   }
   /* Background poll tick (fires on a fixed cadence; gated by the configurable interval + tab visibility + auth). */
@@ -1565,6 +1617,18 @@ class Component extends DCLogic {
           h('span',{style:{width:'9px',height:'9px',borderRadius:'2px',background:c.color||'#888',flex:'none'}}),
           h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},c.summary)))) : null,
       g.msg? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'6px 0'}}, g.msg) : null,
+      /* PP-EXT: sync failures are never silent — last error + reauth hint render here (and as a drawer banner) */
+      g.lastError? h('div',{style:{fontSize:'11.5px',color:'#e5484d',padding:'2px 0 6px'}},
+        '⚠ '+(g.needsReauth?'Sign-in expired — use "Sign in with Google" above. ':'Last sync error: ')+g.lastError.msg) : null,
+      /* PP-EXT: JSON backup — the only external copy of the data until a backend exists */
+      secTitle('Data'),
+      h('div',{style:{display:'flex',gap:'7px',padding:'6px 0 2px'}},
+        h('button',{className:'pp-tbtn',onClick:()=>this.exportBackup()},'Export backup'),
+        h('button',{className:'pp-tbtn',onClick:()=>{ if(this._importEl) this._importEl.click(); }},'Import backup'),
+        h('input',{type:'file',accept:'.json,application/json',ref:el=>this._importEl=el,style:{display:'none'},
+          onChange:e=>{ this.importBackupFile(e.target.files&&e.target.files[0]); e.target.value=''; }})),
+      h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',padding:'0 0 6px'}},
+        'Exports all local data (tasks, settings, prefs) as JSON. Import overwrites current data and reloads.'),
       this.hiddenColList());
     return h('div',{onMouseDown:()=>this.setState({settingsOpen:false}),
       style:{position:'fixed',inset:0,zIndex:2200,background:'rgba(0,0,0,0.4)',display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'62px 16px 0 0'}},
@@ -1590,7 +1654,9 @@ class Component extends DCLogic {
     let free=di.free.slice();
     const remove=(a,b)=>{ const nf=[]; free.forEach(iv=>{ if(b<=iv.start||a>=iv.end){nf.push(iv);} else { if(a>iv.start)nf.push({start:iv.start,end:a}); if(b<iv.end)nf.push({start:b,end:iv.end}); } }); free=nf; };
     const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && this.allotOf(t.id).allotted>0)
-      .map(t=>({id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:t.end,rem:this.allotOf(t.id).allotted,origin:this.allotOf(t.id).allotted}));
+      /* PP-EXT: EDF must use the CURRENT occurrence's due, like isActiveToday — the base end of an old
+         recurring series is long past and would wrongly win every deadline tiebreak. */
+      .map(t=>({id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:(t.recur?this.currentOcc(t).end:t.end),rem:this.allotOf(t.id).allotted,origin:this.allotOf(t.id).allotted}));
     flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
@@ -1671,9 +1737,19 @@ class Component extends DCLogic {
     const runbar=runTask?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 14px',background:'#1a73e8',color:'#fff',flex:'none'}},
       h('span',{style:{flex:1,fontSize:'12.5px',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'⏱ '+runTask.name+' · '+this.fmtDur(this.getSpent(runTask))),
       h('div',{onClick:()=>this.stopTimer(),style:{cursor:'pointer',background:'rgba(255,255,255,0.25)',borderRadius:'5px',padding:'2px 8px',fontSize:'11px'}},'Stop')):null;
+    /* PP-EXT: surfaced notices — timer auto-stop note (dismissible) and gcal sync failure (opens Settings) */
+    const note=this.state.timerNote?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',
+      background:'rgba(230,81,0,0.12)',borderBottom:'1px solid rgba(230,81,0,0.3)',color:'var(--text-2)',flex:'none'}},
+      h('span',{style:{flex:1}},this.state.timerNote),
+      h('span',{onClick:()=>this.setState({timerNote:null}),style:{cursor:'pointer',fontWeight:700}},'✕')):null;
+    const ge=this.state.gcal&&this.state.gcal.lastError;
+    const gerr=ge?h('div',{onClick:()=>this.setState({settingsOpen:true}),title:ge.msg+' — click to open Settings',
+      style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
+      background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
+      '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
     return h('div',{style:{position:'fixed',top:'98px',right:0,bottom:0,width:'340px',background:'var(--side-bg)',
       borderLeft:'1px solid var(--top-border)',boxShadow:'-8px 0 24px rgba(0,0,0,0.25)',zIndex:1500,display:'flex',flexDirection:'column'}},
-      header, runbar,
+      header, gerr, note, runbar,
       h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, this.renderTimeline()));
   }
   /* ==== /PP-EXT ==== */
