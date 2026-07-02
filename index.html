@@ -183,6 +183,7 @@ class Component extends DCLogic {
       selCols:[], colMenu:null, rowDrag:null,
       /* PP-EXT state */
       drawerOpen:false, running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:{} /* PP-EXT: task ids whose inline description panel is expanded */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
@@ -214,6 +215,7 @@ class Component extends DCLogic {
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
+      parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -463,6 +465,12 @@ class Component extends DCLogic {
       if(e.key==='A'){ e.preventDefault(); this.addTask('top'); return; }
       if(k==='u'){ e.preventDefault(); this.undo(); return; }
     }
+    /* PP-EXT: subtasks — Tab indents the selected rows under the row above; Shift+Tab outdents */
+    if(e.key==='Tab' && this.state.selectedIds.length && !this.isEditingTarget(e) && !this.state.detailId){
+      e.preventDefault();
+      if(e.shiftKey) this.outdentRows(this.state.selectedIds); else this.indentRows(this.state.selectedIds);
+      return;
+    }
     if((e.key==='Delete'||e.key==='Backspace') && this.state.selectedIds.length && !this.isEditingTarget(e) && !this.state.detailId){
       e.preventDefault(); this.deleteMulti(this.state.selectedIds);
     }
@@ -669,16 +677,110 @@ class Component extends DCLogic {
     });
     return out;
   }
+  /* ==== PP-EXT: subtasks (ROADMAP Phase 4) ====
+     parentId nests tasks (arbitrary depth in the table, collapsible). Owner's budget model: the parent
+     keeps its own Planned; its allotted time is distributed to children proportional to child Planned,
+     any unassigned remainder stays with the parent (recursive, so grandchildren partition their parent's
+     share). Children never sync to gcal and never compete in the allotment pool themselves. */
+  buildKids(tasks){
+    const byId={}; tasks.forEach(t=>byId[t.id]=t);
+    const kids={};
+    tasks.forEach(t=>{ if(t.parentId!=null && byId[t.parentId] && t.parentId!==t.id) (kids[t.parentId]=kids[t.parentId]||[]).push(t.id); });
+    return {kids, byId};
+  }
+  depthOf(id, byId){
+    let d=0, t=byId[id]; const seen={};
+    while(t && t.parentId!=null && byId[t.parentId] && !seen[t.id]){ seen[t.id]=1; d++; t=byId[t.parentId]; }
+    return d;
+  }
+  subtreeIds(id, kids){
+    const out=[id]; const walk=x=>(kids[x]||[]).forEach(c=>{ out.push(c); walk(c); }); walk(id); return out;
+  }
+  expandSubtrees(ids){ /* cascade helper for delete/archive/complete: selection → selection + descendants */
+    const {kids}=this.buildKids(this.state.tasks);
+    const set=new Set(); ids.forEach(id=>this.subtreeIds(id,kids).forEach(x=>set.add(x)));
+    return [...set];
+  }
+  isHiddenByCollapse(t, byId){
+    const col=this.state.collapsed||{}; const seen={};
+    let p=(t.parentId!=null)?byId[t.parentId]:null;
+    while(p && !seen[p.id]){ if(col[p.id]) return true; seen[p.id]=1; p=(p.parentId!=null)?byId[p.parentId]:null; }
+    return false;
+  }
+  toggleCollapse(id){
+    const col=Object.assign({},this.state.collapsed); if(col[id]) delete col[id]; else col[id]=1;
+    this.setState({collapsed:col}); this.savePrefs({collapsed:col});
+  }
+  /* Keep the row-order invariant: every subtree is contiguous, children directly after their parent.
+     Stable for roots and siblings; strays (child separated from its parent) are re-nested. Mutates. */
+  normalizeTreeOrder(tasks){
+    const byId={}; tasks.forEach(t=>byId[t.id]=t);
+    const kids={}; const roots=[];
+    tasks.forEach(t=>{ if(t.parentId!=null && byId[t.parentId] && t.parentId!==t.id) (kids[t.parentId]=kids[t.parentId]||[]).push(t); else roots.push(t); });
+    const out=[]; const seen={};
+    const walk=t=>{ if(seen[t.id]) return; seen[t.id]=1; out.push(t); (kids[t.id]||[]).forEach(walk); };
+    roots.forEach(walk);
+    if(out.length===tasks.length){ tasks.length=0; out.forEach(t=>tasks.push(t)); }
+  }
+  addSubtask(parentId){
+    const id='t'+Math.random().toString(36).slice(2,8);
+    this.commit(tasks=>{
+      const p=tasks.find(x=>x.id===parentId); if(!p) return;
+      tasks.push(this.normalizeTask({id,name:'New subtask',type:'Proportional',parentId,
+        start:p.start,end:p.end,priority:p.priority,deps:[],pct:0,planned:0,predicted:0,
+        description:'',labels:[],recur:null,completion:null}));
+      this.normalizeTreeOrder(tasks); /* lands right after the parent's subtree */
+    });
+    if(this.state.collapsed[parentId]) this.toggleCollapse(parentId);
+    this.setState({selectedIds:[id]});
+  }
+  indentRows(ids){ /* Tab: become child of the nearest visible row above that isn't moving */
+    const vis=this._visTasks||this.state.tasks;
+    this.commit(tasks=>{
+      const byId={}; tasks.forEach(t=>byId[t.id]=t);
+      ids.forEach(id=>{
+        const vi=vis.findIndex(t=>t.id===id); if(vi<=0) return;
+        let above=null; for(let i=vi-1;i>=0;i--){ if(!ids.includes(vis[i].id)){ above=vis[i]; break; } }
+        if(!above) return;
+        const {kids}=this.buildKids(tasks);
+        if(this.subtreeIds(id,kids).includes(above.id)) return; /* would create a cycle */
+        const t=byId[id]; if(t) t.parentId=above.id;
+      });
+      this.normalizeTreeOrder(tasks);
+    });
+  }
+  outdentRows(ids){ /* Shift+Tab: hoist to the grandparent (or to root) */
+    this.commit(tasks=>{
+      const byId={}; tasks.forEach(t=>byId[t.id]=t);
+      ids.forEach(id=>{ const t=byId[id]; if(!t || t.parentId==null) return;
+        const p=byId[t.parentId]; t.parentId=(p && p.parentId!=null)?p.parentId:null; });
+      this.normalizeTreeOrder(tasks);
+    });
+  }
+  /* Family allotted = own remainder + all descendants' shares (what the parent's timeline block spans). */
+  famAllot(id, kids){
+    return (this.allotOf(id).allotted||0) + (kids[id]||[]).reduce((a,c)=>a+this.famAllot(c,kids),0);
+  }
+  /* ==== /PP-EXT: subtasks ==== */
   /* ==== PP-EXT: archive vs delete (ROADMAP Phase 3) ====
      Archive = hidden from board/timeline/allotment, kept in pp-tasks for stats, gcal untouched
      (computeOutboundOps ignores archivedAt; pruneDeletedEvents skips archived). Delete = permanent
      (and deletes the linked gcal event via the Phase 2 funnel). */
   visibleTasks(){
     const ts=this.state.tasks;
-    if(this.state.showArchived) return ts;
-    return ts.some(t=>t.archivedAt) ? ts.filter(t=>!t.archivedAt) : ts; /* keep identity stable when nothing is archived */
+    const anyArch=!this.state.showArchived && ts.some(t=>t.archivedAt);
+    const {byId}=this.buildKids(ts);
+    const col=this.state.collapsed||{};
+    const anyCol=ts.some(t=>t.parentId!=null && byId[t.parentId] && this.isHiddenByCollapse(t,byId)); /* PP-EXT: collapsed subtrees hide */
+    if(!anyArch && !anyCol) return ts; /* keep identity stable when nothing is hidden */
+    return ts.filter(t=>{
+      if(anyArch && t.archivedAt) return false;
+      if(anyCol && this.isHiddenByCollapse(t,byId)) return false;
+      return true;
+    });
   }
   archiveMulti(ids){
+    ids=this.expandSubtrees(ids); /* PP-EXT: archiving a parent archives its subtree */
     const now=Date.now();
     this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=now; }); });
     this.setState({selectedIds:[]});
@@ -754,7 +856,9 @@ class Component extends DCLogic {
     const avail=Math.max(0, this.dayIntervals(B, this.packStart(), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0));
     fixed.forEach(b=>{ const mins=Math.round((b.end-b.start)/60000);
       map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
-    const acts=tasks.filter(t=>this.isActiveToday(t) && !map[t.id]);
+    /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
+    const kb=this.buildKids(tasks);
+    const acts=tasks.filter(t=>this.isActiveToday(t) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]=this.getSpent(t); });
     if(this.state.settings.allotMode==='spread'){
       const auto={}; let manualSum=0, autoSum=0;
@@ -782,6 +886,25 @@ class Component extends DCLogic {
         map[t.id]={allotted:Math.round(allotted), computed:Math.round(computed), active:true}; });
     }
     tasks.forEach(t=>{ if(!map[t.id]) map[t.id]={allotted:0, computed:0, active:false}; });
+    /* PP-EXT: subtasks — distribute each parent's allotted to its children proportional to child Planned
+       (owner's model: parent keeps its own budget; if Σchild.planned < parent.planned the unassigned
+       remainder stays with the parent). Recursive top-down, so grandchildren partition their parent's
+       share. Archived/Milestone/Excluded children weigh 0. */
+    const distribute=(pid)=>{
+      const kidIds=kb.kids[pid]||[]; if(!kidIds.length) return;
+      const p=kb.byId[pid], pm=map[pid]; if(!pm) return;
+      const A=pm.allotted||0;
+      let S=0; const w={};
+      kidIds.forEach(cid=>{ const ct=kb.byId[cid];
+        w[cid]=(ct.archivedAt||ct.type==='Milestone'||ct.type==='Excluded')?0:Math.max(0,ct.planned||0); S+=w[cid]; });
+      const P=Math.max(0, p.planned||0), denom=Math.max(P,S);
+      let given=0;
+      kidIds.forEach(cid=>{ const share=denom>0?Math.round(A*w[cid]/denom):0; given+=share;
+        map[cid]={allotted:share, computed:share, active:pm.active&&share>0, fromParent:true};
+        distribute(cid); });
+      pm.allotted=Math.max(0, A-given); pm.computed=pm.allotted; /* parent keeps the remainder */
+    };
+    tasks.forEach(t=>{ if(!(t.parentId!=null && kb.byId[t.parentId]) && kb.kids[t.id]) distribute(t.id); });
     return map;
   }
   allotOf(id){ return (this._allot && this._allot[id]) || {allotted:0,computed:0,active:false}; }
@@ -823,11 +946,13 @@ class Component extends DCLogic {
   closeMenu(){ this.setState({menu:null}); }
 
   setPriorityMulti(ids,p){ this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.priority=p; }); }); this.closeMenu(); }
-  completeMulti(ids){ const allDone=this.state.tasks.filter(t=>ids.includes(t.id)).every(t=>t.pct>=100);
+  completeMulti(ids){ ids=this.expandSubtrees(ids); /* PP-EXT: completing a parent completes its subtree */
+    const allDone=this.state.tasks.filter(t=>ids.includes(t.id)).every(t=>t.pct>=100);
     this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)){ if(allDone){ t.pct=0; t.completion=null; } else { t.pct=100; t.completion=Date.now(); } } }); }); this.closeMenu(); }
   duplicateMulti(ids){ this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)){ const c={...tasks[i],id:'t'+Math.random().toString(36).slice(2,8),deps:[...(tasks[i].deps||[])],name:tasks[i].name+' copy'}; tasks.splice(i+1,0,c); } } }); this.closeMenu(); }
   deleteMulti(ids){
     if(ids.length===1){ const t=this.state.tasks.find(x=>x.id===ids[0]); if(t&&t.recur){ this.setState({menu:null}); this.openScope('delete',t.id,this.mostRecentOccIdx(t)); return; } }
+    ids=this.expandSubtrees(ids); /* PP-EXT: deleting a parent deletes its subtree */
     this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); } tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!ids.includes(this.depId(d))); }); }); this.setState({selectedIds:[],menu:null,detailId:null});
   }
   /* ---------- recurrence edit scope ---------- */
@@ -1115,7 +1240,13 @@ class Component extends DCLogic {
     e.preventDefault(); e.stopPropagation();
     this.dragMoved=false;
     const occ=(this._occById[task.id]||[]).find(o=>o.idx===occIdx) || {idx:occIdx,start:task.start,end:task.end};
-    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,startX:e.clientX,deltaSteps:0,origStart:occ.start,origEnd:occ.end};
+    /* PP-EXT: subtasks — moving a parent bar carries its whole subtree by the same delta */
+    let subs=null;
+    if(!task.recur && mode==='move'){
+      const kidIds=this.expandSubtrees([task.id]).filter(id=>id!==task.id);
+      if(kidIds.length){ subs={}; this.state.tasks.forEach(t=>{ if(kidIds.includes(t.id)) subs[t.id]={s:t.start,e:t.end}; }); }
+    }
+    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,startX:e.clientX,deltaSteps:0,origStart:occ.start,origEnd:occ.end,subs};
     if(!task.recur) this.snapshot();
     this.setState({selectedIds:[task.id]});
   }
@@ -1192,7 +1323,10 @@ class Component extends DCLogic {
       if(d.recurring){ this.forceUpdate(); return; }
       const dm=steps*this.DAY;
       const tasks=this.state.tasks.map(t=>{
-        if(t.id!==d.id) return t;
+        if(t.id!==d.id){
+          if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+dm,end:d.subs[t.id].e+dm}; /* PP-EXT: subtree follows */
+          return t;
+        }
         let s=d.origStart, en=d.origEnd;
         if(d.mode==='move'){ s=d.origStart+dm; en=d.origEnd+dm; }
         else if(d.mode==='start'){ s=Math.min(d.origEnd-this.DAY, d.origStart+dm); }
@@ -1236,12 +1370,15 @@ class Component extends DCLogic {
            a predecessor, cascade successors forward), then persist — reusing that snapshot as the undo point. */
         const tasks=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
         this.autoSchedule(tasks); this.setState({tasks}); this.saveTasks(tasks);
+        /* PP-EXT: drag bypasses commit, so push the reschedule out to gcal explicitly (diff vs the drag-start snapshot) */
+        try{ const before=JSON.parse(this.history[this.history.length-1]); this.gcalSyncOut(before, tasks); }catch(_e){}
       }
       this.dragState=null; this.forceUpdate();
     }
     if(this.linkState){
       const idx=this.rowAtY(e.clientY);
-      if(idx!=null){ this.tryAddDep(this.linkState.fromId, this.linkState.fromOcc, this.state.tasks[idx].id); }
+      const vis=this._visTasks||this.state.tasks; /* PP-EXT: rows are the visible list */
+      if(idx!=null && vis[idx]){ this.tryAddDep(this.linkState.fromId, this.linkState.fromOcc, vis[idx].id); }
       this.linkState=null; this.forceUpdate();
     }
     if(this.splitDrag){ this.splitDrag=false; }
@@ -1250,7 +1387,7 @@ class Component extends DCLogic {
     if(!this.bodyEl) return null;
     const r=this.bodyEl.getBoundingClientRect();
     const i=Math.floor((clientY-r.top)/this.rowH);
-    return (i>=0 && i<this.state.tasks.length) ? i : null;
+    return (i>=0 && i<(this._visTasks||this.state.tasks).length) ? i : null; /* PP-EXT: rows are the visible list */
   }
 
   zoom(dir){ this.setState(s=>({dayW:Math.max(20,Math.min(120,s.dayW+dir*8))})); }
@@ -1391,9 +1528,13 @@ class Component extends DCLogic {
     this._accent = accent; this._showCP = showCP;
     /* PP-EXT: archived tasks are hidden from the board unless showArchived. The filtered array is cached so
        its IDENTITY stays stable across renders — the structural memoization below depends on it. */
-    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived){
-      this._visSrcRef=this.state.tasks; this._visArch=!!this.state.showArchived;
+    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived || this._visCol!==this.state.collapsed){
+      this._visSrcRef=this.state.tasks; this._visArch=!!this.state.showArchived; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visTasks=this.visibleTasks();
+      /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
+      const kb=this.buildKids(this.state.tasks);
+      this._kids=kb.kids; this._depth={};
+      this.state.tasks.forEach(t=>{ this._depth[t.id]=this.depthOf(t.id, kb.byId); });
     }
     const tasks = this._visTasks;
     /* PP-EXT: the structural caches (CPM, slack, recurrence expansion, timeline range) depend only on the task
@@ -2019,11 +2160,17 @@ class Component extends DCLogic {
     /* PP-EXT: EDF uses the CURRENT occurrence's due instant (dueMsOf), like isActiveToday — the base end of
        an old recurring series is long past and would wrongly win every deadline tiebreak. Pin semantics:
        dueMs (end-pin) clamps placement before the deadline; notBefore (start-pin) forbids earlier slots. */
-    const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t) && this.allotOf(t.id).allotted>0)
+    /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
+       + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
+    const kb=this.buildKids(this.state.tasks);
+    const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t)
+        && !(t.parentId!=null && kb.byId[t.parentId])
+        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{ const p=this.effPins(t);
+        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids):this.allotOf(t.id).allotted;
         return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t),
           dueMs:p.pe?this.dueMsOf(t):null, notBefore:p.ps?this.notBeforeMsOf(t):null,
-          rem:this.allotOf(t.id).allotted,origin:this.allotOf(t.id).allotted}; });
+          rem:amt,origin:amt}; });
     flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
@@ -2047,9 +2194,34 @@ class Component extends DCLogic {
         reason:(task.dueMs!=null && task.dueMs<winEnd)?'no room before due':'day full'}); }); /* PP-EXT: why it didn't fit */
     const bySlot=(a,b)=>{ if(!a.start && !b.start) return 0; if(!a.start) return 1; if(!b.start) return -1; return a.start-b.start; };
     segs.sort(bySlot);
-    const merged=[];
+    let merged=[];
     segs.forEach(seg=>{ if(!seg.start){merged.push(seg);return;} const last=merged[merged.length-1];
       if(last&&last.start&&last.id===seg.id&&(seg.start-last.end)<=60000){ last.end=seg.end; } else merged.push(Object.assign({},seg)); });
+    /* PP-EXT: subtasks — split each parent chunk into consecutive child sub-blocks ('Parent › Child',
+       child timers work per block); the parent's own remainder keeps its name. Two display levels only:
+       a child block spans its whole family share (grandchildren aren't separately drawn). */
+    const queues={};
+    const queueFor=pid=>{
+      if(queues[pid]) return queues[pid];
+      const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const mins=this.famAllot(cid,kb.kids); const ct=kb.byId[cid];
+        if(mins>0) q.push({id:cid,title:(kb.byId[pid].name+' › '+ct.name),goal:ct.goal,mins}); });
+      const own=this.allotOf(pid).allotted||0;
+      if(own>0) q.push({id:pid,title:kb.byId[pid].name,goal:kb.byId[pid].goal,mins:own});
+      return queues[pid]=q;
+    };
+    const subdivided=[];
+    merged.forEach(c=>{
+      if(!(c.start && c.type==='scheduled' && kb.kids[c.id] && kb.kids[c.id].length)){ subdivided.push(c); return; }
+      const q=queueFor(c.id); let cur=c.start;
+      while(cur < c.end-30000 && q.length){
+        const item=q[0];
+        const take=Math.min((c.end-cur)/60000, item.mins);
+        subdivided.push({id:item.id,title:item.title,goal:item.goal,origin:item.mins,start:cur,end:cur+take*60000,type:'scheduled'});
+        cur+=take*60000; item.mins-=take; if(item.mins<=0.5) q.shift();
+      }
+      if(cur<c.end) subdivided.push({id:c.id,title:c.title,goal:c.goal,origin:c.origin,start:cur,end:c.end,type:'scheduled'});
+    });
+    merged=subdivided;
     busy.forEach(b=>merged.push(b.taskId?{id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed'} /* PP-EXT: pinned task block */
       :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
@@ -2270,13 +2442,25 @@ class Component extends DCLogic {
       title: descOpen?'Hide description':'Show / edit description',
       style:{cursor:'pointer',marginRight:'6px',fontSize:'10px',flex:'none',userSelect:'none',
         color: this.hasDesc(t.description)?this._accent:'var(--text-faint)'}}, descOpen?'▾':'▸');
-    const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',minWidth:0,width:'100%'}},
+    /* PP-EXT: subtasks — indent by depth; parents get a collapse caret (+N badge when collapsed) */
+    const kidsN=((this._kids&&this._kids[t.id])||[]).length;
+    const depth=(this._depth&&this._depth[t.id])||0;
+    const collapsedHere=!!this.state.collapsed[t.id];
+    const caret = kidsN? h('span',{onClick:e=>{e.stopPropagation();this.toggleCollapse(t.id);},onMouseDown:e=>e.stopPropagation(),
+      title:(collapsedHere?'Expand ':'Collapse ')+kidsN+' subtask'+(kidsN>1?'s':'')+' (Tab/Shift+Tab indents rows)',
+      style:{cursor:'pointer',marginRight:'4px',fontSize:'9px',color:'var(--text-mut2)',flex:'none',userSelect:'none'}},
+      collapsedHere?'▸':'▾') : null;
+    const kidBadge = (kidsN&&collapsedHere)? h('span',{style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--chip-bg)',
+      border:'1px solid var(--divider)',borderRadius:'4px',padding:'0 4px',marginLeft:'5px',whiteSpace:'nowrap'}},'+'+kidsN) : null;
+    const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',minWidth:0,width:'100%',
+        paddingLeft:(depth*16)+'px' /* PP-EXT: subtask indent */}},
       h('div',{style:{fontSize:'13px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
+        caret, /* PP-EXT */
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
         t.recur?h('span',{style:{marginRight:'5px',fontSize:'11px'},title:'Repeats · '+(t.recur.label||'')},'🔁'):null,
-        t.name),
+        t.name, kidBadge /* PP-EXT */),
       (depChips.length||(t.labels&&t.labels.length)||t.recur)?h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',alignItems:'center'}},
         t.recur?h('span',{style:{fontSize:'9.5px',color:'#79c08e',background:'rgba(47,158,95,0.12)',border:'1px solid rgba(47,158,95,0.3)',borderRadius:'4px',padding:'0 4px',whiteSpace:'nowrap'}},'↻ '+t.recur.label):null,
         ...(t.labels||[]).map(l=>h('span',{key:l,style:{fontSize:'9.5px',color:'#a9b4c2',background:'#262b33',border:'1px solid #353d48',borderRadius:'4px',padding:'0 4px',whiteSpace:'nowrap'}},'@'+l)),
@@ -2678,6 +2862,7 @@ class Component extends DCLogic {
       divider,
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
       row([ic('⧉'),'Duplicate'],()=>this.duplicateMulti(ids)),
+      !multi?row([ic('↳'),'Add subtask',kbd('Tab')],()=>{this.addSubtask(ids[0]); this.closeMenu();}):null, /* PP-EXT: subtasks */
       divider,
       /* PP-EXT: archive keeps the task (hidden, stats intact, gcal untouched); delete is permanent + deletes the event */
       tasks.every(t=>t.archivedAt)
@@ -2741,9 +2926,26 @@ class Component extends DCLogic {
       preds.length?h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},preds)
         :h('div',{style:{fontSize:'12.5px',color:'var(--text-faint2)'}},'No predecessors. Drag the dot on a task\u2019s bar in the Gantt to link one.'));
 
+    /* PP-EXT: subtasks section — children listed with progress + allot; click opens their detail */
+    const kidIds=(this._kids&&this._kids[t.id])||[];
+    const subRows=kidIds.map(cid=>{ const ct=byId[cid]; if(!ct) return null;
+      const cal=this.allotOf(cid);
+      return h('div',{key:cid,onClick:()=>this.openDetail(cid),
+        style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 10px',background:'var(--field-bg)',cursor:'pointer',
+          border:'1px solid var(--field-border)',borderRadius:'7px',fontSize:'12.5px',color:'var(--text-2)'}},
+        h('span',{style:{color:ct.pct>=100?'#2f9e5f':'var(--text-mut)'}},ct.pct>=100?'✓':'○'),
+        h('span',{style:{flex:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},ct.name),
+        h('span',{style:{fontSize:'11px',color:'var(--text-mut2)',fontVariantNumeric:'tabular-nums'}},
+          this.fmtDur(ct.planned)+' planned'+(cal.active?(' · '+this.fmtDur(cal.allotted)+' today'):''))); });
+    const subBlock=h('div',{style:{marginTop:'22px',marginLeft:'36px'}},
+      h('div',{style:{display:'flex',alignItems:'center',fontSize:'11px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px',marginBottom:'9px'}},
+        'SUBTASKS', this.infoNote('Subtasks partition this task’s allotted time proportional to their Planned; any unassigned remainder stays with this task. They nest in the day timeline inside this task’s block.')),
+      kidIds.length?h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},subRows)
+        :h('div',{style:{fontSize:'12.5px',color:'var(--text-faint2)'}},'No subtasks.'),
+      h('button',{className:'pp-tbtn',onClick:()=>this.addSubtask(t.id),style:{marginTop:'9px'}},'+ Add subtask'));
     const main=h('div',{style:{flex:1,display:'flex',flexDirection:'column',padding:'24px 26px',minWidth:0,overflow:'auto'}},
       h('div',{style:{display:'flex',gap:'12px',alignItems:'flex-start'}},circle,title),
-      predBlock, desc);
+      predBlock, subBlock, desc);
 
     // ----- sidebar -----
     const field=(lbl,content,extra)=>h('div',{style:Object.assign({padding:'14px 18px',borderBottom:'1px solid var(--field-divider)'},extra||{})},
@@ -2797,6 +2999,12 @@ class Component extends DCLogic {
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
       field('Mode',typeSel),
+      /* PP-EXT: subtasks — parent link + one-click unnest */
+      (t.parentId&&byId[t.parentId])?field('Subtask of',h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
+        h('span',{onClick:()=>this.openDetail(t.parentId),style:{cursor:'pointer',fontSize:'13px',color:this._accent,
+          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'↖ '+byId[t.parentId].name),
+        h('span',{onClick:()=>this.outdentRows([t.id]),title:'Un-nest (make it a top-level task)',
+          style:{cursor:'pointer',fontSize:'11px',color:'var(--text-faint2)'}},'✕'))):null,
       field('Tags',tagsEditor),
       field('Start',valWithX(t.start,null,'start',t.allDay/* PP-EXT */)),
       field('Due',valWithX(t.end, (!done&&t.end!=null&&t.end<Date.now())?'#e5484d':'var(--text-2)', 'end', t.allDay/* PP-EXT */)),
