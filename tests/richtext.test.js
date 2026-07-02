@@ -4,22 +4,28 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { make } = require('./_load.js');
 
-test('normalizeTask: full-day tasks have no planned time (migrates existing data)', () => {
+test('normalizeTask: does NOT force all-day planned to 0 (stays user-editable)', () => {
   const c = make();
-  // A previously-imported all-day task stuck at planned 60 gets zeroed on load/normalize.
-  const migrated = c.normalizeTask({ id:'a', allDay:true, planned:60, predicted:60, type:'Proportional' });
-  assert.strictEqual(migrated.planned, 0);
-  assert.strictEqual(migrated.predicted, 0);
-  // A manual predicted override on an all-day task is left alone (planned still 0).
-  const manual = c.normalizeTask({ id:'b', allDay:true, planned:60, predicted:30, predictManual:true });
-  assert.strictEqual(manual.planned, 0);
-  assert.strictEqual(manual.predicted, 30);
+  // normalizeTask must preserve planned — the all-day cleanup is a one-time migration, not a per-load rule.
+  const allDay = c.normalizeTask({ id:'a', allDay:true, planned:60, type:'Proportional' });
+  assert.strictEqual(allDay.planned, 60);
+  const timed = c.normalizeTask({ id:'c', allDay:false, planned:120, type:'Exact' });
+  assert.strictEqual(timed.planned, 120);
 });
 
-test('normalizeTask: timed tasks keep their planned time', () => {
+test('migrateAllDayPlanned: one-time scrub zeros old all-day planned, leaves the rest', () => {
   const c = make();
-  const t = c.normalizeTask({ id:'c', allDay:false, planned:120, type:'Exact' });
-  assert.strictEqual(t.planned, 120);
+  const tasks = [
+    { id:'a', allDay:true, planned:60 },   // old import default -> zeroed
+    { id:'b', allDay:false, planned:30 },  // timed -> untouched
+    { id:'c', allDay:true, planned:0 },    // already 0 -> not counted
+    { id:'d', allDay:true, planned:90 },   // zeroed
+  ];
+  const n = c.migrateAllDayPlanned(tasks);
+  assert.strictEqual(n, 2, 'two all-day tasks with nonzero planned were changed');
+  assert.strictEqual(tasks[0].planned, 0);
+  assert.strictEqual(tasks[1].planned, 30, 'timed task untouched');
+  assert.strictEqual(tasks[3].planned, 0);
 });
 
 test('hasDesc: true only for real content, ignoring empty tags/whitespace', () => {

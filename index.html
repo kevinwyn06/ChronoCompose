@@ -164,6 +164,7 @@ class Component extends DCLogic {
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
     let seed = this.loadTasks() || this.buildSeed();
     seed = seed.map(t=>this.normalizeTask(t));
+    seed = this.runOnceMigrations(seed); /* PP-EXT: scrub old all-day planned defaults, once */
     if(Array.isArray(pf.rowOrder)) seed = this.applyOrder(seed, pf.rowOrder);
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null, splitPct:55, detailId:null, menu:null,
       showYears:false, settingsOpen:false, quickText:'', quickOpen:false, datePick:null, scopePrompt:null,
@@ -196,12 +197,19 @@ class Component extends DCLogic {
   loadRun(){ try{ return JSON.parse(localStorage.getItem('pp-run')||'null'); }catch(e){ return null; } }
   saveRun(r){ try{ if(r) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
   normalizeTask(t){
-    const nt=Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
+    return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
-    /* PP-EXT: full-day tasks have no planned time by rule — enforce here so it also migrates existing data on load. */
-    if(nt.allDay){ nt.planned=0; if(!nt.predictManual) nt.predicted=0; }
-    return nt;
+  }
+  /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
+     New imports already set all-day planned to 0; this only scrubs previously-persisted data, once. Planned
+     stays user-editable afterwards (it is NOT re-zeroed on every load). Returns the number of tasks changed. */
+  migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned){ t.planned=0; n++; } }); return n; }
+  runOnceMigrations(tasks){
+    try{ const done=JSON.parse(localStorage.getItem('pp-migrations')||'{}')||{};
+      if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
+        localStorage.setItem('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
+    return tasks;
   }
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
      UTC, which shifts the day and injects a bogus time (e.g. 17:00) depending on the viewer's timezone. */
@@ -1875,8 +1883,7 @@ class Component extends DCLogic {
       start:h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */)),
       end:h('span',{style:{fontSize:'11.5px',color:overdue?'#e5484d':'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(t.allDay?dispEnd-1:dispEnd, t.allDay/* PP-EXT */)),
       dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
-      planned: t.allDay ? h('span',{title:'Full-day task — no planned time',style:{fontSize:'11.5px',color:'var(--text-faint2)'}},'—') : durIn('planned'),
-      spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
+      planned: durIn('planned'), spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
       cdate:h('span',{style:{fontSize:'11.5px',color:dispComp?'#79c08e':'var(--text-faint)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispComp)),
     };
     const extras={name:{paddingRight:'6px'}};
@@ -2326,7 +2333,7 @@ class Component extends DCLogic {
       field('Duration',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'#e5615d':(this._schedWarn?'#eb8909':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},
-        field('Planned', t.allDay ? valTxt('— (full-day)','var(--text-faint2)') : durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
+        field('Planned', durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
         field('Spent',spentField,{flex:1})),
       field('Allotted (remaining)',allotField),
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
