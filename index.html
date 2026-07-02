@@ -151,6 +151,10 @@ class Component extends DCLogic {
     this.TIMER_IDLE_MS = 5*60000; // ticks stalled longer than this (sleep / closed tab) auto-stop the timer
     this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: persist running.beat so a crash credits up to here
     this.HISTORY_MAX = 200;       // undo/redo depth (applies to BOTH stacks)
+    /* PP-EXT: two-way gcal sync (see computeOutboundOps / gcalFlushQueue). */
+    this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
+    this.GCAL_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped
+    this.GCAL_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-event ids kept this long to block re-import
     this.rowH = 40;
     this.barH = 16;
     this.headH = 48;
@@ -187,7 +191,8 @@ class Component extends DCLogic {
      `freeTime` = reserved personal/leisure minutes (blocks a late-evening slot); `allotMode` today|spread;
      `packFromNow` starts the plan (and pool) at the current time instead of dayStart. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, gcalPollSec:60 }; }
+    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, gcalPollSec:60,
+    gcalTwoWay:false /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
   loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
@@ -197,7 +202,8 @@ class Component extends DCLogic {
       return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg)}); }
     catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30}; } }
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
-    try{ localStorage.setItem('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window})); }catch(e){} }
+    try{ localStorage.setItem('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
+      ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
   loadRun(){ try{ return JSON.parse(localStorage.getItem('pp-run')||'null'); }catch(e){ return null; } }
   saveRun(r){ try{ if(r) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
   normalizeTask(t){
@@ -400,32 +406,38 @@ class Component extends DCLogic {
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
-    clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); /* PP-EXT */
+    clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); /* PP-EXT */
   }
 
   /* ---------- history ---------- */
   snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[]; } /* PP-EXT: named cap */
   commit(fn){
     this.snapshot();
+    const prev = this.state.tasks; /* PP-EXT: pre-change reference for the outbound gcal diff */
     const tasks = this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
     fn(tasks);
     this.autoSchedule(tasks); /* PP-EXT: enforce finish-to-start deps (dependency-driven scheduling) */
     this.setState({tasks});
     this.saveTasks(tasks); /* PP-EXT */
+    this.gcalSyncOut(prev, tasks); /* PP-EXT: single outbound funnel — every task mutation flows through here */
   }
   undo(){
     if(!this.history.length) return;
     this.future.push(JSON.stringify(this.state.tasks)); if(this.future.length>this.HISTORY_MAX) this.future.shift(); /* PP-EXT: cap both stacks — undo/redo cycling grew `future` unbounded */
+    const cur=this.state.tasks; /* PP-EXT */
     const prev = JSON.parse(this.history.pop());
     this.setState({tasks:prev});
     this.saveTasks(prev); /* PP-EXT */
+    this.gcalSyncOut(cur, prev); /* PP-EXT: an undone change is pushed out too (remote follows local) */
   }
   redo(){
     if(!this.future.length) return;
     this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); /* PP-EXT: cap both stacks */
+    const cur=this.state.tasks; /* PP-EXT */
     const nx = JSON.parse(this.future.pop());
     this.setState({tasks:nx});
     this.saveTasks(nx); /* PP-EXT */
+    this.gcalSyncOut(cur, nx); /* PP-EXT */
   }
 
   /* ---------- keyboard ---------- */
@@ -1522,9 +1534,212 @@ class Component extends DCLogic {
     if(recur){ recur.until=until; recur.shifts=[]; recur.overrides={}; }
     return recur;
   }
+  /* ==== PP-EXT: two-way sync — outbound writes (ROADMAP Phase 2) ====
+     Local changes push to Google when settings.gcalTwoWay is on. New tasks insert into the dedicated
+     "ChronoCompose" calendar; edits PATCH the linked event in its own calendar (including imported ones);
+     deletes DELETE the event and leave a tombstone so the next poll can't resurrect the task.
+     Everything below the fetch layer is PURE and unit-tested (tests/twoway.test.js). */
+  /* Inverse of rruleToRecur. Covers every local kind incl. quick-add's weekday/monthDay. UNTIL is UTC. */
+  recurToRRule(recur){
+    if(!recur) return null;
+    const WD={sun:'SU',mon:'MO',tue:'TU',wed:'WE',thu:'TH',fri:'FR',sat:'SA'};
+    let s;
+    switch(recur.kind){
+      case 'day': s='FREQ=DAILY'+((recur.n||1)>1?';INTERVAL='+recur.n:''); break;
+      case 'week': s='FREQ=WEEKLY'+((recur.n||1)>1?';INTERVAL='+recur.n:''); break;
+      case 'weekdays': { const d=(recur.days||[]).map(x=>WD[x]).filter(Boolean); if(!d.length) return null;
+        s='FREQ=WEEKLY;BYDAY='+d.join(','); break; }
+      case 'weekday': s='FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR'; break;
+      case 'month': s='FREQ=MONTHLY'+((recur.n||1)>1?';INTERVAL='+recur.n:''); break;
+      case 'monthDay': s='FREQ=MONTHLY;BYMONTHDAY='+(recur.day||1); break;
+      case 'year': s='FREQ=YEARLY'+((recur.n||1)>1?';INTERVAL='+recur.n:''); break;
+      default: return null;
+    }
+    if(recur.until!=null){ const d=new Date(recur.until); const p=n=>String(n).padStart(2,'0');
+      s+=';UNTIL='+d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+'T'+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds())+'Z'; }
+    return 'RRULE:'+s;
+  }
+  ymdOf(ms){ const d=new Date(ms), p=n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+  toRFC3339Local(ms){ const d=new Date(ms), p=n=>String(n).padStart(2,'0');
+    const off=-d.getTimezoneOffset(), sg=off>=0?'+':'-', ab=Math.abs(off);
+    return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())
+      +sg+p(Math.floor(ab/60))+':'+p(ab%60); }
+  /* Google event time block. All-day: date + EXCLUSIVE end date (our local all-day end already is the
+     exclusive next-day midnight); timed: RFC3339 with the local offset + explicit timeZone (required for
+     recurring events; original event TZ is lost on import since we store epoch ms). */
+  timesBodyOf(st, en, allDay){
+    if(allDay) return {start:{date:this.ymdOf(st)}, end:{date:this.ymdOf(Math.max(en, st+this.DAY))}};
+    const tz=(typeof Intl!=='undefined' && Intl.DateTimeFormat().resolvedOptions().timeZone)||null;
+    const a={dateTime:this.toRFC3339Local(st)}, b={dateTime:this.toRFC3339Local(Math.max(en, st))};
+    if(tz){ a.timeZone=tz; b.timeZone=tz; }
+    return {start:a, end:b};
+  }
+  eventBodyOf(t, includeRecurrence){
+    const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, t.end, !!t.allDay));
+    if(includeRecurrence && t.recur){ const r=this.recurToRRule(t.recur); if(r) body.recurrence=[r]; }
+    return body;
+  }
+  /* The sync fingerprint: only these fields round-trip (planned/goal/description/pins stay local). */
+  recurRuleKey(r){ return r?JSON.stringify({k:r.kind,n:r.n||1,d:r.days||null,day:r.day!=null?r.day:null,u:r.until!=null?r.until:null}):null; }
+  syncFp(t){ return JSON.stringify({n:t.name,s:t.start,e:t.end,a:!!t.allDay,r:this.recurRuleKey(t.recur)}); }
+  /* Google instance id suffix = the ORIGINAL (rule-generated) start, UTC basic format (date-only if all-day). */
+  instStamp(ms, allDay){ const d=new Date(ms), p=n=>String(n).padStart(2,'0');
+    if(allDay) return ''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate());
+    return ''+d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+'T'+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds())+'Z'; }
+  /* Per-occurrence ('this' scope) diffs → instance PATCH/DELETE ops. Local `shifts` (this-and-subsequent
+     moves) have no remote representation — a series with shifts syncs its base rule only (documented). */
+  diffOverrideOps(b, t){
+    if(!t.eventId || !t.recur) return [];
+    if((t.recur.shifts||[]).length) return [];
+    const bo=(b&&b.recur&&b.recur.overrides)||{}, ao=t.recur.overrides||{};
+    const ops=[];
+    Object.keys(ao).forEach(k=>{
+      const a=ao[k]||{}, pb=bo[k]||{};
+      const idx=parseInt(k)||0;
+      const orig=this.occStart(t.start, t.recur, idx);
+      const iid=t.eventId+'_'+this.instStamp(orig, !!t.allDay);
+      if(a.deleted && !pb.deleted){
+        ops.push({op:'deleteInstance', taskId:t.id, calendarId:t.calendarId, eventId:iid});
+      } else if(!a.deleted && (a.start!=null||a.end!=null) && (pb.start!==a.start||pb.end!==a.end)){
+        const dur=Math.max(0, t.end-t.start);
+        const st=a.start!=null?a.start:orig, en=a.end!=null?a.end:st+dur;
+        ops.push({op:'patchInstance', taskId:t.id, calendarId:t.calendarId, eventId:iid,
+          body:this.timesBodyOf(st, en, !!t.allDay)});
+      }
+    });
+    return ops;
+  }
+  /* PURE: diff two task arrays into outbound ops. Skips subtasks (parentId), archived, Milestones, and
+     anything that appeared already linked (that's the import writing, not the user). */
+  computeOutboundOps(before, after){
+    const ops=[];
+    const bById={}; before.forEach(t=>bById[t.id]=t);
+    const aById={}; after.forEach(t=>aById[t.id]=t);
+    after.forEach(t=>{
+      if(t.parentId || t.archivedAt || t.type==='Milestone') return;
+      const b=bById[t.id];
+      if(!t.eventId){
+        if(!b || this.syncFp(b)!==this.syncFp(t)) ops.push({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)});
+        return;
+      }
+      if(!b) return;
+      if(this.syncFp(b)!==this.syncFp(t)){
+        const recurChanged=this.recurRuleKey(b.recur)!==this.recurRuleKey(t.recur);
+        /* never rewrite `recurrence` unless the local rule actually changed — protects RRULE features we
+           don't model (e.g. BYSETPOS) on events created outside ChronoCompose */
+        ops.push({op:'patch', taskId:t.id, calendarId:t.calendarId, eventId:t.eventId,
+          body:this.eventBodyOf(t, recurChanged)});
+      }
+      ops.push(...this.diffOverrideOps(b, t));
+    });
+    before.forEach(t=>{
+      if(aById[t.id]) return;
+      if(t.eventId) ops.push({op:'delete', taskId:t.id, calendarId:t.calendarId, eventId:t.eventId});
+      else ops.push({op:'cancelInsert', taskId:t.id}); /* never reached Google — just drop the pending insert */
+    });
+    return ops;
+  }
+  /* Queue + tombstone persistence (pp-gcal-queue / pp-gcal-tombstones). The queue survives reloads so
+     writes made while offline/expired flush after reconnecting. */
+  loadQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-gcal-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveQueue(q){ try{ localStorage.setItem('pp-gcal-queue', JSON.stringify(q)); }catch(e){} }
+  loadTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-gcal-tombstones')||'{}')||{};
+      const cut=Date.now()-this.GCAL_TOMBSTONE_TTL_MS; let ch=false;
+      Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
+      if(ch) this.saveTombstones(t); return t; }catch(e){ return {}; } }
+  saveTombstones(t){ try{ localStorage.setItem('pp-gcal-tombstones', JSON.stringify(t)); }catch(e){} }
+  clearTombstone(eid){ const t=this.loadTombstones(); if(t[eid]!=null){ delete t[eid]; this.saveTombstones(t); } }
+  /* Outbound funnel (called by commit/undo/redo). Inert unless two-way is on; _gcalApplying suppresses
+     echoes while an import is being committed. */
+  gcalSyncOut(before, after){
+    if(!this.state.settings || !this.state.settings.gcalTwoWay || this._gcalApplying) return;
+    try{ const ops=this.computeOutboundOps(before, after); if(ops.length) this.gcalEnqueue(ops); }
+    catch(e){ this.gcalError(e); }
+  }
+  gcalEnqueue(ops){
+    if(!ops || !ops.length) return;
+    let q=this.loadQueue(); const ts=this.loadTombstones(); let tsChanged=false;
+    ops.forEach(op=>{
+      if(op.op==='cancelInsert'){ q=q.filter(x=>!(x.taskId===op.taskId && x.op==='insert')); return; }
+      if(op.op==='delete'){
+        q=q.filter(x=>x.taskId!==op.taskId); /* the delete supersedes any pending write for the task */
+        if(!op.eventId) return;
+        ts[op.eventId]=Date.now(); tsChanged=true;
+      }
+      q=q.filter(x=>!(x.taskId===op.taskId && x.op===op.op && (x.eventId||null)===(op.eventId||null))); /* coalesce */
+      q.push(op);
+    });
+    if(tsChanged) this.saveTombstones(ts);
+    this.saveQueue(q);
+    this.gcalFlushSoon();
+  }
+  gcalFlushSoon(){ clearTimeout(this._gcalFlushT);
+    this._gcalFlushT=setTimeout(()=>this.gcalFlushQueue(), this.GCAL_FLUSH_DEBOUNCE_MS); }
+  /* Find-or-create the dedicated "ChronoCompose" calendar; id persists in pp-gcal.ccCalId. */
+  gcalEnsureCalendar(){
+    const g=this.state.gcal;
+    if(g.ccCalId) return Promise.resolve(g.ccCalId);
+    const found=(g.calendars||[]).find(c=>c.summary==='ChronoCompose');
+    if(found){ this.saveGcal({ccCalId:found.id}); return Promise.resolve(found.id); }
+    if(this._ccCalCreating) return this._ccCalCreating;
+    this._ccCalCreating=this.gcalFetch('https://www.googleapis.com/calendar/v3/calendars',
+      {method:'POST', body:JSON.stringify({summary:'ChronoCompose'})})
+      .then(d=>{ this._ccCalCreating=null; this.saveGcal({ccCalId:d.id}); return d.id; })
+      .catch(e=>{ this._ccCalCreating=null; throw e; });
+    return this._ccCalCreating;
+  }
+  /* Deliberate direct mutation OUTSIDE commit: linkage stamping is not a user edit — it must not touch
+     undo history and must not re-enter the outbound diff. */
+  stampEventId(taskId, eventId, calendarId){
+    const tasks=this.state.tasks.map(t=>t.id===taskId?Object.assign({},t,{eventId,calendarId}):t);
+    this.setState({tasks}); this.saveTasks(tasks);
+  }
+  /* Serial queue flush. 401 keeps the queue for after reauth; permanent errors drop the op; transient
+     errors retry up to GCAL_OP_MAX_TRIES. A successful flush triggers one immediate silent import so the
+     local copy reconciles with what Google actually stored. */
+  gcalFlushQueue(){
+    if(this._gcalFlushing) return;
+    if(!this.state.settings.gcalTwoWay || !this._token) return;
+    if(!this.loadQueue().length) return;
+    this._gcalFlushing=true;
+    const base='https://www.googleapis.com/calendar/v3/calendars/';
+    let anyWrite=false;
+    const finish=()=>{ this._gcalFlushing=false;
+      if(anyWrite){ this.gcalClearError(); this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); } };
+    const step=()=>{
+      const q=this.loadQueue(); const op=q[0];
+      if(!op){ finish(); return; }
+      let p;
+      if(op.op==='insert'){
+        p=this.gcalEnsureCalendar().then(cid=>
+          this.gcalFetch(base+encodeURIComponent(cid)+'/events',{method:'POST',body:JSON.stringify(op.body)})
+            .then(ev=>this.stampEventId(op.taskId, ev.id, cid)));
+      } else if(op.op==='patch' || op.op==='patchInstance'){
+        p=this.gcalFetch(base+encodeURIComponent(op.calendarId)+'/events/'+encodeURIComponent(op.eventId),
+          {method:'PATCH', body:JSON.stringify(op.body)});
+      } else if(op.op==='delete' || op.op==='deleteInstance'){
+        p=this.gcalFetch(base+encodeURIComponent(op.calendarId)+'/events/'+encodeURIComponent(op.eventId),{method:'DELETE'})
+          .catch(e=>{ if(e.status===404||e.status===410) return {}; throw e; })
+          .then(()=>{ if(op.op==='delete') this.clearTombstone(op.eventId); });
+      } else { p=Promise.resolve(); }
+      p.then(()=>{ anyWrite=true; this.shiftQueue(); step(); })
+       .catch(e=>{
+          this.gcalError(e);
+          if(e.status===401){ this._gcalFlushing=false; return; }
+          if(e.status===400||e.status===403||e.status===404){ this.shiftQueue(); step(); return; }
+          const tries=(op.tries||0)+1;
+          if(tries>=this.GCAL_OP_MAX_TRIES){ this.shiftQueue(); step(); }
+          else { const q2=this.loadQueue(); if(q2[0]&&q2[0].taskId===op.taskId&&q2[0].op===op.op) q2[0]=Object.assign({},q2[0],{tries});
+            this.saveQueue(q2); this._gcalFlushing=false; }
+        });
+    };
+    step();
+  }
+  shiftQueue(){ const q=this.loadQueue(); q.shift(); this.saveQueue(q); }
+  /* ==== /PP-EXT: two-way sync ==== */
   /* PURE: merge fetched calendar events into `tasks` (mutates). results=[{cid,items}], masters={cid|masterId:masterEvent}.
      Recurring instances collapse to ONE task keyed by the master id, carrying a recur rule. Returns {added,updated}. */
-  mergeCalendarEvents(tasks, results, masters, calById){
+  mergeCalendarEvents(tasks, results, masters, calById, tombstones){ /* PP-EXT: tombstones = locally-deleted event ids awaiting remote DELETE */
     const byEid={}; tasks.forEach(t=>{ if(t.eventId) byEid[t.eventId]=t; });
     const handled={}; let added=0, updated=0;
     results.forEach(({cid,items})=>{ const tag=this.calTag(calById&&calById[cid]);
@@ -1545,6 +1760,7 @@ class Component extends DCLogic {
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
           if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
           if(!t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
+        else if(tombstones && tombstones[eid]){ /* PP-EXT: deleted locally — don't resurrect while the DELETE is in flight */ }
         else { const id='t'+Math.random().toString(36).slice(2,8);
           /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
              goal/description come straight from the event; thereafter they persist locally (no round-trip through GCAL). */
@@ -1591,11 +1807,14 @@ class Component extends DCLogic {
         .then(list=>{ const masters={}; list.forEach(x=>{ if(x) masters[x.key]=x.ev; }); return {results,masters}; });
     })
     .then(({results,masters})=>{
+      const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
+      this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
+      try{
       if(opts.silent){
         /* apply on a clone; only commit if it changed anything (avoids undo/render churn on idle polls) */
         const before=JSON.stringify(this.state.tasks);
         const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
-        const r=this.mergeCalendarEvents(clone,results,masters,calById);
+        const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb);
         const removed=this.pruneDeletedEvents(clone,results,ids);
         if(JSON.stringify(clone)!==before){
           this.commit(tasks=>{ tasks.length=0; clone.forEach(t=>tasks.push(t)); });
@@ -1603,9 +1822,10 @@ class Component extends DCLogic {
         }
       } else {
         let r={added:0,updated:0}, removed=0;
-        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById); removed=this.pruneDeletedEvents(tasks,results,ids); });
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb); removed=this.pruneDeletedEvents(tasks,results,ids); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
       }
+      } finally { this._gcalApplying=false; } /* PP-EXT */
       this.gcalClearError(); /* PP-EXT: a successful sync clears any stale failure banner */
     }).catch(e=>{ this.gcalError(e); if(!opts.silent) this.gcalMsg('Import failed: '+e.message); })
       .then(()=>{ this._gcalSyncing=false; });
@@ -1616,6 +1836,8 @@ class Component extends DCLogic {
       if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return;
       const g=this.state.gcal; if(!g||!g.connected||!this._token) return;
       const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]); if(!ids.length) return;
+      /* PP-EXT: push before pull — while local writes are pending, importing would clobber them */
+      if(this.loadQueue().length || this._gcalFlushing){ this.gcalFlushQueue(); return; }
       const sec=Math.max(20, parseInt(this.state.settings&&this.state.settings.gcalPollSec)||60);
       if(Date.now()-(this._lastGcalSync||0) < sec*1000) return;
       this._lastGcalSync=Date.now();
@@ -1624,7 +1846,8 @@ class Component extends DCLogic {
   }
   /* Debounced sync after a settings edit (calendar selection / window change). */
   gcalSyncSoon(){ if(!this._token) return; clearTimeout(this._gcalSoon);
-    this._gcalSoon=setTimeout(()=>{ this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); }, 800); }
+    this._gcalSoon=setTimeout(()=>{ if(this.loadQueue().length||this._gcalFlushing){ this.gcalFlushQueue(); return; } /* PP-EXT: push first */
+      this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); }, 800); }
   /* ==== /PP-EXT ==== */
 
   /* ---------- settings ---------- */
@@ -1677,8 +1900,14 @@ class Component extends DCLogic {
       h('div',{style:{padding:'2px 0 8px'}}, this.googleSignInBtn()),
       setRow('Import window (days)', inp(g.window||30,v=>{ this.saveGcal({window:Math.max(1,parseInt(v)||30)}); this.gcalSyncSoon(); })),
       setRow('Auto-sync every (sec)', inp(s.gcalPollSec||60,v=>this.saveSettings({gcalPollSec:Math.max(20,parseInt(v)||60)}))),
+      /* PP-EXT: two-way sync toggle (ROADMAP Phase 2) — off by default until the owner signs off */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Two-way sync (beta)',
+          this.infoNote('When on, your changes push to Google: tasks you create or edit here become events in a dedicated "ChronoCompose" calendar; edits to imported tasks update their own calendar; deleting a linked task deletes its event. Writes are debounced and queued (they survive reloads and expired sign-ins). Planned/Spent/descriptions/pins stay local.')),
+        toggle(!!s.gcalTwoWay,()=>this.saveSettings({gcalTwoWay:!s.gcalTwoWay}))),
       h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',padding:'0 0 6px'}},
-        'Syncs automatically when connected (on selection/window change and in the background). Import runs one-way; your edits are kept.'),
+        s.gcalTwoWay
+          ? 'Two-way: imports run in the background AND your local changes (name, times, recurrence, deletes) push to Google.'
+          : 'Syncs automatically when connected (on selection/window change and in the background). Import runs one-way; your edits are kept.'),
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
         h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import now')),
       (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},

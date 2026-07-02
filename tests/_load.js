@@ -20,6 +20,7 @@ function loadComponent(){
     document:{ documentElement:{ setAttribute(){} } },
     window:{ matchMedia:undefined, PP_CONFIG:{ googleClientId:'' }, localStorage },
     setInterval:()=>0, clearInterval:()=>{},
+    setTimeout:()=>0, clearTimeout:()=>{}, // two-way sync queue debounce is a no-op under test
     DCLogic: class {
       constructor(p){ this.props = p||{}; }
       setState(o){ if(typeof o==='function') o=o(this.state); Object.assign(this.state, o); }

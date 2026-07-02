@@ -49,12 +49,17 @@ ID**. You create it a single time; after that you just click **Sign in with Goog
 > Settings when `config.js` has none — but pasting it into `config.js` once means you never type it again.
 
 - **Import** pulls upcoming events into tasks (calendar name → `@tag`; a new task's **Planned** is the
-  event's duration, all-day events left blank). Import is **one-way** (Calendar → app): your edits to
-  Planned/notes live in the browser's localStorage and are never overwritten by re-importing.
+  event's duration, all-day events left blank). Your edits to Planned/notes live in the browser's
+  localStorage and are never overwritten by re-importing.
 - **Auto-sync**: once connected, the app re-imports automatically — when you change the selected calendars
   or the import window, and in the background while the tab is open (interval configurable in Settings,
   default 60s). "Import now" forces one immediately. (Instant push on Calendar changes isn't possible from a
   static client-side app; it would need a server.)
+- **Two-way sync (beta, Settings toggle, off by default)**: when on, your local changes push to Google —
+  tasks you create become events in a dedicated **ChronoCompose** calendar, edits to imported tasks update
+  their own calendar, and deleting a linked task deletes its event. Writes are debounced/queued (they
+  survive reloads and expired sign-ins). Name/times/recurrence round-trip; Planned, Spent, descriptions
+  and pins stay local. When off, import is one-way (Calendar → app) as before.
 - **Descriptions** are rich text (bold/italic, bullet + numbered lists). Edit them in a task's detail view,
   or click the ▸ chevron next to a task name to expand an inline editor beneath the row.
 
