@@ -204,6 +204,7 @@ class Component extends DCLogic {
     return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
+      pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -597,15 +598,16 @@ class Component extends DCLogic {
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
      freeTime block (pinned to the end of the window), optionally clamped to `from` for pack-from-now. Single
      source of truth shared by computeAllotted (pool = Σ length) and buildDayTimeline (the bins to pack into). */
-  dayIntervals(B, from){
+  dayIntervals(B, from, extraBusy){ /* PP-EXT: extraBusy = additional busy blocks (pinned tasks), same clamping as meals */
     const s=this.state.settings;
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
     const lo=from!=null?Math.max(winStart,Math.min(from,winEnd)):winStart;
     const busy=[];
-    const addBusy=(a,b,note)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note}); };
+    const addBusy=(a,b,note,taskId)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId}); }; /* PP-EXT: taskId marks pinned-task blocks */
     addBusy(B+this.timeParts(s.lunchStart)*60000, B+this.timeParts(s.lunchEnd)*60000, 'Lunch');
     addBusy(B+this.timeParts(s.dinnerStart)*60000, B+this.timeParts(s.dinnerEnd)*60000, 'Dinner');
     const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time');
+    (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
     const free=[]; let cur=lo;
     arr.forEach(b=>{ if(b.end<=lo) return; const bs=Math.max(b.start,lo); if(bs>cur) free.push({start:cur,end:bs}); cur=Math.max(cur,b.end); });
@@ -613,6 +615,69 @@ class Component extends DCLogic {
     return {winStart, winEnd, lo, busy, free};
   }
   packStart(){ return this.state.settings.packFromNow ? (this.state.nowTick||Date.now()) : null; }
+
+  /* PP-EXT: schedule anchors — restores the old GAS "starts at" (fixed event) vs "due by" (Canvas deadline)
+     distinction lost in the port. Two independent per-task pins (null = infer):
+       pinStart && pinEnd → FIXED: occupies its literal clock span in the day timeline (like a meeting);
+       pinEnd only        → DUE-BY: packs flexibly but must finish before its due instant (EDF + clamping);
+       pinStart only      → NOT-BEFORE: packs flexibly but never earlier than its clock start;
+       neither            → FLEX: packs anywhere (pre-pin behavior).
+     Inference: timed calendar events → fixed; everything else → due-by (the Due column means "due"). */
+  occOf(t){ return t.recur ? this.currentOcc(t) : {start:t.start, end:t.end}; }
+  hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
+  effPins(t){
+    if(t.type==='Milestone'||t.type==='Excluded') return {ps:false,pe:false};
+    const timedEvent = !!(t.eventId && !t.allDay);
+    return { ps: t.pinStart!=null ? !!t.pinStart : timedEvent,
+             pe: t.pinEnd!=null   ? !!t.pinEnd   : true };
+  }
+  isFixedToday(t){ const p=this.effPins(t); return p.ps && p.pe && this.isActiveToday(t); }
+  /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
+     manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). */
+  dueMsOf(t){
+    const oc=this.occOf(t);
+    if(t.allDay) return oc.end;
+    return this.hasClock(oc.end) ? oc.end : oc.end + this.DAY;
+  }
+  notBeforeMsOf(t){ const oc=this.occOf(t); return oc.start; }
+  /* Today's fixed (both-pinned) tasks as busy blocks — the SINGLE source consumed by both computeAllotted
+     (pool shrinks) and buildDayTimeline (blocks render + free slots exclude them), so they always agree. */
+  fixedBlocksToday(B, tasks){
+    const out=[];
+    (tasks||this.state.tasks).forEach(t=>{
+      if(!this.isFixedToday(t)) return;
+      const oc=this.occOf(t);
+      const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
+      if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id});
+    });
+    return out;
+  }
+  /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
+  togglePin(id, which){
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      const p=this.effPins(t);
+      if(which==='start') t.pinStart=!p.ps; else t.pinEnd=!p.pe; });
+  }
+  /* Small ⓘ hover-help marker for non-intuitive features (native title tooltip). Reused across the UI. */
+  infoNote(text){
+    const h=React.createElement;
+    return h('span',{title:text,style:{cursor:'help',fontSize:'9px',color:'var(--text-faint)',marginLeft:'5px',
+      border:'1px solid var(--divider)',borderRadius:'50%',width:'13px',height:'13px',lineHeight:'11px',
+      display:'inline-flex',alignItems:'center',justifyContent:'center',flex:'none',userSelect:'none'}},'i');
+  }
+  PIN_HELP(){ return 'Schedule pins: pin the START to fix when it happens; pin the DUE to require finishing before it.\n'
+    +'Both pinned = fixed block at its clock time (meetings). Due only = flexible but done before the deadline (homework).\n'
+    +'Start only = never scheduled earlier than its start. Neither = fully flexible. Timed calendar events default to both.'; }
+  pinBtn(t, which){
+    const h=React.createElement; const p=this.effPins(t);
+    const on = which==='start' ? p.ps : p.pe;
+    const explicit = which==='start' ? t.pinStart!=null : t.pinEnd!=null;
+    const what = which==='start' ? 'start' : 'due';
+    return h('span',{onClick:e=>{e.stopPropagation();this.togglePin(t.id,which);},onMouseDown:e=>e.stopPropagation(),
+      title:(on?('Pinned '+what):('Unpinned '+what))+(explicit?'':' (auto)')+' — click to toggle. '+this.PIN_HELP(),
+      style:{cursor:'pointer',fontSize:'9.5px',flex:'none',marginRight:'3px',userSelect:'none',
+        opacity:on?1:0.45, filter:on?'none':'grayscale(1)'}},'📌');
+  }
 
   /* Allotted-time ("Remaining" column, ported from CalImport.gs col-H + timeline.gs). The day's pool is the
      sum of the free intervals (window − meals − freeTime), so allotment can never exceed what the timeline can
@@ -625,8 +690,13 @@ class Component extends DCLogic {
   computeAllotted(tasks){
     const map={};
     const B=this.startOfDay(this.state.nowTick||Date.now());
-    const avail=Math.max(0, this.dayIntervals(B, this.packStart()).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0));
-    const acts=tasks.filter(t=>this.isActiveToday(t));
+    /* PP-EXT: fixed (both-pinned) tasks occupy their clock span — they leave the flexible pool entirely and
+       their span is busy time, so the pool shrinks by exactly what the timeline will render as pinned blocks. */
+    const fixed=this.fixedBlocksToday(B, tasks);
+    const avail=Math.max(0, this.dayIntervals(B, this.packStart(), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0));
+    fixed.forEach(b=>{ const mins=Math.round((b.end-b.start)/60000);
+      map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
+    const acts=tasks.filter(t=>this.isActiveToday(t) && !map[t.id]);
     const spentById={}; acts.forEach(t=>{ spentById[t.id]=this.getSpent(t); });
     if(this.state.settings.allotMode==='spread'){
       const auto={}; let manualSum=0, autoSum=0;
@@ -1649,35 +1719,49 @@ class Component extends DCLogic {
   buildDayTimeline(){
     const s=this.state.settings;
     const B=this.startOfDay(this.state.nowTick||Date.now());
-    const di=this.dayIntervals(B, this.packStart());
+    /* PP-EXT: pins — fixed (both-pinned) tasks are busy time via fixedBlocksToday (the same source
+       computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
+    const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
+    const di=this.dayIntervals(B, this.packStart(), fixedBlocks);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;
     let free=di.free.slice();
     const remove=(a,b)=>{ const nf=[]; free.forEach(iv=>{ if(b<=iv.start||a>=iv.end){nf.push(iv);} else { if(a>iv.start)nf.push({start:iv.start,end:a}); if(b<iv.end)nf.push({start:b,end:iv.end}); } }); free=nf; };
-    const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && this.allotOf(t.id).allotted>0)
-      /* PP-EXT: EDF must use the CURRENT occurrence's due, like isActiveToday — the base end of an old
-         recurring series is long past and would wrongly win every deadline tiebreak. */
-      .map(t=>({id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:(t.recur?this.currentOcc(t).end:t.end),rem:this.allotOf(t.id).allotted,origin:this.allotOf(t.id).allotted}));
+    /* PP-EXT: EDF uses the CURRENT occurrence's due instant (dueMsOf), like isActiveToday — the base end of
+       an old recurring series is long past and would wrongly win every deadline tiebreak. Pin semantics:
+       dueMs (end-pin) clamps placement before the deadline; notBefore (start-pin) forbids earlier slots. */
+    const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t) && this.allotOf(t.id).allotted>0)
+      .map(t=>{ const p=this.effPins(t);
+        return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t),
+          dueMs:p.pe?this.dueMsOf(t):null, notBefore:p.ps?this.notBeforeMsOf(t):null,
+          rem:this.allotOf(t.id).allotted,origin:this.allotOf(t.id).allotted}; });
     flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
-       and each placement takes from a slot's front, so iterations are bounded by the slot count. */
-    const fill=(task, rem, allowFragment)=>{ let guard=0; const cap=free.length+2;
-      while(rem>0.5 && guard++<cap){ let placed=false;
-        for(const slot of free){ const dur=(slot.end-slot.start)/60000; if(dur<=0) continue;
+       and placements consume usable span, so iterations are bounded by the (growing) slot count; the guard is
+       re-evaluated because a mid-slot placement (not-before pin) can split a slot into two. */
+    const fill=(task, rem, allowFragment)=>{ let guard=0;
+      while(rem>0.5 && guard++<free.length+8){ let placed=false;
+        for(const slot of free){
+          const st0=Math.max(slot.start, task.notBefore||0);                       /* PP-EXT: start-pin */
+          const en0=Math.min(slot.end, task.dueMs!=null?task.dueMs:Infinity);      /* PP-EXT: end-pin (due-by) */
+          const dur=(en0-st0)/60000; if(dur<=0) continue;
           const take=Math.min(rem,dur); if(!allowFragment && take<rem && take<minChunk) continue;
-          const st=slot.start, en=st+take*60000;
+          const st=st0, en=st+take*60000;
           segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:st,end:en,type:'scheduled'});
           remove(st,en); rem-=take; placed=true; break; }
         if(!placed) break; }
       return rem; };
     flex.forEach(task=>{ let rem=fill(task, task.rem, false); rem=fill(task, rem, true);
-      if(rem>0.5) segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:null,end:null,durationMin:Math.round(rem),type:'unscheduled'}); });
+      if(rem>0.5) segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:null,end:null,
+        durationMin:Math.round(rem),type:'unscheduled',
+        reason:(task.dueMs!=null && task.dueMs<winEnd)?'no room before due':'day full'}); }); /* PP-EXT: why it didn't fit */
     const bySlot=(a,b)=>{ if(!a.start && !b.start) return 0; if(!a.start) return 1; if(!b.start) return -1; return a.start-b.start; };
     segs.sort(bySlot);
     const merged=[];
     segs.forEach(seg=>{ if(!seg.start){merged.push(seg);return;} const last=merged[merged.length-1];
       if(last&&last.start&&last.id===seg.id&&(seg.start-last.end)<=60000){ last.end=seg.end; } else merged.push(Object.assign({},seg)); });
-    busy.forEach(b=>merged.push({title:b.note,start:b.start,end:b.end,type:'meal'}));
+    busy.forEach(b=>merged.push(b.taskId?{id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed'} /* PP-EXT: pinned task block */
+      :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd};
   }
@@ -1689,6 +1773,7 @@ class Component extends DCLogic {
     const topOf=ms=>((ms-dStart)/60000)*px;
     const TYP={scheduled:{bg:'linear-gradient(45deg,#FED5CF,#FEF2DB)',fg:'#3a2f2a'},
       meal:{bg:'linear-gradient(45deg,#D3C7E6,#E8D8E0)',fg:'#332b3a'},
+      fixed:{bg:'linear-gradient(45deg,#C8E6D2,#E2F0DC)',fg:'#233529'}, /* PP-EXT: pinned (fixed-time) block */
       unscheduled:{bg:'linear-gradient(45deg,#BEDAE3,#DEE6DF)',fg:'#2a3538'}};
     const labels=[]; for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){
       const ms=new Date(dStart); ms.setHours(hh,0,0,0);
@@ -1704,11 +1789,12 @@ class Component extends DCLogic {
         style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%',
           display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
           background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'#fff':'#1a73e8'}}, running?'■':'▶');
-      return h('div',{key:'b'+i,title:(c.goal?('Goal: '+c.goal):c.title),
+      return h('div',{key:'b'+i,title:(c.type==='fixed'?'Pinned at its clock time — ':'')+(c.goal?('Goal: '+c.goal):c.title), /* PP-EXT: fixed hint */
         style:{position:'absolute',left:'40px',right:'8px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
           borderRadius:'6px',padding:'3px 22px 3px 7px',fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
-          textOverflow:'ellipsis',boxShadow:'0 1px 3px rgba(0,0,0,0.15)',border:cur?'2px solid #ea4335':'1px solid rgba(0,0,0,0.15)'}},
-        c.title, btn); });
+          textOverflow:'ellipsis',boxShadow:'0 1px 3px rgba(0,0,0,0.15)',
+          border:cur?'2px solid #ea4335':(c.type==='fixed'?'2px solid rgba(35,53,41,0.45)':'1px solid rgba(0,0,0,0.15)')}}, /* PP-EXT */
+        (c.type==='fixed'?'📌 ':'')+c.title, btn); });
     const nowLine = (now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:'34px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     const unsched=data.chunks.filter(c=>!c.start);
@@ -1716,7 +1802,8 @@ class Component extends DCLogic {
       h('div',{style:{position:'relative',height:H+'px',margin:'4px 4px 0'}}, ...labels, ...grid, ...blocks, nowLine),
       unsched.length? h('div',{style:{margin:'12px 4px 4px',padding:'10px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
         h('div',{style:{fontSize:'12px',fontWeight:600,color:'#e5824d',marginBottom:'6px'}},'⚠ Unscheduled (no room today)'),
-        ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11.5px',color:'var(--text-2)',padding:'2px 0'}}, c.title+' · '+this.fmtDur(c.durationMin)))) : null);
+        ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11.5px',color:'var(--text-2)',padding:'2px 0'}},
+          c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:'')))) : null); /* PP-EXT: why it didn't fit */
   }
   renderDrawer(){
     if(!this.state.drawerOpen) return null;
@@ -1956,8 +2043,10 @@ class Component extends DCLogic {
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
       name:nameBlock, type:typeSel,
-      start:h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */)),
-      end:h('span',{style:{fontSize:'11.5px',color:overdue?'#e5484d':'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(t.allDay?dispEnd-1:dispEnd, t.allDay/* PP-EXT */)),
+      start:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'start'), /* PP-EXT: start pin */
+        h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */))),
+      end:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'end'), /* PP-EXT: due pin */
+        h('span',{style:{fontSize:'11.5px',color:overdue?'#e5484d':'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(t.allDay?dispEnd-1:dispEnd, t.allDay/* PP-EXT */))),
       dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
       planned: durIn('planned'), spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
       cdate:h('span',{style:{fontSize:'11.5px',color:dispComp?'#79c08e':'var(--text-faint)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispComp)),
@@ -2406,6 +2495,14 @@ class Component extends DCLogic {
       field('Tags',tagsEditor),
       field('Start',valWithX(t.start,null,'start',t.allDay/* PP-EXT */)),
       field('Due',valWithX(t.end, (!done&&t.end!=null&&t.end<Date.now())?'#e5484d':'var(--text-2)', 'end', t.allDay/* PP-EXT */)),
+      /* PP-EXT: schedule pins — fixed-at-clock-time vs due-by-deadline vs flexible (see PIN_HELP) */
+      field(h('span',null,'Schedule pins',this.infoNote(this.PIN_HELP())),
+        h('div',{style:{display:'flex',gap:'14px',alignItems:'center',fontSize:'12.5px',color:'var(--text-2)'}},
+          h('span',{style:{display:'flex',alignItems:'center',gap:'4px'}}, this.pinBtn(t,'start'), 'Start'),
+          h('span',{style:{display:'flex',alignItems:'center',gap:'4px'}}, this.pinBtn(t,'end'), 'Due'),
+          h('span',{style:{fontSize:'11px',color:'var(--text-faint2)'}},
+            (p=>(p.ps&&p.pe)?'fixed at its clock time':(p.pe?'due-by (finish before due)':(p.ps?'not before start':'fully flexible')))(this.effPins(t)))),
+      ),
       field('Duration',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'#e5615d':(this._schedWarn?'#eb8909':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},
