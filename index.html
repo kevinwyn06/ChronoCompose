@@ -184,7 +184,7 @@ class Component extends DCLogic {
       /* PP-EXT state */
       drawerOpen:false, running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
-      descOpen:{} /* PP-EXT: task ids whose inline description panel is expanded */ };
+      descOpen:pf.descOpen||{} /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -570,7 +570,15 @@ class Component extends DCLogic {
   renderRichHtml(html, style){ const h=React.createElement;
     return h('div',{className:'pp-rich', dangerouslySetInnerHTML:{__html:this.sanitizeHtml(html)},
       style:Object.assign({fontSize:'13px',lineHeight:'1.5',color:'var(--text-2)'},style||{})}); }
-  toggleDescOpen(id){ const d=Object.assign({}, this.state.descOpen); if(d[id]){ this.flushDesc(); delete d[id]; } else d[id]=true; this.setState({descOpen:d}); }
+  toggleDescOpen(id){ const d=Object.assign({}, this.state.descOpen); if(d[id]){ this.flushDesc(); delete d[id]; } else d[id]=true; this.setState({descOpen:d}); this.savePrefs({descOpen:d})/* PP-EXT: persist expanded state across sessions */; }
+  /* PP-EXT: measure an open description panel so the Gantt can offset the rows below it (keeps sheet⇄gantt row
+     alignment while the panel grows with content). Heights live in this._descH (not state); a descTick bump
+     re-renders the Gantt only when a measured height actually changes. */
+  observeDescPanel(id, el){ this._descH=this._descH||{}; const measure=()=>{ const hgt=el.offsetHeight;
+      if(this._descH[id]!==hgt){ this._descH[id]=hgt; this.setState(s=>({descTick:(s.descTick||0)+1})); } };
+    measure(); if(typeof ResizeObserver!=='undefined'){ const ro=new ResizeObserver(measure); ro.observe(el); el._descRo=ro; } }
+  descExtra(t){ return this.state.descOpen[t.id] ? ((this._descH&&this._descH[t.id])||0) : 0; }
+  yOfRow(i){ return (this._yTop&&this._yTop[i]!=null) ? this._yTop[i] : i*this.rowH; }
   /* ==== /PP-EXT ==== */
 
   /* ==== PP-EXT: goal, time-tracking timers, allotted-time (ported Schedule-sheet "Remaining") ==== */
@@ -2440,15 +2448,17 @@ class Component extends DCLogic {
     const descOpen = !!this.state.descOpen[t.id];
     const descToggle = h('span',{onClick:e=>{e.stopPropagation();this.toggleDescOpen(t.id);}, onMouseDown:e=>e.stopPropagation(),
       title: descOpen?'Hide description':'Show / edit description',
-      style:{cursor:'pointer',marginRight:'6px',fontSize:'10px',flex:'none',userSelect:'none',
-        color: this.hasDesc(t.description)?this._accent:'var(--text-faint)'}}, descOpen?'▾':'▸');
+      /* PP-EXT: distinct glyph (lines = text) + larger, so it doesn't read like the subtask caret */
+      style:{cursor:'pointer',marginRight:'6px',fontSize:'13px',lineHeight:1,flex:'none',userSelect:'none',
+        color: (descOpen||this.hasDesc(t.description))?this._accent:'var(--text-faint)'}}, '☰');
     /* PP-EXT: subtasks — indent by depth; parents get a collapse caret (+N badge when collapsed) */
     const kidsN=((this._kids&&this._kids[t.id])||[]).length;
     const depth=(this._depth&&this._depth[t.id])||0;
     const collapsedHere=!!this.state.collapsed[t.id];
     const caret = kidsN? h('span',{onClick:e=>{e.stopPropagation();this.toggleCollapse(t.id);},onMouseDown:e=>e.stopPropagation(),
       title:(collapsedHere?'Expand ':'Collapse ')+kidsN+' subtask'+(kidsN>1?'s':'')+' (Tab/Shift+Tab indents rows)',
-      style:{cursor:'pointer',marginRight:'4px',fontSize:'9px',color:'var(--text-mut2)',flex:'none',userSelect:'none'}},
+      /* PP-EXT: enlarged triangle so the collapse caret is clearly distinct from the ☰ description toggle */
+      style:{cursor:'pointer',marginRight:'4px',fontSize:'13px',lineHeight:1,color:'var(--text-mut2)',flex:'none',userSelect:'none'}},
       collapsedHere?'▸':'▾') : null;
     const kidBadge = (kidsN&&collapsedHere)? h('span',{style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--chip-bg)',
       border:'1px solid var(--divider)',borderRadius:'4px',padding:'0 4px',marginLeft:'5px',whiteSpace:'nowrap'}},'+'+kidsN) : null;
@@ -2541,24 +2551,26 @@ class Component extends DCLogic {
     const visN=(this._visTasks||this.state.tasks).length; /* PP-EXT: rows are the visible list (archived may be hidden) */
     if(rd && rd.overIndex===i) bsh = (bsh?bsh+',':'')+'inset 0 2px 0 0 '+this._accent;
     if(rd && rd.overIndex===visN && i===visN-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent; /* PP-EXT */
-    /* PP-EXT: inline description panel — an overlay anchored below the row spanning the sheet (non-Gantt) width.
-       Rendered as an overlay (not a layout row) so the side-by-side Gantt bars stay row-aligned. */
+    /* PP-EXT: inline description panel — an in-flow block below the row's cells spanning the sheet (non-Gantt)
+       width. It pushes the rows below it down; the Gantt offsets its matching rows by the panel's measured
+       height (observeDescPanel → this._descH → yOfRow) so the side-by-side Gantt bars stay row-aligned. */
     const descPanel = descOpen ? h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onContextMenu:e=>e.stopPropagation(),
-      style:{position:'absolute',top:'100%',left:0,width:totalW+'px',zIndex:6,cursor:'default',
-        background:'var(--card-bg)',borderTop:'1px solid var(--divider)',borderBottom:'1px solid var(--row-border)',
-        boxShadow:'0 12px 28px rgba(0,0,0,0.38)',padding:'12px 16px 14px'}},
-      this.richEditor(t,{minHeight:110})) : null;
+      ref:el=>{ if(!el) return; this._descEls=this._descEls||{}; const prev=this._descEls[t.id]; if(prev===el) return;
+        if(prev&&prev._descRo){ prev._descRo.disconnect(); prev._descRo=null; } this._descEls[t.id]=el; this.observeDescPanel(t.id,el); },
+      style:{width:totalW+'px',cursor:'default',
+        background:'var(--card-bg)',borderTop:'1px solid var(--divider)',padding:'8px 16px 10px'}},
+      this.richEditor(t,{minHeight:34})) : null;
     return h('div',{key:t.id,
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>this.rowPointerDown(e,t.id,i),
       onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
-      style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',position:'relative',
-        zIndex:descOpen?7:'auto',
+      style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.ids.includes(t.id))?0.4:(t.archivedAt?0.45:1)/* PP-EXT: archived rows render dimmed */,
         background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
         borderBottom:'1px solid var(--row-border)',
         boxShadow: bsh||'none'}},
-      cols.map(c=>cell(c, content[c.k], extras[c.k])),
+      h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px'}}/* PP-EXT: cells row (fixed height); panel stacks beneath */,
+        cols.map(c=>cell(c, content[c.k], extras[c.k]))),
       descPanel
     );
   }
@@ -2568,7 +2580,10 @@ class Component extends DCLogic {
     const h=React.createElement;
     const tl=this._tl; const dayW=this.state.dayW;
     const totalW=tl.days*dayW;
-    const bodyH=tasks.length*this.rowH;
+    /* PP-EXT: rows may be taller than rowH when an inline description panel is open in the sheet; precompute
+       each row's Y top (yOfRow reads this._yTop) so bars/stripes/arrows stay aligned with the sheet. */
+    const yTop=[]; let acc=0; for(let i=0;i<tasks.length;i++){ yTop[i]=acc; acc+=this.rowH+this.descExtra(tasks[i]); }
+    this._yTop=yTop; const bodyH=acc;
 
     /* PP-EXT: virtualization window — only render timeline chrome + bars within the visible day range. */
     const win=this.ganttVWin(tl,dayW); this._vwin=win; const vd0=win.d0, vd1=win.d1;
@@ -2645,7 +2660,7 @@ class Component extends DCLogic {
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
         return h('div',{key:'r'+t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
           onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
-          style:{position:'absolute',left:0,right:0,top:(i*this.rowH)+'px',height:this.rowH+'px',
+          style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:this.rowH+'px',
             background: sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'),
             borderBottom:'1px solid var(--row-border-gantt)',
             boxShadow: crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'}}); }),
@@ -2674,7 +2689,7 @@ class Component extends DCLogic {
     const h=React.createElement;
     const a=occs[0].start, b=occs[occs.length-1].end;
     const left=this.xOf(a), w=Math.max(10,this.xOf(b)-left);
-    const top=rowI*this.rowH+(this.rowH-this.barH)/2;
+    const top=this.yOfRow(rowI)+(this.rowH-this.barH)/2;
     const crit=this._showCP && this._cpm.critical[t.id];
     const sel=this.isSel(t.id);
     const base=crit?'#e5484d':(this._accent||'#3f7bd6');
@@ -2700,7 +2715,7 @@ class Component extends DCLogic {
     let st=o.start, en=o.end;
     if(dragging){ const m=this.dragState.mode; if(m==='move'){st+=dShift;en+=dShift;} else if(m==='start'){st=Math.min(en-this.DAY,st+dShift);} else if(m==='end'){en=Math.max(st+this.DAY,en+dShift);} }
     const left=this.xOf(st);
-    const top=rowI*this.rowH+(this.rowH-this.barH)/2;
+    const top=this.yOfRow(rowI)+(this.rowH-this.barH)/2;
     const crit=this._showCP && this._cpm.critical[t.id];
     const sel=this.isSel(t.id);
     const pct=this.occPct(t,o.idx); const done=pct>=100;
@@ -2724,7 +2739,7 @@ class Component extends DCLogic {
     }
     if(this.isChore(t)){
       const sz=this.barH+2;
-      return h('div',{key,style:{position:'absolute',left:(left-sz/2)+'px',top:(rowI*this.rowH+(this.rowH-sz)/2)+'px',width:sz+'px',height:sz+'px',zIndex:5}},
+      return h('div',{key,style:{position:'absolute',left:(left-sz/2)+'px',top:(this.yOfRow(rowI)+(this.rowH-sz)/2)+'px',width:sz+'px',height:sz+'px',zIndex:5}},
         h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
           title:t.name+' · chore'+occLbl+' · double-click for details',
           style:{position:'relative',width:'100%',height:'100%',borderRadius:'50%',cursor:'grab',
@@ -2760,8 +2775,8 @@ class Component extends DCLogic {
         const pid=this.depId(dep), occ=this.depOcc(dep);
         const p=byId[pid]; if(!p) return;
         if(!this.isScheduled(p) || !this.isScheduled(t)) return;
-        const sx=predEnd(pid,occ); const sy=idx[pid]*this.rowH+this.rowH/2;
-        const tx=tgtStart(t.id); const ty=idx[t.id]*this.rowH+this.rowH/2;
+        const sx=predEnd(pid,occ); const sy=this.yOfRow(idx[pid])+this.rowH/2;
+        const tx=tgtStart(t.id); const ty=this.yOfRow(idx[t.id])+this.rowH/2;
         const critEdge=this._showCP && this._cpm.critical[pid] && this._cpm.critical[t.id];
         const col=critEdge?'#e5484d':'#6b7280';
         const g=13;
@@ -2778,7 +2793,7 @@ class Component extends DCLogic {
     // temp link line
     let temp=null;
     if(this.linkState){
-      if(this._occById[this.linkState.fromId]){ const sx=predEnd(this.linkState.fromId,this.linkState.fromOcc); const sy=idx[this.linkState.fromId]*this.rowH+this.rowH/2;
+      if(this._occById[this.linkState.fromId]){ const sx=predEnd(this.linkState.fromId,this.linkState.fromOcc); const sy=this.yOfRow(idx[this.linkState.fromId])+this.rowH/2;
         temp=h('path',{d:'M'+sx+','+sy+' L'+this.linkState.x+','+this.linkState.y,fill:'none',
           stroke:this._accent,strokeWidth:1.8,strokeDasharray:'5 4',style:{animation:'ppdash 0.5s linear infinite'}}); }
     }
@@ -2844,7 +2859,7 @@ class Component extends DCLogic {
     const divider=h('div',{style:{height:'1px',background:'var(--menu-hover)',margin:'5px 0'}});
     const label=(t)=>h('div',{style:{padding:'7px 14px 4px',fontSize:'11px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px'}},t);
 
-    const menu=h('div',{onClick:e=>e.stopPropagation(),onContextMenu:e=>{e.preventDefault();},
+    const menu=h('div',{onMouseDown:e=>e.stopPropagation()/* PP-EXT: keep the overlay's mousedown from closing the menu before an item's click fires (row items like Delete) */,onClick:e=>e.stopPropagation(),onContextMenu:e=>{e.preventDefault();},
       style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
         borderRadius:'10px',boxShadow:'0 12px 40px rgba(0,0,0,0.55)',padding:'6px 0',zIndex:2100,
         fontFamily:'inherit'}},
