@@ -225,12 +225,12 @@ test('drag-pin: dragBlock spans the pinned window today, ignored on a stale day'
 });
 
 // 13. snapPinStart: snaps to 5-min grid and clamps so the whole block stays inside the window.
-test('drag-pin: snapPinStart snaps to 5 min and clamps within the window', () => {
+test('drag-pin: snapPinStart snaps to 15 min and clamps within the window', () => {
   const c = make();
   const B = c.startOfDay(Date.now());
   cleanDay(c, '10:00'); // window 00:00–10:00
   assert.strictEqual(c.snapPinStart(B + (2 * 60 + 3) * 60000, 60, B),
-    B + (2 * 60 + 5) * 60000, '02:03 snaps up to 02:05');
+    B + (2 * 60) * 60000, '02:03 snaps to 02:00 (15-min grid)');
   assert.strictEqual(c.snapPinStart(B - 3600000, 60, B), B, 'before day start → clamped to window start');
   assert.strictEqual(c.snapPinStart(B + 12 * 3600000, 60, B), B + 9 * 3600000,
     'a 60-min block can start no later than 09:00 (ends at 10:00)');
@@ -308,9 +308,9 @@ test('drag-pin: snapPinStart magnetically snaps to a neighbour block edge', () =
   // end edge lands 2 min before 03:00 → snaps so the block ends at 03:00 (starts at 02:00)
   assert.strictEqual(c.snapPinStart(B + (1 * 60 + 58) * 60000, 60, B, [edge]), B + 2 * 3600000,
     'end within magnet snaps the block to abut the neighbour edge');
-  // no target within magnet → 5-min grid snap (02:03 → 02:05)
+  // no target within magnet → 15-min grid snap (02:03 → 02:00)
   assert.strictEqual(c.snapPinStart(B + (2 * 60 + 3) * 60000, 60, B, [B + 9 * 3600000]),
-    B + (2 * 60 + 5) * 60000, 'far targets leave the grid snap in charge');
+    B + (2 * 60) * 60000, 'far targets leave the grid snap in charge');
 });
 
 // 17. Break-between-tasks reserves settings.breakMin after each packed task and shrinks the pool to match.
@@ -334,4 +334,67 @@ test('break: breakMin shrinks the pool and spaces packed tasks apart', () => {
     Math.max(...chunks.filter(x => x.id === 'b' && x.start).map(x => x.end)),
     Math.min(...chunks.filter(x => x.id === 'a' && x.start).map(x => x.start))];
   assert.ok((second - first) / MIN >= 30, 'at least a 30-min break separates the two tasks');
+});
+
+/* ==================== PART E — MULTI-DAY (per-day scheduling + pins) ==================== */
+
+// E1. Future-day allotment ignores `spent` (spent = time worked TODAY only). Same task, same pool:
+//     today's column subtracts spent; a future day schedules the full planned share.
+test('multi-day: future-day computeAllotted uses spent = 0', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00'); // 600-min pool, no meals
+  const t = activeTask(c, { id: 't', name: 'T', planned: 120, spent: 45, start: B - DAY, end: B + 5 * DAY });
+  c.state.tasks = [t];
+  const today = c.computeAllotted([t], B);
+  const future = c.computeAllotted([t], B + 2 * DAY);
+  // sole active task → gets the whole pool minus spent today; future day ignores spent.
+  assert.strictEqual(today['t'].allotted, 600 - 45, 'today subtracts spent');
+  assert.strictEqual(future['t'].allotted, 600, 'future day ignores spent (spent = today only)');
+});
+
+// E2. A block dragged onto a FUTURE day pins for THAT day: buildDayTimeline(B_future) renders it as a
+//     fixed drag-pin, and the same pin is invisible on today's column (pin.day must match the column).
+test('multi-day: a per-day pin shows on its own day, not on others', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00');
+  const future = B + 2 * DAY;
+  const t = activeTask(c, { id: 't', name: 'T', planned: 120, start: B - DAY, end: B + 5 * DAY });
+  t.pin = { day: future, start: future + 5 * 3600000, dur: 120 }; // 05:00–07:00 on B+2
+  c.state.tasks = [t];
+
+  const fx = c.buildDayTimeline(future).chunks.filter(x => x.type === 'fixed' && x.id === 't');
+  assert.strictEqual(fx.length, 1, 'pinned block renders on its own (future) day');
+  assert.ok(fx[0].dragPin, 'flagged as a drag-pin');
+  assert.strictEqual(fx[0].start, future + 5 * 3600000, 'at the pinned start on that day');
+
+  const todayFixed = c.buildDayTimeline(B).chunks.filter(x => x.type === 'fixed' && x.id === 't');
+  assert.strictEqual(todayFixed.length, 0, "a future-day pin is not applied to today's column");
+});
+
+// E3. A stale pin (pin.day in the PAST) is ignored on every rendered day.
+test('multi-day: a past-day pin is ignored', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00');
+  const t = activeTask(c, { id: 't', name: 'T', planned: 120, start: B - 5 * DAY, end: B + 5 * DAY });
+  t.pin = { day: B - 2 * DAY, start: B - 2 * DAY + 5 * 3600000, dur: 120 }; // pinned to a past day
+  c.state.tasks = [t];
+  for (const day of [B, B + DAY, B + 2 * DAY]) {
+    const fx = c.buildDayTimeline(day).chunks.filter(x => x.type === 'fixed' && x.id === 't');
+    assert.strictEqual(fx.length, 0, 'no fixed block from a stale (past) pin');
+  }
+});
+
+// E4. isActiveOn windows by date for the given day: a task active only on a later day doesn't allot today.
+test('multi-day: isActiveOn windows tasks to the right day', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const t = activeTask(c, { id: 't', name: 'T', planned: 60, start: B + 2 * DAY, end: B + 2 * DAY });
+  assert.ok(!c.isActiveOn(t, B), 'not active today (window starts in 2 days)');
+  assert.ok(c.isActiveOn(t, B + 2 * DAY), 'active on its own day');
 });

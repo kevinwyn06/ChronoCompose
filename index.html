@@ -164,7 +164,7 @@ class Component extends DCLogic {
     this.barH = 16;
     this.headH = 48;
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
-    this.PIN_SNAP = 5;           // PP-EXT: minutes a dragged timeline block snaps to (Phase 5)
+    this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
@@ -183,14 +183,20 @@ class Component extends DCLogic {
     seed = seed.map(t=>this.normalizeTask(t));
     seed = this.runOnceMigrations(seed); /* PP-EXT: scrub old all-day planned defaults, once */
     if(Array.isArray(pf.rowOrder)) seed = this.applyOrder(seed, pf.rowOrder);
-    this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null, splitPct:55, detailId:null, menu:null,
+    /* PP-EXT: main-view selector (Gantt · 4-Day · Week · Month · Schedule · Today) + per-view-group split
+       widths, both persisted in pp-prefs. Migrate the old 'calendar' toggle value to the new 'month'. */
+    const ppMainView = (pf.mainView==='calendar') ? 'month' : (pf.mainView || 'gantt');
+    const ppViewSplit = Object.assign({gantt:55, cal:55, today:32, schedule:40}, pf.viewSplit||{});
+    this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
+      splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
+      detailId:null, menu:null,
       showYears:false, settingsOpen:false, quickText:'', quickOpen:false, datePick:null, scopePrompt:null,
       theme:this.initialTheme(),
       rowMode: pf.rowMode||'default',
       colW: pf.colW||{}, colOrder: pf.colOrder||null, colHidden: pf.colHidden||{},
       selCols:[], colMenu:null, rowDrag:null,
       /* PP-EXT state */
-      drawerOpen:false, mainView:'gantt', monthAnchor:null, hoverDay:null, /* PP-EXT: main Gantt|Calendar toggle + month-view hover (Phase 6) */
+      drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{} /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */ };
@@ -199,8 +205,9 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT: persistence for tasks / spent-timer / settings / gcal ==== */
   /* PP-EXT: the day's task capacity is DERIVED — window − meals − freeTime — not a standalone number.
-     `freeTime` = reserved personal/leisure minutes (blocks a late-evening slot); `allotMode` today|spread;
-     `packFromNow` starts the plan (and pool) at the current time instead of dayStart. */
+     `freeTime` = reserved personal/leisure minutes (blocks a late-evening slot). Allotment is always whole-day
+     (the today|spread `allotMode` selector was removed 2026-07; the default key is kept as a harmless no-op).
+     `packFromNow` starts today's plan (and pool) at the current time instead of dayStart. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
@@ -603,25 +610,31 @@ class Component extends DCLogic {
   setGoal(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.goal=val; }); }
   startOfDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
   isMilestone(t){ return t.type==='Milestone'; } /* PP-EXT: internal milestone marker (created via gantt-header click / quick-add; no longer a user-selectable mode) */
-  /* PP-EXT: the INFERRED include default — today ∈ [start,due] by DATE (time-of-day ignored), current occurrence. */
-  inWindowToday(t){
+  /* PP-EXT: the INFERRED include default — day B ∈ [start,due] by DATE (time-of-day ignored), occurrence-for-B. */
+  inWindowOn(t, B){
     if(!this.isScheduled(t)) return false;
-    const today=this.startOfDay(this.state.nowTick||Date.now());
-    const oc = t.recur ? this.currentOcc(t) : {start:t.start, end:t.end};
-    return this.startOfDay(oc.start) <= today && today <= this.startOfDay(oc.end);
+    const oc = this.occForDay(t, B);
+    return this.startOfDay(oc.start) <= B && B <= this.startOfDay(oc.end);
   }
-  isActiveToday(t){ // a task only has allotted time if it's included today (default: today ∈ [start,end], date-inclusive)
+  inWindowToday(t){ return this.inWindowOn(t, this.startOfDay(this.state.nowTick||Date.now())); }
+  /* PP-EXT: a task allots on day B if it's included that day (default: B ∈ [start,end], date-inclusive). The
+     manual include/exclude override (`included`) applies fully on TODAY; on other days a manual EXCLUDE is still
+     respected everywhere, but a manual "include today" does NOT leak onto other days (falls back to the window). */
+  isActiveOn(t, B){
     if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
     if(!this.isScheduled(t) || this.isMilestone(t)) return false;
-    /* PP-EXT: include/exclude toggle overrides the date-window default (null = infer). */
-    if(t.included!=null) return !!t.included;
-    return this.inWindowToday(t);
+    if(t.included!=null){
+      if(B===this.startOfToday()) return !!t.included;
+      if(t.included===false) return false;
+    }
+    return this.inWindowOn(t, B);
   }
+  isActiveToday(t){ return this.isActiveOn(t, this.startOfToday()); }
   /* PP-EXT: flip the effective include state and store it as an explicit override (like togglePin vs effPins). */
   toggleIncluded(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
     const cur = t.included!=null ? t.included : this.inWindowToday(t); t.included = !cur; }); }
-  /* PP-EXT: inclusive count of days from today to the task's (current-occurrence) due date, ≥1. Drives
-     'spread' allotment: remaining planned ÷ activeDaysLeft = today's share (48h over 12 days → 4h/day). */
+  /* PP-EXT: inclusive count of days from today to the task's (current-occurrence) due date, ≥1. (No longer used
+     since the 'spread' allot mode was removed 2026-07; kept as a small reusable helper.) */
   activeDaysLeft(t){
     const today=this.startOfDay(this.state.nowTick||Date.now());
     const oc = t.recur ? this.currentOcc(t) : {start:t.start, end:t.end};
@@ -691,7 +704,10 @@ class Component extends DCLogic {
     if(cur<winEnd) free.push({start:cur,end:winEnd});
     return {winStart, winEnd, lo, busy, free};
   }
-  packStart(){ return this.state.settings.packFromNow ? (this.state.nowTick||Date.now()) : null; }
+  /* PP-EXT: the "from now" toggle starts the plan (and pool) at the current time — but ONLY for today's column.
+     Future-day timelines always plan the whole day (B ≠ today ⇒ null). B omitted ⇒ today. */
+  packStart(B){ const today=this.startOfToday();
+    return (this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null; }
 
   /* PP-EXT: schedule anchors — restores the old GAS "starts at" (fixed event) vs "due by" (Canvas deadline)
      distinction lost in the port. Two independent per-task pins (null = infer):
@@ -701,6 +717,16 @@ class Component extends DCLogic {
        neither            → FLEX: packs anywhere (pre-pin behavior).
      Inference: timed calendar events → fixed; everything else → due-by (the Due column means "due"). */
   occOf(t){ return t.recur ? this.currentOcc(t) : {start:t.start, end:t.end}; }
+  /* PP-EXT: the occurrence relevant to day B (multi-day timelines). For today (or B omitted) this is the exact
+     current-occurrence behaviour (occOf); for another day it's the occurrence overlapping [B, B+DAY), so a Week
+     column schedules that day's own instance of a repeating task. Non-recurring tasks have a single occurrence. */
+  occForDay(t, B){
+    if(B==null || B===this.startOfToday()) return this.occOf(t);
+    if(!t.recur) return {start:t.start, end:t.end, idx:0};
+    const occs=(this._occById&&this._occById[t.id])||this.expandTask(t,this._horizon||t.end);
+    const dayEnd=B+this.DAY;
+    return occs.find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd)) || this.occOf(t);
+  }
   hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
   effPins(t){
     if(this.isMilestone(t)) return {ps:false,pe:false};
@@ -708,15 +734,17 @@ class Component extends DCLogic {
     return { ps: t.pinStart!=null ? !!t.pinStart : timedEvent,
              pe: t.pinEnd!=null   ? !!t.pinEnd   : true };
   }
-  isFixedToday(t){ const p=this.effPins(t); return p.ps && p.pe && this.isActiveToday(t); }
+  isFixedOn(t, B){ const p=this.effPins(t); return p.ps && p.pe && this.isActiveOn(t, B); }
+  isFixedToday(t){ return this.isFixedOn(t, this.startOfToday()); }
   /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
-     manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). */
-  dueMsOf(t){
-    const oc=this.occOf(t);
+     manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
+     scheduled (occurrence-for-B); omitted ⇒ today. */
+  dueMsOf(t, B){
+    const oc=this.occForDay(t, B);
     if(t.allDay) return oc.end;
     return this.hasClock(oc.end) ? oc.end : oc.end + this.DAY;
   }
-  notBeforeMsOf(t){ const oc=this.occOf(t); return oc.start; }
+  notBeforeMsOf(t, B){ const oc=this.occForDay(t, B); return oc.start; }
   /* PP-EXT: drag-pin (Phase 5) — a block dragged in the drawer timeline is fixed at its dropped clock time
      FOR THAT DAY ONLY. Returns the block span {start,end} when the task carries an active pin for today, else
      null. The duration is captured at drop (pin.dur) rather than derived, so it stays stable regardless of
@@ -740,13 +768,13 @@ class Component extends DCLogic {
     const labelOf=t=>(t.parentId!=null && byId[t.parentId]) ? (byId[t.parentId].name+' › '+t.name) : t.name;
     const out=[];
     src.forEach(t=>{
-      if(this.isFixedToday(t)){
-        const oc=this.occOf(t);
+      if(this.isFixedOn(t, B)){
+        const oc=this.occForDay(t, B);
         const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
         if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id});
         return;
       }
-      if(!this.isActiveToday(t)) return; /* a drag-pin only holds while the task participates today */
+      if(!this.isActiveOn(t, B)) return; /* a drag-pin only holds while the task participates that day */
       const db=this.dragBlock(t, B);
       if(db) out.push({start:db.start, end:db.end, note:labelOf(t), taskId:t.id, dragPin:true});
     });
@@ -834,12 +862,12 @@ class Component extends DCLogic {
   }
   /* Family allotted = own remainder + all descendants' shares (what the parent's timeline block spans).
      A drag-pinned child leaves the family (it renders as its own fixed block), so it isn't summed here. */
-  famAllot(id, kids, byId){
+  famAllot(id, kids, byId, B){
     byId = byId || this.buildKids(this.state.tasks).byId;
-    const B=this.startOfDay(this.state.nowTick||Date.now());
+    if(B==null) B=this.startOfDay(this.state.nowTick||Date.now());
     return (this.allotOf(id).allotted||0) + (kids[id]||[]).reduce((a,c)=>{
       const ct=byId[c]; if(ct && this.hasDragPinToday(ct, B)) return a; /* pinned child: separate fixed block */
-      return a + this.famAllot(c, kids, byId);
+      return a + this.famAllot(c, kids, byId, B);
     }, 0);
   }
   /* ==== /PP-EXT: subtasks ==== */
@@ -921,16 +949,18 @@ class Component extends DCLogic {
   }
 
   /* Allotted-time ("Remaining" column, ported from CalImport.gs col-H + timeline.gs). The day's pool is the
-     sum of the free intervals (window − meals − freeTime), so allotment can never exceed what the timeline can
-     physically hold. Two modes:
-       'today'  — whole remaining competes for today (original formula): Exact/manual take a fixed slice off the
-                  top; Proportional split the leftover pool weighted by Planned, minus time already spent.
-       'spread' — each task targets remaining ÷ activeDaysLeft (its per-day share); manual overrides stay fixed;
-                  scale down only if the day is oversubscribed.
+     sum of day B's free intervals (window − meals − freeTime), so allotment can never exceed what the timeline
+     can physically hold. Every non-fixed active task is Proportional: it splits the leftover pool weighted by
+     Planned, minus time already spent; a manual Predict override takes a fixed slice off the top.
+     Day-aware: B (default today) selects which day is scheduled; `spent` is time worked TODAY, so future-day
+     columns (B ≠ today) allot with spent = 0 ("just simply schedule"). Multi-day timeline views compute a
+     per-column map; renderVals caches today's map in _allot for the sheet's Predict column.
      Returns { [id]: {allotted, computed, active} }. `computed` = the auto value (for the override toggle). */
-  computeAllotted(tasks){
+  computeAllotted(tasks, B, opts){
     const map={};
-    const B=this.startOfDay(this.state.nowTick||Date.now());
+    const today=this.startOfToday();
+    if(B==null) B=today;
+    const useSpent = (B===today); /* PP-EXT: spent = today's work only → future days schedule fresh */
     /* PP-EXT: fixed (both-pinned) tasks occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline will render as pinned blocks. */
     const fixed=this.fixedBlocksToday(B, tasks);
@@ -938,25 +968,16 @@ class Component extends DCLogic {
       map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
-    const acts=tasks.filter(t=>this.isActiveToday(t) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    const acts=tasks.filter(t=>this.isActiveOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
     /* PP-EXT: break-between-tasks (settings.breakMin) reserves breakMin after each packed family in
        buildDayTimeline; shrink the pool by the same estimate (one break per packable family) so allotment
        stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
        allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled. */
     const brk=Math.max(0, this.state.settings.breakMin||0);
-    const rawAvail=this.dayIntervals(B, this.packStart(), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
+    const rawAvail=this.dayIntervals(B, this.packStart(B), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
     const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
-    const spentById={}; acts.forEach(t=>{ spentById[t.id]=this.getSpent(t); });
-    if(this.state.settings.allotMode==='spread'){
-      const auto={}; let manualSum=0, autoSum=0;
-      acts.forEach(t=>{ const rem=Math.max(0,(t.planned||0)-spentById[t.id]); const a=rem/this.activeDaysLeft(t); auto[t.id]=a;
-        if(t.predictManual) manualSum+=Math.max(0,t.predicted); else autoSum+=a; });
-      const room=Math.max(0, avail-manualSum);
-      const scale=(autoSum>room && autoSum>0) ? room/autoSum : 1;
-      acts.forEach(t=>{ const computed=auto[t.id];
-        const allotted=t.predictManual ? Math.max(0,t.predicted) : computed*scale;
-        map[t.id]={allotted:Math.round(allotted), computed:Math.round(computed), active:true}; });
-    } else {
+    const spentById={}; acts.forEach(t=>{ spentById[t.id]= useSpent ? this.getSpent(t) : 0; });
+    {
       /* PP-EXT: no scheduling modes — every non-fixed active task is Proportional; a manual Predict override
          takes a fixed slice off the top (and its auto value shows what it'd be if it rejoined the pool). */
       let fixedSum=0, propPlanSum=0;
@@ -1450,7 +1471,7 @@ class Component extends DCLogic {
   onMouseUp(e){
     if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
       const bd=this._blockDrag; this._blockDrag=null;
-      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets); else this.forceUpdate();
+      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day); else this.forceUpdate();
       return;
     }
     if(this.colDrag){ this.savePrefs({colW:this.state.colW}); this.colDrag=null; return; }
@@ -1488,7 +1509,12 @@ class Component extends DCLogic {
       if(idx!=null && vis[idx]){ this.tryAddDep(this.linkState.fromId, this.linkState.fromOcc, vis[idx].id); }
       this.linkState=null; this.forceUpdate();
     }
-    if(this.splitDrag){ this.splitDrag=false; }
+    if(this.splitDrag){ this.splitDrag=false;
+      /* PP-EXT: remember this width under the current view's split group (persisted in pp-prefs) */
+      const key=this.splitKeyFor(this.state.mainView);
+      const vs=Object.assign({}, this.state.viewSplit, {[key]:this.state.splitPct});
+      this.setState({viewSplit:vs}); this.savePrefs({viewSplit:vs});
+    }
   }
   rowAtY(clientY){
     if(!this.bodyEl) return null;
@@ -2192,10 +2218,6 @@ class Component extends DCLogic {
       secTitle('Day schedule'),
       setRow('Day window (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dayStart,v=>this.saveSettings({dayStart:v}),{width:'56px'}), inp(s.dayEnd,v=>this.saveSettings({dayEnd:v}),{width:'56px'}))),
       setRow('Free time / day (min)', inp(s.freeTime,v=>this.saveSettings({freeTime:Math.max(0,parseInt(v)||0)}))),
-      setRow('Allot mode', h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'8px',padding:'2px'}},
-        [['today','Whole today'],['spread','Spread days']].map(it=>{ const active=(s.allotMode||'today')===it[0];
-          return h('div',{key:it[0],onClick:()=>this.saveSettings({allotMode:it[0]}),
-            style:{padding:'5px 10px',fontSize:'11.5px',fontWeight:600,borderRadius:'6px',cursor:'pointer',color:active?'#fff':'var(--text-mut2)',background:active?this._accent:'transparent'}},it[1]); }))),
       setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
       setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
@@ -2252,30 +2274,54 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT: right drawer — ported single-day auto-scheduling timeline (old doGet) ==== */
   timeParts(str){ const m=String(str||'0:0').split(':'); return (parseInt(m[0])||0)*60+(parseInt(m[1])||0); }
-  /* PP-EXT: compact icon buttons (the top bar is crowded — text labels overflow/clip on narrow windows). */
-  renderDrawerToggle(){
-    const h=React.createElement; const on=this.state.drawerOpen;
-    return h('button',{className:'pp-iconbtn',onClick:()=>this.setState(s=>({drawerOpen:!s.drawerOpen})),title:'Today’s timeline (right drawer)',
-      style:on?{background:this._accent,borderColor:this._accent,color:'#fff'}:null},'▤');
+  /* PP-EXT: the drawer is gone — Today is a main view now. Keep the methods (placeholders stay) returning null. */
+  renderDrawerToggle(){ return null; }
+  renderDrawer(){ return null; }
+  /* PP-EXT: which persisted split-width group a view uses. {4-Day, Week, Month} share 'cal'; Gantt/Today/Schedule
+     each keep their own — so the sheet↔view divider position is remembered per group across reloads. */
+  splitKeyFor(view){
+    if(view==='gantt') return 'gantt';
+    if(view==='today') return 'today';
+    if(view==='schedule') return 'schedule';
+    return 'cal'; /* day4 · week · month */
   }
-  /* PP-EXT: swap the main right pane between the Gantt and the month Calendar (Phase 6); glyph shows the target view */
+  setView(v){ const key=this.splitKeyFor(v);
+    this.setState({mainView:v, splitPct:(this.state.viewSplit&&this.state.viewSplit[key])||55, hoverDay:null});
+    this.savePrefs({mainView:v});
+  }
+  /* PP-EXT: main-view selector — Gantt · 4-Day · Week · Month · Schedule · Today (replaces the old Gantt|Calendar
+     toggle). Each view group remembers its own split width (see setView / splitKeyFor). */
   renderViewToggle(){
-    const h=React.createElement; const cal=this.state.mainView==='calendar';
-    return h('button',{className:'pp-iconbtn',onClick:()=>this.setState(s=>({mainView:s.mainView==='calendar'?'gantt':'calendar',hoverDay:null})),
-      title:cal?'Show the Gantt chart':'Show the month calendar',
-      style:cal?{background:this._accent,borderColor:this._accent,color:'#fff'}:null}, cal?'📊':'📅');
+    const h=React.createElement; const cur=this.state.mainView;
+    const VIEWS=[['gantt','📊','Gantt'],['day4','🗓','4-Day'],['week','📆','Week'],['month','📅','Month'],['schedule','📋','Schedule'],['today','☀','Today']];
+    return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
+      VIEWS.map(v=>{ const active=cur===v[0];
+        return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
+          style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
+            fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'#fff':'var(--text-mut2)',
+            background:active?this._accent:'transparent'}}, h('span',{style:{fontSize:'12px'}},v[1]), v[2]); }));
   }
   /* Port of buildTodayTimeline (timeline.gs): greedily pack today's active tasks' allotted minutes into the
      free slots (window − meals − freeTime, from dayIntervals); order priority → EDF (due) → longer-first;
      split on `minChunk`; merge adjacent chunks of the same task. `packFromNow` starts the plan at the current
      time. A relaxed second pass fills sub-minChunk fragments so a fragmented day doesn't strand whole tasks. */
-  buildDayTimeline(){
+  buildDayTimeline(B){
     const s=this.state.settings;
-    const B=this.startOfDay(this.state.nowTick||Date.now());
+    const today=this.startOfToday();
+    if(B==null) B=today;
+    /* PP-EXT: multi-day timelines — allotOf / famAllot read this._allot, so swap in day B's allotment map for
+       the duration of this build (render is synchronous, so no other code sees the swap), then restore. Today
+       reuses the cached map from renderVals; other days compute a fresh (spent = 0) map. */
+    const savedAllot=this._allot;
+    this._allot = (B===today && savedAllot) ? savedAllot : this.computeAllotted(this.state.tasks, B);
+    try{ return this._buildDayTimelineInner(B, s); }
+    finally{ this._allot=savedAllot; }
+  }
+  _buildDayTimelineInner(B, s){
     /* PP-EXT: pins — fixed (both-pinned) tasks are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
     const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
-    const di=this.dayIntervals(B, this.packStart(), fixedBlocks);
+    const di=this.dayIntervals(B, this.packStart(B), fixedBlocks);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;
     let free=di.free.slice();
     const remove=(a,b)=>{ const nf=[]; free.forEach(iv=>{ if(b<=iv.start||a>=iv.end){nf.push(iv);} else { if(a>iv.start)nf.push({start:iv.start,end:a}); if(b<iv.end)nf.push({start:b,end:iv.end}); } }); free=nf; };
@@ -2285,14 +2331,14 @@ class Component extends DCLogic {
     /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
     const kb=this.buildKids(this.state.tasks);
-    const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t)
+    const flex=this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
         && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
         && !(t.parentId!=null && kb.byId[t.parentId])
-        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId)>0 : this.allotOf(t.id).allotted>0))
+        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{ const p=this.effPins(t);
-        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId):this.allotOf(t.id).allotted;
-        return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t),
-          dueMs:p.pe?this.dueMsOf(t):null, notBefore:p.ps?this.notBeforeMsOf(t):null,
+        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.allotOf(t.id).allotted;
+        return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
+          dueMs:p.pe?this.dueMsOf(t,B):null, notBefore:p.ps?this.notBeforeMsOf(t,B):null,
           rem:amt,origin:amt}; });
     flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
     const minChunk=s.minChunk||30; const segs=[];
@@ -2333,7 +2379,7 @@ class Component extends DCLogic {
       if(queues[pid]) return queues[pid];
       const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const ct=kb.byId[cid];
         if(this.hasDragPinToday(ct, B)) return; /* PP-EXT: a pinned child renders as its own fixed block, not in the family */
-        const mins=this.famAllot(cid,kb.kids,kb.byId);
+        const mins=this.famAllot(cid,kb.kids,kb.byId,B);
         if(mins>0) q.push({id:cid,title:(kb.byId[pid].name+' › '+ct.name),goal:ct.goal,mins}); });
       const own=this.allotOf(pid).allotted||0;
       if(own>0) q.push({id:pid,title:kb.byId[pid].name,goal:kb.byId[pid].goal,mins:own});
@@ -2378,14 +2424,14 @@ class Component extends DCLogic {
   }
   /* Clock times a dragged block should magnetically snap to: every other block's start & end (meals, fixed,
      packed blocks) plus the window edges. Excludes the dragged task's own chunks. Impure (reads the timeline). */
-  snapTargets(excludeId){
-    const data=this.buildDayTimeline();
+  snapTargets(excludeId, B){
+    const data=this.buildDayTimeline(B);
     const set=new Set([data.dayStart, data.dayEnd]);
     data.chunks.forEach(c=>{ if(!c.start) return; if(c.id && c.id===excludeId) return; set.add(c.start); set.add(c.end); });
     return [...set];
   }
-  pinBlockAt(id, rawStart, dur, targets){
-    const B=this.startOfDay(this.state.nowTick||Date.now());
+  pinBlockAt(id, rawStart, dur, targets, B){
+    if(B==null) B=this.startOfDay(this.state.nowTick||Date.now());
     const start=this.snapPinStart(rawStart, dur, B, targets), d=Math.round(dur);
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin={day:B, start, dur:d}; });
   }
@@ -2399,39 +2445,51 @@ class Component extends DCLogic {
     const t=kb.byId[c.id];
     return !!t && !(kb.kids[c.id] && kb.kids[c.id].length);
   }
-  blockPointerDown(e, c){
+  blockPointerDown(e, c, B){
     if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
-    const dur = c.type==='fixed' ? Math.round((c.end-c.start)/60000) : Math.round(this.allotOf(c.id).allotted);
+    const today=this.startOfToday(); if(B==null) B=today;
+    let dur;
+    if(c.type==='fixed') dur=Math.round((c.end-c.start)/60000);
+    else { const allot=(B===today)?this._allot:this.computeAllotted(this.state.tasks, B); /* PP-EXT: pin the day's own allotment */
+      const a=allot&&allot[c.id]; dur=Math.round(a?a.allotted:((c.end-c.start)/60000)); }
     if(dur<=0) return;
-    this._blockDrag={ id:c.id, dur, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
-      targets:this.snapTargets(c.id) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging */ };
+    this._blockDrag={ id:c.id, dur, day:B, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
+      targets:this.snapTargets(c.id, B) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging */ };
     this.forceUpdate();
   }
-  renderTimeline(){
-    const h=React.createElement; const data=this.buildDayTimeline();
+  /* PP-EXT: one day's vertical timeline (Today view + each 4-Day/Week column). B = the day; opts.showLabels
+     draws the hour gutter (off for multi-day columns that share one gutter); opts.drag=false makes it read-only.
+     The now-line and current-block highlight only appear on today's column. Drops call blockPointerDown(…, B)
+     so a block dragged onto a future day pins for THAT day. */
+  TL_TYP(){ return {scheduled:{bg:'linear-gradient(45deg,#FED5CF,#FEF2DB)',fg:'#3a2f2a'},
+      meal:{bg:'linear-gradient(45deg,#D3C7E6,#E8D8E0)',fg:'#332b3a'},
+      fixed:{bg:'linear-gradient(45deg,#C8E6D2,#E2F0DC)',fg:'#233529'},
+      unscheduled:{bg:'linear-gradient(45deg,#BEDAE3,#DEE6DF)',fg:'#2a3538'}}; }
+  renderDayColumn(B, opts){
+    opts=opts||{}; const showLabels=opts.showLabels!==false; const allowDrag=opts.drag!==false;
+    const h=React.createElement; const data=this.buildDayTimeline(B);
     const kb=this.buildKids(this.state.tasks); /* PP-EXT: draggability = leaf, non-subtask blocks */
+    const isToday=(B===this.startOfToday());
     const startHour=new Date(data.dayStart).getHours();
     const dStart=data.dayStart, dEnd=data.dayEnd; const totalMin=(dEnd-dStart)/60000; const px=this.TL_PXPM;
     const H=totalMin*px; const now=this.state.nowTick||Date.now();
-    const bd=this._blockDrag; /* PP-EXT: live drag-pin preview */
+    const bd=this._blockDrag; /* PP-EXT: live drag-pin preview (only for the column being dragged) */
+    const gut=showLabels?34:2, blkLeft=showLabels?40:4;
     const topOf=ms=>((ms-dStart)/60000)*px;
-    const TYP={scheduled:{bg:'linear-gradient(45deg,#FED5CF,#FEF2DB)',fg:'#3a2f2a'},
-      meal:{bg:'linear-gradient(45deg,#D3C7E6,#E8D8E0)',fg:'#332b3a'},
-      fixed:{bg:'linear-gradient(45deg,#C8E6D2,#E2F0DC)',fg:'#233529'}, /* PP-EXT: pinned (fixed-time) block */
-      unscheduled:{bg:'linear-gradient(45deg,#BEDAE3,#DEE6DF)',fg:'#2a3538'}};
-    const labels=[]; for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){
+    const TYP=this.TL_TYP();
+    const labels=[]; if(showLabels) for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){
       const ms=new Date(dStart); ms.setHours(hh,0,0,0);
       labels.push(h('div',{key:'l'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:0,fontSize:'10px',color:'var(--text-mut2)',fontWeight:600}},((hh%12)||12)+(hh<12?'a':'p'))); }
     const grid=[]; for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){ const ms=new Date(dStart); ms.setHours(hh,0,0,0);
-      grid.push(h('div',{key:'g'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:'34px',right:0,height:'1px',background:'var(--row-border-gantt)'}})); }
+      grid.push(h('div',{key:'g'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:gut+'px',right:0,height:'1px',background:'var(--row-border-gantt)'}})); }
     const blocks=data.chunks.filter(c=>c.start).map((c,i)=>{
-      /* PP-EXT: while dragging this block, float it to the (snapped) preview position */
-      const dragging = bd && bd.moved && bd.id===c.id && c.type!=='unscheduled';
+      /* PP-EXT: while dragging this block on THIS day, float it to the (snapped) preview position */
+      const dragging = bd && bd.moved && bd.id===c.id && bd.day===B && c.type!=='unscheduled';
       const shownStart = dragging ? bd.previewStart : c.start;
       const top=topOf(shownStart), height=Math.max(13,((c.end-c.start)/60000)*px-2);
-      const cur = now>=c.start && now<c.end; const ty=TYP[c.type]||TYP.scheduled;
+      const cur = isToday && now>=c.start && now<c.end; const ty=TYP[c.type]||TYP.scheduled;
       const running=c.id && this.isRunning(c.id);
-      const canDrag=this.blockDraggable(c, kb); /* PP-EXT */
+      const canDrag=allowDrag && this.blockDraggable(c, kb); /* PP-EXT */
       const btn = c.type==='meal' ? null : h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
         title:running?'Stop timer':'Start timer',
         style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%',
@@ -2444,28 +2502,164 @@ class Component extends DCLogic {
           display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
           background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕') : null;
       const tip = c.type==='fixed'
-        ? (c.dragPin ? 'Pinned here for today — drag to move, ✕ to unpin'
+        ? (c.dragPin ? 'Pinned to this day — drag to move, ✕ to unpin'
                      : 'Pinned at its clock time — edit the event time to move it')
-        : (canDrag ? 'Drag to pin at a time (today only)'+(c.goal?(' · Goal: '+c.goal):'')
+        : (canDrag ? 'Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')
                    : (c.goal?('Goal: '+c.goal):c.title));
       return h('div',{key:'b'+i,title:tip,
-        onMouseDown:canDrag?(e=>this.blockPointerDown(e,c)):null, /* PP-EXT: drag to pin */
-        style:{position:'absolute',left:'40px',right:'8px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
+        onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B)):null, /* PP-EXT: drag to pin (this day) */
+        style:{position:'absolute',left:blkLeft+'px',right:'6px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
           borderRadius:'6px',padding:'3px 22px 3px '+(c.dragPin?'20px':'7px'),fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
           textOverflow:'ellipsis',boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)',
           cursor:canDrag?(dragging?'grabbing':'grab'):'default',
           opacity:dragging?0.9:1, zIndex:dragging?6:'auto',
           border:cur?'2px solid #ea4335':(c.type==='fixed'?(c.dragPin?'2px dashed rgba(35,53,41,0.6)':'2px solid rgba(35,53,41,0.45)'):'1px solid rgba(0,0,0,0.15)')}}, /* PP-EXT: dashed = drag-pin */
         (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, unpin, btn); });
-    const nowLine = (now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:'34px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
+    const nowLine = (isToday && now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:gut+'px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     const unsched=data.chunks.filter(c=>!c.start);
     return h('div',{style:{position:'relative'}},
       h('div',{style:{position:'relative',height:H+'px',margin:'4px 4px 0'}}, ...labels, ...grid, ...blocks, nowLine),
-      unsched.length? h('div',{style:{margin:'12px 4px 4px',padding:'10px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
-        h('div',{style:{fontSize:'12px',fontWeight:600,color:'#e5824d',marginBottom:'6px'}},'⚠ Unscheduled (no room today)'),
-        ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11.5px',color:'var(--text-2)',padding:'2px 0'}},
+      unsched.length? h('div',{style:{margin:'12px 4px 4px',padding:'8px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
+        h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'#e5824d',marginBottom:'5px'}},'⚠ Unscheduled'),
+        ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
           c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:'')))) : null); /* PP-EXT: why it didn't fit */
+  }
+  /* ==== PP-EXT: multi-day timeline views (4-Day / Week) + Today + Schedule ==== */
+  /* Shared left hour gutter, aligned to the settings day-window scale (all day columns share it). */
+  renderHourGutter(){
+    const h=React.createElement; const s=this.state.settings; const px=this.TL_PXPM; const B=this.startOfToday();
+    const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
+    const startHour=new Date(winStart).getHours(), endHour=new Date(winEnd).getHours();
+    const H=((winEnd-winStart)/60000)*px; const labels=[];
+    for(let hh=startHour; hh<=endHour; hh++){ const ms=new Date(winStart); ms.setHours(hh,0,0,0);
+      labels.push(h('div',{key:'gl'+hh,style:{position:'absolute',top:((ms.getTime()-winStart)/60000)*px+'px',left:0,fontSize:'10px',color:'var(--text-mut2)',fontWeight:600}},((hh%12)||12)+(hh<12?'a':'p'))); }
+    return h('div',{style:{flex:'none',width:'26px'}}, h('div',{style:{position:'relative',height:H+'px',margin:'26px 0 0'}}, ...labels));
+  }
+  dayHeaderLabel(B){ const d=new Date(B);
+    return {dow:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()], dom:d.getDate(),
+      mon:['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}; }
+  /* N side-by-side day columns (4-Day, Week). A day header (hoverable → glows the sheet, and glows itself when a
+     task is hovered) sits above each column; today's header is accented. Columns share the left hour gutter. */
+  renderMultiDayView(days, header){
+    const h=React.createElement; const today=this.startOfToday(); const hoverId=this.state.hoverId;
+    const cols=days.map((B,i)=>{
+      const lab=this.dayHeaderLabel(B); const isToday=(B===today);
+      const glow=hoverId!=null && this.tasksOnDay(B).includes(hoverId); /* hovering a task → its day header glows */
+      const isHoverDay=this.state.hoverDay===B;
+      const hdr=h('div',{key:'h',onMouseEnter:()=>this.setState({hoverDay:B}), onMouseLeave:()=>this.setState({hoverDay:null}),
+        style:{flex:'none',height:'26px',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',cursor:'default',
+          borderBottom:'1px solid var(--row-border-gantt)',fontSize:'11.5px',fontWeight:700,
+          color:isToday?'#fff':'var(--text-2)',background:glow?'rgba(245,181,54,0.30)':(isToday?this._accent:(isHoverDay?'var(--hover)':'transparent')),
+          boxShadow:glow?'inset 0 0 0 2px rgba(245,181,54,0.75)':'none'}},
+        h('span',{},lab.dow),h('span',{style:{opacity:0.85,fontWeight:600}},lab.dom));
+      return h('div',{key:'col'+i,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',
+        borderRight:i<days.length-1?'1px solid var(--row-border-gantt)':'none'}},
+        hdr, h('div',{style:{flex:1,minWidth:0}}, this.renderDayColumn(B, {showLabels:false}))); });
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+      header||null,
+      h('div',{style:{flex:1,minHeight:0,display:'flex',overflow:'auto'}}, this.renderHourGutter(), ...cols));
+  }
+  next4Days(){ const B=this.startOfToday(); const out=[]; for(let i=0;i<4;i++){ const d=new Date(B); d.setDate(d.getDate()+i); out.push(d.getTime()); } return out; }
+  weekStartMs(){ const a=this.state.weekAnchor!=null?this.state.weekAnchor:this.startOfToday();
+    const d=new Date(a); d.setDate(d.getDate()-d.getDay()); d.setHours(0,0,0,0); return d.getTime(); } /* Sunday of that week */
+  weekDays(){ const s=this.weekStartMs(); const out=[]; for(let i=0;i<7;i++){ const d=new Date(s); d.setDate(d.getDate()+i); out.push(d.getTime()); } return out; }
+  shiftWeek(delta){ const d=new Date(this.weekStartMs()); d.setDate(d.getDate()+delta*7); this.setState({weekAnchor:d.getTime(), hoverDay:null}); }
+  renderWeekView(){
+    const h=React.createElement; const days=this.weekDays(); const s=days[0], e=days[6];
+    const lab=b=>{ const d=new Date(b); return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]+' '+d.getDate(); };
+    const arrow=(g,dl)=>h('div',{className:'pp-iconbtn',onClick:()=>this.shiftWeek(dl),title:dl<0?'Previous week':'Next week'},g);
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
+      arrow('‹',-1),
+      h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)',minWidth:'150px',textAlign:'center'}}, lab(s)+' – '+lab(e)),
+      arrow('›',1),
+      h('button',{className:'pp-tbtn',onClick:()=>this.setState({weekAnchor:null,hoverDay:null}),title:'Jump to this week',style:{fontSize:'11px',padding:'3px 9px'}},'This week'),
+      h('div',{style:{flex:1}}),
+      this.renderPackToggle());
+    return this.renderMultiDayView(days, header);
+  }
+  render4DayView(){
+    const h=React.createElement;
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
+      h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Next 4 days'),
+      h('div',{style:{flex:1}}),
+      this.renderPackToggle());
+    return this.renderMultiDayView(this.next4Days(), header);
+  }
+  /* ⏱ From now / ☀ Full day — flips settings.packFromNow, which only affects TODAY's column. */
+  renderPackToggle(){
+    const h=React.createElement; const on=this.state.settings.packFromNow;
+    return h('button',{className:'pp-tbtn',onClick:()=>this.saveSettings({packFromNow:!on}),
+      title:on?'Today: planning the rest of the day (from now)':'Today: planning the whole day',
+      style:Object.assign({fontSize:'11px',padding:'3px 8px'}, on?{background:this._accent,borderColor:this._accent,color:'#fff'}:null)},
+      on?'⏱ From now':'☀ Full day');
+  }
+  /* Today view (replaces the old right drawer): running-timer bars + gcal error banner + the from-now toggle,
+     above today's full-width timeline column. */
+  renderTodayView(){
+    const h=React.createElement; const B=this.startOfToday();
+    const now=new Date(this.state.nowTick||Date.now());
+    const dstr=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()]+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][now.getMonth()]+' '+now.getDate();
+    const runIds=Object.keys(this.state.running||{});
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'0 14px',height:'46px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
+      h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Today'),
+      h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)'}},dstr),
+      h('div',{style:{flex:1}}),
+      this.renderPackToggle());
+    const runbar = runIds.length ? h('div',{style:{display:'flex',flexDirection:'column',flex:'none'}},
+      ...runIds.map(id=>{ const rt=this.state.tasks.find(t=>t.id===id); if(!rt) return null;
+        return h('div',{key:'run'+id,style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 14px',background:'#1a73e8',color:'#fff',borderBottom:'1px solid rgba(255,255,255,0.18)'}},
+          h('span',{style:{flex:1,fontSize:'12.5px',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'⏱ '+rt.name+' · '+this.fmtDur(this.getSpent(rt))),
+          h('div',{onClick:()=>this.stopTimer(id),style:{cursor:'pointer',background:'rgba(255,255,255,0.25)',borderRadius:'5px',padding:'2px 8px',fontSize:'11px'}},'Stop')); }).filter(Boolean)) : null;
+    const note=this.state.timerNote?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',
+      background:'rgba(230,81,0,0.12)',borderBottom:'1px solid rgba(230,81,0,0.3)',color:'var(--text-2)',flex:'none'}},
+      h('span',{style:{flex:1}},this.state.timerNote),
+      h('span',{onClick:()=>this.setState({timerNote:null}),style:{cursor:'pointer',fontWeight:700}},'✕')):null;
+    const ge=this.state.gcal&&this.state.gcal.lastError;
+    const gerr=ge?h('div',{onClick:()=>this.setState({settingsOpen:true}),title:ge.msg+' — click to open Settings',
+      style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
+      background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
+      '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+      header, gerr, note, runbar,
+      h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, this.renderDayColumn(B, {showLabels:true})));
+  }
+  /* Schedule (agenda) view — one column, a divider per day (next 7), each day's scheduled blocks as chips with
+     start–end times. Display-only (no drag). */
+  renderScheduleView(){
+    const h=React.createElement; const today=this.startOfToday(); const days=[]; for(let i=0;i<7;i++){ const d=new Date(today); d.setDate(d.getDate()+i); days.push(d.getTime()); }
+    const hoverId=this.state.hoverId;
+    const fmtClock=ms=>{ const d=new Date(ms); let hh=d.getHours(), mm=d.getMinutes(); const ap=hh<12?'a':'p'; hh=(hh%12)||12; return hh+':'+String(mm).padStart(2,'0')+ap; };
+    const TYP=this.TL_TYP();
+    const sections=days.map((B,di)=>{
+      const data=this.buildDayTimeline(B);
+      const lab=this.dayHeaderLabel(B); const isToday=(B===today);
+      const timed=data.chunks.filter(c=>c.start).sort((a,b)=>a.start-b.start);
+      const unsched=data.chunks.filter(c=>!c.start);
+      const isHoverDay=this.state.hoverDay===B;
+      const glow=hoverId!=null && this.tasksOnDay(B).includes(hoverId);
+      const divider=h('div',{onMouseEnter:()=>this.setState({hoverDay:B}), onMouseLeave:()=>this.setState({hoverDay:null}),
+        style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 12px',position:'sticky',top:0,zIndex:1,
+          borderBottom:'1px solid var(--row-border-gantt)',background:glow?'rgba(245,181,54,0.25)':'var(--sheet-bg)'}},
+        h('span',{style:{fontSize:'12.5px',fontWeight:800,color:isToday?this._accent:'var(--text-strong)'}}, lab.dow+' '+lab.mon+' '+lab.dom+(isToday?' · Today':'')),
+        h('div',{style:{flex:1}}),
+        h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}}, timed.length?(timed.length+' block'+(timed.length>1?'s':'')):'—'));
+      const chips=timed.map((c,i)=>{ const ty=TYP[c.type]||TYP.scheduled; const running=c.id&&this.isRunning(c.id);
+        return h('div',{key:'sc'+i,title:c.goal?('Goal: '+c.goal):c.title,
+          style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
+            background:ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,boxShadow:'0 1px 2px rgba(0,0,0,0.12)'}},
+          h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',opacity:0.85,fontWeight:700}}, fmtClock(c.start)+'–'+fmtClock(c.end)),
+          h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title),
+          c.type!=='meal'?h('div',{onClick:()=>this.toggleTimer(c.id),title:running?'Stop timer':'Start timer',
+            style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+              fontSize:'9px',background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'#fff':'#1a73e8'}}, running?'■':'▶'):null); });
+      const unl = unsched.length? h('div',{style:{margin:'4px 12px',fontSize:'11px',color:'#e5824d'}},
+        '⚠ Unscheduled: '+unsched.map(c=>c.title+' ('+this.fmtDur(c.durationMin)+')').join(', ')) : null;
+      const empty = (!timed.length && !unsched.length)? h('div',{style:{margin:'4px 12px 8px',fontSize:'11px',color:'var(--text-mut2)'}},'Nothing scheduled') : null;
+      return h('div',{key:'sd'+di,style:{flex:'none',paddingBottom:'6px'}}, divider, ...chips, unl, empty); });
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+      h('div',{style:{padding:'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none',fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Schedule · next 7 days'),
+      h('div',{style:{flex:1,minHeight:0,overflow:'auto'}}, ...sections));
   }
   /* ==== PP-EXT: month calendar view (ROADMAP Phase 6) ====
      A 7×6 month grid in the drawer. Hovering a day glows all that day's tasks in the sheet + gantt (via
@@ -2561,41 +2755,16 @@ class Component extends DCLogic {
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, dowRow, grid);
   }
   /* ==== /PP-EXT: month view ==== */
-  renderDrawer(){
-    if(!this.state.drawerOpen) return null;
-    const h=React.createElement;
-    const now=new Date(this.state.nowTick||Date.now());
-    const dstr=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()]+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][now.getMonth()]+' '+now.getDate();
-    const runIds=Object.keys(this.state.running||{}); /* PP-EXT: multitasking — one bar per running timer */
-    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'0 14px',height:'46px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
-      h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Today'),
-      h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)'}},dstr),
-      h('div',{style:{flex:1}}),
-      /* PP-EXT: flip the plan (and allotment pool) between full-day and starting at the current time */
-      h('button',{className:'pp-tbtn',onClick:()=>this.saveSettings({packFromNow:!this.state.settings.packFromNow}),
-        title:this.state.settings.packFromNow?'Planning the rest of today (from now)':'Planning the whole day (from day start)',
-        style:Object.assign({fontSize:'11px',padding:'3px 8px'}, this.state.settings.packFromNow?{background:this._accent,borderColor:this._accent,color:'#fff'}:null)},
-        this.state.settings.packFromNow?'⏱ From now':'☀ Full day'),
-      h('div',{className:'pp-iconbtn',onClick:()=>this.setState({drawerOpen:false}),title:'Close'},'✕'));
-    const runbar = runIds.length ? h('div',{style:{display:'flex',flexDirection:'column',flex:'none'}},
-      ...runIds.map(id=>{ const rt=this.state.tasks.find(t=>t.id===id); if(!rt) return null;
-        return h('div',{key:'run'+id,style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 14px',background:'#1a73e8',color:'#fff',borderBottom:'1px solid rgba(255,255,255,0.18)'}},
-          h('span',{style:{flex:1,fontSize:'12.5px',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'⏱ '+rt.name+' · '+this.fmtDur(this.getSpent(rt))),
-          h('div',{onClick:()=>this.stopTimer(id),style:{cursor:'pointer',background:'rgba(255,255,255,0.25)',borderRadius:'5px',padding:'2px 8px',fontSize:'11px'}},'Stop')); }).filter(Boolean)) : null;
-    /* PP-EXT: surfaced notices — timer auto-stop note (dismissible) and gcal sync failure (opens Settings) */
-    const note=this.state.timerNote?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',
-      background:'rgba(230,81,0,0.12)',borderBottom:'1px solid rgba(230,81,0,0.3)',color:'var(--text-2)',flex:'none'}},
-      h('span',{style:{flex:1}},this.state.timerNote),
-      h('span',{onClick:()=>this.setState({timerNote:null}),style:{cursor:'pointer',fontWeight:700}},'✕')):null;
-    const ge=this.state.gcal&&this.state.gcal.lastError;
-    const gerr=ge?h('div',{onClick:()=>this.setState({settingsOpen:true}),title:ge.msg+' — click to open Settings',
-      style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
-      background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
-      '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
-    return h('div',{style:{position:'fixed',top:'98px',right:0,bottom:0,width:'340px',background:'var(--side-bg)',
-      borderLeft:'1px solid var(--top-border)',boxShadow:'-8px 0 24px rgba(0,0,0,0.25)',zIndex:1500,display:'flex',flexDirection:'column'}},
-      header, gerr, note, runbar,
-      h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, this.renderTimeline()));
+  /* PP-EXT: the right pane for the current main view (drawer removed — Today is a view now). */
+  renderMainPane(tasks){
+    switch(this.state.mainView){
+      case 'day4':     return this.render4DayView();
+      case 'week':     return this.renderWeekView();
+      case 'month':    return this.renderMonthView();
+      case 'schedule': return this.renderScheduleView();
+      case 'today':    return this.renderTodayView();
+      default:         return this.renderGantt(tasks);
+    }
   }
   /* ==== /PP-EXT ==== */
 
@@ -2608,7 +2777,7 @@ class Component extends DCLogic {
         h('div',{onMouseDown:e=>this.startSplit(e),
           style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
         h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-          this.state.mainView==='calendar' ? this.renderMonthView() : this.renderGantt(tasks))), /* PP-EXT: Calendar replaces Gantt on toggle (Phase 6) */
+          this.renderMainPane(tasks))), /* PP-EXT: main-view selector picks the right pane */
       this.state.menu ? this.renderMenu() : null,
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
@@ -2853,6 +3022,9 @@ class Component extends DCLogic {
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
     let bsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'');
+    /* PP-EXT: calendar day-hover glow — hovering a day (Month/Week/4-Day/Schedule) sets _glowIds via renderVals;
+       this is the NORMAL-row wash (the milestone + Gantt rows already had it; the plain rows were the missing case). */
+    if(this._glowIds && this._glowIds.has(t.id)) bsh = (bsh?bsh+',':'')+'inset 0 0 0 9999px rgba(245,181,54,0.16)';
     const visN=(this._visTasks||this.state.tasks).length; /* PP-EXT: rows are the visible list (archived may be hidden) */
     if(rd && rd.overIndex===i) bsh = (bsh?bsh+',':'')+'inset 0 2px 0 0 '+this._accent;
     if(rd && rd.overIndex===visN && i===visN-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent; /* PP-EXT */
