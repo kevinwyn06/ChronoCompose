@@ -204,3 +204,62 @@ test('slack: critical chain ~0, parallel task > 0', () => {
   assert.strictEqual(critical[B.id], true, 'B critical');
   assert.strictEqual(critical[P.id], false, 'P not critical');
 });
+
+/* ===================== PART D — DRAG-PIN (Phase 5) ===================== */
+
+// 12. dragBlock: a pin for today spans [start, start+dur]; a stale pin (other day) is ignored.
+test('drag-pin: dragBlock spans the pinned window today, ignored on a stale day', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 9 * 3600000;
+  const t = activeTask(c, {});
+  t.pin = { day: B, start: B + 14 * 3600000, dur: 60 };
+  const blk = c.dragBlock(t, B);
+  assert.ok(blk, 'today pin yields a block');
+  assert.strictEqual(blk.start, B + 14 * 3600000, 'block starts at the pinned clock time');
+  assert.strictEqual(blk.end, B + 15 * 3600000, 'block ends dur minutes later');
+  t.pin = { day: B - DAY, start: B + 14 * 3600000, dur: 60 }; // yesterday
+  assert.strictEqual(c.dragBlock(t, B), null, 'stale pin ignored');
+  t.pin = null;
+  assert.strictEqual(c.dragBlock(t, B), null, 'no pin → null');
+});
+
+// 13. snapPinStart: snaps to 5-min grid and clamps so the whole block stays inside the window.
+test('drag-pin: snapPinStart snaps to 5 min and clamps within the window', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  cleanDay(c, '10:00'); // window 00:00–10:00
+  assert.strictEqual(c.snapPinStart(B + (2 * 60 + 3) * 60000, 60, B),
+    B + (2 * 60 + 5) * 60000, '02:03 snaps up to 02:05');
+  assert.strictEqual(c.snapPinStart(B - 3600000, 60, B), B, 'before day start → clamped to window start');
+  assert.strictEqual(c.snapPinStart(B + 12 * 3600000, 60, B), B + 9 * 3600000,
+    'a 60-min block can start no later than 09:00 (ends at 10:00)');
+});
+
+// 14. A pinned block occupies its slot as a fixed drag-pin; other tasks repack around it, no overlap.
+test('drag-pin: pinned block is fixed & draggable; other tasks pack around it', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00'); // 600-min pool, no meals
+  const pinned = activeTask(c, { name: 'P', planned: 120 });
+  pinned.pin = { day: B, start: B + 5 * 3600000, dur: 120 }; // 05:00–07:00
+  const other = activeTask(c, { name: 'O', planned: 120 });
+  const { chunks } = pack(c, [pinned, other]);
+
+  // pinned task's allotment equals its pinned span, flagged fixed (removed from the flexible pool)
+  assert.strictEqual(c._allot[pinned.id].allotted, 120, 'pinned allotment = its span');
+  assert.ok(c._allot[pinned.id].fixed, 'pinned task marked fixed in the allotment map');
+
+  const fx = chunks.filter(x => x.type === 'fixed' && x.id === pinned.id);
+  assert.strictEqual(fx.length, 1, 'one fixed block for the pinned task');
+  assert.strictEqual(fx[0].start, B + 5 * 3600000, 'fixed block at the pinned start');
+  assert.strictEqual(fx[0].end, B + 7 * 3600000, 'fixed block spans dur minutes');
+  assert.ok(fx[0].dragPin, 'flagged as a drag-pin (so the UI makes it draggable)');
+  assert.strictEqual(chunks.filter(x => x.type === 'scheduled' && x.id === pinned.id).length, 0,
+    'pinned task is not also packed as a flexible block');
+
+  const os = chunks.filter(x => x.type === 'scheduled' && x.id === other.id);
+  assert.ok(os.length > 0, 'other task still scheduled');
+  for (const s of os) assert.ok(!overlaps(s, fx[0]), 'other task never overlaps the pinned block');
+});

@@ -163,6 +163,8 @@ class Component extends DCLogic {
     this.barH = 16;
     this.headH = 48;
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
+    this.PIN_SNAP = 5;           // PP-EXT: minutes a dragged timeline block snaps to (Phase 5)
+    this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
        day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
        toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
@@ -225,6 +227,7 @@ class Component extends DCLogic {
       included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / toggleIncluded) */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
+      pin:null, /* PP-EXT: drag-pin {day, start, dur} — a block dragged in the drawer, fixed for that day only (Phase 5; see dragBlock) */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -711,15 +714,34 @@ class Component extends DCLogic {
     return this.hasClock(oc.end) ? oc.end : oc.end + this.DAY;
   }
   notBeforeMsOf(t){ const oc=this.occOf(t); return oc.start; }
-  /* Today's fixed (both-pinned) tasks as busy blocks — the SINGLE source consumed by both computeAllotted
-     (pool shrinks) and buildDayTimeline (blocks render + free slots exclude them), so they always agree. */
+  /* PP-EXT: drag-pin (Phase 5) — a block dragged in the drawer timeline is fixed at its dropped clock time
+     FOR THAT DAY ONLY. Returns the block span {start,end} when the task carries an active pin for today, else
+     null. The duration is captured at drop (pin.dur) rather than derived, so it stays stable regardless of
+     later allotment churn (mirrors a both-pinned task's clock span — no circular dependency with the pool).
+     Stale pins (pin.day ≠ today) are ignored; milestones and subtask children can't be independently pinned. */
+  dragBlock(t, B){
+    const p=t.pin; if(!p || p.day!==B) return null;
+    if(this.isMilestone(t) || t.parentId!=null) return null;
+    const dur=Math.max(0, p.dur||0);
+    const a=Math.max(p.start, B), b=Math.min(p.start + dur*60000, B+this.DAY);
+    return b>a ? {start:a, end:b} : null;
+  }
+  hasDragPinToday(t, B){ return !!this.dragBlock(t, B); }
+  /* Today's FIXED busy blocks — the SINGLE source consumed by both computeAllotted (pool shrinks) and
+     buildDayTimeline (blocks render + free slots exclude them), so they always agree. Two kinds:
+     both-pinned tasks occupy their occurrence clock span; drag-pinned tasks occupy their dropped span. */
   fixedBlocksToday(B, tasks){
     const out=[];
     (tasks||this.state.tasks).forEach(t=>{
-      if(!this.isFixedToday(t)) return;
-      const oc=this.occOf(t);
-      const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
-      if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id});
+      if(this.isFixedToday(t)){
+        const oc=this.occOf(t);
+        const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
+        if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id});
+        return;
+      }
+      if(!this.isActiveToday(t)) return; /* a drag-pin only holds while the task participates today */
+      const db=this.dragBlock(t, B);
+      if(db) out.push({start:db.start, end:db.end, note:t.name, taskId:t.id, dragPin:true});
     });
     return out;
   }
@@ -1341,6 +1363,13 @@ class Component extends DCLogic {
   }
 
   onMouseMove(e){
+    if(this._blockDrag){ /* PP-EXT: dragging a drawer timeline block (Phase 5) */
+      const bd=this._blockDrag; const dyPx=e.clientY-bd.startClientY;
+      if(!bd.moved && Math.abs(dyPx)<4) return; bd.moved=true;
+      const B=this.startOfDay(this.state.nowTick||Date.now());
+      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/this.TL_PXPM)*60000, bd.dur, B);
+      this.forceUpdate(); return;
+    }
     if(this.colDrag){
       const d=this.colDrag; const base=Math.round(d.startW+(e.clientX-d.startX));
       this.setState(s=>{ const cw=Object.assign({},s.colW); d.keys.forEach(k=>cw[k]=Math.max(this.colMin(k),base)); return {colW:cw}; });
@@ -1396,6 +1425,11 @@ class Component extends DCLogic {
     }
   }
   onMouseUp(e){
+    if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
+      const bd=this._blockDrag; this._blockDrag=null;
+      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur); else this.forceUpdate();
+      return;
+    }
     if(this.colDrag){ this.savePrefs({colW:this.state.colW}); this.colDrag=null; return; }
     if(this.headPending){
       const p=this.headPending; this.headPending=null;
@@ -2214,6 +2248,7 @@ class Component extends DCLogic {
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
     const kb=this.buildKids(this.state.tasks);
     const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t)
+        && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
         && !(t.parentId!=null && kb.byId[t.parentId])
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{ const p=this.effPins(t);
@@ -2272,16 +2307,50 @@ class Component extends DCLogic {
       if(cur<c.end) subdivided.push({id:c.id,title:c.title,goal:c.goal,origin:c.origin,start:cur,end:c.end,type:'scheduled'});
     });
     merged=subdivided;
-    busy.forEach(b=>merged.push(b.taskId?{id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed'} /* PP-EXT: pinned task block */
+    busy.forEach(b=>merged.push(b.taskId?{id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed',
+        dragPin:kb.byId[b.taskId]?this.hasDragPinToday(kb.byId[b.taskId], B):false} /* PP-EXT: pinned task block (dragPin ⇒ draggable + unpin) */
       :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd};
   }
+  /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start to PIN_SNAP minutes and clamp so the
+     whole block stays inside today's window. Pure (settings-only), so scheduling.gen tests can exercise it. */
+  snapPinStart(rawStart, dur, B){
+    const s=this.state.settings;
+    const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
+    const snap=this.PIN_SNAP*60000;
+    let st=B + Math.round((rawStart-B)/snap)*snap;
+    const maxStart=Math.max(winStart, winEnd - Math.max(0,dur)*60000);
+    return Math.max(winStart, Math.min(st, maxStart));
+  }
+  pinBlockAt(id, rawStart, dur){
+    const B=this.startOfDay(this.state.nowTick||Date.now());
+    const start=this.snapPinStart(rawStart, dur, B), d=Math.round(dur);
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin={day:B, start, dur:d}; });
+  }
+  unpinBlock(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin=null; }); }
+  /* Timeline block draggable only for a leaf, non-subtask flexible block, or an existing drag-pin (to move it).
+     Both-pinned / gcal-timed fixed blocks and subtask-family blocks are not draggable in v1. */
+  blockDraggable(c, kb){
+    if(c.type==='meal' || !c.start) return false;
+    if(c.type==='fixed') return !!c.dragPin;
+    const t=kb.byId[c.id];
+    return !!t && t.parentId==null && !(kb.kids[c.id] && kb.kids[c.id].length);
+  }
+  blockPointerDown(e, c){
+    if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
+    const dur = c.type==='fixed' ? Math.round((c.end-c.start)/60000) : Math.round(this.allotOf(c.id).allotted);
+    if(dur<=0) return;
+    this._blockDrag={ id:c.id, dur, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false };
+    this.forceUpdate();
+  }
   renderTimeline(){
     const h=React.createElement; const data=this.buildDayTimeline();
+    const kb=this.buildKids(this.state.tasks); /* PP-EXT: draggability = leaf, non-subtask blocks */
     const startHour=new Date(data.dayStart).getHours();
-    const dStart=data.dayStart, dEnd=data.dayEnd; const totalMin=(dEnd-dStart)/60000; const px=1.15;
+    const dStart=data.dayStart, dEnd=data.dayEnd; const totalMin=(dEnd-dStart)/60000; const px=this.TL_PXPM;
     const H=totalMin*px; const now=this.state.nowTick||Date.now();
+    const bd=this._blockDrag; /* PP-EXT: live drag-pin preview */
     const topOf=ms=>((ms-dStart)/60000)*px;
     const TYP={scheduled:{bg:'linear-gradient(45deg,#FED5CF,#FEF2DB)',fg:'#3a2f2a'},
       meal:{bg:'linear-gradient(45deg,#D3C7E6,#E8D8E0)',fg:'#332b3a'},
@@ -2293,20 +2362,38 @@ class Component extends DCLogic {
     const grid=[]; for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){ const ms=new Date(dStart); ms.setHours(hh,0,0,0);
       grid.push(h('div',{key:'g'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:'34px',right:0,height:'1px',background:'var(--row-border-gantt)'}})); }
     const blocks=data.chunks.filter(c=>c.start).map((c,i)=>{
-      const top=topOf(c.start), height=Math.max(13,((c.end-c.start)/60000)*px-2);
+      /* PP-EXT: while dragging this block, float it to the (snapped) preview position */
+      const dragging = bd && bd.moved && bd.id===c.id && c.type!=='unscheduled';
+      const shownStart = dragging ? bd.previewStart : c.start;
+      const top=topOf(shownStart), height=Math.max(13,((c.end-c.start)/60000)*px-2);
       const cur = now>=c.start && now<c.end; const ty=TYP[c.type]||TYP.scheduled;
       const running=c.id && this.isRunning(c.id);
-      const btn = c.type==='meal' ? null : h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},
+      const canDrag=this.blockDraggable(c, kb); /* PP-EXT */
+      const btn = c.type==='meal' ? null : h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
         title:running?'Stop timer':'Start timer',
         style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%',
           display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
           background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'#fff':'#1a73e8'}}, running?'■':'▶');
-      return h('div',{key:'b'+i,title:(c.type==='fixed'?'Pinned at its clock time — ':'')+(c.goal?('Goal: '+c.goal):c.title), /* PP-EXT: fixed hint */
+      /* PP-EXT: unpin ✕ on drag-pinned blocks (clears the pin → repacks flexibly) */
+      const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id);},onMouseDown:e=>e.stopPropagation(),
+        title:'Unpin (return to flexible scheduling)',
+        style:{position:'absolute',top:'2px',left:'2px',width:'16px',height:'16px',borderRadius:'50%',
+          display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
+          background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕') : null;
+      const tip = c.type==='fixed'
+        ? (c.dragPin ? 'Pinned here for today — drag to move, ✕ to unpin'
+                     : 'Pinned at its clock time — edit the event time to move it')
+        : (canDrag ? 'Drag to pin at a time (today only)'+(c.goal?(' · Goal: '+c.goal):'')
+                   : (c.goal?('Goal: '+c.goal):c.title));
+      return h('div',{key:'b'+i,title:tip,
+        onMouseDown:canDrag?(e=>this.blockPointerDown(e,c)):null, /* PP-EXT: drag to pin */
         style:{position:'absolute',left:'40px',right:'8px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
-          borderRadius:'6px',padding:'3px 22px 3px 7px',fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
-          textOverflow:'ellipsis',boxShadow:'0 1px 3px rgba(0,0,0,0.15)',
-          border:cur?'2px solid #ea4335':(c.type==='fixed'?'2px solid rgba(35,53,41,0.45)':'1px solid rgba(0,0,0,0.15)')}}, /* PP-EXT */
-        (c.type==='fixed'?'📌 ':'')+c.title, btn); });
+          borderRadius:'6px',padding:'3px 22px 3px '+(c.dragPin?'20px':'7px'),fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
+          textOverflow:'ellipsis',boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)',
+          cursor:canDrag?(dragging?'grabbing':'grab'):'default',
+          opacity:dragging?0.9:1, zIndex:dragging?6:'auto',
+          border:cur?'2px solid #ea4335':(c.type==='fixed'?(c.dragPin?'2px dashed rgba(35,53,41,0.6)':'2px solid rgba(35,53,41,0.45)'):'1px solid rgba(0,0,0,0.15)')}}, /* PP-EXT: dashed = drag-pin */
+        (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, unpin, btn); });
     const nowLine = (now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:'34px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     const unsched=data.chunks.filter(c=>!c.start);
