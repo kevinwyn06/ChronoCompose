@@ -2252,17 +2252,18 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT: right drawer — ported single-day auto-scheduling timeline (old doGet) ==== */
   timeParts(str){ const m=String(str||'0:0').split(':'); return (parseInt(m[0])||0)*60+(parseInt(m[1])||0); }
+  /* PP-EXT: compact icon buttons (the top bar is crowded — text labels overflow/clip on narrow windows). */
   renderDrawerToggle(){
     const h=React.createElement; const on=this.state.drawerOpen;
-    return h('button',{className:'pp-tbtn',onClick:()=>this.setState(s=>({drawerOpen:!s.drawerOpen})),title:'Toggle today’s timeline (right drawer)',
-      style:on?{background:this._accent,borderColor:this._accent,color:'#fff'}:null},'▤ Timeline');
+    return h('button',{className:'pp-iconbtn',onClick:()=>this.setState(s=>({drawerOpen:!s.drawerOpen})),title:'Today’s timeline (right drawer)',
+      style:on?{background:this._accent,borderColor:this._accent,color:'#fff'}:null},'▤');
   }
-  /* PP-EXT: swap the main right pane between the Gantt and the month Calendar (Phase 6) */
+  /* PP-EXT: swap the main right pane between the Gantt and the month Calendar (Phase 6); glyph shows the target view */
   renderViewToggle(){
     const h=React.createElement; const cal=this.state.mainView==='calendar';
-    return h('button',{className:'pp-tbtn',onClick:()=>this.setState(s=>({mainView:s.mainView==='calendar'?'gantt':'calendar',hoverDay:null})),
+    return h('button',{className:'pp-iconbtn',onClick:()=>this.setState(s=>({mainView:s.mainView==='calendar'?'gantt':'calendar',hoverDay:null})),
       title:cal?'Show the Gantt chart':'Show the month calendar',
-      style:cal?{background:this._accent,borderColor:this._accent,color:'#fff'}:null}, cal?'▦ Gantt':'▦ Calendar');
+      style:cal?{background:this._accent,borderColor:this._accent,color:'#fff'}:null}, cal?'📊':'📅');
   }
   /* Port of buildTodayTimeline (timeline.gs): greedily pack today's active tasks' allotted minutes into the
      free slots (window − meals − freeTime, from dayIntervals); order priority → EDF (due) → longer-first;
