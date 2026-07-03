@@ -111,30 +111,52 @@ test('getSpent adds live elapsed while running', () => {
   const t = activeTask(c, { spent:10 });
   c.state.tasks = [t];
   assert.strictEqual(c.getSpent(t), 10);
-  c.state.running = { id:t.id, startedAt: Date.now() - 60*60000 };
+  c.state.running = { [t.id]: { startedAt: Date.now() - 60*60000 } };
   c.state.nowTick = Date.now();
   const s = c.getSpent(t);
   assert.ok(s >= 69 && s <= 71, 'about 10 + 60 minutes, got '+s);
 });
 
-test('timers: one at a time; stop accumulates spent', () => {
+test('timers: multitasking concurrent; stop accumulates spent per task', () => {
   const c = make();
   const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 });
   c.state.tasks = [a, b];
   c.startTimer(a.id);
-  assert.strictEqual(c.state.running.id, a.id);
-  c.startTimer(b.id); // starting b stops a
-  assert.strictEqual(c.state.running.id, b.id);
-  // simulate 30 min elapsed then stop
-  c.state.running = { id:b.id, startedAt: Date.now() - 30*60000 };
-  c.stopTimer();
-  assert.strictEqual(c.state.running, null);
+  assert.ok(c.isRunning(a.id));
+  c.startTimer(b.id); // both run now (multitasking)
+  assert.ok(c.isRunning(a.id) && c.isRunning(b.id), 'a and b both running');
+  // simulate 30 min elapsed for b, then stop just b
+  c.state.running = Object.assign({}, c.state.running, { [b.id]: { startedAt: Date.now() - 30*60000 } });
+  c.stopTimer(b.id);
+  assert.ok(!c.isRunning(b.id) && c.isRunning(a.id), 'b stopped, a still running');
   const bb = c.state.tasks.find(t=>t.id===b.id);
   assert.ok(bb.spent >= 29 && bb.spent <= 31, 'b spent ~30, got '+bb.spent);
-  // toggle same running task stops it
-  c.startTimer(a.id);
+  // toggle the still-running a stops it -> nothing running
   c.toggleTimer(a.id);
-  assert.strictEqual(c.state.running, null);
+  assert.ok(!c.anyRunning());
+});
+
+test('autoTimerPlan: start-pinned auto-starts once; both-pinned auto-pauses at its end', () => {
+  const c = make();
+  const now = Date.now();
+  c.state.nowTick = now;
+  // start-only pinned, window open now -> should be planned to start
+  const s = activeTask(c, { pinStart:true, pinEnd:false, start: now - 60000, end: now + 3600000 });
+  c.state.tasks = [s];
+  c.state.running = {};
+  let plan = c.autoTimerPlan(now);
+  assert.ok(plan.start.includes(s.id), 'start-pinned in-window task should auto-start');
+  // once its occurrence is marked done, it is not re-started
+  c._autoDone[s.id + ':' + c.occOf(s).start] = true;
+  plan = c.autoTimerPlan(now);
+  assert.ok(!plan.start.includes(s.id), 'already-started occurrence is not re-started');
+
+  // both-pinned, currently running, clock now past its end -> should be planned to pause
+  const bp = activeTask(c, { pinStart:true, pinEnd:true, start: now - 3600000, end: now - 1000 });
+  c.state.tasks = [bp];
+  c.state.running = { [bp.id]: { startedAt: now - 3600000, beat: now } };
+  const plan2 = c.autoTimerPlan(now);
+  assert.ok(plan2.pause.includes(bp.id), 'both-pinned running task past its end should auto-pause');
 });
 
 test('togglePredictManual / setPredict', () => {

@@ -150,6 +150,9 @@ class Component extends DCLogic {
     /* PP-EXT: timer idle guard + history bounds (see stopTimerAt / snapshot / undo / redo). */
     this.TIMER_IDLE_MS = 5*60000; // ticks stalled longer than this (sleep / closed tab) auto-stop the timer
     this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: persist running.beat so a crash credits up to here
+    /* PP-EXT: pin-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
+       occurrence / re-fire an auto-pause. Keyed by `taskId:occurrenceStartMs`. */
+    this._autoDone = {}; this._autoPaused = {};
     this.HISTORY_MAX = 200;       // undo/redo depth (applies to BOTH stacks)
     /* PP-EXT: two-way gcal sync (see computeOutboundOps / gcalFlushQueue). */
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
@@ -207,8 +210,12 @@ class Component extends DCLogic {
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
     try{ localStorage.setItem('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
       ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
-  loadRun(){ try{ return JSON.parse(localStorage.getItem('pp-run')||'null'); }catch(e){ return null; } }
-  saveRun(r){ try{ if(r) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
+  /* PP-EXT: running timers are a MAP { [taskId]: {startedAt, beat} } (multitasking). Migrate the old
+     single-timer shape {id,startedAt,beat} on load. */
+  loadRun(){ try{ const raw=JSON.parse(localStorage.getItem('pp-run')||'null'); if(!raw) return {};
+      if(raw.id!==undefined) return { [raw.id]: { startedAt:raw.startedAt, beat:raw.beat||raw.startedAt } };
+      return raw; }catch(e){ return {}; } }
+  saveRun(r){ try{ if(r && Object.keys(r).length) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
   normalizeTask(t){
     return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
@@ -399,10 +406,11 @@ class Component extends DCLogic {
     window.addEventListener('mouseup', this._onUp);
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
-    this._tickRun=setInterval(()=>{ if(this.state.running){ this.timerHeartbeat(); if(this.state.running) this.setState({nowTick:Date.now()}); } }, 1000);
-    this._tickIdle=setInterval(()=>{ if(!this.state.running) this.setState({nowTick:Date.now()}); this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
+    this._tickRun=setInterval(()=>{ if(this.anyRunning()){ this.timerHeartbeat(); this.autoTimerTick(); if(this.anyRunning()) this.setState({nowTick:Date.now()}); } }, 1000);
+    this._tickIdle=setInterval(()=>{ if(!this.anyRunning()) this.setState({nowTick:Date.now()}); this.autoTimerTick(); /* PP-EXT: catch pin-driven auto-starts while idle */ this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
     /* PP-EXT: a run restored from pp-run may be stale (tab was closed mid-run) — settle it before it accrues */
     this.timerHeartbeat();
+    this.autoTimerTick(); /* PP-EXT: fire any pin-driven auto-starts already due on load */
     this.maybeAutoArchive(); /* PP-EXT: sweep long-completed tasks once on load (then hourly via the idle tick) */
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
        (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
@@ -613,32 +621,55 @@ class Component extends DCLogic {
     const end=this.startOfDay(oc.end);
     return Math.max(1, Math.round((end-today)/this.DAY)+1);
   }
-  /* live spent minutes = stored spent + elapsed of the currently-running timer */
-  getSpent(t){ let s=t.spent||0; const r=this.state.running; if(r && r.id===t.id) s+=(this.state.nowTick-r.startedAt)/60000; return Math.max(0,s); }
-  isRunning(id){ const r=this.state.running; return !!(r && r.id===(id&&id.id!==undefined?id.id:id)); }
-  startTimer(id){ if(this.state.running) this.stopTimer(); const now=Date.now(); const r={id,startedAt:now,beat:now}; this.setState({running:r,nowTick:now}); this.saveRun(r); }
-  stopTimer(){ this.stopTimerAt(Date.now()); }
-  /* PP-EXT: stop crediting only up to `ts` (clamped to [startedAt, now]). The idle guard uses this so a timer
-     left running through system sleep / a closed tab credits up to the last heartbeat, not all wall-clock time. */
-  stopTimerAt(ts){ const r=this.state.running; if(!r) return;
+  /* live spent minutes = stored spent + elapsed of this task's running timer (if any) */
+  getSpent(t){ let s=t.spent||0; const r=this.state.running&&this.state.running[t.id]; if(r) s+=(this.state.nowTick-r.startedAt)/60000; return Math.max(0,s); }
+  isRunning(id){ const key=(id&&id.id!==undefined?id.id:id); return !!(this.state.running && this.state.running[key]); }
+  anyRunning(){ const r=this.state.running; return !!(r && Object.keys(r).length); } /* PP-EXT: running is a map (multitasking) */
+  /* PP-EXT: multitasking — starting a timer does NOT stop the others. */
+  startTimer(id){ if(this.isRunning(id)) return; const now=Date.now();
+    const r=Object.assign({}, this.state.running, {[id]:{startedAt:now, beat:now}});
+    this.setState({running:r, nowTick:now}); this.saveRun(r); }
+  stopTimer(id){ this.stopTimerAt(id, Date.now()); }
+  /* PP-EXT: stop crediting THIS task only up to `ts` (clamped to [startedAt, now]). The idle guard uses this so a
+     timer left running through system sleep / a closed tab credits up to the last heartbeat, not all wall-clock time. */
+  stopTimerAt(id, ts){ const run=this.state.running||{}; const r=run[id]; if(!r) return;
     const end=Math.min(Math.max(ts, r.startedAt), Date.now());
     const add=Math.max(0,(end-r.startedAt)/60000);
     /* accumulate fractional minutes (fmtDur rounds for display); rounding on every stop lost time
        across many short sessions. */
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===r.id); if(t) t.spent=(t.spent||0)+add; });
-    this.setState({running:null}); this.saveRun(null); }
-  /* PP-EXT: heartbeat + idle guard, called from the 1s run tick and once on mount. If ticks stalled longer
-     than TIMER_IDLE_MS (sleep/suspend) or a persisted run's beat is stale (crash/closed tab), auto-stop at the
-     last beat and surface a note; otherwise persist a fresh beat every TIMER_BEAT_MS. */
-  timerHeartbeat(){ const r=this.state.running; if(!r) return;
-    const now=Date.now(); const last=r.beat||r.startedAt;
-    if(now-last>this.TIMER_IDLE_MS){
-      this.stopTimerAt(last);
-      this.setState({timerNote:'Timer auto-stopped (inactivity/sleep) — time credited up to last activity.'});
-    } else if(now-last>=this.TIMER_BEAT_MS){
-      const nr=Object.assign({},r,{beat:now}); this.setState({running:nr}); this.saveRun(nr);
-    } }
-  toggleTimer(id){ const r=this.state.running; if(r && r.id===id) this.stopTimer(); else this.startTimer(id); }
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.spent=(t.spent||0)+add; });
+    const nr=Object.assign({}, this.state.running); delete nr[id];
+    this.setState({running:nr}); this.saveRun(nr); }
+  /* PP-EXT: heartbeat + idle guard across ALL running timers, called from the 1s run tick and once on mount.
+     A timer whose beat stalled past TIMER_IDLE_MS (sleep/suspend/crash/closed tab) auto-stops at its last beat and
+     surfaces a note; the rest persist a fresh beat every TIMER_BEAT_MS. */
+  timerHeartbeat(){ const run=this.state.running||{}; const ids=Object.keys(run); if(!ids.length) return;
+    const now=Date.now();
+    const stale=ids.filter(id=>now-(run[id].beat||run[id].startedAt)>this.TIMER_IDLE_MS);
+    if(stale.length){ stale.forEach(id=>this.stopTimerAt(id, run[id].beat||run[id].startedAt));
+      this.setState({timerNote:(stale.length>1?stale.length+' timers':'Timer')+' auto-stopped (inactivity/sleep) — time credited up to last activity.'}); }
+    const cur=this.state.running||{}; let changed=false; const nr=Object.assign({}, cur);
+    Object.keys(cur).forEach(id=>{ const r=cur[id]; if(now-(r.beat||r.startedAt)>=this.TIMER_BEAT_MS){ nr[id]=Object.assign({},r,{beat:now}); changed=true; } });
+    if(changed){ this.setState({running:nr}); this.saveRun(nr); } }
+  toggleTimer(id){ if(this.isRunning(id)) this.stopTimer(id); else this.startTimer(id); }
+  /* PP-EXT: pin-driven auto timers. A start-pinned active task auto-starts its timer when the clock reaches its
+     start (multitasking, doesn't stop others); a both-pinned task auto-pauses (with a drawer note) when the clock
+     reaches its end. Live/open-app only — no back-crediting of time while the tab was closed. Decisions are pure
+     (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
+  autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
+      if(this.isMilestone(t)||t.archivedAt) return;
+      const p=this.effPins(t); if(!p.ps) return; if(!this.isActiveToday(t)) return;
+      const oc=this.occOf(t); const startMs=oc.start; const endMs=p.pe?oc.end:Infinity; const key=t.id+':'+startMs;
+      const running=this.isRunning(t.id);
+      if(p.ps&&p.pe&&running&&now>=endMs){ if(!this._autoPaused[key]) pause.push(t.id); return; }
+      if(now>=startMs&&now<endMs&&!running&&!this._autoDone[key]) start.push(t.id);
+    }); return {start, pause}; }
+  autoTimerTick(){ const now=Date.now(); const plan=this.autoTimerPlan(now);
+    plan.start.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+      this._autoDone[id+':'+this.occOf(t).start]=true; this.startTimer(id); });
+    plan.pause.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+      this._autoPaused[id+':'+this.occOf(t).start]=true; this.stopTimer(id);
+      this.setState({timerNote:'“'+t.name+'” reached its pinned end time — timer paused.'}); }); }
 
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
      freeTime block (pinned to the end of the window), optionally clamped to `from` for pack-from-now. Single
@@ -2292,7 +2323,7 @@ class Component extends DCLogic {
     const h=React.createElement;
     const now=new Date(this.state.nowTick||Date.now());
     const dstr=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()]+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][now.getMonth()]+' '+now.getDate();
-    const r=this.state.running; const runTask=r?this.state.tasks.find(t=>t.id===r.id):null;
+    const runIds=Object.keys(this.state.running||{}); /* PP-EXT: multitasking — one bar per running timer */
     const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'0 14px',height:'46px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
       h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Today'),
       h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)'}},dstr),
@@ -2303,9 +2334,11 @@ class Component extends DCLogic {
         style:Object.assign({fontSize:'11px',padding:'3px 8px'}, this.state.settings.packFromNow?{background:this._accent,borderColor:this._accent,color:'#fff'}:null)},
         this.state.settings.packFromNow?'⏱ From now':'☀ Full day'),
       h('div',{className:'pp-iconbtn',onClick:()=>this.setState({drawerOpen:false}),title:'Close'},'✕'));
-    const runbar=runTask?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 14px',background:'#1a73e8',color:'#fff',flex:'none'}},
-      h('span',{style:{flex:1,fontSize:'12.5px',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'⏱ '+runTask.name+' · '+this.fmtDur(this.getSpent(runTask))),
-      h('div',{onClick:()=>this.stopTimer(),style:{cursor:'pointer',background:'rgba(255,255,255,0.25)',borderRadius:'5px',padding:'2px 8px',fontSize:'11px'}},'Stop')):null;
+    const runbar = runIds.length ? h('div',{style:{display:'flex',flexDirection:'column',flex:'none'}},
+      ...runIds.map(id=>{ const rt=this.state.tasks.find(t=>t.id===id); if(!rt) return null;
+        return h('div',{key:'run'+id,style:{display:'flex',alignItems:'center',gap:'8px',padding:'8px 14px',background:'#1a73e8',color:'#fff',borderBottom:'1px solid rgba(255,255,255,0.18)'}},
+          h('span',{style:{flex:1,fontSize:'12.5px',fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'⏱ '+rt.name+' · '+this.fmtDur(this.getSpent(rt))),
+          h('div',{onClick:()=>this.stopTimer(id),style:{cursor:'pointer',background:'rgba(255,255,255,0.25)',borderRadius:'5px',padding:'2px 8px',fontSize:'11px'}},'Stop')); }).filter(Boolean)) : null;
     /* PP-EXT: surfaced notices — timer auto-stop note (dismissible) and gcal sync failure (opens Settings) */
     const note=this.state.timerNote?h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',
       background:'rgba(230,81,0,0.12)',borderBottom:'1px solid rgba(230,81,0,0.3)',color:'var(--text-2)',flex:'none'}},

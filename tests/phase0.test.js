@@ -74,11 +74,11 @@ test('stopTimerAt credits only up to the given timestamp', () => {
   const t = activeTask(c, { id: 'w', spent: 0 });
   c.state.tasks = [t];
   const now = Date.now();
-  c.state.running = { id: 'w', startedAt: now - 10 * 60000, beat: now - 8 * 60000 };
-  c.stopTimerAt(now - 8 * 60000); // credit up to the last beat, not all 10 minutes
+  c.state.running = { w: { startedAt: now - 10 * 60000, beat: now - 8 * 60000 } };
+  c.stopTimerAt('w', now - 8 * 60000); // credit up to the last beat, not all 10 minutes
   const after = c.state.tasks.find(x => x.id === 'w');
   assert.ok(Math.abs(after.spent - 2) < 0.05, `expected ~2 min, got ${after.spent}`);
-  assert.equal(c.state.running, null);
+  assert.ok(!c.isRunning('w'));
 });
 
 test('stopTimerAt clamps ts into [startedAt, now]', () => {
@@ -86,11 +86,11 @@ test('stopTimerAt clamps ts into [startedAt, now]', () => {
   const t = activeTask(c, { id: 'w2', spent: 0 });
   c.state.tasks = [t];
   const now = Date.now();
-  c.state.running = { id: 'w2', startedAt: now - 60000 };
-  c.stopTimerAt(now - 5 * 60000); // before startedAt → credits 0
+  c.state.running = { w2: { startedAt: now - 60000 } };
+  c.stopTimerAt('w2', now - 5 * 60000); // before startedAt → credits 0
   assert.ok(c.state.tasks.find(x => x.id === 'w2').spent < 0.02);
-  c.state.running = { id: 'w2', startedAt: now - 60000 };
-  c.stopTimerAt(now + 60 * 60000); // future ts → clamped to now (~1 min)
+  c.state.running = { w2: { startedAt: now - 60000 } };
+  c.stopTimerAt('w2', now + 60 * 60000); // future ts → clamped to now (~1 min)
   const sp = c.state.tasks.find(x => x.id === 'w2').spent;
   assert.ok(sp <= 1.1, `future ts must not over-credit (got ${sp})`);
 });
@@ -100,9 +100,9 @@ test('timerHeartbeat auto-stops a stale run at its last beat and leaves a note',
   const t = activeTask(c, { id: 'w3', spent: 0 });
   c.state.tasks = [t];
   const now = Date.now();
-  c.state.running = { id: 'w3', startedAt: now - 30 * 60000, beat: now - c.TIMER_IDLE_MS - 60000 };
+  c.state.running = { w3: { startedAt: now - 30 * 60000, beat: now - c.TIMER_IDLE_MS - 60000 } };
   c.timerHeartbeat();
-  assert.equal(c.state.running, null, 'stale run must be stopped');
+  assert.ok(!c.isRunning('w3'), 'stale run must be stopped');
   const sp = c.state.tasks.find(x => x.id === 'w3').spent;
   // credited from startedAt to beat ≈ 30min − (idle+1min)
   const expected = (30 * 60000 - (c.TIMER_IDLE_MS + 60000)) / 60000;
@@ -114,10 +114,10 @@ test('timerHeartbeat refreshes the beat of a live run without stopping it', () =
   const c = make();
   c.state.tasks = [activeTask(c, { id: 'w4' })];
   const now = Date.now();
-  c.state.running = { id: 'w4', startedAt: now - 60000, beat: now - c.TIMER_BEAT_MS - 1000 };
+  c.state.running = { w4: { startedAt: now - 60000, beat: now - c.TIMER_BEAT_MS - 1000 } };
   c.timerHeartbeat();
-  assert.ok(c.state.running, 'live run keeps running');
-  assert.ok(now - c.state.running.beat < c.TIMER_BEAT_MS, 'beat was refreshed');
+  assert.ok(c.isRunning('w4'), 'live run keeps running');
+  assert.ok(now - c.state.running.w4.beat < c.TIMER_BEAT_MS, 'beat was refreshed');
 });
 
 // ---------------------------------------------------------------------------

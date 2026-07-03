@@ -190,7 +190,7 @@ test('getSpent = stored spent + elapsed of the running timer', () => {
   assert.equal(c.getSpent(t), 20);
   // running this task, started 10 min ago
   c.state.nowTick = Date.now();
-  c.state.running = { id: t.id, startedAt: c.state.nowTick - 10 * 60000 };
+  c.state.running = { [t.id]: { startedAt: c.state.nowTick - 10 * 60000 } };
   assert.ok(Math.abs(c.getSpent(t) - 30) < 0.01);
 });
 
@@ -199,9 +199,9 @@ test('startTimer sets the running task; toggleTimer stops it', () => {
   const t = activeTask(c);
   c.state.tasks.push(t);
   c.startTimer(t.id);
-  assert.ok(c.state.running && c.state.running.id === t.id);
+  assert.ok(c.isRunning(t.id));
   c.toggleTimer(t.id); // same id -> stop
-  assert.equal(c.state.running, null);
+  assert.ok(!c.isRunning(t.id));
 });
 
 test('stopTimer accumulates elapsed minutes into spent', () => {
@@ -209,22 +209,26 @@ test('stopTimer accumulates elapsed minutes into spent', () => {
   const t = activeTask(c, { spent: 5 });
   c.state.tasks.push(t);
   // simulate a timer that started 15 minutes ago
-  c.state.running = { id: t.id, startedAt: Date.now() - 15 * 60000 };
-  c.stopTimer();
+  c.state.running = { [t.id]: { startedAt: Date.now() - 15 * 60000 } };
+  c.stopTimer(t.id);
   const after = c.state.tasks.find(x => x.id === t.id);
-  assert.equal(c.state.running, null);
+  assert.ok(!c.isRunning(t.id));
   assert.ok(Math.abs(after.spent - 20) < 0.05, `expected ~20, got ${after.spent}`);
 });
 
-test('only one task runs at a time; switching accumulates the first', () => {
+test('timers are multitasking: starting a second does NOT stop the first', () => {
   const c = make();
   const a = activeTask(c, { spent: 0 });
   const b = activeTask(c);
   c.state.tasks.push(a, b);
   // A has been running for 10 min
-  c.state.running = { id: a.id, startedAt: Date.now() - 10 * 60000 };
-  c.startTimer(b.id); // should stop A (accumulating) and start B
-  assert.equal(c.state.running.id, b.id);
+  c.state.running = { [a.id]: { startedAt: Date.now() - 10 * 60000 } };
+  c.startTimer(b.id); // B starts; A keeps running
+  assert.ok(c.isRunning(a.id) && c.isRunning(b.id), 'both run concurrently');
   const aAfter = c.state.tasks.find(x => x.id === a.id);
-  assert.ok(Math.abs(aAfter.spent - 10) < 0.05, `expected ~10, got ${aAfter.spent}`);
+  assert.equal(aAfter.spent, 0, 'A is still running, so nothing credited yet');
+  // stopping A now credits its ~10 min
+  c.stopTimer(a.id);
+  assert.ok(!c.isRunning(a.id) && c.isRunning(b.id), 'A stopped, B still running');
+  assert.ok(Math.abs(c.state.tasks.find(x=>x.id===a.id).spent - 10) < 0.05);
 });
