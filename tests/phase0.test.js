@@ -1,5 +1,6 @@
 // Phase 0 (ROADMAP.md) — bug-fix bundle: normalizeTask numeric defaults, undo/redo cap symmetry,
-// EDF-uses-current-occurrence, timer idle guard (stopTimerAt/timerHeartbeat), JSON backup round-trip.
+// EDF-uses-current-occurrence, timer accounting (stopTimerAt/timerHeartbeat — timers persist across
+// a closed tab / sleep), JSON backup round-trip.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');
@@ -95,19 +96,21 @@ test('stopTimerAt clamps ts into [startedAt, now]', () => {
   assert.ok(sp <= 1.1, `future ts must not over-credit (got ${sp})`);
 });
 
-test('timerHeartbeat auto-stops a stale run at its last beat and leaves a note', () => {
+test('timerHeartbeat keeps a run with a long-stalled beat alive (timers persist across a closed tab / sleep)', () => {
   const c = make();
   const t = activeTask(c, { id: 'w3', spent: 0 });
   c.state.tasks = [t];
   const now = Date.now();
-  c.state.running = { w3: { startedAt: now - 30 * 60000, beat: now - c.TIMER_IDLE_MS - 60000 } };
+  // beat is 40 min stale (tab was closed / machine asleep) — the timer must NOT auto-stop.
+  c.state.running = { w3: { startedAt: now - 45 * 60000, beat: now - 40 * 60000 } };
   c.timerHeartbeat();
-  assert.ok(!c.isRunning('w3'), 'stale run must be stopped');
+  assert.ok(c.isRunning('w3'), 'a stalled beat no longer stops the timer — it keeps counting');
+  assert.equal(c.state.tasks.find(x => x.id === 'w3').spent, 0, 'nothing credited while still running');
+  assert.ok(!c.state.timerNote, 'no inactivity note');
+  // stopping now credits the full wall-clock span from startedAt (≈45 min), not just up to the last beat
+  c.stopTimer('w3');
   const sp = c.state.tasks.find(x => x.id === 'w3').spent;
-  // credited from startedAt to beat ≈ 30min − (idle+1min)
-  const expected = (30 * 60000 - (c.TIMER_IDLE_MS + 60000)) / 60000;
-  assert.ok(Math.abs(sp - expected) < 0.05, `expected ~${expected} min, got ${sp}`);
-  assert.ok(c.state.timerNote, 'a user-visible note is set');
+  assert.ok(Math.abs(sp - 45) < 0.1, `expected full ~45 min credited on stop, got ${sp}`);
 });
 
 test('timerHeartbeat refreshes the beat of a live run without stopping it', () => {

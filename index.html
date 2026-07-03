@@ -147,9 +147,9 @@ class Component extends DCLogic {
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
     this.RECUR_BACKOFF = 3;     // occurrences to rewind when estimating the start index
-    /* PP-EXT: timer idle guard + history bounds (see stopTimerAt / snapshot / undo / redo). */
-    this.TIMER_IDLE_MS = 5*60000; // ticks stalled longer than this (sleep / closed tab) auto-stop the timer
-    this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: persist running.beat so a crash credits up to here
+    /* PP-EXT: timers persist across a closed tab / sleep (owner choice) — a running timer keeps counting until
+       manually stopped or auto-paused at a pinned end; there is no inactivity auto-stop. See stopTimerAt / snapshot. */
+    this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: refresh running.beat so pp-run stays fresh across reloads
     /* PP-EXT: pin-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
        occurrence / re-fire an auto-pause. Keyed by `taskId:occurrenceStartMs`. */
     this._autoDone = {}; this._autoPaused = {};
@@ -630,8 +630,8 @@ class Component extends DCLogic {
     const r=Object.assign({}, this.state.running, {[id]:{startedAt:now, beat:now}});
     this.setState({running:r, nowTick:now}); this.saveRun(r); }
   stopTimer(id){ this.stopTimerAt(id, Date.now()); }
-  /* PP-EXT: stop crediting THIS task only up to `ts` (clamped to [startedAt, now]). The idle guard uses this so a
-     timer left running through system sleep / a closed tab credits up to the last heartbeat, not all wall-clock time. */
+  /* PP-EXT: stop crediting THIS task up to `ts` (clamped to [startedAt, now]). Manual stop and the pinned-end
+     auto-pause both credit up to now — a running timer counts wall-clock even across a closed tab / sleep. */
   stopTimerAt(id, ts){ const run=this.state.running||{}; const r=run[id]; if(!r) return;
     const end=Math.min(Math.max(ts, r.startedAt), Date.now());
     const add=Math.max(0,(end-r.startedAt)/60000);
@@ -640,22 +640,17 @@ class Component extends DCLogic {
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.spent=(t.spent||0)+add; });
     const nr=Object.assign({}, this.state.running); delete nr[id];
     this.setState({running:nr}); this.saveRun(nr); }
-  /* PP-EXT: heartbeat + idle guard across ALL running timers, called from the 1s run tick and once on mount.
-     A timer whose beat stalled past TIMER_IDLE_MS (sleep/suspend/crash/closed tab) auto-stops at its last beat and
-     surfaces a note; the rest persist a fresh beat every TIMER_BEAT_MS. */
-  timerHeartbeat(){ const run=this.state.running||{}; const ids=Object.keys(run); if(!ids.length) return;
-    const now=Date.now();
-    const stale=ids.filter(id=>now-(run[id].beat||run[id].startedAt)>this.TIMER_IDLE_MS);
-    if(stale.length){ stale.forEach(id=>this.stopTimerAt(id, run[id].beat||run[id].startedAt));
-      this.setState({timerNote:(stale.length>1?stale.length+' timers':'Timer')+' auto-stopped (inactivity/sleep) — time credited up to last activity.'}); }
-    const cur=this.state.running||{}; let changed=false; const nr=Object.assign({}, cur);
+  /* PP-EXT: heartbeat across ALL running timers, called from the 1s run tick and once on mount. Timers persist
+     across sleep / a closed tab (owner choice) — there is no inactivity auto-stop; this only refreshes the
+     persisted beat every TIMER_BEAT_MS so pp-run stays current. */
+  timerHeartbeat(){ const cur=this.state.running||{}; if(!Object.keys(cur).length) return;
+    const now=Date.now(); let changed=false; const nr=Object.assign({}, cur);
     Object.keys(cur).forEach(id=>{ const r=cur[id]; if(now-(r.beat||r.startedAt)>=this.TIMER_BEAT_MS){ nr[id]=Object.assign({},r,{beat:now}); changed=true; } });
     if(changed){ this.setState({running:nr}); this.saveRun(nr); } }
   toggleTimer(id){ if(this.isRunning(id)) this.stopTimer(id); else this.startTimer(id); }
   /* PP-EXT: pin-driven auto timers. A start-pinned active task auto-starts its timer when the clock reaches its
-     start (multitasking, doesn't stop others); a both-pinned task auto-pauses (with a drawer note) when the clock
-     reaches its end. Live/open-app only — no back-crediting of time while the tab was closed. Decisions are pure
-     (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
+     start (multitasking, doesn't stop others); a both-pinned task auto-pauses silently (no prompt) when the clock
+     reaches its end. Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
   autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
       if(this.isMilestone(t)||t.archivedAt) return;
       const p=this.effPins(t); if(!p.ps) return; if(!this.isActiveToday(t)) return;
@@ -668,8 +663,7 @@ class Component extends DCLogic {
     plan.start.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
       this._autoDone[id+':'+this.occOf(t).start]=true; this.startTimer(id); });
     plan.pause.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
-      this._autoPaused[id+':'+this.occOf(t).start]=true; this.stopTimer(id);
-      this.setState({timerNote:'“'+t.name+'” reached its pinned end time — timer paused.'}); }); }
+      this._autoPaused[id+':'+this.occOf(t).start]=true; this.stopTimer(id); /* PP-EXT: silent — no prompt/note */ }); }
 
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
      freeTime block (pinned to the end of the window), optionally clamped to `from` for pack-from-now. Single
