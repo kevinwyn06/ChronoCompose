@@ -159,10 +159,10 @@ class Component extends DCLogic {
     this.rowH = 40;
     this.barH = 16;
     this.headH = 48;
-    /* PP-EXT: `type` is now the SCHEDULING MODE (was task category — categories are done with @tags).
-       Exact = allotted is planned−spent exactly; Proportional = shares the day's leftover time;
-       Excluded = never scheduled/allotted; Milestone = zero-duration marker (unchanged behavior). */
-    this.TYPES = ['Exact','Proportional','Excluded','Milestone'];
+    /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
+       day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
+       toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
+       'Milestone' marker (see isMilestone; set by addMilestoneAt / quick-add) — 'Exact'/'Excluded' modes are gone. */
     this.PCOL = {1:'#d1453b',2:'#eb8909',3:'#246fe0',4:'#7b8794'};
     this.PNAME = {1:'P1',2:'P2',3:'P3',4:'P4'};
     this.PROJECT = 'Life Planner';
@@ -214,6 +214,7 @@ class Component extends DCLogic {
       spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
+      included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / toggleIncluded) */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
@@ -282,11 +283,12 @@ class Component extends DCLogic {
 
   /* ---------- columns ---------- */
   colDefs(){
-    /* PP-EXT: type→Mode; added spent; predicted→"Allot" (computed remaining/allotted time).
+    /* PP-EXT: Mode column removed (scheduling is derived) → replaced by an Incl (include/exclude today) toggle;
+       added spent; predicted→"Allot" (computed remaining/allotted time).
        Tags column dropped (tags already render under the task name); Goal column dropped (replaced by the description). */
     return [
       {k:'check',w:50,lock:true},{k:'name',w:236,l:'Task Name'},
-      {k:'type',w:120,l:'Mode'},
+      {k:'incl',w:58,l:'Incl'},
       {k:'start',w:150,l:'Start'},{k:'end',w:150,l:'Due'},
       {k:'dur',w:52,l:'Dur'},{k:'planned',w:78,l:'Planned'},{k:'spent',w:70,l:'Spent'},
       {k:'predicted',w:96,l:'Allot'},
@@ -370,18 +372,19 @@ class Component extends DCLogic {
   buildSeed(){
     const D = this.DAY;
     const t0 = new Date(); t0.setHours(0,0,0,0); const B=t0.getTime();
-    const mk=(id,name,type,offStart,offEnd,pri,deps,pct,planned,spent,goal,labels)=>this.normalizeTask({
+    /* PP-EXT: `extra` merges optional fields (e.g. included:false) — scheduling is derived now, no Mode column. */
+    const mk=(id,name,type,offStart,offEnd,pri,deps,pct,planned,spent,goal,labels,extra)=>this.normalizeTask(Object.assign({
       id,name,type,start:B+offStart*D+9*3600000,end:B+offEnd*D+9*3600000,priority:pri,deps,pct,
       planned:planned,spent:spent,goal:goal,labels:labels||[],description:'',
       completion: pct>=100 ? B+offEnd*D : null
-    });
+    }, extra||{}));
     return [
       mk('t1','Research project + reading list','Proportional',0,2,1,[],20,180,20,'Send 3 emails; read 2 papers',['research']),
       mk('t2','AI project','Proportional',0,4,2,[],35,240,60,'Ship the scheduler MVP',['sim','code']),
-      mk('t3','Practice problems','Exact',0,0,3,[],0,60,0,'2 mediums',['study']),
+      mk('t3','Practice problems','Proportional',0,0,3,[],0,60,0,'2 mediums',['study']),
       mk('t4','Online course lectures','Proportional',0,3,3,[],10,120,0,'',['study']),
-      mk('t5','Exercise','Exact',0,0,2,[],0,45,0,'Full body',['health']),
-      mk('t6','Update website','Excluded',1,6,4,[],0,300,0,'Backlog — not scheduled yet',['personal']),
+      mk('t5','Exercise','Proportional',0,0,2,[],0,45,0,'Full body',['health']),
+      mk('t6','Update website','Proportional',1,6,4,[],0,300,0,'Backlog — excluded from today (Incl toggle off)',['personal'],{included:false}),
       mk('t7','Team Meeting','Milestone',0,0,1,[],0,0,0,'',['work']),
     ];
   }
@@ -584,15 +587,24 @@ class Component extends DCLogic {
   /* ==== PP-EXT: goal, time-tracking timers, allotted-time (ported Schedule-sheet "Remaining") ==== */
   setGoal(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.goal=val; }); }
   startOfDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
-  isActiveToday(t){ // "a task only has allotted time if today ∈ [start,end]" (date-inclusive)
-    if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
-    if(!this.isScheduled(t) || t.type==='Milestone' || t.type==='Excluded') return false;
+  isMilestone(t){ return t.type==='Milestone'; } /* PP-EXT: internal milestone marker (created via gantt-header click / quick-add; no longer a user-selectable mode) */
+  /* PP-EXT: the INFERRED include default — today ∈ [start,due] by DATE (time-of-day ignored), current occurrence. */
+  inWindowToday(t){
+    if(!this.isScheduled(t)) return false;
     const today=this.startOfDay(this.state.nowTick||Date.now());
-    /* PP-EXT: repeats gate on the current occurrence, not the (possibly long-past) base span, matching the
-       rest of the render which uses currentOcc / _occById. */
     const oc = t.recur ? this.currentOcc(t) : {start:t.start, end:t.end};
     return this.startOfDay(oc.start) <= today && today <= this.startOfDay(oc.end);
   }
+  isActiveToday(t){ // a task only has allotted time if it's included today (default: today ∈ [start,end], date-inclusive)
+    if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
+    if(!this.isScheduled(t) || this.isMilestone(t)) return false;
+    /* PP-EXT: include/exclude toggle overrides the date-window default (null = infer). */
+    if(t.included!=null) return !!t.included;
+    return this.inWindowToday(t);
+  }
+  /* PP-EXT: flip the effective include state and store it as an explicit override (like togglePin vs effPins). */
+  toggleIncluded(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+    const cur = t.included!=null ? t.included : this.inWindowToday(t); t.included = !cur; }); }
   /* PP-EXT: inclusive count of days from today to the task's (current-occurrence) due date, ≥1. Drives
      'spread' allotment: remaining planned ÷ activeDaysLeft = today's share (48h over 12 days → 4h/day). */
   activeDaysLeft(t){
@@ -659,7 +671,7 @@ class Component extends DCLogic {
   occOf(t){ return t.recur ? this.currentOcc(t) : {start:t.start, end:t.end}; }
   hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
   effPins(t){
-    if(t.type==='Milestone'||t.type==='Excluded') return {ps:false,pe:false};
+    if(this.isMilestone(t)) return {ps:false,pe:false};
     const timedEvent = !!(t.eventId && !t.allDay);
     return { ps: t.pinStart!=null ? !!t.pinStart : timedEvent,
              pe: t.pinEnd!=null   ? !!t.pinEnd   : true };
@@ -878,15 +890,15 @@ class Component extends DCLogic {
         const allotted=t.predictManual ? Math.max(0,t.predicted) : computed*scale;
         map[t.id]={allotted:Math.round(allotted), computed:Math.round(computed), active:true}; });
     } else {
+      /* PP-EXT: no scheduling modes — every non-fixed active task is Proportional; a manual Predict override
+         takes a fixed slice off the top (and its auto value shows what it'd be if it rejoined the pool). */
       let fixedSum=0, propPlanSum=0;
       acts.forEach(t=>{ const spent=spentById[t.id];
-        if(t.type==='Exact') fixedSum+=Math.max(0,t.planned-spent);
-        else if(t.predictManual) fixedSum+=Math.max(0,t.predicted);
+        if(t.predictManual) fixedSum+=Math.max(0,t.predicted);
         else propPlanSum+=Math.max(0,t.planned); });
       const pool=Math.max(0, avail-fixedSum);
       acts.forEach(t=>{ const spent=spentById[t.id]; let computed;
-        if(t.type==='Exact'){ computed=Math.max(0,t.planned-spent); }
-        else if(t.predictManual){ /* the auto value = what it'd be if this override were off: rejoin the pool */
+        if(t.predictManual){ /* the auto value = what it'd be if this override were off: rejoin the pool */
           const pps=propPlanSum+Math.max(0,t.planned), pl=pool+Math.max(0,t.predicted);
           computed = pps>0 ? Math.max(0,(Math.max(0,t.planned)/pps)*pl-spent) : 0; }
         else { const share = propPlanSum>0 ? (Math.max(0,t.planned)/propPlanSum)*pool : 0; computed=Math.max(0,share-spent); }
@@ -897,14 +909,14 @@ class Component extends DCLogic {
     /* PP-EXT: subtasks — distribute each parent's allotted to its children proportional to child Planned
        (owner's model: parent keeps its own budget; if Σchild.planned < parent.planned the unassigned
        remainder stays with the parent). Recursive top-down, so grandchildren partition their parent's
-       share. Archived/Milestone/Excluded children weigh 0. */
+       share. Archived/Milestone/excluded children weigh 0. */
     const distribute=(pid)=>{
       const kidIds=kb.kids[pid]||[]; if(!kidIds.length) return;
       const p=kb.byId[pid], pm=map[pid]; if(!pm) return;
       const A=pm.allotted||0;
       let S=0; const w={};
       kidIds.forEach(cid=>{ const ct=kb.byId[cid];
-        w[cid]=(ct.archivedAt||ct.type==='Milestone'||ct.type==='Excluded')?0:Math.max(0,ct.planned||0); S+=w[cid]; });
+        w[cid]=(ct.archivedAt||this.isMilestone(ct)||ct.included===false)?0:Math.max(0,ct.planned||0); S+=w[cid]; });
       const P=Math.max(0, p.planned||0), denom=Math.max(P,S);
       let given=0;
       kidIds.forEach(cid=>{ const share=denom>0?Math.round(A*w[cid]/denom):0; given+=share;
@@ -1821,7 +1833,7 @@ class Component extends DCLogic {
     const bById={}; before.forEach(t=>bById[t.id]=t);
     const aById={}; after.forEach(t=>aById[t.id]=t);
     after.forEach(t=>{
-      if(t.parentId || t.archivedAt || t.type==='Milestone') return;
+      if(t.parentId || t.archivedAt || this.isMilestone(t)) return;
       const b=bById[t.id];
       if(!t.eventId){
         if(!b || this.syncFp(b)!==this.syncFp(t)) ops.push({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)});
@@ -2399,7 +2411,7 @@ class Component extends DCLogic {
       display:'flex',alignItems:'center',height:'100%',borderRight:'1px solid var(--row-border)',minWidth:0},extra||{})},content);
 
     // ---- distinct milestone row ----
-    if(t.type==='Milestone'){
+    if(this.isMilestone(t)){
       const mcol = crit ? '#e5484d' : pcol;
       const diamond=h('div',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
         title:'Milestone · click to complete',style:{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}},
@@ -2477,9 +2489,15 @@ class Component extends DCLogic {
         ...depChips):null
     );
 
-    const typeSel=h('select',{className:'pp-sel',value:t.type,onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
-      onChange:e=>this.setType(t.id,e.target.value)},
-      this.TYPES.map(tp=>h('option',{key:tp,value:tp},tp)));
+    /* PP-EXT: include/exclude-today toggle (replaces the old Mode column). Checked = counts toward today's
+       schedule/allotment; default (auto) follows today ∈ [start,due], a manual click overrides. */
+    const inclCell = this.isMilestone(t)
+      ? h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—')
+      : (()=>{ const on=this.isActiveToday(t); const explicit=t.included!=null;
+          return h('span',{onClick:e=>{e.stopPropagation();this.toggleIncluded(t.id);}, onMouseDown:e=>e.stopPropagation(),
+            title:(on?'Counts toward today':'Excluded from today')+(explicit?' (manual)':' (auto: today ∈ [start,due])')+' · click to toggle',
+            style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',
+              color: on?'#79c08e':'var(--text-faint2)'}}, on?'☑':'☐'); })();
 
     const durIn=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
       onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
@@ -2536,7 +2554,7 @@ class Component extends DCLogic {
       style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
-      name:nameBlock, type:typeSel,
+      name:nameBlock, incl:inclCell,
       start:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'start'), /* PP-EXT: start pin */
         h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */))),
       end:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'end'), /* PP-EXT: due pin */
@@ -2730,7 +2748,7 @@ class Component extends DCLogic {
         borderRadius:'50%',background:'var(--bg)',border:'2px solid '+this._accent,cursor:'crosshair',zIndex:6,
         opacity:(this.state.hoverId===t.id||sel)?1:0.25}});
 
-    if(t.type==='Milestone'){
+    if(this.isMilestone(t)){
       const sz=this.barH;
       return h('div',{key,onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},title:t.name+occLbl,
         style:{position:'absolute',left:(left-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
@@ -2975,8 +2993,14 @@ class Component extends DCLogic {
         onMouseEnter:e=>{e.currentTarget.style.background='var(--menu-hover)';e.currentTarget.style.color='#e5615d';},
         onMouseLeave:e=>{e.currentTarget.style.background='transparent';e.currentTarget.style.color='var(--text-faint2)';}},'×'):null);
 
-    const typeSel=h('select',{className:'pp-sel',value:t.type,onChange:e=>this.setType(t.id,e.target.value),style:{width:'100%'}},
-      this.TYPES.map(tp=>h('option',{key:tp,value:tp},tp)));
+    /* PP-EXT: include/exclude-today control (replaces the old Mode select). */
+    const inclCtl = this.isMilestone(t)
+      ? h('span',{style:{fontSize:'13px',color:'var(--text-faint2)'}},'— (milestone)')
+      : (()=>{ const on=this.isActiveToday(t); const explicit=t.included!=null;
+          return h('div',{onClick:()=>this.toggleIncluded(t.id),title:'Click to toggle',
+            style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer'}},
+            h('span',{style:{fontSize:'16px',lineHeight:1,color:on?'#79c08e':'var(--text-faint2)'}}, on?'☑':'☐'),
+            h('span',{style:{fontSize:'13px',color:'var(--text-2)'}}, (on?'Counted today':'Excluded today')+(explicit?' · manual':' · auto'))); })();
     const durInput=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
       style:{textAlign:'left',width:'90px',border:'1px solid var(--divider)'},
       onBlur:e=>this.setDur(t.id,key,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
@@ -3013,7 +3037,7 @@ class Component extends DCLogic {
     const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
-      field('Mode',typeSel),
+      field('Include today',inclCtl),
       /* PP-EXT: subtasks — parent link + one-click unnest */
       (t.parentId&&byId[t.parentId])?field('Subtask of',h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
         h('span',{onClick:()=>this.openDetail(t.parentId),style:{cursor:'pointer',fontSize:'13px',color:this._accent,

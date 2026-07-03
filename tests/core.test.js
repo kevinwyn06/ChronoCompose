@@ -27,42 +27,66 @@ test('normalizeTask fills defaults', () => {
   assert.strictEqual(t.priority, 4);
 });
 
-test('isActiveToday: only today in [start,end], excludes Excluded/Milestone', () => {
+test('isActiveToday: only today in [start,end], excludes milestones and included:false', () => {
   const c = make();
   c.state.nowTick = Date.now();
   const B = Date.now();
   assert.strictEqual(c.isActiveToday(activeTask(c)), true);
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), false, 'future');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B-4*DAY, end:B-2*DAY })), false, 'past');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Excluded' })), false);
-  assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false);
+  assert.strictEqual(c.isActiveToday(activeTask(c, { included:false })), false, 'excluded');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
+  // included:true forces active even outside the [start,end] window
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
-test('computeAllotted: Exact fixed, Excluded/Milestone inactive, Proportional split', () => {
+test('inWindowToday is date-only (ignores time of day at the window edges)', () => {
+  const c = make();
+  const B = Date.now();
+  c.state.nowTick = B;
+  // a task that ends at 00:30 today (very early) is still "in window today" by date
+  const endEarly = c.startOfDay(B) + 30 * 60000;
+  const startYesterday = c.startOfDay(B) - 12 * 3600000;
+  assert.strictEqual(c.inWindowToday(activeTask(c, { start:startYesterday, end:endEarly })), true);
+  assert.strictEqual(c.inWindowToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), false);
+});
+
+test('toggleIncluded flips the effective include state and stores it explicitly', () => {
+  const c = make();
+  c.state.nowTick = Date.now();
+  const t = activeTask(c); // straddles today -> effectively included (included:null)
+  c.state.tasks = [t];
+  assert.strictEqual(c.isActiveToday(t), true);
+  c.toggleIncluded(t.id);
+  assert.strictEqual(c.state.tasks[0].included, false, 'first toggle excludes');
+  assert.strictEqual(c.isActiveToday(c.state.tasks[0]), false);
+  c.toggleIncluded(t.id);
+  assert.strictEqual(c.state.tasks[0].included, true, 'second toggle re-includes explicitly');
+  assert.strictEqual(c.isActiveToday(c.state.tasks[0]), true);
+});
+
+test('isMilestone reflects the internal Milestone marker', () => {
+  const c = make();
+  assert.strictEqual(c.isMilestone(activeTask(c, { type:'Milestone' })), true);
+  assert.strictEqual(c.isMilestone(activeTask(c)), false);
+});
+
+test('computeAllotted: manual-override fixed, excluded/milestone inactive, Proportional split', () => {
   const c = make();
   c.state.nowTick = Date.now();
   cleanDay(c, '10:00'); // 600 min pool
-  const ex = activeTask(c, { type:'Exact', planned:120, spent:0 });
-  const p1 = activeTask(c, { type:'Proportional', planned:120 });
-  const p2 = activeTask(c, { type:'Proportional', planned:240 });
-  const excl = activeTask(c, { type:'Excluded', planned:999 });
+  const ex = activeTask(c, { predictManual:true, predicted:120, planned:120 });
+  const p1 = activeTask(c, { planned:120 });
+  const p2 = activeTask(c, { planned:240 });
+  const excl = activeTask(c, { included:false, planned:999 });
   c.state.tasks = [ex, p1, p2, excl];
   const a = c.computeAllotted(c.state.tasks);
-  assert.strictEqual(a[ex.id].allotted, 120, 'Exact = planned - spent');
+  assert.strictEqual(a[ex.id].allotted, 120, 'override = predicted');
   // pool after fixed = 600-120 = 480; split 120:240 => 160 and 320
   assert.strictEqual(a[p1.id].allotted, 160);
   assert.strictEqual(a[p2.id].allotted, 320);
   assert.strictEqual(a[excl.id].active, false);
   assert.strictEqual(a[excl.id].allotted, 0);
-});
-
-test('computeAllotted: Exact subtracts spent', () => {
-  const c = make();
-  c.state.nowTick = Date.now();
-  cleanDay(c, '10:00');
-  const ex = activeTask(c, { type:'Exact', planned:120, spent:30 });
-  c.state.tasks = [ex];
-  assert.strictEqual(c.computeAllotted(c.state.tasks)[ex.id].allotted, 90);
 });
 
 test('computeAllotted: manual override redistributes pool to remaining Proportional', () => {
@@ -163,8 +187,8 @@ test('buildDayTimeline: overflow tasks become unscheduled', () => {
   const c = make();
   c.state.nowTick = Date.now();
   cleanDay(c, '01:00'); // 60-min window
-  // Exact allotment is a fixed slice (planned-spent), not pool-capped, so 10h into a 1h window overflows.
-  const big = activeTask(c, { type:'Exact', planned:600, name:'Big' });
+  // A manual Predict override is a fixed slice, not pool-capped, so 10h into a 1h window overflows.
+  const big = activeTask(c, { predictManual:true, predicted:600, planned:600, name:'Big' });
   c.state.tasks = [big];
   c._allot = c.computeAllotted(c.state.tasks);
   const d = c.buildDayTimeline();

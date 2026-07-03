@@ -25,7 +25,7 @@ test('packer: meals present as meal chunks; scheduled within window & clear of m
   const c = make();
   c.state.nowTick = Date.now();
   c.state.settings.freeTime = 0; // keep default 07:00-23:00 window + default lunch/dinner
-  const t = activeTask(c, { type: 'Exact', planned: 120 });
+  const t = activeTask(c, { predictManual: true, predicted: 120, planned: 120 });
   const { chunks, dayStart, dayEnd } = pack(c, [t]);
 
   const meals = chunks.filter(x => x.type === 'meal');
@@ -49,8 +49,8 @@ test('packer: priority 1 scheduled before priority 4', () => {
   const c = make();
   c.state.nowTick = Date.now();
   cleanDay(c, '08:00'); // 480-min pool, no meals
-  const p1 = activeTask(c, { type: 'Exact', planned: 60, priority: 1 });
-  const p4 = activeTask(c, { type: 'Exact', planned: 60, priority: 4 });
+  const p1 = activeTask(c, { predictManual: true, predicted: 60, planned: 60, priority: 1 });
+  const p4 = activeTask(c, { predictManual: true, predicted: 60, planned: 60, priority: 4 });
   const { chunks } = pack(c, [p4, p1]); // deliberately give input in reverse of priority
 
   const start1 = Math.min(...chunks.filter(x => x.type === 'scheduled' && x.id === p1.id).map(x => x.start));
@@ -59,12 +59,12 @@ test('packer: priority 1 scheduled before priority 4', () => {
   assert.ok(start1 < start4, `P1 (${start1}) must start before P4 (${start4})`);
 });
 
-// 3. Overflow: an Exact task whose planned exceeds the window leaves an 'unscheduled' remainder.
+// 3. Overflow: a task whose (manually-overridden) allotment exceeds the window leaves an 'unscheduled' remainder.
 test('packer: overflow produces unscheduled remainder', () => {
   const c = make();
   c.state.nowTick = Date.now();
   cleanDay(c, '02:00'); // 120-min pool, no meals
-  const t = activeTask(c, { type: 'Exact', planned: 180 }); // Exact allotment is NOT pool-capped -> 180
+  const t = activeTask(c, { predictManual: true, predicted: 180, planned: 180 }); // a manual override is NOT pool-capped -> 180
   const { chunks } = pack(c, [t]);
 
   const un = chunks.filter(x => x.type === 'unscheduled' && x.id === t.id);
@@ -85,7 +85,7 @@ test('packer: sub-minChunk fragments still fully scheduled when total fits', () 
     dayStart: '00:00', dayEnd: '01:40',
     lunchStart: '00:25', lunchEnd: '00:50', dinnerStart: '01:15', dinnerEnd: '01:40',
   });
-  const t = activeTask(c, { type: 'Exact', planned: 50 });
+  const t = activeTask(c, { predictManual: true, predicted: 50, planned: 50 });
   const { chunks } = pack(c, [t]);
 
   const un = chunks.filter(x => x.type === 'unscheduled');
@@ -103,7 +103,7 @@ test('packer: packFromNow clamps scheduled start to now', () => {
     dayStart: '00:00', dayEnd: '23:00',
     lunchStart: '00:00', lunchEnd: '00:00', dinnerStart: '00:00', dinnerEnd: '00:00',
   });
-  const t = activeTask(c, { type: 'Exact', planned: 120 });
+  const t = activeTask(c, { predictManual: true, predicted: 120, planned: 120 });
   const { chunks } = pack(c, [t]);
   const sched = chunks.filter(x => x.type === 'scheduled');
   assert.ok(sched.length > 0, 'task scheduled');
@@ -114,7 +114,7 @@ test('packer: packFromNow clamps scheduled start to now', () => {
 
 function mk(c, over){
   return c.normalizeTask(Object.assign(
-    { id: 'z' + Math.random().toString(36).slice(2, 8), name: 't', type: 'Exact', deps: [], recur: null }, over));
+    { id: 'z' + Math.random().toString(36).slice(2, 8), name: 't', deps: [], recur: null }, over));
 }
 
 // 6. Basic snap forward.

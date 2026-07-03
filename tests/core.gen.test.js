@@ -97,21 +97,8 @@ test('normalizeTask guarantees a scheduling-mode (type) exists [SPEC]', () => {
 // ---------------------------------------------------------------------------
 // Predicted / allotted computation  (computeAllotted, 'today' mode)
 // ---------------------------------------------------------------------------
-test('Exact task: allotted = planned - spent (fixed slice)', () => {
-  const c = make();
-  cleanDay(c, '03:00'); // pool = 180 min
-  const t = activeTask(c, { type: 'Exact', planned: 120, spent: 30 });
-  const m = c.computeAllotted([t]);
-  assert.equal(m[t.id].allotted, 90);
-});
-
-test('Exact task: spent > planned floors allotted at 0', () => {
-  const c = make();
-  cleanDay(c, '03:00');
-  const t = activeTask(c, { type: 'Exact', planned: 60, spent: 100 });
-  const m = c.computeAllotted([t]);
-  assert.equal(m[t.id].allotted, 0);
-});
+// (Scheduling modes were removed: every task is Proportional; a fixed slice is expressed with a
+//  manual Predict override — see the predictManual tests below. There is no 'Exact' type anymore.)
 
 test('Proportional split: leftover pool weighted by planned', () => {
   const c = make();
@@ -183,11 +170,11 @@ test('task entirely in the future is inactive with 0 allotment', () => {
   assert.equal(m[t.id].allotted, 0);
 });
 
-test('Milestone and Excluded tasks never get allotment even if today is in range', () => {
+test('Milestone and excluded (included:false) tasks never get allotment even if today is in range', () => {
   const c = make();
   cleanDay(c, '03:00');
   const mile = activeTask(c, { type: 'Milestone' });
-  const excl = activeTask(c, { type: 'Excluded' });
+  const excl = activeTask(c, { included: false });
   const m = c.computeAllotted([mile, excl]);
   assert.equal(m[mile.id].active, false);
   assert.equal(m[excl.id].active, false);
