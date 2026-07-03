@@ -189,7 +189,8 @@ class Component extends DCLogic {
       colW: pf.colW||{}, colOrder: pf.colOrder||null, colHidden: pf.colHidden||{},
       selCols:[], colMenu:null, rowDrag:null,
       /* PP-EXT state */
-      drawerOpen:false, running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      drawerOpen:false, drawerTab:'today', monthAnchor:null, hoverDay:null, /* PP-EXT: drawer Today|Month tabs + month-view hover (Phase 6) */
+      running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{} /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
@@ -1669,6 +1670,8 @@ class Component extends DCLogic {
       this._seqOf = {}; tasks.forEach((t,i)=>{ this._seqOf[t.id]=String(i+1); });
     }
     this._allot = this.computeAllotted(tasks); /* PP-EXT: allotted/remaining map — live (spent/settings), reads memoized _occById */
+    /* PP-EXT: month-view — hovering a day glows all its tasks in the sheet + gantt (Phase 6) */
+    this._glowIds = this.state.hoverDay!=null ? new Set(this.tasksOnDay(this.state.hoverDay, tasks)) : null;
     return {
       board: this.renderBoard(tasks),
       quickadd: this.renderQuickAdd(),
@@ -2454,21 +2457,98 @@ class Component extends DCLogic {
         ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11.5px',color:'var(--text-2)',padding:'2px 0'}},
           c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:'')))) : null); /* PP-EXT: why it didn't fit */
   }
+  /* ==== PP-EXT: month calendar view (ROADMAP Phase 6) ====
+     A 7×6 month grid in the drawer. Hovering a day glows all that day's tasks in the sheet + gantt (via
+     _glowIds → tasksOnDay); hovering a task (hoverId) glows its day cells here. Render-only — no commits.
+     Occurrence-aware (expandTask handles recurrence incl. deleted overrides); archived tasks excluded. */
+  monthAnchorMs(){ /* first-of-month for the displayed month (defaults to the current month) */
+    const a=this.state.monthAnchor!=null ? this.state.monthAnchor : (this.state.nowTick||Date.now());
+    const d=new Date(a); d.setDate(1); d.setHours(0,0,0,0); return d.getTime();
+  }
+  monthGrid(anchorMs){ /* 42 day cells starting on the Sunday on/before the 1st (DST-safe via Date math) */
+    const m=new Date(anchorMs); m.setDate(1); m.setHours(0,0,0,0); const monthIdx=m.getMonth();
+    const start=new Date(m); start.setDate(1 - m.getDay()); /* back to Sunday */
+    const cells=[];
+    for(let i=0;i<42;i++){ const cur=new Date(start); cur.setDate(start.getDate()+i); cur.setHours(0,0,0,0);
+      cells.push({dayStart:cur.getTime(), inMonth:cur.getMonth()===monthIdx, dom:cur.getDate()}); }
+    return {cells, monthIdx, monthStart:m.getTime()};
+  }
+  /* Ids of non-archived scheduled tasks with an occurrence overlapping [dayStart, dayStart+DAY). Half-open on
+     the end (all-day/exclusive ends don't leak onto the next day); zero-length points (milestones) match their day. */
+  tasksOnDay(dayStart, tasks){
+    tasks=tasks||this.state.tasks; const dayEnd=dayStart+this.DAY; const out=[];
+    tasks.forEach(t=>{ if(t.archivedAt || !this.isScheduled(t)) return;
+      const occs=this.expandTask(t, dayEnd);
+      const hit=occs.some(o=> (o.end>o.start) ? (o.start<dayEnd && o.end>dayStart) : (o.start>=dayStart && o.start<dayEnd));
+      if(hit) out.push(t.id); });
+    return out;
+  }
+  /* Symmetric inverse (used by tests): the day-starts in [from,to) a task occupies. */
+  daysOfTask(id, from, to, tasks){
+    tasks=tasks||this.state.tasks; const t=tasks.find(x=>x.id===id);
+    if(!t || t.archivedAt || !this.isScheduled(t)) return [];
+    const occs=this.expandTask(t, to); const set=[];
+    for(let d=from; d<to; d+=this.DAY){ const dayEnd=d+this.DAY;
+      if(occs.some(o=> (o.end>o.start) ? (o.start<dayEnd && o.end>d) : (o.start>=d && o.start<dayEnd))) set.push(d); }
+    return set;
+  }
+  shiftMonth(delta){ const d=new Date(this.monthAnchorMs()); d.setMonth(d.getMonth()+delta); this.setState({monthAnchor:d.getTime(), hoverDay:null}); }
+  renderMonthView(){
+    const h=React.createElement;
+    const anchor=this.monthAnchorMs(); const {cells,monthIdx}=this.monthGrid(anchor);
+    const MON=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    const todayStart=this.startOfDay(this.state.nowTick||Date.now());
+    const hoverId=this.state.hoverId;
+    const arrow=(glyph,delta)=>h('div',{className:'pp-iconbtn',onClick:()=>this.shiftMonth(delta),title:delta<0?'Previous month':'Next month',
+      style:{width:'24px',height:'24px',fontSize:'13px'}},glyph);
+    const title=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 4px 10px'}},
+      arrow('‹',-1),
+      h('div',{style:{flex:1,textAlign:'center',fontSize:'13px',fontWeight:700,color:'var(--text-strong)'}}, MON[monthIdx]+' '+new Date(anchor).getFullYear()),
+      arrow('›',1));
+    const dow=['S','M','T','W','T','F','S'].map((d,i)=>h('div',{key:'dow'+i,style:{textAlign:'center',fontSize:'10px',fontWeight:700,color:'var(--text-mut2)',padding:'2px 0'}},d));
+    const cellEls=cells.map((c,i)=>{
+      const ids=this.tasksOnDay(c.dayStart); const n=ids.length;
+      const isToday=c.dayStart===todayStart;
+      const glow=hoverId!=null && ids.includes(hoverId); /* hovering a task → its days glow here */
+      const dots=[]; const dn=Math.min(n,4);
+      for(let k=0;k<dn;k++) dots.push(h('div',{key:'d'+k,style:{width:'5px',height:'5px',borderRadius:'50%',background:this._accent}}));
+      return h('div',{key:'c'+i,
+          onMouseEnter:()=>this.setState({hoverDay:c.dayStart}), onMouseLeave:()=>this.setState({hoverDay:null}),
+          title:n?(n+' task'+(n>1?'s':'')+' on this day'):'No tasks',
+          style:{position:'relative',minHeight:'44px',border:'1px solid var(--row-border-gantt)',borderRadius:'6px',padding:'3px 4px',
+            display:'flex',flexDirection:'column',cursor:'default',
+            background:glow?'rgba(245,181,54,0.22)':(isToday?'var(--hover)':'transparent'),
+            opacity:c.inMonth?1:0.4,
+            boxShadow:isToday?'inset 0 0 0 1.5px '+this._accent:'none'}},
+        h('div',{style:{fontSize:'11px',fontWeight:isToday?700:600,color:'var(--text-2)'}},c.dom),
+        h('div',{style:{flex:1}}),
+        n?h('div',{style:{display:'flex',flexWrap:'wrap',gap:'2px',justifyContent:'flex-end'}},...dots,
+          n>4?h('div',{style:{fontSize:'8px',fontWeight:700,color:'var(--text-mut2)',lineHeight:'5px'}},'+'+(n-4)):null):null); });
+    return h('div',{style:{padding:'4px 6px'}}, title,
+      h('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:'3px'}}, ...dow, ...cellEls),
+      h('div',{style:{fontSize:'10.5px',color:'var(--text-mut2)',textAlign:'center',padding:'10px 4px 2px'}},
+        'Hover a day to glow its tasks · hover a task to glow its days'));
+  }
+  /* ==== /PP-EXT: month view ==== */
   renderDrawer(){
     if(!this.state.drawerOpen) return null;
     const h=React.createElement;
     const now=new Date(this.state.nowTick||Date.now());
     const dstr=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getDay()]+' '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][now.getMonth()]+' '+now.getDate();
     const runIds=Object.keys(this.state.running||{}); /* PP-EXT: multitasking — one bar per running timer */
+    const tab=this.state.drawerTab||'today'; /* PP-EXT: Today | Month (Phase 6) */
+    const tabBtn=(k,lbl)=>h('div',{key:k,onClick:()=>this.setState({drawerTab:k,hoverDay:null}),
+      style:{padding:'4px 11px',fontSize:'12px',fontWeight:600,borderRadius:'6px',cursor:'pointer',
+        color:tab===k?'#fff':'var(--text-mut2)',background:tab===k?this._accent:'transparent'}},lbl);
     const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'0 14px',height:'46px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
-      h('div',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Today'),
-      h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)'}},dstr),
+      h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'8px',padding:'2px'}}, tabBtn('today','Today'), tabBtn('month','Month')),
+      tab==='today'?h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)'}},dstr):null,
       h('div',{style:{flex:1}}),
       /* PP-EXT: flip the plan (and allotment pool) between full-day and starting at the current time */
-      h('button',{className:'pp-tbtn',onClick:()=>this.saveSettings({packFromNow:!this.state.settings.packFromNow}),
+      tab==='today'?h('button',{className:'pp-tbtn',onClick:()=>this.saveSettings({packFromNow:!this.state.settings.packFromNow}),
         title:this.state.settings.packFromNow?'Planning the rest of today (from now)':'Planning the whole day (from day start)',
         style:Object.assign({fontSize:'11px',padding:'3px 8px'}, this.state.settings.packFromNow?{background:this._accent,borderColor:this._accent,color:'#fff'}:null)},
-        this.state.settings.packFromNow?'⏱ From now':'☀ Full day'),
+        this.state.settings.packFromNow?'⏱ From now':'☀ Full day'):null,
       h('div',{className:'pp-iconbtn',onClick:()=>this.setState({drawerOpen:false}),title:'Close'},'✕'));
     const runbar = runIds.length ? h('div',{style:{display:'flex',flexDirection:'column',flex:'none'}},
       ...runIds.map(id=>{ const rt=this.state.tasks.find(t=>t.id===id); if(!rt) return null;
@@ -2487,8 +2567,8 @@ class Component extends DCLogic {
       '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
     return h('div',{style:{position:'fixed',top:'98px',right:0,bottom:0,width:'340px',background:'var(--side-bg)',
       borderLeft:'1px solid var(--top-border)',boxShadow:'-8px 0 24px rgba(0,0,0,0.25)',zIndex:1500,display:'flex',flexDirection:'column'}},
-      header, gerr, note, runbar,
-      h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, this.renderTimeline()));
+      header, gerr, note, tab==='today'?runbar:null,
+      h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, tab==='month'?this.renderMonthView():this.renderTimeline()));
   }
   /* ==== /PP-EXT ==== */
 
@@ -2589,6 +2669,7 @@ class Component extends DCLogic {
         style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
       const mrd=this.state.rowDrag;
       let mbsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'inset 3px 0 0 '+mcol);
+      if(this._glowIds && this._glowIds.has(t.id)) mbsh+=',inset 0 0 0 9999px rgba(245,181,54,0.18)'; /* PP-EXT: month-view day glow (Phase 6) */
       if(mrd && mrd.overIndex===i) mbsh+=',inset 0 2px 0 0 '+this._accent;
       const mvisN=(this._visTasks||this.state.tasks).length; /* PP-EXT */
       if(mrd && mrd.overIndex===mvisN && i===mvisN-1) mbsh+=',inset 0 -2px 0 0 '+this._accent;
@@ -2871,7 +2952,7 @@ class Component extends DCLogic {
           style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:(this.rowH+this.descExtra(t))+'px',
             background: sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'),
             borderBottom:'1px solid var(--row-border-gantt)',
-            boxShadow: crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'}}); }),
+            boxShadow: (this._glowIds&&this._glowIds.has(t.id)?'inset 0 0 0 9999px rgba(245,181,54,0.16)':(crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'))}}); }), /* PP-EXT: month-view day glow */
       arrows, ...bars, todayLine);
 
     return h('div',{ref:el=>{this.ganttScrollEl=el; if(el&&!el._wz){el._wz=1; el.addEventListener('wheel',ev=>this.onWheelZoom(ev),{passive:false});}}, onScroll:e=>this.syncFromGantt(e),
