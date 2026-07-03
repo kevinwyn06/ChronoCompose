@@ -164,6 +164,7 @@ class Component extends DCLogic {
     this.headH = 48;
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     this.PIN_SNAP = 5;           // PP-EXT: minutes a dragged timeline block snaps to (Phase 5)
+    this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
        day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
@@ -199,7 +200,7 @@ class Component extends DCLogic {
      `freeTime` = reserved personal/leisure minutes (blocks a late-evening slot); `allotMode` today|spread;
      `packFromNow` starts the plan (and pool) at the current time instead of dayStart. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, gcalPollSec:60,
+    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     autoArchiveDays:7 /* PP-EXT: auto-archive completed tasks after N days (0 = off) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
@@ -718,10 +719,11 @@ class Component extends DCLogic {
      FOR THAT DAY ONLY. Returns the block span {start,end} when the task carries an active pin for today, else
      null. The duration is captured at drop (pin.dur) rather than derived, so it stays stable regardless of
      later allotment churn (mirrors a both-pinned task's clock span — no circular dependency with the pool).
-     Stale pins (pin.day ≠ today) are ignored; milestones and subtask children can't be independently pinned. */
+     Stale pins (pin.day ≠ today) are ignored; milestones can't be pinned. A drag-pinned subtask (leaf child)
+     leaves its parent's family packing and becomes its own fixed block — see famAllot / distribute / queueFor. */
   dragBlock(t, B){
     const p=t.pin; if(!p || p.day!==B) return null;
-    if(this.isMilestone(t) || t.parentId!=null) return null;
+    if(this.isMilestone(t)) return null;
     const dur=Math.max(0, p.dur||0);
     const a=Math.max(p.start, B), b=Math.min(p.start + dur*60000, B+this.DAY);
     return b>a ? {start:a, end:b} : null;
@@ -731,8 +733,11 @@ class Component extends DCLogic {
      buildDayTimeline (blocks render + free slots exclude them), so they always agree. Two kinds:
      both-pinned tasks occupy their occurrence clock span; drag-pinned tasks occupy their dropped span. */
   fixedBlocksToday(B, tasks){
+    const src=tasks||this.state.tasks;
+    const byId={}; src.forEach(t=>byId[t.id]=t); /* PP-EXT: for a pinned subtask's "Parent › Child" label */
+    const labelOf=t=>(t.parentId!=null && byId[t.parentId]) ? (byId[t.parentId].name+' › '+t.name) : t.name;
     const out=[];
-    (tasks||this.state.tasks).forEach(t=>{
+    src.forEach(t=>{
       if(this.isFixedToday(t)){
         const oc=this.occOf(t);
         const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
@@ -741,7 +746,7 @@ class Component extends DCLogic {
       }
       if(!this.isActiveToday(t)) return; /* a drag-pin only holds while the task participates today */
       const db=this.dragBlock(t, B);
-      if(db) out.push({start:db.start, end:db.end, note:t.name, taskId:t.id, dragPin:true});
+      if(db) out.push({start:db.start, end:db.end, note:labelOf(t), taskId:t.id, dragPin:true});
     });
     return out;
   }
@@ -825,9 +830,15 @@ class Component extends DCLogic {
       this.normalizeTreeOrder(tasks);
     });
   }
-  /* Family allotted = own remainder + all descendants' shares (what the parent's timeline block spans). */
-  famAllot(id, kids){
-    return (this.allotOf(id).allotted||0) + (kids[id]||[]).reduce((a,c)=>a+this.famAllot(c,kids),0);
+  /* Family allotted = own remainder + all descendants' shares (what the parent's timeline block spans).
+     A drag-pinned child leaves the family (it renders as its own fixed block), so it isn't summed here. */
+  famAllot(id, kids, byId){
+    byId = byId || this.buildKids(this.state.tasks).byId;
+    const B=this.startOfDay(this.state.nowTick||Date.now());
+    return (this.allotOf(id).allotted||0) + (kids[id]||[]).reduce((a,c)=>{
+      const ct=byId[c]; if(ct && this.hasDragPinToday(ct, B)) return a; /* pinned child: separate fixed block */
+      return a + this.famAllot(c, kids, byId);
+    }, 0);
   }
   /* ==== /PP-EXT: subtasks ==== */
   /* ==== PP-EXT: archive vs delete (ROADMAP Phase 3) ====
@@ -921,12 +932,18 @@ class Component extends DCLogic {
     /* PP-EXT: fixed (both-pinned) tasks occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline will render as pinned blocks. */
     const fixed=this.fixedBlocksToday(B, tasks);
-    const avail=Math.max(0, this.dayIntervals(B, this.packStart(), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0));
     fixed.forEach(b=>{ const mins=Math.round((b.end-b.start)/60000);
       map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
     const acts=tasks.filter(t=>this.isActiveToday(t) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    /* PP-EXT: break-between-tasks (settings.breakMin) reserves breakMin after each packed family in
+       buildDayTimeline; shrink the pool by the same estimate (one break per packable family) so allotment
+       stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
+       allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled. */
+    const brk=Math.max(0, this.state.settings.breakMin||0);
+    const rawAvail=this.dayIntervals(B, this.packStart(), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
+    const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]=this.getSpent(t); });
     if(this.state.settings.allotMode==='spread'){
       const auto={}; let manualSum=0, autoSum=0;
@@ -964,10 +981,14 @@ class Component extends DCLogic {
       const A=pm.allotted||0;
       let S=0; const w={};
       kidIds.forEach(cid=>{ const ct=kb.byId[cid];
+        /* PP-EXT: a drag-pinned child already holds a fixed slice (map[cid].fixed) — it's out of the family
+           split entirely (weight 0, keeps its pinned allotment, doesn't reduce the parent's remainder). */
+        if(map[cid] && map[cid].fixed){ w[cid]=0; return; }
         w[cid]=(ct.archivedAt||this.isMilestone(ct)||ct.included===false)?0:Math.max(0,ct.planned||0); S+=w[cid]; });
       const P=Math.max(0, p.planned||0), denom=Math.max(P,S);
       let given=0;
-      kidIds.forEach(cid=>{ const share=denom>0?Math.round(A*w[cid]/denom):0; given+=share;
+      kidIds.forEach(cid=>{ if(map[cid] && map[cid].fixed){ distribute(cid); return; } /* keep the pinned slice */
+        const share=denom>0?Math.round(A*w[cid]/denom):0; given+=share;
         map[cid]={allotted:share, computed:share, active:pm.active&&share>0, fromParent:true};
         distribute(cid); });
       pm.allotted=Math.max(0, A-given); pm.computed=pm.allotted; /* parent keeps the remainder */
@@ -1367,7 +1388,7 @@ class Component extends DCLogic {
       const bd=this._blockDrag; const dyPx=e.clientY-bd.startClientY;
       if(!bd.moved && Math.abs(dyPx)<4) return; bd.moved=true;
       const B=this.startOfDay(this.state.nowTick||Date.now());
-      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/this.TL_PXPM)*60000, bd.dur, B);
+      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/this.TL_PXPM)*60000, bd.dur, B, bd.targets);
       this.forceUpdate(); return;
     }
     if(this.colDrag){
@@ -1427,7 +1448,7 @@ class Component extends DCLogic {
   onMouseUp(e){
     if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
       const bd=this._blockDrag; this._blockDrag=null;
-      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur); else this.forceUpdate();
+      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets); else this.forceUpdate();
       return;
     }
     if(this.colDrag){ this.savePrefs({colW:this.state.colW}); this.colDrag=null; return; }
@@ -2173,6 +2194,10 @@ class Component extends DCLogic {
       setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
       setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
+      /* PP-EXT: break between tasks — reserves this many minutes of gap after each packed task */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Break between tasks (min)',
+          this.infoNote('Minutes of breathing room reserved after each scheduled task in the day timeline (0 = back-to-back). Reduces the allotment pool so tasks still fit around their breaks; meals and fixed events already count as breaks.')),
+        inp(s.breakMin,v=>this.saveSettings({breakMin:Math.max(0,parseInt(v)||0)}))),
       /* PP-EXT: auto-archive (ROADMAP Phase 3) */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto-archive done after (days)',
           this.infoNote('Completed tasks archive automatically after this many days (0 = never). Archived tasks are hidden but kept for stats — see the "N archived" chip under the task list. Live recurring series are never auto-archived.')),
@@ -2250,9 +2275,9 @@ class Component extends DCLogic {
     const flex=this.state.tasks.filter(t=>this.isActiveToday(t) && !this.isFixedToday(t)
         && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
         && !(t.parentId!=null && kb.byId[t.parentId])
-        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids)>0 : this.allotOf(t.id).allotted>0))
+        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{ const p=this.effPins(t);
-        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids):this.allotOf(t.id).allotted;
+        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId):this.allotOf(t.id).allotted;
         return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t),
           dueMs:p.pe?this.dueMsOf(t):null, notBefore:p.ps?this.notBeforeMsOf(t):null,
           rem:amt,origin:amt}; });
@@ -2273,7 +2298,12 @@ class Component extends DCLogic {
           remove(st,en); rem-=take; placed=true; break; }
         if(!placed) break; }
       return rem; };
+    const brk=Math.max(0, s.breakMin||0); /* PP-EXT: minutes of break reserved after each packed task */
     flex.forEach(task=>{ let rem=fill(task, task.rem, false); rem=fill(task, rem, true);
+      if(brk>0 && rem<task.origin){ /* PP-EXT: reserve a break after this task's last chunk so the next task can't abut it */
+        let lastEnd=null; segs.forEach(sg=>{ if(sg.id===task.id && sg.start && sg.end>(lastEnd||0)) lastEnd=sg.end; });
+        if(lastEnd!=null) remove(lastEnd, lastEnd+brk*60000);
+      }
       if(rem>0.5) segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:null,end:null,
         durationMin:Math.round(rem),type:'unscheduled',
         reason:(task.dueMs!=null && task.dueMs<winEnd)?'no room before due':'day full'}); }); /* PP-EXT: why it didn't fit */
@@ -2288,7 +2318,9 @@ class Component extends DCLogic {
     const queues={};
     const queueFor=pid=>{
       if(queues[pid]) return queues[pid];
-      const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const mins=this.famAllot(cid,kb.kids); const ct=kb.byId[cid];
+      const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const ct=kb.byId[cid];
+        if(this.hasDragPinToday(ct, B)) return; /* PP-EXT: a pinned child renders as its own fixed block, not in the family */
+        const mins=this.famAllot(cid,kb.kids,kb.byId);
         if(mins>0) q.push({id:cid,title:(kb.byId[pid].name+' › '+ct.name),goal:ct.goal,mins}); });
       const own=this.allotOf(pid).allotted||0;
       if(own>0) q.push({id:pid,title:kb.byId[pid].name,goal:kb.byId[pid].goal,mins:own});
@@ -2313,35 +2345,53 @@ class Component extends DCLogic {
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd};
   }
-  /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start to PIN_SNAP minutes and clamp so the
-     whole block stays inside today's window. Pure (settings-only), so scheduling.gen tests can exercise it. */
-  snapPinStart(rawStart, dur, B){
+  /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start and clamp so the whole block stays
+     inside today's window. Two-stage snap: if either edge (start or end) lands within PIN_MAGNET minutes of a
+     neighbour block's edge (`targets` = clock times of other blocks/meals), snap magnetically so blocks abut;
+     otherwise snap to the PIN_SNAP grid. Pure given `targets`, so scheduling.gen tests can exercise it. */
+  snapPinStart(rawStart, dur, B, targets){
     const s=this.state.settings;
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
-    const snap=this.PIN_SNAP*60000;
-    let st=B + Math.round((rawStart-B)/snap)*snap;
-    const maxStart=Math.max(winStart, winEnd - Math.max(0,dur)*60000);
+    const snap=this.PIN_SNAP*60000, durMs=Math.max(0,dur)*60000;
+    let st;
+    let best=null, bestD=this.PIN_MAGNET*60000+1;
+    (targets||[]).forEach(tt=>{
+      const ds=Math.abs(rawStart-tt);          if(ds<bestD){ bestD=ds; best=tt; }          /* start edge meets a neighbour */
+      const de=Math.abs((rawStart+durMs)-tt);  if(de<bestD){ bestD=de; best=tt-durMs; }     /* end edge meets a neighbour */
+    });
+    st = (best!=null) ? best : B + Math.round((rawStart-B)/snap)*snap;
+    const maxStart=Math.max(winStart, winEnd - durMs);
     return Math.max(winStart, Math.min(st, maxStart));
   }
-  pinBlockAt(id, rawStart, dur){
+  /* Clock times a dragged block should magnetically snap to: every other block's start & end (meals, fixed,
+     packed blocks) plus the window edges. Excludes the dragged task's own chunks. Impure (reads the timeline). */
+  snapTargets(excludeId){
+    const data=this.buildDayTimeline();
+    const set=new Set([data.dayStart, data.dayEnd]);
+    data.chunks.forEach(c=>{ if(!c.start) return; if(c.id && c.id===excludeId) return; set.add(c.start); set.add(c.end); });
+    return [...set];
+  }
+  pinBlockAt(id, rawStart, dur, targets){
     const B=this.startOfDay(this.state.nowTick||Date.now());
-    const start=this.snapPinStart(rawStart, dur, B), d=Math.round(dur);
+    const start=this.snapPinStart(rawStart, dur, B, targets), d=Math.round(dur);
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin={day:B, start, dur:d}; });
   }
   unpinBlock(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin=null; }); }
-  /* Timeline block draggable only for a leaf, non-subtask flexible block, or an existing drag-pin (to move it).
-     Both-pinned / gcal-timed fixed blocks and subtask-family blocks are not draggable in v1. */
+  /* Timeline block draggable for any LEAF flexible block (top-level or subtask) or an existing drag-pin (to
+     move it). Both-pinned / gcal-timed fixed blocks and parent (family) blocks are not draggable — a family
+     block is subdivided, so there's no single span to pin. A pinned leaf subtask leaves its parent's family. */
   blockDraggable(c, kb){
     if(c.type==='meal' || !c.start) return false;
     if(c.type==='fixed') return !!c.dragPin;
     const t=kb.byId[c.id];
-    return !!t && t.parentId==null && !(kb.kids[c.id] && kb.kids[c.id].length);
+    return !!t && !(kb.kids[c.id] && kb.kids[c.id].length);
   }
   blockPointerDown(e, c){
     if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
     const dur = c.type==='fixed' ? Math.round((c.end-c.start)/60000) : Math.round(this.allotOf(c.id).allotted);
     if(dur<=0) return;
-    this._blockDrag={ id:c.id, dur, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false };
+    this._blockDrag={ id:c.id, dur, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
+      targets:this.snapTargets(c.id) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging */ };
     this.forceUpdate();
   }
   renderTimeline(){

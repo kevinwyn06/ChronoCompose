@@ -263,3 +263,75 @@ test('drag-pin: pinned block is fixed & draggable; other tasks pack around it', 
   assert.ok(os.length > 0, 'other task still scheduled');
   for (const s of os) assert.ok(!overlaps(s, fx[0]), 'other task never overlaps the pinned block');
 });
+
+// 15. A drag-pinned SUBTASK leaves its parent's family and becomes its own fixed block; the parent
+//     family block shrinks by that child's pinned span and its other children still pack inside it.
+test('drag-pin: a pinned subtask becomes a standalone fixed block, out of the family', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00'); // 600-min pool, no meals
+  const p = activeTask(c, { id: 'p', name: 'Parent', planned: 120 });
+  const c1 = activeTask(c, { id: 'c1', name: 'Alpha', planned: 60, parentId: 'p' });
+  const c2 = activeTask(c, { id: 'c2', name: 'Beta', planned: 60, parentId: 'p' });
+  c1.pin = { day: B, start: B + 8 * 3600000, dur: 120 }; // 08:00–10:00
+  const { chunks } = pack(c, [p, c1, c2]);
+
+  // pinned child holds its captured span as a fixed drag-pin, not a proportional child share
+  assert.strictEqual(c._allot['c1'].allotted, 120, 'pinned child allotment = its pinned span');
+  assert.ok(c._allot['c1'].fixed, 'pinned child flagged fixed');
+  assert.ok(!c._allot['c1'].fromParent, 'pinned child is no longer a family share');
+
+  const fx = chunks.filter(x => x.type === 'fixed' && x.id === 'c1');
+  assert.strictEqual(fx.length, 1, 'one fixed block for the pinned subtask');
+  assert.ok(fx[0].dragPin, 'flagged as a drag-pin (draggable + unpin)');
+  assert.strictEqual(fx[0].title, 'Parent › Alpha', 'pinned subtask keeps its Parent › Child label');
+  assert.strictEqual(chunks.filter(x => x.type === 'scheduled' && x.id === 'c1').length, 0,
+    'pinned subtask is not also packed inside the family');
+
+  // sibling c2 and the parent remainder still pack, and never overlap the pinned child
+  assert.ok(schedMin(chunks, 'c2') > 0, 'sibling still scheduled inside the family');
+  const fam = chunks.filter(x => x.type === 'scheduled' && (x.id === 'c2' || x.id === 'p'));
+  for (const s of fam) assert.ok(!overlaps(s, fx[0]), 'family blocks never overlap the pinned child');
+});
+
+// 16. snapPinStart magnet: a proposed start (or end) within PIN_MAGNET of a neighbour edge snaps to abut it;
+//     otherwise it falls back to the PIN_SNAP grid.
+test('drag-pin: snapPinStart magnetically snaps to a neighbour block edge', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  cleanDay(c, '10:00');
+  const edge = B + 3 * 3600000; // a neighbour block edge at 03:00
+  // start edge lands 3 min before 03:00 → snaps the start to 03:00
+  assert.strictEqual(c.snapPinStart(B + (2 * 60 + 57) * 60000, 60, B, [edge]), edge,
+    'start within magnet snaps to the neighbour edge');
+  // end edge lands 2 min before 03:00 → snaps so the block ends at 03:00 (starts at 02:00)
+  assert.strictEqual(c.snapPinStart(B + (1 * 60 + 58) * 60000, 60, B, [edge]), B + 2 * 3600000,
+    'end within magnet snaps the block to abut the neighbour edge');
+  // no target within magnet → 5-min grid snap (02:03 → 02:05)
+  assert.strictEqual(c.snapPinStart(B + (2 * 60 + 3) * 60000, 60, B, [B + 9 * 3600000]),
+    B + (2 * 60 + 5) * 60000, 'far targets leave the grid snap in charge');
+});
+
+// 17. Break-between-tasks reserves settings.breakMin after each packed task and shrinks the pool to match.
+test('break: breakMin shrinks the pool and spaces packed tasks apart', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '04:00'); // 240-min pool, no meals
+  c.state.settings.breakMin = 30;
+  const a = activeTask(c, { id: 'a', name: 'A', planned: 120 });
+  const b = activeTask(c, { id: 'b', name: 'B', planned: 120 });
+  const { chunks } = pack(c, [a, b]);
+
+  // pool shrank by one break per packable family (2 × 30 = 60): 240 → 180, split evenly
+  assert.strictEqual(c._allot['a'].allotted, 90, 'allotment reflects the break-reduced pool');
+  assert.strictEqual(c._allot['b'].allotted, 90);
+
+  const aEnd = Math.max(...chunks.filter(x => x.id === 'a' && x.start).map(x => x.end));
+  const bStart = Math.min(...chunks.filter(x => x.id === 'b' && x.start).map(x => x.start));
+  const [first, second] = aEnd <= bStart ? [aEnd, bStart] : [
+    Math.max(...chunks.filter(x => x.id === 'b' && x.start).map(x => x.end)),
+    Math.min(...chunks.filter(x => x.id === 'a' && x.start).map(x => x.start))];
+  assert.ok((second - first) / MIN >= 30, 'at least a 30-min break separates the two tasks');
+});
