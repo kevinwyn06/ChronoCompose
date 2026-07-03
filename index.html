@@ -162,6 +162,7 @@ class Component extends DCLogic {
     this.rowH = 40;
     this.barH = 16;
     this.headH = 48;
+    this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
        day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
        toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
@@ -299,7 +300,7 @@ class Component extends DCLogic {
       {k:'start',w:150,l:'Start'},{k:'end',w:150,l:'Due'},
       {k:'dur',w:52,l:'Dur'},{k:'planned',w:78,l:'Planned'},{k:'spent',w:70,l:'Spent'},
       {k:'predicted',w:96,l:'Allot'},
-      {k:'pct',w:104,l:'% Done'},{k:'cdate',w:150,l:'Completed'}
+      {k:'pct',w:132,l:'% Done'} /* PP-EXT: Completed (cdate) column removed — completion date still lives in the detail panel */
     ];
   }
   orderedCols(){
@@ -1070,6 +1071,10 @@ class Component extends DCLogic {
       t.pct=pct; t.completion = pct>=100 ? (t.completion||Date.now()) : null;
     });
   }
+  /* PP-EXT: nudge % Done by ±PCT_STEP (occurrence-aware via setPct); used by the −/+ buttons in the pct cell. */
+  stepPct(id,dir){ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+    const cur = t.recur ? this.occPct(t,this.currentOccIdx(t)) : (t.pct||0);
+    this.setPct(id, cur + dir*this.PCT_STEP); }
   removeDep(toId,fromId){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===toId); if(t) t.deps=(t.deps||[]).filter(d=>this.depId(d)!==fromId); }); }
   isScheduled(t){ return t.start!=null && t.end!=null; }
   clearDate(id,key){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; if(key==='completion'){ t.completion=null; } else { t[key]=null; } }); }
@@ -2567,12 +2572,22 @@ class Component extends DCLogic {
       onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
       style:{textAlign:'left',color:'var(--text-2)'}});
 
-    const pctBar=h('div',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation(); const r=e.currentTarget.getBoundingClientRect(); this.setPct(t.id,(e.clientX-r.left)/r.width*100);},
-      title:t.recur?'Progress of current occurrence · click to set':'Click to set progress',
-      style:{position:'relative',width:'100%',height:'15px',background:'var(--pct-track)',borderRadius:'3px',overflow:'hidden',cursor:'pointer'}},
-      h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:dispPct+'%',background:done?'#2f9e5f':'#3f7bd6'}}),
-      h('span',{style:{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
-        fontSize:'10.5px',fontWeight:600,color:dispPct>50?'#fff':'var(--text-num)'}}, dispPct+'%'));
+    /* PP-EXT: % Done is now stepped with −/+ buttons (owner request). The bar remains a visual + click-to-set. */
+    const pctBtn=(label,dir)=>h('div',{onMouseDown:e=>e.stopPropagation(),
+      onClick:e=>{e.stopPropagation(); this.stepPct(t.id,dir);},
+      title:(dir>0?'Increase':'Decrease')+' % Done by '+this.PCT_STEP+'%',
+      style:{cursor:'pointer',flex:'none',width:'17px',height:'17px',display:'flex',alignItems:'center',justifyContent:'center',
+        fontSize:'13px',fontWeight:700,lineHeight:1,userSelect:'none',borderRadius:'3px',
+        color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)'}}, label);
+    const pctBar=h('div',{style:{display:'flex',alignItems:'center',gap:'5px',width:'100%'}},
+      pctBtn('−',-1),
+      h('div',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation(); const r=e.currentTarget.getBoundingClientRect(); this.setPct(t.id,(e.clientX-r.left)/r.width*100);},
+        title:t.recur?'Progress of current occurrence · click to set':'Click to set progress',
+        style:{position:'relative',flex:1,minWidth:0,height:'15px',background:'var(--pct-track)',borderRadius:'3px',overflow:'hidden',cursor:'pointer'}},
+        h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:dispPct+'%',background:done?'#2f9e5f':'#3f7bd6'}}),
+        h('span',{style:{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
+          fontSize:'10.5px',fontWeight:600,color:dispPct>50?'#fff':'var(--text-num)'}}, dispPct+'%')),
+      pctBtn('+',1));
 
     const durStr = this.isChore(t) ? '—' : Math.round(this.durDays(t))+'d';
     const overdue = !done && !this.isChore(t) && dispEnd!=null && dispEnd < Date.now(); /* PP-EXT: current instance */
@@ -2603,18 +2618,23 @@ class Component extends DCLogic {
       ref:el=>{ if(!el) return; this._descEls=this._descEls||{}; const prev=this._descEls[t.id]; if(prev===el) return;
         if(prev&&prev._descRo){ prev._descRo.disconnect(); prev._descRo=null; } this._descEls[t.id]=el; this.observeDescPanel(t.id,el); },
       style:{width:totalW+'px',cursor:'default',
-        background:'var(--card-bg)',borderTop:'1px solid var(--divider)',padding:'8px 16px 10px'}},
+        /* PP-EXT: row separator lives on the measured panel (bottom) so the Gantt, which adds descExtra=offsetHeight,
+           stays aligned; no borderTop — the cells row's own borderBottom already separates cells from the panel. */
+        background:'var(--card-bg)',borderBottom:'1px solid var(--row-border)',padding:'8px 16px 10px'}},
       this.richEditor(t,{minHeight:34})) : null;
     return h('div',{key:t.id,
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>this.rowPointerDown(e,t.id,i),
       onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
+      /* PP-EXT: NO borderBottom here — this outer div is auto-height, so a 1px border would add outside the
+         content and drift the sheet down 1px/row vs the Gantt (which lays rows out at exactly rowH). The
+         separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.ids.includes(t.id))?0.4:(t.archivedAt?0.45:1)/* PP-EXT: archived rows render dimmed */,
         background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
-        borderBottom:'1px solid var(--row-border)',
         boxShadow: bsh||'none'}},
-      h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px'}}/* PP-EXT: cells row (fixed height); panel stacks beneath */,
+      h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
+        borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,
         cols.map(c=>cell(c, content[c.k], extras[c.k]))),
       descPanel
     );
@@ -2655,10 +2675,13 @@ class Component extends DCLogic {
     /* /PP-EXT */
     const header=h('div',{title:'Click to drop a milestone on this date',
       onClick:e=>{ const r=e.currentTarget.getBoundingClientRect(); const day=Math.floor((e.clientX-r.left)/dayW); this.addMilestoneAt(tl.start+day*this.DAY+12*3600000); },
-      style:{position:'sticky',top:0,zIndex:6,background:'var(--top-bg)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px',cursor:'copy'}},
+      /* PP-EXT: NO borderBottom here — this outer div is auto-height (two 24px tiers = 48), so a 1px border would
+         add outside → a 49px header that offsets every Gantt row 1px below the sheet's 48px header. The border
+         lives on the day tier (fixed 24px → border-box absorbs it), keeping the header exactly headH like the sheet. */
+      style:{position:'sticky',top:0,zIndex:6,background:'var(--top-bg)',minWidth:totalW+'px',cursor:'copy'}},
       /* PP-EXT: relative rows host the absolutely-positioned (windowed) header cells */
       h('div',{style:{position:'relative',height:'24px',minWidth:totalW+'px'}},weekCells),
-      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',minWidth:totalW+'px'}},dayCells));
+      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px'}}/* PP-EXT: header bottom border here (fixed height absorbs it) so total header = headH, aligned with the sheet */,dayCells));
       /* /PP-EXT */
 
     // grid background  /* PP-EXT: windowed to [vd0,vd1] */
@@ -2705,7 +2728,10 @@ class Component extends DCLogic {
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
         return h('div',{key:'r'+t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
           onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
-          style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:this.rowH+'px',
+          /* PP-EXT: stripe spans the FULL expanded row (rowH + its desc panel), so opening a description grows
+             the expanded task's own Gantt row — hover/selection/border cover the whole thing — instead of the
+             blank space reading as the following row. The bar itself stays centered in the top rowH (see ganttBlock). */
+          style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:(this.rowH+this.descExtra(t))+'px',
             background: sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'),
             borderBottom:'1px solid var(--row-border-gantt)',
             boxShadow: crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'}}); }),

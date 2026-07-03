@@ -232,3 +232,26 @@ test('timers are multitasking: starting a second does NOT stop the first', () =>
   assert.ok(!c.isRunning(a.id) && c.isRunning(b.id), 'A stopped, B still running');
   assert.ok(Math.abs(c.state.tasks.find(x=>x.id===a.id).spent - 10) < 0.05);
 });
+
+// ---------------------------------------------------------------------------
+// % Done stepping (−/+ buttons) — stepPct nudges pct by ±PCT_STEP, clamped, snapped
+// ---------------------------------------------------------------------------
+test('stepPct increments/decrements pct by PCT_STEP and clamps at 0..100', () => {
+  const c = make();
+  const t = activeTask(c, { pct: 20 });
+  c.state.tasks = [t];
+  c.stepPct(t.id, 1);
+  assert.equal(c.state.tasks.find(x => x.id === t.id).pct, 20 + c.PCT_STEP, 'one + step up');
+  c.stepPct(t.id, -1); c.stepPct(t.id, -1);
+  assert.equal(c.state.tasks.find(x => x.id === t.id).pct, 20 - c.PCT_STEP, 'net one step down');
+  // clamp at 0
+  const lo = activeTask(c, { pct: 0 }); c.state.tasks = [lo];
+  c.stepPct(lo.id, -1);
+  assert.equal(c.state.tasks.find(x => x.id === lo.id).pct, 0, 'does not go below 0');
+  // clamp at 100 + marks completion
+  const hi = activeTask(c, { pct: 100 - c.PCT_STEP, completion: null }); c.state.tasks = [hi];
+  c.stepPct(hi.id, 1);
+  const done = c.state.tasks.find(x => x.id === hi.id);
+  assert.equal(done.pct, 100, 'reaches exactly 100');
+  assert.ok(done.completion, 'hitting 100 stamps a completion date');
+});
