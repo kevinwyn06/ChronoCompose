@@ -1407,11 +1407,12 @@ class Component extends DCLogic {
   }
 
   onMouseMove(e){
-    if(this._blockDrag){ /* PP-EXT: dragging a drawer timeline block (Phase 5) */
+    if(this._blockDrag){ /* PP-EXT: dragging a day-timeline block to pin it (per-day) */
       const bd=this._blockDrag; const dyPx=e.clientY-bd.startClientY;
       if(!bd.moved && Math.abs(dyPx)<4) return; bd.moved=true;
-      const B=this.startOfDay(this.state.nowTick||Date.now());
-      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/this.TL_PXPM)*60000, bd.dur, B, bd.targets);
+      const B=bd.day!=null?bd.day:this.startOfDay(this.state.nowTick||Date.now());
+      const px=bd.px||this.TL_PXPM; /* PP-EXT: match the scale the block was rendered at (fit-to-height) */
+      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/px)*60000, bd.dur, B, bd.targets);
       this.forceUpdate(); return;
     }
     if(this.colDrag){
@@ -2445,7 +2446,7 @@ class Component extends DCLogic {
     const t=kb.byId[c.id];
     return !!t && !(kb.kids[c.id] && kb.kids[c.id].length);
   }
-  blockPointerDown(e, c, B){
+  blockPointerDown(e, c, B, opts){
     if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
     const today=this.startOfToday(); if(B==null) B=today;
     let dur;
@@ -2453,7 +2454,8 @@ class Component extends DCLogic {
     else { const allot=(B===today)?this._allot:this.computeAllotted(this.state.tasks, B); /* PP-EXT: pin the day's own allotment */
       const a=allot&&allot[c.id]; dur=Math.round(a?a.allotted:((c.end-c.start)/60000)); }
     if(dur<=0) return;
-    this._blockDrag={ id:c.id, dur, day:B, startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
+    this._blockDrag={ id:c.id, dur, day:B, px:(opts&&opts.px)||this._curColPx||this.TL_PXPM, /* PP-EXT: px/min at render → calibrates the drag */
+      startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
       targets:this.snapTargets(c.id, B) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging */ };
     this.forceUpdate();
   }
@@ -2471,8 +2473,14 @@ class Component extends DCLogic {
     const kb=this.buildKids(this.state.tasks); /* PP-EXT: draggability = leaf, non-subtask blocks */
     const isToday=(B===this.startOfToday());
     const startHour=new Date(data.dayStart).getHours();
-    const dStart=data.dayStart, dEnd=data.dayEnd; const totalMin=(dEnd-dStart)/60000; const px=this.TL_PXPM;
-    const H=totalMin*px; const now=this.state.nowTick||Date.now();
+    const dStart=data.dayStart, dEnd=data.dayEnd; const totalMin=(dEnd-dStart)/60000;
+    /* PP-EXT: fit the timeline to the measured available height (no scroll until an Unscheduled list overflows).
+       Falls back to the fixed TL_PXPM scale before the container is measured. `_curColPx` feeds the block-drag
+       px→minutes conversion so dragging stays calibrated to whatever scale we render at. */
+    const px = (opts.availH && opts.availH>40) ? Math.max(0.15, opts.availH/totalMin) : this.TL_PXPM;
+    const H = (opts.availH && opts.availH>40) ? opts.availH : totalMin*px;
+    this._curColPx = px;
+    const now=this.state.nowTick||Date.now();
     const bd=this._blockDrag; /* PP-EXT: live drag-pin preview (only for the column being dragged) */
     const gut=showLabels?34:2, blkLeft=showLabels?40:4;
     const topOf=ms=>((ms-dStart)/60000)*px;
@@ -2519,22 +2527,35 @@ class Component extends DCLogic {
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     const unsched=data.chunks.filter(c=>!c.start);
     return h('div',{style:{position:'relative'}},
-      h('div',{style:{position:'relative',height:H+'px',margin:'4px 4px 0'}}, ...labels, ...grid, ...blocks, nowLine),
-      unsched.length? h('div',{style:{margin:'12px 4px 4px',padding:'8px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
+      /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
+         scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
+      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, nowLine),
+      unsched.length? h('div',{style:{margin:'8px 4px 4px',padding:'8px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
         h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'#e5824d',marginBottom:'5px'}},'⚠ Unscheduled'),
         ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
           c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:'')))) : null); /* PP-EXT: why it didn't fit */
   }
   /* ==== PP-EXT: multi-day timeline views (4-Day / Week) + Today + Schedule ==== */
-  /* Shared left hour gutter, aligned to the settings day-window scale (all day columns share it). */
-  renderHourGutter(){
-    const h=React.createElement; const s=this.state.settings; const px=this.TL_PXPM; const B=this.startOfToday();
+  /* Shared left hour gutter (multi-day). availH = the timeline body height so it aligns with the columns'
+     fitted scale; margin-top 26px clears the day-header row. */
+  renderHourGutter(availH){
+    const h=React.createElement; const s=this.state.settings; const B=this.startOfToday();
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
-    const startHour=new Date(winStart).getHours(), endHour=new Date(winEnd).getHours();
-    const H=((winEnd-winStart)/60000)*px; const labels=[];
+    const totalMin=(winEnd-winStart)/60000;
+    const px=(availH && availH>40) ? Math.max(0.15, availH/totalMin) : this.TL_PXPM;
+    const H=(availH && availH>40) ? availH : totalMin*px;
+    const startHour=new Date(winStart).getHours(), endHour=new Date(winEnd).getHours(); const labels=[];
     for(let hh=startHour; hh<=endHour; hh++){ const ms=new Date(winStart); ms.setHours(hh,0,0,0);
       labels.push(h('div',{key:'gl'+hh,style:{position:'absolute',top:((ms.getTime()-winStart)/60000)*px+'px',left:0,fontSize:'10px',color:'var(--text-mut2)',fontWeight:600}},((hh%12)||12)+(hh<12?'a':'p'))); }
-    return h('div',{style:{flex:'none',width:'26px'}}, h('div',{style:{position:'relative',height:H+'px',margin:'26px 0 0'}}, ...labels));
+    return h('div',{style:{flex:'none',width:'26px'}}, h('div',{style:{position:'relative',height:H+'px',margin:'26px 0 0',overflow:'hidden'}}, ...labels));
+  }
+  /* PP-EXT: measure a timeline scroll container's client height so renderDayColumn can fit the day vertically.
+     Browser-only (ResizeObserver); re-renders once when the height changes. */
+  observeTLHeight(el){
+    if(!el || typeof ResizeObserver==='undefined') return;
+    const read=()=>{ const hh=el.clientHeight; if(hh && Math.abs((this._tlAvailH||0)-hh)>1){ this._tlAvailH=hh; this.forceUpdate(); } };
+    read();
+    if(!el._tlRo){ el._tlRo=new ResizeObserver(read); el._tlRo.observe(el); }
   }
   dayHeaderLabel(B){ const d=new Date(B);
     return {dow:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()], dom:d.getDate(),
@@ -2543,22 +2564,30 @@ class Component extends DCLogic {
      task is hovered) sits above each column; today's header is accented. Columns share the left hour gutter. */
   renderMultiDayView(days, header){
     const h=React.createElement; const today=this.startOfToday(); const hoverId=this.state.hoverId;
+    /* PP-EXT: one shared vertical scroll (so all columns scroll TOGETHER when an Unscheduled list overflows);
+       columns fit the viewport otherwise. availH = shared height − the 26px day-header row. */
+    /* PP-EXT: fit the columns to the shared height minus the day-header row (the body clips its last label, so
+       no extra tail needed); only an Unscheduled list grows a column and triggers the shared scroll. */
+    const DHH=26; const availH=(this._tlAvailH && this._tlAvailH>DHH+40) ? this._tlAvailH-DHH : null;
     const cols=days.map((B,i)=>{
       const lab=this.dayHeaderLabel(B); const isToday=(B===today);
       const glow=hoverId!=null && this.tasksOnDay(B).includes(hoverId); /* hovering a task → its day header glows */
       const isHoverDay=this.state.hoverDay===B;
       const hdr=h('div',{key:'h',onMouseEnter:()=>this.setState({hoverDay:B}), onMouseLeave:()=>this.setState({hoverDay:null}),
-        style:{flex:'none',height:'26px',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',cursor:'default',
+        style:{flex:'none',height:DHH+'px',display:'flex',alignItems:'center',justifyContent:'center',gap:'5px',cursor:'default',
+          position:'sticky',top:0,zIndex:2, /* PP-EXT: keep day headers visible while the shared column body scrolls */
           borderBottom:'1px solid var(--row-border-gantt)',fontSize:'11.5px',fontWeight:700,
-          color:isToday?'#fff':'var(--text-2)',background:glow?'rgba(245,181,54,0.30)':(isToday?this._accent:(isHoverDay?'var(--hover)':'transparent')),
+          color:isToday?'#fff':'var(--text-2)',background:glow?'rgba(245,181,54,0.30)':(isToday?this._accent:(isHoverDay?'var(--hover)':'var(--gantt-bg)')),
           boxShadow:glow?'inset 0 0 0 2px rgba(245,181,54,0.75)':'none'}},
         h('span',{},lab.dow),h('span',{style:{opacity:0.85,fontWeight:600}},lab.dom));
-      return h('div',{key:'col'+i,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',
+      return h('div',{key:'col'+i,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',
         borderRight:i<days.length-1?'1px solid var(--row-border-gantt)':'none'}},
-        hdr, h('div',{style:{flex:1,minWidth:0}}, this.renderDayColumn(B, {showLabels:false}))); });
+        hdr, h('div',{style:{flex:'none',minWidth:0}}, this.renderDayColumn(B, {showLabels:false, availH}))); });
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header||null,
-      h('div',{style:{flex:1,minHeight:0,display:'flex',overflow:'auto'}}, this.renderHourGutter(), ...cols));
+      h('div',{ref:el=>this.observeTLHeight(el),
+        style:{flex:1,minHeight:0,display:'flex',alignItems:'flex-start',overflow:'auto'}},
+        this.renderHourGutter(availH), ...cols));
   }
   next4Days(){ const B=this.startOfToday(); const out=[]; for(let i=0;i<4;i++){ const d=new Date(B); d.setDate(d.getDate()+i); out.push(d.getTime()); } return out; }
   weekStartMs(){ const a=this.state.weekAnchor!=null?this.state.weekAnchor:this.startOfToday();
@@ -2620,15 +2649,21 @@ class Component extends DCLogic {
       style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
       background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
       '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
+    /* PP-EXT: fit today's timeline to the pane (no scroll unless an Unscheduled list overflows). availH = the
+       scroll wrapper's height minus its ~12px vertical padding (the body clips its last hour label). */
+    const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header, gerr, note, runbar,
-      h('div',{style:{flex:1,overflow:'auto',padding:'6px 8px'}}, this.renderDayColumn(B, {showLabels:true})));
+      h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
+        this.renderDayColumn(B, {showLabels:true, availH})));
   }
   /* Schedule (agenda) view — one column, a divider per day (next 7), each day's scheduled blocks as chips with
-     start–end times. Display-only (no drag). */
+     start–end times. Leaf flexible chips are draggable (vertical drag → pin at a time for that day, 15-min snap,
+     the same machinery as the timeline columns; a nominal px/min is used since the agenda has no time axis). */
   renderScheduleView(){
     const h=React.createElement; const today=this.startOfToday(); const days=[]; for(let i=0;i<7;i++){ const d=new Date(today); d.setDate(d.getDate()+i); days.push(d.getTime()); }
-    const hoverId=this.state.hoverId;
+    const hoverId=this.state.hoverId; const kb=this.buildKids(this.state.tasks); const bd=this._blockDrag;
+    const SCHED_PX=this.TL_PXPM; /* drag sensitivity in this list (px per minute) */
     const fmtClock=ms=>{ const d=new Date(ms); let hh=d.getHours(), mm=d.getMinutes(); const ap=hh<12?'a':'p'; hh=(hh%12)||12; return hh+':'+String(mm).padStart(2,'0')+ap; };
     const TYP=this.TL_TYP();
     const sections=days.map((B,di)=>{
@@ -2645,12 +2680,25 @@ class Component extends DCLogic {
         h('div',{style:{flex:1}}),
         h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}}, timed.length?(timed.length+' block'+(timed.length>1?'s':'')):'—'));
       const chips=timed.map((c,i)=>{ const ty=TYP[c.type]||TYP.scheduled; const running=c.id&&this.isRunning(c.id);
-        return h('div',{key:'sc'+i,title:c.goal?('Goal: '+c.goal):c.title,
+        const canDrag=this.blockDraggable(c, kb);
+        const dragging = bd && bd.moved && bd.id===c.id && bd.day===B;
+        const span=c.end-c.start; const st=dragging?bd.previewStart:c.start; const en=dragging?bd.previewStart+span:c.end;
+        const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id);},onMouseDown:e=>e.stopPropagation(),
+          title:'Unpin (return to flexible scheduling)',
+          style:{flex:'none',cursor:'pointer',width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+            fontSize:'9px',background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕') : null;
+        return h('div',{key:'sc'+i,
+          title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
+          onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
           style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
-            background:ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,boxShadow:'0 1px 2px rgba(0,0,0,0.12)'}},
-          h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',opacity:0.85,fontWeight:700}}, fmtClock(c.start)+'–'+fmtClock(c.end)),
+            background:ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,
+            boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 2px rgba(0,0,0,0.12)',
+            cursor:canDrag?(dragging?'grabbing':'grab'):'default',opacity:dragging?0.9:1,
+            border:c.dragPin?'1px dashed rgba(35,53,41,0.55)':'1px solid transparent'}},
+          h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',opacity:0.85,fontWeight:700}}, fmtClock(st)+'–'+fmtClock(en)),
           h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title),
-          c.type!=='meal'?h('div',{onClick:()=>this.toggleTimer(c.id),title:running?'Stop timer':'Start timer',
+          unpin,
+          c.type!=='meal'?h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer',
             style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
               fontSize:'9px',background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'#fff':'#1a73e8'}}, running?'■':'▶'):null); });
       const unl = unsched.length? h('div',{style:{margin:'4px 12px',fontSize:'11px',color:'#e5824d'}},
