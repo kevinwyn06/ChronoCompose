@@ -2132,7 +2132,10 @@ class Component extends DCLogic {
     const calById={}; (g.calendars||[]).forEach(c=>calById[c.id]=c);
     const evUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin='+encodeURIComponent(timeMin)+'&timeMax='+encodeURIComponent(tmax);
     if(!opts.silent) this.gcalMsg('Importing…');
-    Promise.all(ids.map(cid=>this.gcalFetch(evUrl(cid)).then(d=>({cid,items:d.items||[]}))))
+    const gone=[]; /* PP-EXT: selected calendars that 404/410 — removed from Google or access revoked; skip them instead of failing the whole sync */
+    Promise.all(ids.map(cid=>this.gcalFetch(evUrl(cid)).then(d=>({cid,items:d.items||[]}))
+      .catch(e=>{ if(e.status===404||e.status===410){ gone.push(cid); return null; } throw e; })))
+    .then(all=>all.filter(Boolean))
     .then(results=>{
       // Resolve each distinct recurring series' master once (for its RRULE) so occurrences collapse to one task.
       const need={}; results.forEach(({cid,items})=>items.forEach(ev=>{ if(ev.recurringEventId) need[cid+'|'+ev.recurringEventId]={cid,id:ev.recurringEventId}; }));
@@ -2143,6 +2146,7 @@ class Component extends DCLogic {
     })
     .then(({results,masters})=>{
       const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
+      const liveIds=ids.filter(id=>gone.indexOf(id)<0); /* PP-EXT: never prune tasks of a calendar we couldn't reach — that empty result isn't proof the events were deleted */
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
       if(opts.silent){
@@ -2150,20 +2154,30 @@ class Component extends DCLogic {
         const before=JSON.stringify(this.state.tasks);
         const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
         const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb);
-        const removed=this.pruneDeletedEvents(clone,results,ids);
+        const removed=this.pruneDeletedEvents(clone,results,liveIds);
         if(JSON.stringify(clone)!==before){
           this.commit(tasks=>{ tasks.length=0; clone.forEach(t=>tasks.push(t)); });
           if(r.added||removed) this.gcalMsg('Auto-synced: +'+r.added+' new, −'+removed+' removed.');
         }
       } else {
         let r={added:0,updated:0}, removed=0;
-        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb); removed=this.pruneDeletedEvents(tasks,results,ids); });
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb); removed=this.pruneDeletedEvents(tasks,results,liveIds); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
       }
       } finally { this._gcalApplying=false; } /* PP-EXT */
       this.gcalClearError(); /* PP-EXT: a successful sync clears any stale failure banner */
+      this.gcalDropGone(gone,calById); /* PP-EXT: auto-deselect any removed/unreachable calendars so polling stops re-failing */
     }).catch(e=>{ this.gcalError(e); if(!opts.silent) this.gcalMsg('Import failed: '+e.message); })
       .then(()=>{ this._gcalSyncing=false; });
+  }
+  /* PP-EXT: drop calendars that returned 404/410 from the selection so we stop polling a calendar the user
+     deleted (or lost access to). Imported tasks are left in place — a fetch failure isn't proof they were deleted. */
+  gcalDropGone(gone,calById){
+    if(!gone||!gone.length) return;
+    const sel=Object.assign({},this.state.gcal.selected);
+    const names=gone.map(cid=>{ delete sel[cid]; const c=calById&&calById[cid]; return c&&c.summary?c.summary:cid; });
+    this.saveGcal({selected:sel});
+    this.gcalMsg('Calendar no longer available — deselected: '+names.join(', ')+'.');
   }
   /* Background poll tick (fires on a fixed cadence; gated by the configurable interval + tab visibility + auth). */
   gcalMaybeSync(){

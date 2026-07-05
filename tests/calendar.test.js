@@ -102,6 +102,20 @@ test('pruneDeletedEvents: removes deleted, keeps manual and unselected-calendar 
   assert.deepEqual(ids, ['L','M','O'], 'dead removed; manual + other-cal kept');
 });
 
+test('pruneDeletedEvents: a calendar excluded from selectedIds (404/removed) keeps its tasks', () => {
+  // gcalImport drops a calendar that returned 404/410 from the prune's selectedIds so an unreachable
+  // calendar never wipes its imported tasks — a failed fetch isn't proof the events were deleted.
+  const c = make();
+  const kept = c.normalizeTask({ id:'G', name:'from-gone-cal', calendarId:'calGone', eventId:'e_g' });
+  const live = c.normalizeTask({ id:'L', name:'live', calendarId:'cal1', eventId:'e_live' });
+  const tasks = [kept, live];
+  const results = [{ cid:'cal1', items:[ { id:'e_live', start:{dateTime:'2026-07-01T09:00:00Z'} } ] }];
+  // 'calGone' is intentionally NOT in selectedIds (it 404'd, so gcalImport excluded it)
+  const removed = c.pruneDeletedEvents(tasks, results, ['cal1']);
+  assert.strictEqual(removed, 0, 'nothing pruned');
+  assert.deepEqual(tasks.map(t=>t.id).sort(), ['G','L'], 'gone-calendar task preserved');
+});
+
 test('pruneDeletedEvents: recurring series kept if any instance present, removed if none', () => {
   const c = make();
   const series = c.normalizeTask({ id:'S', name:'series', calendarId:'cal1', eventId:'m1' });
