@@ -164,6 +164,8 @@ class Component extends DCLogic {
     this.barH = 16;
     this.headH = 48;
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
+    this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
+    this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
@@ -1388,7 +1390,12 @@ class Component extends DCLogic {
     const sel=this.state.selectedIds;
     const ids=(sel.includes(p.id)&&sel.length>1) ? this.state.tasks.filter(t=>sel.includes(t.id)).map(t=>t.id) : [p.id];
     this.rowDragMoved=false;
-    this._rowDrag={ids,primaryId:p.id,fromIndex:p.index,overIndex:p.index};
+    /* PP-EXT: drag-to-nest — the dragged rows AND their whole subtrees ride along, so they're excluded from
+       neighbour detection (prevents a row nesting under its own descendant) and dimmed together. */
+    const kids=(this.buildKids(this.state.tasks)).kids;
+    const moveSet={}; ids.forEach(id=>this.subtreeIds(id,kids).forEach(x=>moveSet[x]=1));
+    this._rowDrag={ids,primaryId:p.id,fromIndex:p.index,overIndex:p.index,
+      startX:p.x, x:p.x, y:p.y, depth:(this._depth&&this._depth[p.id])||0, parentId:null, moveSet};
     this.setState({rowDrag:this._rowDrag, menu:null});
   }
   rowAtInsert(clientY){
@@ -1398,17 +1405,42 @@ class Component extends DCLogic {
     const idx=Math.round(y/this.rowH);
     return Math.max(0, Math.min((this._visTasks||this.state.tasks).length, idx)); /* PP-EXT: rows are the VISIBLE list */
   }
-  reorderRows(ids,to){
+  /* PP-EXT: drag-to-nest — PURE projection of a row-drop into {index, depth, parentId}. Given the visible rows,
+     a depth map + full byId (for the ancestor walk), the insertion gap, the set of rows riding along (moveSet),
+     and a horizontal nest intent in whole levels (steps: +right nests, −left outdents), it resolves which parent
+     the dropped rows attach to. The default (steps 0) keeps the row a sibling of the row above, so a plain
+     vertical drag never nests. Clamped to the depth range the gap allows; parent is always outside moveSet (prev
+     is), so no cycles. IO-free → unit-tested in tests/_load.js. */
+  projectRowDrop(vis, depthOf, byId, overIndex, moveSet, steps){
+    const moves=id=>!!(moveSet&&moveSet[id]);
+    let prev=null; for(let i=overIndex-1;i>=0;i--){ if(!moves(vis[i].id)){ prev=vis[i]; break; } }
+    let next=null; for(let i=overIndex;i<vis.length;i++){ if(!moves(vis[i].id)){ next=vis[i]; break; } }
+    const prevD = prev ? (depthOf[prev.id]||0) : -1;
+    let maxDepth = prev ? prevD+1 : 0;         /* deepest: a child of the row above */
+    let minDepth = next ? (depthOf[next.id]||0) : 0; /* shallowest: sibling of the row below (else it'd swallow next) */
+    if(maxDepth<minDepth) maxDepth=minDepth;
+    const basis = prev ? prevD : 0;            /* steps 0 ⇒ sibling of the row above */
+    let depth = Math.max(minDepth, Math.min(maxDepth, basis + (steps||0)));
+    let parentId=null;
+    if(depth>0 && prev){ let anc=prev; while(anc && (depthOf[anc.id]||0)>=depth){ anc=(anc.parentId!=null)?byId[anc.parentId]:null; } parentId=anc?anc.id:null; }
+    return {index:overIndex, depth, parentId};
+  }
+  reorderRows(ids,to,parentId){
     /* PP-EXT: `to` indexes the VISIBLE rows (archived may be hidden) — anchor on the first visible non-moving
-       task at/after `to`, then splice against the full array so hidden tasks keep their positions. */
+       task at/after `to`, then splice against the full array so hidden tasks keep their positions. When called
+       from drag-to-nest, `parentId` re-parents the moving roots (their subtrees ride along via
+       normalizeTreeOrder); undefined means "keep current parent" (plain reorder). */
     const vis=this._visTasks||this.state.tasks;
     let anchorId=null; for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
+    const reparent = parentId!==undefined; /* PP-EXT */
     this.commit(tasks=>{
       const moving=tasks.filter(t=>ids.includes(t.id));
+      if(reparent) moving.forEach(t=>{ t.parentId = parentId; }); /* PP-EXT: descendants keep pointing here → carried along */
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
       let ti = anchorId==null ? tasks.length : tasks.findIndex(t=>t.id===anchorId);
       if(ti<0) ti=tasks.length;
       tasks.splice(ti,0,...moving);
+      if(reparent) this.normalizeTreeOrder(tasks); /* PP-EXT: re-gather each moved subtree contiguously under its new parent */
     });
     setTimeout(()=>this.persistRowOrder(), 0);
   }
@@ -1442,8 +1474,17 @@ class Component extends DCLogic {
       if(Math.abs(e.clientY-this.rowPending.y)>4 || Math.abs(e.clientX-this.rowPending.x)>4) this.beginRowDrag();
     }
     if(this._rowDrag){
-      const rd=this._rowDrag; const oi=this.rowAtInsert(e.clientY);
-      if(oi!==rd.overIndex){ rd.overIndex=oi; this.rowDragMoved=true; this.setState({rowDrag:Object.assign({},rd)}); }
+      const rd=this._rowDrag;
+      rd.x=e.clientX; rd.y=e.clientY; /* PP-EXT: floating drag ghost tracks the cursor */
+      const oi=this.rowAtInsert(e.clientY);
+      /* PP-EXT: drag-to-nest — horizontal offset past the deadzone picks a nesting level (right nests, left outdents) */
+      const dx=e.clientX-rd.startX;
+      const steps=(Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
+      const vis=this._visTasks||this.state.tasks;
+      const drop=this.projectRowDrop(vis, this._depth||{}, this._byId||{}, oi, rd.moveSet, steps);
+      if(oi!==rd.overIndex || drop.depth!==rd.depth || drop.parentId!==rd.parentId) this.rowDragMoved=true;
+      rd.overIndex=oi; rd.depth=drop.depth; rd.parentId=drop.parentId; rd.dropParentId=drop.parentId;
+      this.setState({rowDrag:Object.assign({},rd)}); /* PP-EXT: re-render every move so the ghost follows smoothly */
       return;
     }
     if(this.dragState){
@@ -1491,7 +1532,7 @@ class Component extends DCLogic {
     }
     if(this._rowDrag){
       const rd=this._rowDrag; this._rowDrag=null; this.rowPending=null;
-      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex); }
+      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex, rd.dropParentId); }
       this.rowDragMoved=false; this.setState({rowDrag:null}); return;
     }
     if(this.rowPending){ this.rowPending=null; }
@@ -1674,7 +1715,7 @@ class Component extends DCLogic {
       this._visTasks=this.visibleTasks();
       /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
       const kb=this.buildKids(this.state.tasks);
-      this._kids=kb.kids; this._depth={};
+      this._kids=kb.kids; this._byId=kb.byId; this._depth={}; /* PP-EXT: _byId cached for the drag-to-nest ancestor walk */
       this.state.tasks.forEach(t=>{ this._depth[t.id]=this.depthOf(t.id, kb.byId); });
     }
     const tasks = this._visTasks;
@@ -2926,7 +2967,8 @@ class Component extends DCLogic {
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
       this.state.settingsOpen ? this.renderSettings() : null,
-      this.state.scopePrompt ? this.renderScopePrompt() : null
+      this.state.scopePrompt ? this.renderScopePrompt() : null,
+      this.state.rowDrag ? this.renderRowDragGhost() : null /* PP-EXT: floating drag-to-nest ghost */
     );
   }
 
@@ -2981,6 +3023,50 @@ class Component extends DCLogic {
       style:{flex:1,overflow:'auto',minHeight:0}}, inner);
   }
 
+  /* PP-EXT: drag-to-nest visuals — the indented insertion bar for row `i` (offset to the projected depth so a
+     nest reads as "goes deeper") plus a box-shadow ring on the prospective parent row. Shared by the normal and
+     milestone row renderers so both look identical mid-drag. */
+  rowDropDeco(t,i){
+    const rd=this.state.rowDrag;
+    if(!rd) return {bar:null, glow:''};
+    const h=React.createElement;
+    const acc=this._accent;
+    const visN=(this._visTasks||this.state.tasks).length;
+    const indent = 8 + (rd.depth||0)*16; /* PP-EXT: align the bar with the name indent (depth*16) */
+    const mkBar=(edge)=>h('div',{key:'ppdrop',style:Object.assign({position:'absolute',left:indent+'px',right:'6px',height:'2px',
+        background:acc,borderRadius:'2px',zIndex:7,pointerEvents:'none',boxShadow:'0 0 0 1.5px var(--sheet-bg)'}, edge)},
+      h('div',{style:{position:'absolute',left:'-3px',top:'-2px',width:'6px',height:'6px',borderRadius:'50%',background:acc}}));
+    let bar=null;
+    if(rd.overIndex===i) bar=mkBar({top:'-1px'});
+    else if(rd.overIndex===visN && i===visN-1) bar=mkBar({bottom:'-1px'});
+    /* PP-EXT: highlight the row the dragged task would drop INTO (nesting), unless it's part of the moving set */
+    const nesting = rd.dropParentId!=null && rd.dropParentId===t.id && !(rd.moveSet&&rd.moveSet[t.id]);
+    const glow = nesting ? (',inset 0 0 0 1.5px '+acc) : '';
+    return {bar, glow};
+  }
+  /* PP-EXT: drag-to-nest — the floating "lifted" card that follows the cursor while a row is dragged. Shows the
+     primary task name, a +N badge for multi-row drags, and a live "into <parent>" / "to top level" hint when the
+     drop would re-parent. position:fixed + pointer-events:none so it never intercepts the drag. */
+  renderRowDragGhost(){
+    const rd=this.state.rowDrag; if(!rd || !this.rowDragMoved) return null;
+    const h=React.createElement; const acc=this._accent;
+    const byId=this._byId||{}; const prim=byId[rd.primaryId]; if(!prim) return null;
+    const moreN=(rd.ids&&rd.ids.length>1)?rd.ids.length-1:0;
+    const orig=(prim.parentId!=null)?prim.parentId:null;
+    const changed=(rd.dropParentId!==undefined) && (rd.dropParentId!==orig);
+    const par=(rd.dropParentId!=null)?byId[rd.dropParentId]:null;
+    const sub=changed ? (par ? ('↳ into '+(par.name||'untitled')) : '↳ to top level') : null;
+    return h('div',{style:{position:'fixed',left:((rd.x||0)+14)+'px',top:((rd.y||0)+10)+'px',zIndex:4000,pointerEvents:'none',
+        padding:'7px 11px',borderRadius:'8px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
+        boxShadow:'0 10px 26px rgba(0,0,0,0.30), 0 2px 6px rgba(0,0,0,0.18)',transform:'rotate(-1.3deg)',opacity:0.96,
+        display:'flex',flexDirection:'column',gap:'2px'}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:'7px'}},
+        h('span',{style:{color:'var(--text-faint)',fontSize:'12px'}},'⠿'),
+        h('span',{style:{fontSize:'13px',fontWeight:600,color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'240px'}}, prim.name||'untitled'),
+        moreN?h('span',{style:{fontSize:'10.5px',fontWeight:700,color:'#fff',background:acc,borderRadius:'9px',padding:'1px 7px'}},'+'+moreN):null),
+      sub?h('div',{style:{fontSize:'11px',fontWeight:600,color:acc,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'260px'}}, sub):null
+    );
+  }
   sheetRow(t,i,cols,totalW,byId){
     const h=React.createElement;
     const crit=this._showCP && this._cpm.critical[t.id];
@@ -3010,19 +3096,18 @@ class Component extends DCLogic {
       const mrd=this.state.rowDrag;
       let mbsh = crit?'inset 3px 0 0 #e5484d':(sel?'inset 2px 0 0 #3b82f6':'inset 3px 0 0 '+mcol);
       if(this._glowIds && this._glowIds.has(t.id)) mbsh+=',inset 0 0 0 9999px rgba(245,181,54,0.18)'; /* PP-EXT: month-view day glow (Phase 6) */
-      if(mrd && mrd.overIndex===i) mbsh+=',inset 0 2px 0 0 '+this._accent;
-      const mvisN=(this._visTasks||this.state.tasks).length; /* PP-EXT */
-      if(mrd && mrd.overIndex===mvisN && i===mvisN-1) mbsh+=',inset 0 -2px 0 0 '+this._accent;
+      const mdeco=this.rowDropDeco(t,i); /* PP-EXT: drag-to-nest indented bar + parent-nest ring */
+      if(mdeco.glow) mbsh+=mdeco.glow;
       return h('div',{key:t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
         onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
-        style:{display:'flex',alignItems:'center',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',gap:'10px',padding:'0 9px',
-          opacity:(mrd&&mrd.ids.includes(t.id))?0.4:1,
+        style:{display:'flex',alignItems:'center',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',gap:'10px',padding:'0 9px',position:'relative'/* PP-EXT: anchors the drop bar */,
+          opacity:(mrd&&mrd.moveSet&&mrd.moveSet[t.id])?0.4:1,
           background: sel?'var(--sel)':(hov?'var(--hover)':'rgba(137,87,229,0.06)'),
           borderBottom:'1px solid var(--row-border)', borderTop:'1px solid rgba(137,87,229,0.18)',
           boxShadow: mbsh}},
-        mgrip,
+        mdeco.bar/* PP-EXT */, mgrip,
         h('div',{style:{flex:'0 0 20px',display:'flex',justifyContent:'center'}},diamond),
         h('span',{style:{color:'var(--text-faint)',fontVariantNumeric:'tabular-nums',fontSize:'11.5px',flex:'0 0 18px'}}, seqOf[t.id]||''),
         h('span',{style:{fontSize:'9px',fontWeight:700,letterSpacing:'0.6px',color:mcol,textTransform:'uppercase',
@@ -3169,9 +3254,8 @@ class Component extends DCLogic {
     /* PP-EXT: calendar day-hover glow — hovering a day (Month/Week/4-Day/Schedule) sets _glowIds via renderVals;
        this is the NORMAL-row wash (the milestone + Gantt rows already had it; the plain rows were the missing case). */
     if(this._glowIds && this._glowIds.has(t.id)) bsh = (bsh?bsh+',':'')+'inset 0 0 0 9999px rgba(245,181,54,0.16)';
-    const visN=(this._visTasks||this.state.tasks).length; /* PP-EXT: rows are the visible list (archived may be hidden) */
-    if(rd && rd.overIndex===i) bsh = (bsh?bsh+',':'')+'inset 0 2px 0 0 '+this._accent;
-    if(rd && rd.overIndex===visN && i===visN-1) bsh = (bsh?bsh+',':'')+'inset 0 -2px 0 0 '+this._accent; /* PP-EXT */
+    const deco=this.rowDropDeco(t,i); /* PP-EXT: drag-to-nest indented bar + parent-nest ring */
+    if(deco.glow) bsh = (bsh?bsh:'')+deco.glow;
     /* PP-EXT: inline description panel — an in-flow block below the row's cells spanning the sheet (non-Gantt)
        width. It pushes the rows below it down; the Gantt offsets its matching rows by the panel's measured
        height (observeDescPanel → this._descH → yOfRow) so the side-by-side Gantt bars stay row-aligned. */
@@ -3191,13 +3275,14 @@ class Component extends DCLogic {
          content and drift the sheet down 1px/row vs the Gantt (which lays rows out at exactly rowH). The
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
-        opacity:(rd&&rd.ids.includes(t.id))?0.4:(t.archivedAt?0.45:1)/* PP-EXT: archived rows render dimmed */,
+        opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
         background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
         borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,
         cols.map(c=>cell(c, content[c.k], extras[c.k]))),
-      descPanel
+      descPanel,
+      deco.bar /* PP-EXT: drag-to-nest indented insertion bar */
     );
   }
 
