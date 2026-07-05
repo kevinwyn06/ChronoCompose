@@ -1940,14 +1940,28 @@ class Component extends DCLogic {
     if(tz){ a.timeZone=tz; b.timeZone=tz; }
     return {start:a, end:b};
   }
+  /* PP-EXT: our description is sanitized rich HTML; Google's event description is plain text. Flatten block
+     boundaries to newlines, bullets to "• ", drop remaining tags, decode the few entities we emit. Pure. */
+  descToText(html){
+    if(!html) return '';
+    return String(html)
+      .replace(/<li[^>]*>/gi,'• ')
+      .replace(/<\s*(?:br|\/p|\/div|\/li|\/h[1-6]|\/ul|\/ol)\s*\/?>/gi,'\n')
+      .replace(/<[^>]*>/g,'')
+      .replace(/&nbsp;/gi,' ').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>')
+      .replace(/&#39;/gi,"'").replace(/&quot;/gi,'"')
+      .replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  }
   eventBodyOf(t, includeRecurrence){
     const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, t.end, !!t.allDay));
+    body.description=this.descToText(t.description); /* PP-EXT: push description outbound as plain text (import still never overwrites the local rich copy) */
     if(includeRecurrence && t.recur){ const r=this.recurToRRule(t.recur); if(r) body.recurrence=[r]; }
     return body;
   }
-  /* The sync fingerprint: only these fields round-trip (planned/goal/description/pins stay local). */
+  /* The sync fingerprint: these fields round-trip outbound (planned/goal/pins stay local; description pushes
+     out but import never overwrites the local rich-text copy). */
   recurRuleKey(r){ return r?JSON.stringify({k:r.kind,n:r.n||1,d:r.days||null,day:r.day!=null?r.day:null,u:r.until!=null?r.until:null}):null; }
-  syncFp(t){ return JSON.stringify({n:t.name,s:t.start,e:t.end,a:!!t.allDay,r:this.recurRuleKey(t.recur)}); }
+  syncFp(t){ return JSON.stringify({n:t.name,s:t.start,e:t.end,a:!!t.allDay,r:this.recurRuleKey(t.recur),d:this.descToText(t.description)}); }
   /* Google instance id suffix = the ORIGINAL (rule-generated) start, UTC basic format (date-only if all-day). */
   instStamp(ms, allDay){ const d=new Date(ms), p=n=>String(n).padStart(2,'0');
     if(allDay) return ''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate());
@@ -1983,6 +1997,7 @@ class Component extends DCLogic {
     const aById={}; after.forEach(t=>aById[t.id]=t);
     after.forEach(t=>{
       if(t.parentId || t.archivedAt || this.isMilestone(t)) return;
+      if(!this.isScheduled(t)) return; /* PP-EXT: a dateless task has no start/end — it can't be a calendar event (would push a 1970-epoch block); skip until it's given dates */
       const b=bById[t.id];
       if(!t.eventId){
         if(!b || this.syncFp(b)!==this.syncFp(t)) ops.push({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)});
@@ -2041,6 +2056,21 @@ class Component extends DCLogic {
   }
   gcalFlushSoon(){ clearTimeout(this._gcalFlushT);
     this._gcalFlushT=setTimeout(()=>this.gcalFlushQueue(), this.GCAL_FLUSH_DEBOUNCE_MS); }
+  /* PP-EXT: which local tasks have never been pushed to Google and are eligible to be (dated, not a
+     subtask/milestone/archived, no eventId yet). Pure, so it's unit-testable and drives the button label. */
+  gcalBackfillable(){ return (this.state.tasks||[]).filter(t=>
+    !t.eventId && !t.parentId && !t.archivedAt && !this.isMilestone(t) && this.isScheduled(t)); }
+  /* PP-EXT: one-time backfill — enqueue an insert for every never-synced local task so it lands in the
+     dedicated ChronoCompose calendar. Turns two-way on (backfilling implies it) and writes to the real
+     calendar, so it's an explicit button, never automatic. */
+  gcalBackfill(){
+    if(!this._token){ this.gcalMsg('Sign in with Google first.'); return; }
+    const eligible=this.gcalBackfillable();
+    if(!eligible.length){ this.gcalMsg('Nothing to backfill — every dated task is already synced.'); return; }
+    if(!this.state.settings.gcalTwoWay) this.saveSettings({gcalTwoWay:true}); /* backfilling implies two-way */
+    this.gcalEnqueue(eligible.map(t=>({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)})));
+    this.gcalMsg('Backfilling '+eligible.length+' task'+(eligible.length>1?'s':'')+' into the ChronoCompose calendar…');
+  }
   /* Find-or-create the dedicated "ChronoCompose" calendar; id persists in pp-gcal.ccCalId. */
   gcalEnsureCalendar(){
     const g=this.state.gcal;
@@ -2298,14 +2328,21 @@ class Component extends DCLogic {
       h('div',{style:{padding:'2px 0 8px'}}, this.googleSignInBtn()),
       setRow('Import window (days)', inp(g.window||30,v=>{ this.saveGcal({window:Math.max(1,parseInt(v)||30)}); this.gcalSyncSoon(); })),
       setRow('Auto-sync every (sec)', inp(s.gcalPollSec||60,v=>this.saveSettings({gcalPollSec:Math.max(20,parseInt(v)||60)}))),
-      /* PP-EXT: two-way sync toggle (ROADMAP Phase 2) — off by default until the owner signs off */
+      /* PP-EXT: two-way sync toggle (ROADMAP Phase 2) — owner-blessed; enable via this toggle or the Backfill button */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Two-way sync (beta)',
-          this.infoNote('When on, your changes push to Google: tasks you create or edit here become events in a dedicated "ChronoCompose" calendar; edits to imported tasks update their own calendar; deleting a linked task deletes its event. Writes are debounced and queued (they survive reloads and expired sign-ins). Planned/Spent/descriptions/pins stay local.')),
+          this.infoNote('When on, your changes push to Google: tasks you create or edit here become events in a dedicated "ChronoCompose" calendar; edits to imported tasks update their own calendar; deleting a linked task deletes its event. Title, dates/times, recurrence and description (as plain text) all push out. Writes are debounced and queued (they survive reloads and expired sign-ins). Planned/Spent/pins stay local; import never overwrites your local rich-text description.')),
         toggle(!!s.gcalTwoWay,()=>this.saveSettings({gcalTwoWay:!s.gcalTwoWay}))),
       h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',padding:'0 0 6px'}},
         s.gcalTwoWay
-          ? 'Two-way: imports run in the background AND your local changes (name, times, recurrence, deletes) push to Google.'
+          ? 'Two-way: imports run in the background AND your local changes (name, times, recurrence, description, deletes) push to Google.'
           : 'Syncs automatically when connected (on selection/window change and in the background). Import runs one-way; your edits are kept.'),
+      /* PP-EXT: one-time backfill — push never-synced local tasks into the ChronoCompose calendar (also turns two-way on) */
+      (()=>{ const n=g.connected?this.gcalBackfillable().length:0;
+        return h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'2px 0 6px'}},
+          h('button',{className:'pp-tbtn',onClick:()=>this.gcalBackfill(),disabled:!g.connected||!n,
+            style:(g.connected&&n)?null:{opacity:0.5}}, 'Backfill to Google'+(n?(' ('+n+')'):'')),
+          h('span',{style:{fontSize:'11px',color:'var(--text-faint2)'}},
+            n? 'Send '+n+' un-synced task'+(n>1?'s':'')+' to a "ChronoCompose" calendar.' : 'All dated tasks are already on Google.')); })(),
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
         h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import now')),
       (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},

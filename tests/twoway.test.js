@@ -65,6 +65,46 @@ test('eventBodyOf: timed events use RFC3339 with offset; recurrence only when as
   assert.deepEqual([...withR.recurrence], ['RRULE:FREQ=DAILY']);
 });
 
+test('descToText flattens rich HTML to plain text; eventBodyOf pushes it out', () => {
+  const c = make();
+  assert.equal(c.descToText(''), '');
+  assert.equal(c.descToText('<p>Hello</p><p>World</p>'), 'Hello\nWorld');
+  assert.equal(c.descToText('a<br>b'), 'a\nb');
+  assert.equal(c.descToText('<ul><li>one</li><li>two</li></ul>'), '• one\n• two');
+  assert.equal(c.descToText('x &amp; y &lt;z&gt;'), 'x & y <z>');
+  const B = c.startOfDay(Date.now());
+  const t = activeTask(c, { name: 'D', start: B + H, end: B + 2 * H, description: '<p>notes</p>' });
+  assert.equal(c.eventBodyOf(t, false).description, 'notes', 'description pushed as plain text');
+  // a description-only edit is a real fingerprint change → a patch
+  const linked = activeTask(c, { start: B + H, end: B + 2 * H, eventId: 'e1', calendarId: 'c1', description: '<p>a</p>' });
+  const edited = Object.assign({}, linked, { description: '<p>b</p>' });
+  const ops = c.computeOutboundOps([linked], [edited]);
+  assert.equal(ops.length, 1); assert.equal(ops[0].op, 'patch');
+  assert.equal(ops[0].body.description, 'b');
+});
+
+test('outbound diff skips dateless tasks (no start/due cannot be a calendar event)', () => {
+  const c = make();
+  const dateless = c.normalizeTask({ id: 'DL', name: 'dl', type: 'Proportional',
+    start: null, end: null, priority: 4, deps: [], pct: 0, planned: 60, spent: 0, included: true });
+  assert.equal(c.computeOutboundOps([], [dateless]).length, 0, 'no insert for a dateless task');
+  // and it is not offered for backfill
+  c.state.tasks = [dateless];
+  assert.equal(c.gcalBackfillable().length, 0, 'dateless task not backfillable');
+});
+
+test('gcalBackfillable selects only dated, unsynced, non-sub/milestone/archived tasks', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const plain = activeTask(c, { id: 'P', start: B + H, end: B + 2 * H });          // eligible
+  const linked = activeTask(c, { id: 'L', start: B + H, end: B + 2 * H, eventId: 'e' }); // already synced
+  const sub = activeTask(c, { id: 'S', start: B + H, end: B + 2 * H, parentId: 'P' });    // subtask
+  const ms = activeTask(c, { id: 'M', type: 'Milestone', start: B, end: B });             // milestone
+  const dateless = c.normalizeTask({ id: 'D', name: 'd', type: 'Proportional', start: null, end: null, priority: 4, deps: [], pct: 0, planned: 30, spent: 0 });
+  c.state.tasks = [plain, linked, sub, ms, dateless];
+  assert.deepEqual(c.gcalBackfillable().map(t => t.id), ['P']);
+});
+
 // ---------------------------------------------------------------------------
 // computeOutboundOps
 // ---------------------------------------------------------------------------
