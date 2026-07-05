@@ -40,6 +40,30 @@ test('isActiveToday: only today in [start,end], excludes milestones and included
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
+test('dateless task (no start/due) joins today only when included + has planned time', () => {
+  const c = make();
+  const B = Date.now();
+  c.state.nowTick = B;
+  const today = c.startOfToday();
+  const dateless = (over) => c.normalizeTask(Object.assign({ id:'d'+Math.random().toString(36).slice(2,7),
+    name:'dl', type:'Proportional', start:null, end:null, priority:4, deps:[], pct:0, planned:120, spent:0 }, over||{}));
+  assert.strictEqual(c.isScheduled(dateless()), false, 'no dates => unscheduled');
+  assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'included + planned>0 => active today');
+  assert.strictEqual(c.isActiveToday(dateless({ included:true, planned:0 })), false, 'no allotted time => not active');
+  assert.strictEqual(c.isActiveToday(dateless({ included:null })), false, 'not explicitly included => not active');
+  assert.strictEqual(c.isActiveToday(dateless({ included:false })), false, 'excluded => not active');
+  // never surfaces on another day
+  assert.strictEqual(c.isActiveOn(dateless({ included:true }), today + 3*DAY), false, 'other day => not active');
+  // due/notBefore are null-safe (fall back to the scheduled day's bounds) so the timeline can order it
+  const dl = dateless({ included:true });
+  assert.strictEqual(c.dueMsOf(dl, today), today + DAY, 'dateless due = end of today');
+  assert.strictEqual(c.notBeforeMsOf(dl, today), today, 'dateless notBefore = start of today');
+  // it actually receives allotted time in the pool
+  c.state.tasks = [dl];
+  const map = c.computeAllotted(c.state.tasks, today);
+  assert.ok(map[dl.id].active && map[dl.id].allotted > 0, 'dateless task allots time today');
+});
+
 test('inWindowToday is date-only (ignores time of day at the window edges)', () => {
   const c = make();
   const B = Date.now();

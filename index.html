@@ -622,7 +622,13 @@ class Component extends DCLogic {
      respected everywhere, but a manual "include today" does NOT leak onto other days (falls back to the window). */
   isActiveOn(t, B){
     if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
-    if(!this.isScheduled(t) || this.isMilestone(t)) return false;
+    if(this.isMilestone(t)) return false;
+    if(!this.isScheduled(t)){
+      /* PP-EXT: a dateless task (no start/due, shown as "—") has no [start,due] window, so it only joins
+         TODAY — and only when the owner explicitly includes it AND has given it time to allot. It never
+         surfaces on any other day. */
+      return B===this.startOfToday() && t.included===true && (t.planned||0)>0;
+    }
     if(t.included!=null){
       if(B===this.startOfToday()) return !!t.included;
       if(t.included===false) return false;
@@ -741,10 +747,11 @@ class Component extends DCLogic {
      scheduled (occurrence-for-B); omitted ⇒ today. */
   dueMsOf(t, B){
     const oc=this.occForDay(t, B);
+    if(oc.end==null) return (B!=null?B:this.startOfToday())+this.DAY; /* PP-EXT: dateless task — due = end of the day it's scheduled into (today) */
     if(t.allDay) return oc.end;
     return this.hasClock(oc.end) ? oc.end : oc.end + this.DAY;
   }
-  notBeforeMsOf(t, B){ const oc=this.occForDay(t, B); return oc.start; }
+  notBeforeMsOf(t, B){ const oc=this.occForDay(t, B); return oc.start!=null?oc.start:(B!=null?B:this.startOfToday()); } /* PP-EXT: dateless → day start */
   /* PP-EXT: drag-pin (Phase 5) — a block dragged in the drawer timeline is fixed at its dropped clock time
      FOR THAT DAY ONLY. Returns the block span {start,end} when the task carries an active pin for today, else
      null. The duration is captured at drop (pin.dur) rather than derived, so it stays stable regardless of
@@ -3507,8 +3514,10 @@ class Component extends DCLogic {
 
     const title=h('div',{className:'pp-edit',contentEditable:true,suppressContentEditableWarning:true,
       onBlur:e=>this.rename(t.id,e.target.textContent),
+      /* PP-EXT: Enter commits the title (blur → rename); Shift+Enter inserts a line break instead. */
+      onKeyDown:e=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); e.target.blur(); } },
       style:{fontSize:'21px',fontWeight:700,color:'var(--text-strong)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
-        lineHeight:'1.3',outline:'none',padding:'2px 4px',borderRadius:'4px',flex:1}},t.name);
+        lineHeight:'1.3',outline:'none',padding:'2px 4px',borderRadius:'4px',flex:1,whiteSpace:'pre-wrap'/* PP-EXT: honor Shift+Enter line breaks */}},t.name);
 
     /* PP-EXT: big WYSIWYG rich-text description (replaces the old plain-text line + fake comment box) */
     const desc=h('div',{style:{marginTop:'16px',marginLeft:'36px'}},
@@ -3584,10 +3593,23 @@ class Component extends DCLogic {
       h('span',{style:{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:600,color:'#fff'}},t.pct+'%'));
 
     /* PP-EXT: detail-panel editors for the new fields */
-    const tagsEditor=h('input',{className:'pp-num',type:'text',key:'dt'+(t.labels||[]).join(','),defaultValue:(t.labels||[]).map(l=>'@'+l).join(' '),
-      placeholder:'@tag @tag',style:{textAlign:'left',width:'100%',border:'1px solid var(--divider)'},
-      onBlur:e=>{ const labels=(e.target.value.match(/@?([a-z0-9_-]+)/gi)||[]).map(x=>x.replace(/^@/,'').toLowerCase()); this.commit(tasks=>{ const x=tasks.find(z=>z.id===t.id); if(x) x.labels=labels; }); },
-      onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
+    /* PP-EXT: chip-based tag editor — each tag is a removable chip (× deletes it); the trailing input adds one
+       or more (@a @b or bare words), Enter/blur commits. Much easier than editing one raw "@a @b" string. */
+    const removeLabel=(lab)=>this.commit(tasks=>{ const x=tasks.find(z=>z.id===t.id); if(x) x.labels=(x.labels||[]).filter(l=>l!==lab); });
+    const addLabels=(val)=>{ const add=(String(val).match(/@?([a-z0-9_-]+)/gi)||[]).map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);
+      if(!add.length) return; this.commit(tasks=>{ const x=tasks.find(z=>z.id===t.id); if(!x) return;
+        const seen=new Set(x.labels||[]); add.forEach(a=>{ if(!seen.has(a)){ seen.add(a); } }); x.labels=[...seen]; }); };
+    const tagChip=(l)=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',gap:'4px',fontSize:'11px',color:'#a9b4c2',
+      background:'#262b33',border:'1px solid #353d48',borderRadius:'4px',padding:'1px 4px 1px 6px',whiteSpace:'nowrap'}},
+      '@'+l, h('span',{onClick:()=>removeLabel(l),title:'Remove tag',
+        style:{cursor:'pointer',color:'var(--text-faint2)',fontSize:'13px',lineHeight:1},
+        onMouseEnter:e=>e.currentTarget.style.color='#e5615d',onMouseLeave:e=>e.currentTarget.style.color='var(--text-faint2)'},'×'));
+    const tagsEditor=h('div',{style:{display:'flex',flexWrap:'wrap',gap:'5px',alignItems:'center'}},
+      ...(t.labels||[]).map(tagChip),
+      h('input',{className:'pp-num',type:'text',key:'addtag'+(t.labels||[]).length,placeholder:(t.labels&&t.labels.length)?'+ tag':'@tag',
+        style:{textAlign:'left',flex:'1 0 56px',minWidth:'56px',border:'1px solid var(--divider)'},
+        onBlur:e=>{ if(e.target.value.trim()){ addLabels(e.target.value); e.target.value=''; } },
+        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } }}));
     const goalEditor=h('input',{className:'pp-num',type:'text',key:'dg'+(t.goal||''),defaultValue:t.goal||'',placeholder:'Goal for this task',
       style:{textAlign:'left',width:'100%',border:'1px solid var(--divider)'},
       onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
