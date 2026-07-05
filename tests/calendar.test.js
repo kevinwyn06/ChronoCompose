@@ -135,6 +135,27 @@ test('gcalDropGone: deselects a removed calendar and unlinks its tasks (strips @
   assert.strictEqual(k.calendarId, 'cal1', 'unrelated linked task untouched');
 });
 
+test('gcalReconcileLinks: unlinks tasks whose calendar is absent from a fresh list; strips the shared @tag', () => {
+  const c = make();
+  c.state.gcal = { connected:true, selected:{}, calendars:[], window:30, ccCalId:'ccCal' };
+  // Two tasks from a now-removed "todoist" calendar (tag on both), plus a per-task user label on one.
+  const a = c.normalizeTask({ id:'A', name:'a', calendarId:'calTd', eventId:'ea', labels:['todoist','errand'] });
+  const b = c.normalizeTask({ id:'B', name:'b', calendarId:'calTd', eventId:'eb', labels:['todoist'] });
+  // A task still linked to a live calendar, and a task on our own ChronoCompose calendar — both must survive.
+  const live = c.normalizeTask({ id:'L', name:'live', calendarId:'cal1', eventId:'el', labels:['work'] });
+  const ours = c.normalizeTask({ id:'O', name:'ours', calendarId:'ccCal', eventId:'eo', labels:[] });
+  c.state.tasks = [a, b, live, ours];
+  const n = c.gcalReconcileLinks([{ id:'cal1', summary:'Work' }]); // fresh list: no todoist, cal1 present
+  assert.strictEqual(n, 2, 'both todoist tasks unlinked');
+  const A = c.state.tasks.find(t=>t.id==='A'), B = c.state.tasks.find(t=>t.id==='B');
+  assert.strictEqual(A.calendarId, null); assert.strictEqual(A.eventId, null);
+  assert.deepEqual(A.labels, ['errand'], 'shared @todoist stripped, per-task @errand kept');
+  assert.deepEqual(B.labels, [], '@todoist stripped');
+  assert.strictEqual(c.state.tasks.find(t=>t.id==='L').calendarId, 'cal1', 'live-calendar task untouched');
+  assert.strictEqual(c.state.tasks.find(t=>t.id==='O').calendarId, 'ccCal', 'ChronoCompose-calendar task untouched');
+  assert.strictEqual(c.gcalReconcileLinks([{ id:'cal1', summary:'Work' }]), 0, 'idempotent: nothing left to unlink');
+});
+
 test('pruneDeletedEvents: recurring series kept if any instance present, removed if none', () => {
   const c = make();
   const series = c.normalizeTask({ id:'S', name:'series', calendarId:'cal1', eventId:'m1' });

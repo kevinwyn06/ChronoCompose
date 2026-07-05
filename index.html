@@ -1841,8 +1841,33 @@ class Component extends DCLogic {
   gcalListCalendars(){
     this.gcalFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList')
       .then(d=>{ const cals=(d.items||[]).map(c=>({id:c.id,summary:c.summary,color:c.backgroundColor}));
-        this.setState(s=>({gcal:Object.assign({},s.gcal,{calendars:cals,msg:cals.length+' calendars loaded'})})); })
+        this.setState(s=>({gcal:Object.assign({},s.gcal,{calendars:cals,msg:cals.length+' calendars loaded'})}));
+        if(cals.length) this.gcalReconcileLinks(cals); /* PP-EXT: a fresh list is authoritative — unlink tasks whose calendar is gone */ })
       .catch(e=>this.gcalMsg('List failed: '+e.message));
+  }
+  /* PP-EXT: reconcile task↔calendar links against the authoritative calendarList. A task linked to a
+     calendarId that no longer appears (calendar deleted, or access removed — e.g. an old "@todoist" import)
+     is UNLINKED: its calendar @tag + calendarId/eventId are cleared so it survives as a plain manual task.
+     The @tag to strip is the label common to ALL tasks sharing that gone calendarId (import stamps the
+     calendar tag on every one of them); labels only some of them carry are user labels and stay. */
+  gcalReconcileLinks(cals){
+    const known={}; (cals||[]).forEach(c=>{ if(c&&c.id) known[c.id]=1; });
+    const cc=this.state.gcal&&this.state.gcal.ccCalId; if(cc) known[cc]=1; /* our own calendar counts as known */
+    const byGone={};
+    this.state.tasks.forEach(t=>{ if(t.calendarId && !known[t.calendarId]) (byGone[t.calendarId]=byGone[t.calendarId]||[]).push(t); });
+    const goneIds=Object.keys(byGone); if(!goneIds.length) return 0;
+    const stripFor={}; /* gone calendarId → Set of tags to remove (intersection of each linked task's labels) */
+    goneIds.forEach(cid=>{ let inter=null;
+      byGone[cid].forEach(t=>{ const s=new Set(t.labels||[]);
+        inter = inter===null ? s : new Set([...inter].filter(x=>s.has(x))); });
+      stripFor[cid]=inter||new Set(); });
+    let n=0; const wasApplying=this._gcalApplying; this._gcalApplying=true; /* local unlink — never diff a DELETE back to a calendar that no longer exists */
+    try{ this.commit(tasks=>{ tasks.forEach(t=>{ if(t.calendarId && !known[t.calendarId]){
+      const strip=stripFor[t.calendarId]; if(strip&&strip.size) t.labels=(t.labels||[]).filter(l=>!strip.has(l));
+      t.calendarId=null; t.eventId=null; n++; } }); }); }
+    finally { this._gcalApplying=wasApplying; }
+    if(n) this.gcalMsg('Unlinked '+n+' task'+(n>1?'s':'')+' from a removed calendar.');
+    return n;
   }
   toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); this.gcalSyncSoon(); /* PP-EXT: sync on selection change */ }
   calTag(cal){ return (cal&&cal.summary?cal.summary:'cal').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
