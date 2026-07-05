@@ -116,6 +116,25 @@ test('pruneDeletedEvents: a calendar excluded from selectedIds (404/removed) kee
   assert.deepEqual(tasks.map(t=>t.id).sort(), ['G','L'], 'gone-calendar task preserved');
 });
 
+test('gcalDropGone: deselects a removed calendar and unlinks its tasks (strips @tag + calendarId/eventId)', () => {
+  const c = make();
+  c.state.gcal = { connected:true, selected:{ calGone:true, cal1:true }, calendars:[], window:30 };
+  const gone = c.normalizeTask({ id:'G', name:'Todoist task', calendarId:'calGone', eventId:'e_g', labels:['todoist','work'] });
+  const keep = c.normalizeTask({ id:'K', name:'live', calendarId:'cal1', eventId:'e_k', labels:['work'] });
+  c.state.tasks = [gone, keep];
+  // calById still carries the (now-removed) calendar's summary from the last successful list
+  c.gcalDropGone(['calGone'], { calGone:{ id:'calGone', summary:'Todoist' } });
+  assert.ok(!c.state.gcal.selected.calGone, 'removed calendar deselected');
+  assert.strictEqual(c.state.gcal.selected.cal1, true, 'other calendar untouched');
+  const g = c.state.tasks.find(t=>t.id==='G');
+  assert.ok(g, 'task kept, not deleted');
+  assert.strictEqual(g.calendarId, null, 'calendarId cleared');
+  assert.strictEqual(g.eventId, null, 'eventId cleared');
+  assert.deepEqual(g.labels, ['work'], 'only the calendar @tag stripped; user labels kept');
+  const k = c.state.tasks.find(t=>t.id==='K');
+  assert.strictEqual(k.calendarId, 'cal1', 'unrelated linked task untouched');
+});
+
 test('pruneDeletedEvents: recurring series kept if any instance present, removed if none', () => {
   const c = make();
   const series = c.normalizeTask({ id:'S', name:'series', calendarId:'cal1', eventId:'m1' });

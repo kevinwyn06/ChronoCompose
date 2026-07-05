@@ -2171,13 +2171,26 @@ class Component extends DCLogic {
       .then(()=>{ this._gcalSyncing=false; });
   }
   /* PP-EXT: drop calendars that returned 404/410 from the selection so we stop polling a calendar the user
-     deleted (or lost access to). Imported tasks are left in place — a fetch failure isn't proof they were deleted. */
+     deleted (or lost access to). Imported tasks are kept but UNLINKED — their calendar `@tag` and
+     calendarId/eventId are cleared so they survive as plain manual tasks (a fetch failure isn't proof the
+     events were deleted, so we never silently remove them). */
   gcalDropGone(gone,calById){
     if(!gone||!gone.length) return;
+    const goneSet={}, goneTags={};
     const sel=Object.assign({},this.state.gcal.selected);
-    const names=gone.map(cid=>{ delete sel[cid]; const c=calById&&calById[cid]; return c&&c.summary?c.summary:cid; });
+    const names=gone.map(cid=>{ goneSet[cid]=1; delete sel[cid];
+      const c=calById&&calById[cid]; if(c) goneTags[cid]=this.calTag(c); return c&&c.summary?c.summary:cid; });
     this.saveGcal({selected:sel});
-    this.gcalMsg('Calendar no longer available — deselected: '+names.join(', ')+'.');
+    let detached=0;
+    if(this.state.tasks.some(t=>t.calendarId&&goneSet[t.calendarId])){
+      const wasApplying=this._gcalApplying; this._gcalApplying=true; /* local unlink — don't diff a DELETE back out to a calendar that no longer exists */
+      try{ this.commit(tasks=>{ tasks.forEach(t=>{ if(t.calendarId&&goneSet[t.calendarId]){
+        const tag=goneTags[t.calendarId]; if(tag) t.labels=(t.labels||[]).filter(l=>l!==tag);
+        t.calendarId=null; t.eventId=null; detached++; } }); }); }
+      finally { this._gcalApplying=wasApplying; }
+    }
+    this.gcalMsg('Calendar no longer available — deselected: '+names.join(', ')
+      +(detached?('; unlinked '+detached+' task'+(detached>1?'s':'')):'')+'.');
   }
   /* Background poll tick (fires on a fixed cadence; gated by the configurable interval + tab visibility + auth). */
   gcalMaybeSync(){
