@@ -199,6 +199,7 @@ class Component extends DCLogic {
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
       /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
@@ -263,7 +264,7 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations']; }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits']; /* pp-habits: Phase 9 */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=localStorage.getItem(k); if(v==null) return;
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
@@ -1170,6 +1171,52 @@ class Component extends DCLogic {
       this.commit(tasks=>this.sweepAutoArchive(tasks, now, days));
   }
   /* ==== /PP-EXT: archive ==== */
+
+  /* ==== PP-EXT Phase 9: Habits — a lightweight entity separate from tasks (own pp-habits store, no gcal/undo
+     funnel). A habit is scheduled daily or on specific weekdays; a day counts as done via a MANUAL check-off
+     (`done` ledger) OR automatically when any linked task (`taskIds`) was worked on / completed that day. Streaks
+     count only scheduled days (today isn't broken until it ends). Pure helpers so streak/consistency are testable. */
+  loadHabits(){ try{ const a=JSON.parse(localStorage.getItem('pp-habits')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeHabit(x)):[]; }catch(e){ return []; } }
+  saveHabits(habits){ try{ localStorage.setItem('pp-habits', JSON.stringify(habits)); }catch(e){} this.setState({habits}); }
+  normalizeHabit(hb){ hb=hb||{}; const sk=(hb.schedule&&hb.schedule.kind==='weekdays')?'weekdays':'daily';
+    return { id: hb.id||('h'+Math.random().toString(36).slice(2,8)), name: hb.name||'New habit',
+      schedule: { kind:sk, days: Array.isArray(hb.schedule&&hb.schedule.days)?hb.schedule.days.slice():[] },
+      taskIds: Array.isArray(hb.taskIds)?hb.taskIds.slice():[],
+      done: (hb.done&&typeof hb.done==='object')?Object.assign({},hb.done):{}, createdAt: hb.createdAt||Date.now() }; }
+  addHabit(){ const hb=this.normalizeHabit({name:'New habit'}); this.saveHabits([...(this.state.habits||[]), hb]); return hb.id; }
+  updateHabit(id, patch){ this.saveHabits((this.state.habits||[]).map(hb=> hb.id===id ? this.normalizeHabit(Object.assign({}, hb, patch)) : hb)); }
+  deleteHabit(id){ this.saveHabits((this.state.habits||[]).filter(hb=>hb.id!==id)); }
+  toggleHabitDone(id, dayMs){ const ymd=this.ymdOf(dayMs==null?Date.now():dayMs);
+    this.saveHabits((this.state.habits||[]).map(hb=>{ if(hb.id!==id) return hb; const done=Object.assign({}, hb.done);
+      if(done[ymd]) delete done[ymd]; else done[ymd]=true; return Object.assign({}, hb, {done}); })); }
+  /* PURE: is the habit scheduled on the given day? (daily → always; weekdays → the day's weekday is in the set). */
+  habitScheduledOn(hb, dayMs){ if(!hb) return false; const s=hb.schedule||{kind:'daily'};
+    if(s.kind==='weekdays') return (s.days||[]).indexOf(new Date(dayMs).getDay())>=0; return true; }
+  /* PURE: did a linked task feed this habit on `dayMs` (worked on via a timer that day, or completed that day)? */
+  habitAutoDoneOn(hb, dayMs, byId){ const ids=hb&&hb.taskIds; if(!ids||!ids.length) return false; const ymd=this.ymdOf(dayMs);
+    const find=id=>byId?byId[id]:(this.state.tasks||[]).find(t=>t.id===id);
+    return ids.some(id=>{ const t=find(id); if(!t) return false;
+      if(this.getSpentOn(t, dayMs)>0) return true;
+      if(t.completion && this.ymdOf(t.completion)===ymd) return true;
+      if(t.recur){ const ov=t.recur.overrides||{}; return Object.keys(ov).some(oi=>ov[oi]&&ov[oi].completion&&this.ymdOf(ov[oi].completion)===ymd); }
+      return false; }); }
+  habitDoneOn(hb, dayMs, byId){ const ymd=this.ymdOf(dayMs); return !!(hb&&hb.done&&hb.done[ymd]) || this.habitAutoDoneOn(hb, dayMs, byId); }
+  /* PURE: current streak — consecutive scheduled days done, counting back from today; a not-yet-done TODAY does
+     not break it (grace), an earlier missed scheduled day does. Non-scheduled days are skipped, not counted. */
+  habitStreak(hb, now, byId){ now=now||Date.now(); const today=this.startOfDay(now); let streak=0;
+    for(let i=0;i<this.RECUR_MAX;i++){ const ms=today-i*this.DAY;
+      if(!this.habitScheduledOn(hb, ms)) continue;
+      if(this.habitDoneOn(hb, ms, byId)) streak++; else { if(i===0) continue; break; } }
+    return streak; }
+  /* PURE: consistency over the last `days` days = done scheduled days / total scheduled days. */
+  habitConsistency(hb, now, days, byId){ now=now||Date.now(); days=days||30; const today=this.startOfDay(now); let sched=0, done=0;
+    for(let i=0;i<days;i++){ const ms=today-i*this.DAY; if(!this.habitScheduledOn(hb, ms)) continue; sched++; if(this.habitDoneOn(hb, ms, byId)) done++; }
+    return { sched, done, pct: sched?Math.round(done/sched*100):0 }; }
+  scheduleLabel(hb){ const s=hb.schedule||{kind:'daily'}; if(s.kind!=='weekdays') return 'Daily';
+    if(!s.days||!s.days.length) return 'No days'; const L=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    return s.days.slice().sort((a,b)=>a-b).map(d=>L[d]).join(' '); }
+  /* ==== /PP-EXT Phase 9: Habits ==== */
+
   /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
   togglePin(id, which){
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
@@ -2747,7 +2794,7 @@ class Component extends DCLogic {
   renderPageNav(){
     const h=React.createElement; const cur=this.state.mainView;
     const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
-    const PAGES=[['stats','📈','Stats',0],['archive','🗄','Archive',archN]];
+    const PAGES=[['stats','📈','Stats',0],['habits','🔁','Habits',0],['archive','🗄','Archive',archN]];
     return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       PAGES.map(v=>{ const active=cur===v[0];
         return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
@@ -3109,7 +3156,7 @@ class Component extends DCLogic {
        scroll wrapper's height minus its ~12px vertical padding (the body clips its last hour label). */
     const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-      header, gerr, note, runbar,
+      header, gerr, note, runbar, this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
       h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
         this.renderDayColumn(B, {showLabels:true, availH})));
   }
@@ -3269,6 +3316,7 @@ class Component extends DCLogic {
       case 'today':    return this.renderTodayView();
       case 'archive':  return this.renderArchiveView(); /* PP-EXT Phase 9 */
       case 'stats':    return this.renderStatsView();   /* PP-EXT Phase 9 */
+      case 'habits':   return this.renderHabitsView();  /* PP-EXT Phase 9 */
       default:         return this.renderGantt(tasks);
     }
   }
@@ -3405,11 +3453,108 @@ class Component extends DCLogic {
       card('Today: plan vs actual', adh,
         'How today’s allotted schedule compares to what your timers have recorded so far.'),
       card('Habit streaks',
-        h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'Available once Habits ship (next Phase 9 PR).'),
-        'Streak grid + consistency per habit — arrives with the Habits entity.'));
+        (()=>{ const habits=this.state.habits||[]; if(!habits.length)
+            return h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'No habits yet — add one on the 🔁 Habits page.');
+          const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t); const now=Date.now();
+          return h('div',{style:{display:'flex',flexDirection:'column',gap:'8px'}}, habits.map(hb=>{
+            const st=this.habitStreak(hb,now,byId); const cn=this.habitConsistency(hb,now,days,byId);
+            return h('div',{key:hb.id,style:{display:'flex',alignItems:'center',gap:'8px'}},
+              h('span',{style:{flex:'0 0 110px',fontSize:'11.5px',color:'var(--text-2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},hb.name),
+              h('div',{style:{flex:1,height:'10px',background:'var(--chip-bg)',borderRadius:'5px',overflow:'hidden'}},
+                h('div',{style:{height:'100%',width:cn.pct+'%',background:this._accent,borderRadius:'5px'}})),
+              h('span',{style:{flex:'0 0 auto',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},'🔥'+st+' · '+cn.pct+'%')); })); })(),
+        'Current streak (🔥) and consistency % per habit over the selected window. Manage on the 🔁 Habits page.'));
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, grid);
   }
   /* ==== /PP-EXT Phase 9: Stats page ==== */
+
+  /* ==== PP-EXT Phase 9: Habits page — manage habits (name, cadence, linked tasks), check off, and see streaks +
+     a 14-day grid. Daily check-off is also surfaced in the Today view (renderTodayHabits). ==== */
+  renderHabitsView(){
+    const h=React.createElement;
+    const habits=this.state.habits||[];
+    const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
+    const now=Date.now(); const today=this.startOfToday();
+    const DOW=['S','M','T','W','T','F','S'];
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',padding:'12px 16px',borderBottom:'1px solid var(--top-border)'}},
+      h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'🔁 Habits'),
+      h('span',{style:{fontSize:'12px',color:'var(--text-mut2)'}},habits.length+(habits.length===1?' habit':' habits')),
+      this.infoNote('Habits are separate from tasks. A day counts as done when you check it off — or automatically when a linked task was worked on / completed that day. Streaks count only scheduled days; today won’t break your streak until it ends.'),
+      h('div',{style:{flex:1}}),
+      h('button',{onClick:()=>this.addHabit(),
+        style:{fontSize:'12px',fontWeight:600,cursor:'pointer',padding:'5px 12px',borderRadius:'7px',border:'none',background:this._accent,color:'#fff'}},'＋ Add habit'));
+    if(!habits.length)
+      return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header,
+        h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-faint)',fontSize:'13px'}},
+          'No habits yet. Click “＋ Add habit” to start one.'));
+    const dayGrid=hb=>{ const cells=[]; for(let i=13;i>=0;i--){ const ms=today-i*this.DAY; const sched=this.habitScheduledOn(hb,ms);
+      const done=sched&&this.habitDoneOn(hb,ms,byId); const isToday=i===0;
+      cells.push(h('div',{key:i,title:new Date(ms).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})+(sched?(done?' · done':' · missed'):' · not scheduled'),
+        onClick:sched?()=>this.toggleHabitDone(hb.id,ms):null,
+        style:{width:'15px',height:'15px',borderRadius:'4px',cursor:sched?'pointer':'default',
+          background:done?this._accent:(sched?'transparent':'var(--chip-bg)'),
+          border:'1px solid '+(done?this._accent:(sched?'var(--text-faint)':'transparent')),
+          boxShadow:isToday?'0 0 0 2px var(--gantt-bg), 0 0 0 3px '+this._accent:'none'}})); }
+      return h('div',{style:{display:'flex',gap:'3px'}}, ...cells); };
+    const linkableFor=hb=>(this.state.tasks||[]).filter(t=>!t.archivedAt && !this.isMilestone(t) && (hb.taskIds||[]).indexOf(t.id)<0);
+    const habitCard=hb=>{ const streak=this.habitStreak(hb,now,byId); const cons=this.habitConsistency(hb,now,30,byId); const wd=hb.schedule.kind==='weekdays';
+      return h('div',{key:hb.id,style:{background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',padding:'14px 16px',display:'flex',flexDirection:'column',gap:'12px'}},
+        /* top: name + streak/consistency + delete */
+        h('div',{style:{display:'flex',alignItems:'center',gap:'12px'}},
+          h('input',{defaultValue:hb.name,key:'nm'+hb.name,onBlur:e=>{ const v=e.target.value.trim(); if(v&&v!==hb.name) this.updateHabit(hb.id,{name:v}); },
+            style:{flex:1,minWidth:0,fontSize:'14px',fontWeight:700,color:'var(--text)',background:'transparent',border:'none',borderBottom:'1px solid transparent',outline:'none'}}),
+          h('span',{title:'Current streak',style:{fontSize:'13px',fontWeight:700,color:streak>0?this._accent:'var(--text-faint)'}},'🔥 '+streak),
+          h('span',{title:'30-day consistency',style:{fontSize:'12px',color:'var(--text-mut2)',fontVariantNumeric:'tabular-nums'}},cons.pct+'%'),
+          h('span',{onClick:()=>{ if(confirm('Delete habit “'+hb.name+'”?')) this.deleteHabit(hb.id); },title:'Delete habit',
+            style:{cursor:'pointer',color:'var(--text-faint)',fontSize:'14px',padding:'0 2px'}},'🗑')),
+        /* cadence */
+        h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
+          h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'6px',padding:'2px'}},
+            [['daily','Daily'],['weekdays','Weekdays']].map(m=>h('div',{key:m[0],onClick:()=>this.updateHabit(hb.id,{schedule:{kind:m[0],days:hb.schedule.days}}),
+              style:{padding:'3px 10px',fontSize:'11px',fontWeight:600,borderRadius:'4px',cursor:'pointer',
+                color:hb.schedule.kind===m[0]?'#fff':'var(--text-mut2)',background:hb.schedule.kind===m[0]?this._accent:'transparent'}},m[1]))),
+          wd?h('div',{style:{display:'flex',gap:'3px'}}, DOW.map((d,i)=>{ const on=(hb.schedule.days||[]).indexOf(i)>=0;
+            return h('div',{key:i,onClick:()=>{ const days=(hb.schedule.days||[]).slice(); const j=days.indexOf(i); if(j>=0) days.splice(j,1); else days.push(i); this.updateHabit(hb.id,{schedule:{kind:'weekdays',days}}); },
+              style:{width:'24px',height:'24px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'11px',fontWeight:700,
+                color:on?'#fff':'var(--text-mut2)',background:on?this._accent:'var(--chip-bg)'}},d); })):null),
+        /* 14-day grid + today check */
+        h('div',{style:{display:'flex',alignItems:'center',gap:'12px'}},
+          dayGrid(hb),
+          this.habitScheduledOn(hb,today)?h('button',{onClick:()=>this.toggleHabitDone(hb.id,today),
+            style:{marginLeft:'auto',fontSize:'11px',fontWeight:600,cursor:'pointer',padding:'4px 11px',borderRadius:'6px',
+              border:'1px solid '+(this.habitDoneOn(hb,today,byId)?this._accent:'var(--divider)'),
+              background:this.habitDoneOn(hb,today,byId)?this._accent:'transparent',
+              color:this.habitDoneOn(hb,today,byId)?'#fff':'var(--text-mut2)'}}, (this.habitDoneOn(hb,today,byId)?'✓ Done today':'Mark today')):
+            h('span',{style:{marginLeft:'auto',fontSize:'11px',color:'var(--text-faint)'}},'Not scheduled today')),
+        /* linked tasks */
+        h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
+          h('span',{style:{fontSize:'11px',color:'var(--text-mut2)'}},'Linked tasks:'),
+          ...(hb.taskIds||[]).map(id=>{ const t=byId[id]; return h('span',{key:id,style:{display:'inline-flex',alignItems:'center',gap:'4px',fontSize:'11px',
+            background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'10px',padding:'1px 4px 1px 8px',color:'var(--text-2)'}},
+            t?t.name:'(deleted)', h('span',{onClick:()=>this.updateHabit(hb.id,{taskIds:(hb.taskIds||[]).filter(x=>x!==id)}),style:{cursor:'pointer',color:'var(--text-faint)',padding:'0 3px'}},'✕')); }),
+          (()=>{ const opts=linkableFor(hb); return opts.length?h('select',{value:'',onChange:e=>{ if(e.target.value) this.updateHabit(hb.id,{taskIds:[...(hb.taskIds||[]),e.target.value]}); },
+            style:{fontSize:'11px',padding:'2px 4px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--sheet-bg)',color:'var(--text-2)'}},
+            h('option',{value:''},'+ link a task'), ...opts.map(t=>h('option',{key:t.id,value:t.id},t.name))):null; })())); };
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header,
+      h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'16px',alignContent:'start'}},
+        ...habits.map(habitCard)));
+  }
+  /* PP-EXT Phase 9: compact today's-habits checklist for the Today view (only habits scheduled today). */
+  renderTodayHabits(){
+    const h=React.createElement; const habits=(this.state.habits||[]); const today=this.startOfToday();
+    const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
+    const due=habits.filter(hb=>this.habitScheduledOn(hb,today));
+    if(!due.length) return null;
+    return h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',padding:'7px 14px',flex:'none',
+      borderBottom:'1px solid var(--top-border)',background:'var(--sheet-bg)'}},
+      h('span',{style:{fontSize:'11px',fontWeight:700,color:'var(--text-mut2)',textTransform:'uppercase',letterSpacing:'0.4px'}},'🔁 Habits'),
+      ...due.map(hb=>{ const done=this.habitDoneOn(hb,today,byId); const auto=!done?false:!(hb.done&&hb.done[this.ymdOf(today)]);
+        return h('div',{key:hb.id,onClick:()=>this.toggleHabitDone(hb.id,today),title:auto?'Auto-completed by a linked task':'Click to toggle',
+          style:{display:'inline-flex',alignItems:'center',gap:'5px',fontSize:'11.5px',cursor:'pointer',padding:'3px 10px',borderRadius:'12px',
+            border:'1px solid '+(done?this._accent:'var(--divider)'),background:done?this._accent:'var(--chip-bg)',color:done?'#fff':'var(--text-2)'}},
+          h('span',{},done?'✓':'○'), hb.name); }));
+  }
+  /* ==== /PP-EXT Phase 9: Habits page ==== */
 
   renderBoard(tasks){
     const h=React.createElement;
