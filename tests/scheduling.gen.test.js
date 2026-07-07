@@ -345,7 +345,8 @@ test('multi-day: future-day computeAllotted uses spent = 0', () => {
   const B = c.startOfDay(Date.now());
   c.state.nowTick = B + 30000;
   cleanDay(c, '10:00'); // 600-min pool, no meals
-  const t = activeTask(c, { id: 't', name: 'T', planned: 120, spent: 45, start: B - DAY, end: B + 5 * DAY });
+  // spent is now a per-day ledger (spentByDay); today's 45 min must come from today's key, not the lifetime total.
+  const t = activeTask(c, { id: 't', name: 'T', planned: 120, spent: 45, spentByDay: { [c.ymdOf(B)]: 45 }, start: B - DAY, end: B + 5 * DAY });
   c.state.tasks = [t];
   const today = c.computeAllotted([t], B);
   const future = c.computeAllotted([t], B + 2 * DAY);

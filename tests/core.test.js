@@ -193,6 +193,62 @@ test('autoTimerPlan: both-pinned auto-starts once & auto-pauses; one-pin tasks n
   assert.ok(plan2.pause.includes(bp.id), 'both-pinned running task past its end should auto-pause');
 });
 
+test('daily ledger: stopTimerAt credits both lifetime spent and spentByDay[startDay]', () => {
+  const c = make();
+  c.state.nowTick = Date.now();
+  const t = activeTask(c, { spent:0 });
+  c.state.tasks = [t];
+  const startedAt = Date.now() - 30*60000;
+  c.state.running = { [t.id]: { startedAt, beat: startedAt } };
+  c.stopTimer(t.id);
+  const tt = c.state.tasks.find(x=>x.id===t.id);
+  const key = c.ymdOf(startedAt);
+  assert.ok(tt.spent >= 29 && tt.spent <= 31, 'lifetime spent ~30, got '+tt.spent);
+  assert.ok(tt.spentByDay[key] >= 29 && tt.spentByDay[key] <= 31, 'today ledger ~30, got '+tt.spentByDay[key]);
+  assert.ok(Math.abs(tt.spent - tt.spentByDay[key]) < 0.01, 'single session: lifetime == that day');
+});
+
+test('daily ledger: getSpentOn is per-day; lifetime spent from prior days is not counted today', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const yKey = c.ymdOf(today - DAY), tKey = c.ymdOf(today);
+  const t = activeTask(c, { spent:90, spentByDay:{ [yKey]:60, [tKey]:30 } });
+  c.state.running = {};
+  assert.strictEqual(c.getSpentOn(t, today), 30, 'today only');
+  assert.strictEqual(c.getSpentOn(t, today - DAY), 60, 'yesterday only');
+  assert.strictEqual(c.getSpent(t), 90, 'lifetime total unchanged');
+});
+
+test('daily ledger: getSpentOn adds live running only on the timer\'s start day', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const t = activeTask(c, { spent:0, spentByDay:{} });
+  const startedAt = Date.now() - 20*60000;
+  c.state.running = { [t.id]: { startedAt } };
+  c.state.nowTick = Date.now();
+  assert.ok(c.getSpentOn(t, today) >= 19 && c.getSpentOn(t, today) <= 21, 'live ~20 today');
+  assert.strictEqual(c.getSpentOn(t, today + DAY), 0, 'no live credit on a different day');
+});
+
+test('computeAllotted subtracts today-only spent (prior-day spent no longer shrinks the pool)', () => {
+  const c = make();
+  c.state.nowTick = Date.now();
+  cleanDay(c, '10:00'); // 600 pool
+  const today = c.startOfToday();
+  const yKey = c.ymdOf(today - DAY);
+  // 60 min of work logged YESTERDAY only — must not reduce today's allotment
+  const p1 = activeTask(c, { type:'Proportional', planned:120, spent:60, spentByDay:{ [yKey]:60 } });
+  const p2 = activeTask(c, { type:'Proportional', planned:240 });
+  c.state.tasks = [p1, p2];
+  const a = c.computeAllotted(c.state.tasks);
+  assert.strictEqual(a[p1.id].allotted, 200, 'full 600*120/360 — yesterday spent ignored today');
+  assert.strictEqual(a[p2.id].allotted, 400);
+  // now log 50 min TODAY -> its allotment drops by exactly 50
+  p1.spentByDay[c.ymdOf(today)] = 50; p1.spent = 110;
+  const b = c.computeAllotted(c.state.tasks);
+  assert.strictEqual(b[p1.id].allotted, 150, '200 share - 50 done today');
+});
+
 test('togglePredictManual / setPredict', () => {
   const c = make();
   c.state.nowTick = Date.now();

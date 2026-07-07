@@ -114,7 +114,8 @@ test('Proportional split subtracts spent from the share', () => {
   const c = make();
   cleanDay(c, '03:00'); // pool 180
   const a = activeTask(c, { type: 'Proportional', planned: 60, spent: 0 });
-  const b = activeTask(c, { type: 'Proportional', planned: 120, spent: 30 });
+  // spent is a per-day ledger now; 30 min done TODAY subtracts from today's share.
+  const b = activeTask(c, { type: 'Proportional', planned: 120, spent: 30, spentByDay: { [c.ymdOf(c.startOfToday())]: 30 } });
   const m = c.computeAllotted([a, b]);
   assert.equal(m[a.id].allotted, 60);   // 120/180*180 unaffected... a's share
   assert.equal(m[b.id].allotted, 90);   // 120/180*180 - 30

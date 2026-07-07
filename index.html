@@ -203,7 +203,8 @@ class Component extends DCLogic {
       descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
       /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
          sort={key,dir}|null (null=manual order); colFilters={[key]:spec}; chips=[] active smart-chip keys. */
-      sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[] };
+      sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[],
+      spentScope: pf.spentScope==='life' ? 'life' : 'today' /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -236,7 +237,8 @@ class Component extends DCLogic {
   saveRun(r){ try{ if(r && Object.keys(r).length) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
   normalizeTask(t){
     return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
-      spent:0, goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
+      spent:0, spentByDay:{}, /* PP-EXT: per-day timer ledger {ymd:minutes}; spent stays the lifetime total, spentByDay is the daily slice (getSpentOn). Fixes computeAllotted over-subtracting lifetime spent from today's pool. */
+      goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
       included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / toggleIncluded) */
@@ -655,6 +657,15 @@ class Component extends DCLogic {
   }
   /* live spent minutes = stored spent + elapsed of this task's running timer (if any) */
   getSpent(t){ let s=t.spent||0; const r=this.state.running&&this.state.running[t.id]; if(r) s+=(this.state.nowTick-r.startedAt)/60000; return Math.max(0,s); }
+  /* PP-EXT: spent on a single day (B = any ms in that day). Reads the per-day ledger + the live running
+     portion of a timer STARTED that day. This is what computeAllotted subtracts from the day's pool (today's
+     work only), and what the Spent-cell "today" toggle shows. */
+  getSpentOn(t, B){ const key=this.ymdOf(B); let s=(t.spentByDay&&t.spentByDay[key])||0;
+    const r=this.state.running&&this.state.running[t.id]; if(r && this.ymdOf(r.startedAt)===key) s+=(this.state.nowTick-r.startedAt)/60000;
+    return Math.max(0,s); }
+  /* PP-EXT: the value the Spent column shows, honoring the today/life scope toggle (see toggleSpentScope). */
+  spentDisplay(t){ return this.state.spentScope==='life' ? this.getSpent(t) : this.getSpentOn(t, this.startOfToday()); }
+  toggleSpentScope(){ const s=this.state.spentScope==='life'?'today':'life'; this.setState({spentScope:s}); this.savePrefs({spentScope:s}); }
   isRunning(id){ const key=(id&&id.id!==undefined?id.id:id); return !!(this.state.running && this.state.running[key]); }
   anyRunning(){ const r=this.state.running; return !!(r && Object.keys(r).length); } /* PP-EXT: running is a map (multitasking) */
   /* PP-EXT: multitasking — starting a timer does NOT stop the others. */
@@ -669,7 +680,11 @@ class Component extends DCLogic {
     const add=Math.max(0,(end-r.startedAt)/60000);
     /* accumulate fractional minutes (fmtDur rounds for display); rounding on every stop lost time
        across many short sessions. */
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.spent=(t.spent||0)+add; });
+    /* PP-EXT: credit both the lifetime total and the per-day ledger (keyed by the segment's START day —
+       a session running across midnight lumps to its start day, matching the single-credit model; see getSpentOn). */
+    const dk=this.ymdOf(r.startedAt);
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.spent=(t.spent||0)+add;
+      const by=Object.assign({}, t.spentByDay); by[dk]=(by[dk]||0)+add; t.spentByDay=by; } });
     const nr=Object.assign({}, this.state.running); delete nr[id];
     this.setState({running:nr}); this.saveRun(nr); }
   /* PP-EXT: heartbeat across ALL running timers, called from the 1s run tick and once on mount. Timers persist
@@ -984,7 +999,7 @@ class Component extends DCLogic {
       case 'end':       return t.end==null?null:this.dueMsOf(t, this.startOfToday()); /* current occurrence's due */
       case 'dur':       return this.durDays(t);
       case 'planned':   return +t.planned||0;
-      case 'spent':     return this.getSpent(t);
+      case 'spent':     return this.spentDisplay(t); /* PP-EXT: sort matches the shown scope (today/life) */
       case 'predicted': return +t.predicted||0;
       case 'pct':       return +t.pct||0;
       case 'priority':  return +t.priority||4; /* 1=highest → ascending shows P1 first */
@@ -1183,7 +1198,8 @@ class Component extends DCLogic {
     const map={};
     const today=this.startOfToday();
     if(B==null) B=today;
-    const useSpent = (B===today); /* PP-EXT: spent = today's work only → future days schedule fresh */
+    /* PP-EXT: spent = that day's work only (getSpentOn reads the per-day ledger) → future days schedule fresh,
+       and a task worked on prior days no longer has its lifetime spent wrongly subtracted from today's pool. */
     /* PP-EXT: fixed (both-pinned) tasks occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline will render as pinned blocks. */
     const fixed=this.fixedBlocksToday(B, tasks);
@@ -1199,7 +1215,7 @@ class Component extends DCLogic {
     const brk=Math.max(0, this.state.settings.breakMin||0);
     const rawAvail=this.dayIntervals(B, this.packStart(B), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
     const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
-    const spentById={}; acts.forEach(t=>{ spentById[t.id]= useSpent ? this.getSpent(t) : 0; });
+    const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
     {
       /* PP-EXT: no scheduling modes — every non-fixed active task is Proportional; a manual Predict override
          takes a fixed slice off the top (and its auto value shows what it'd be if it rejoined the pool). */
@@ -3273,6 +3289,12 @@ class Component extends DCLogic {
           background:selected?'var(--sel)':(isOver?'var(--hover)':'transparent'),
           boxShadow:isOver?'inset 2px 0 0 '+this._accent:'none',transition:'background .1s'}},
         c.l||'',
+        /* PP-EXT: Spent scope toggle (today ↔ lifetime) — its own click, stops propagation so it doesn't cycle the sort. */
+        c.k==='spent'?h('span',{key:'scope',onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleSpentScope();},
+          title:this.state.spentScope==='life'?'Showing lifetime total — click for today only':'Showing today only — click for lifetime total',
+          style:{marginLeft:'5px',fontSize:'8.5px',fontWeight:700,letterSpacing:'0.2px',padding:'1px 4px',borderRadius:'3px',cursor:'pointer',
+            color:this._accent,background:'var(--sel)',textTransform:'none'}},
+          this.state.spentScope==='life'?'life':'today'):null,
         /* PP-EXT Phase 7: sort + filter indicators — DISPLAY ONLY (pointer-events:none so the header body owns the
            click that cycles the sort). ↕ = sortable/unsorted, ▲/▼ = active sort dir; the accent dot = active filter. */
         c.lock?null:(()=>{ const ar=this.sortArrow(c.k); const on=!!ar; const filt=this.filterActive((this.state.colFilters||{})[c.k]);
@@ -3533,8 +3555,10 @@ class Component extends DCLogic {
 
     /* PP-EXT: spent cell (read-only; driven by drawer timers), live green while running */
     const running=this.isRunning(t.id);
-    const spentCell = h('span',{style:{fontSize:'11.5px',color:running?'#79c08e':'var(--text-num)',fontVariantNumeric:'tabular-nums'}},
-      (t.spent||running)? this.fmtDur(this.getSpent(t)) : '—', running?h('span',{style:{marginLeft:'4px',color:'#e5484d'}},'●'):null);
+    const spentVal=this.spentDisplay(t);
+    const spentCell = h('span',{title:this.state.spentScope==='life'?'Lifetime total (click the Spent header to show today)':'Today only (click the Spent header to show lifetime)',
+      style:{fontSize:'11.5px',color:running?'#79c08e':'var(--text-num)',fontVariantNumeric:'tabular-nums'}},
+      (spentVal>0||running)? this.fmtDur(spentVal) : '—', running?h('span',{style:{marginLeft:'4px',color:'#e5484d'}},'●'):null);
 
     /* PP-EXT: predicted = allotted/remaining time. Computed (Planned−Spent, redistributed) unless overridden.
        Manual override shows RED and editable; toggle icon flips computed<->manual. Only meaningful today∈[start,end]. */
@@ -4121,7 +4145,9 @@ class Component extends DCLogic {
     const goalEditor=h('input',{className:'pp-num',type:'text',key:'dg'+(t.goal||''),defaultValue:t.goal||'',placeholder:'Goal for this task',
       style:{textAlign:'left',width:'100%',border:'1px solid var(--divider)'},
       onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
-    const spentField=valTxt(this.fmtDur(this.getSpent(t))+(this.isRunning(t.id)?' ⏱ running':''), this.isRunning(t.id)?'#79c08e':'var(--text-2)');
+    /* PP-EXT: detail panel shows lifetime spent + today's slice from the per-day ledger (getSpentOn). */
+    const spentToday=this.getSpentOn(t, this.startOfToday());
+    const spentField=valTxt(this.fmtDur(this.getSpent(t))+(this.isRunning(t.id)?' ⏱ running':'')+(spentToday>0?'  ·  '+this.fmtDur(spentToday)+' today':''), this.isRunning(t.id)?'#79c08e':'var(--text-2)');
     const al=this.allotOf(t.id);
     const allotField = !al.active
       ? valTxt('— (today outside [start, due])','var(--text-faint2)')
