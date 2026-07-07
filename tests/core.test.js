@@ -160,20 +160,30 @@ test('timers: multitasking concurrent; stop accumulates spent per task', () => {
   assert.ok(!c.anyRunning());
 });
 
-test('autoTimerPlan: start-pinned auto-starts once; both-pinned auto-pauses at its end', () => {
+test('autoTimerPlan: both-pinned auto-starts once & auto-pauses; one-pin tasks never auto-start', () => {
   const c = make();
   const now = Date.now();
   c.state.nowTick = now;
-  // start-only pinned, window open now -> should be planned to start
+  // start-only pinned, window open now -> must NOT auto-start (a lone pin has no defined end; owner decision)
   const s = activeTask(c, { pinStart:true, pinEnd:false, start: now - 60000, end: now + 3600000 });
   c.state.tasks = [s];
   c.state.running = {};
+  assert.ok(!c.autoTimerPlan(now).start.includes(s.id), 'start-pin-only task must not auto-start');
+  // end-only pinned, in window -> also must NOT auto-start
+  const e = activeTask(c, { pinStart:false, pinEnd:true, start: now - 60000, end: now + 3600000 });
+  c.state.tasks = [e];
+  assert.ok(!c.autoTimerPlan(now).start.includes(e.id), 'end-pin-only task must not auto-start');
+
+  // both-pinned, window open now -> should be planned to start
+  const b = activeTask(c, { pinStart:true, pinEnd:true, start: now - 60000, end: now + 3600000 });
+  c.state.tasks = [b];
+  c.state.running = {};
   let plan = c.autoTimerPlan(now);
-  assert.ok(plan.start.includes(s.id), 'start-pinned in-window task should auto-start');
+  assert.ok(plan.start.includes(b.id), 'both-pinned in-window task should auto-start');
   // once its occurrence is marked done, it is not re-started
-  c._autoDone[s.id + ':' + c.occOf(s).start] = true;
+  c._autoDone[b.id + ':' + c.occOf(b).start] = true;
   plan = c.autoTimerPlan(now);
-  assert.ok(!plan.start.includes(s.id), 'already-started occurrence is not re-started');
+  assert.ok(!plan.start.includes(b.id), 'already-started occurrence is not re-started');
 
   // both-pinned, currently running, clock now past its end -> should be planned to pause
   const bp = activeTask(c, { pinStart:true, pinEnd:true, start: now - 3600000, end: now - 1000 });

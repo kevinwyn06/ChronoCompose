@@ -680,15 +680,17 @@ class Component extends DCLogic {
     Object.keys(cur).forEach(id=>{ const r=cur[id]; if(now-(r.beat||r.startedAt)>=this.TIMER_BEAT_MS){ nr[id]=Object.assign({},r,{beat:now}); changed=true; } });
     if(changed){ this.setState({running:nr}); this.saveRun(nr); } }
   toggleTimer(id){ if(this.isRunning(id)) this.stopTimer(id); else this.startTimer(id); }
-  /* PP-EXT: pin-driven auto timers. A start-pinned active task auto-starts its timer when the clock reaches its
-     start (multitasking, doesn't stop others); a both-pinned task auto-pauses silently (no prompt) when the clock
-     reaches its end. Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
+  /* PP-EXT: pin-driven auto timers. A *both-pinned* (fixed-block) active task auto-starts its timer when the clock
+     reaches its start (multitasking, doesn't stop others) and auto-pauses silently (no prompt) when the clock
+     reaches its end. A task with only one pin never auto-starts — a lone start pin has no defined end, so it would
+     run forever (owner decision 2026-07-07); the startPin notification reminds the user to start it manually.
+     Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
   autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
       if(this.isMilestone(t)||t.archivedAt) return;
-      const p=this.effPins(t); if(!p.ps) return; if(!this.isActiveToday(t)) return;
-      const oc=this.occOf(t); const startMs=oc.start; const endMs=p.pe?oc.end:Infinity; const key=t.id+':'+startMs;
+      const p=this.effPins(t); if(!(p.ps&&p.pe)) return; if(!this.isActiveToday(t)) return;
+      const oc=this.occOf(t); const startMs=oc.start; const endMs=oc.end; const key=t.id+':'+startMs;
       const running=this.isRunning(t.id);
-      if(p.ps&&p.pe&&running&&now>=endMs){ if(!this._autoPaused[key]) pause.push(t.id); return; }
+      if(running&&now>=endMs){ if(!this._autoPaused[key]) pause.push(t.id); return; }
       if(now>=startMs&&now<endMs&&!running&&!this._autoDone[key]) start.push(t.id);
     }); return {start, pause}; }
   autoTimerTick(){ const now=Date.now(); const plan=this.autoTimerPlan(now);
