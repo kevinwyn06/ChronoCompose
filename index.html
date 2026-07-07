@@ -2747,7 +2747,7 @@ class Component extends DCLogic {
   renderPageNav(){
     const h=React.createElement; const cur=this.state.mainView;
     const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
-    const PAGES=[['archive','🗄','Archive',archN]];
+    const PAGES=[['stats','📈','Stats',0],['archive','🗄','Archive',archN]];
     return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       PAGES.map(v=>{ const active=cur===v[0];
         return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
@@ -3268,6 +3268,7 @@ class Component extends DCLogic {
       case 'schedule': return this.renderScheduleView();
       case 'today':    return this.renderTodayView();
       case 'archive':  return this.renderArchiveView(); /* PP-EXT Phase 9 */
+      case 'stats':    return this.renderStatsView();   /* PP-EXT Phase 9 */
       default:         return this.renderGantt(tasks);
     }
   }
@@ -3306,6 +3307,109 @@ class Component extends DCLogic {
       h('div',{style:{flex:1,overflow:'auto'}}, arch.map(row)));
   }
   /* ==== /PP-EXT Phase 9: Archive page ==== */
+
+  /* ==== PP-EXT Phase 9: Stats page — built on the per-day spentByDay ledger (getSpentOn substrate). Reads ALL
+     tasks incl. archived (archived completions are the point of stats). Pure aggregation so it's unit-testable;
+     habit streaks are a placeholder until the Habits entity (later PR). ==== */
+  STATS_TAG_COLORS(){ return ['#3b82f6','#10b981','#f59e0b','#8b5cf6','#ef4444','#14b8a6','#ec4899','#64748b']; }
+  statsData(now, days){
+    now = now || Date.now(); days = days || 14;
+    const today = this.startOfToday();
+    const tasks = this.state.tasks || [];
+    const byId={}; tasks.forEach(t=>byId[t.id]=t);
+    const buckets=[]; const idx={};
+    for(let i=days-1;i>=0;i--){ const ms=today-i*this.DAY; const ymd=this.ymdOf(ms); idx[ymd]=buckets.length; buckets.push({ms,ymd,spent:0,completed:0}); }
+    const byTag={}; let windowSpent=0;
+    const stamp=c=>{ if(c==null) return; const j=idx[this.ymdOf(c)]; if(j!=null) buckets[j].completed++; };
+    tasks.forEach(t=>{
+      if(this.isMilestone(t)) return;
+      const by=t.spentByDay||{}; const tag=(t.labels&&t.labels[0])||'untagged';
+      for(const k in by){ const m=+by[k]||0; if(!m) continue; const j=idx[k]; if(j!=null){ buckets[j].spent+=m; windowSpent+=m; byTag[tag]=(byTag[tag]||0)+m; } }
+      if(t.recur){ const ov=t.recur.overrides||{}; Object.keys(ov).forEach(oi=>{ if(ov[oi]&&ov[oi].completion) stamp(ov[oi].completion); }); }
+      else if((+t.pct||0)>=100) stamp(t.completion);
+    });
+    /* planned-vs-spent accuracy over completed (non-recurring) tasks completed within the window */
+    let planSum=0, spentSum=0, accN=0;
+    tasks.forEach(t=>{ if(this.isMilestone(t)||t.recur) return; if((+t.pct||0)<100||!t.completion) return;
+      if(idx[this.ymdOf(t.completion)]!=null){ planSum+=(+t.planned||0); spentSum+=this.getSpent(t); accN++; } });
+    /* today adherence — allotted plan vs actual recorded */
+    const allot=this.computeAllotted(tasks, today); let allotted=0, actual=0;
+    tasks.forEach(t=>{ if(this.isMilestone(t)) return; const a=allot[t.id]; if(a&&a.active) allotted+=(+a.allotted||0); actual+=this.getSpentOn(t, today); });
+    /* current backlog */
+    const live=tasks.filter(t=>!t.archivedAt && !this.isMilestone(t));
+    const overdue=live.filter(t=>(+t.pct||0)<100 && this.dueMsOf(t, today)<now).length;
+    const unplanned=live.filter(t=>this.matchChip(t,'unplanned',byId)).length;
+    const tags=Object.keys(byTag).map(k=>({tag:k,min:byTag[k]})).sort((a,b)=>b.min-a.min);
+    return { days, buckets, byTag:tags, windowSpent, completedWin:buckets.reduce((a,b)=>a+b.completed,0),
+      overdue, unplanned, accuracy:{planSum,spentSum,n:accN}, adherence:{allotted,actual} };
+  }
+  renderStatsView(){
+    const h=React.createElement;
+    const days=this.state.statsDays||14;
+    const d=this.statsData(Date.now(), days);
+    const card=(title,body,note)=>h('div',{style:{background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',padding:'14px 16px',display:'flex',flexDirection:'column',gap:'10px',minWidth:0}},
+      h('div',{style:{display:'flex',alignItems:'center',fontSize:'12px',fontWeight:700,color:'var(--text-mut2)',textTransform:'uppercase',letterSpacing:'0.4px'}}, title, note?this.infoNote(note):null), body);
+    const stat=(v,l,col)=>h('div',{style:{display:'flex',flexDirection:'column',gap:'2px'}},
+      h('span',{style:{fontSize:'22px',fontWeight:800,color:col||'var(--text-strong)',fontVariantNumeric:'tabular-nums'}},v),
+      h('span',{style:{fontSize:'11px',color:'var(--text-mut2)'}},l));
+    /* spent-time trend — one bar per day */
+    const maxSpent=Math.max(1,...d.buckets.map(b=>b.spent));
+    const trend=h('div',{style:{display:'flex',alignItems:'flex-end',gap:'3px',height:'120px'}},
+      d.buckets.map((b,i)=>{ const isToday=i===d.buckets.length-1; const dt=new Date(b.ms);
+        return h('div',{key:b.ymd,title:dt.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})+' · '+this.fmtDur(Math.round(b.spent)),
+          style:{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'flex-end',gap:'4px',height:'100%'}},
+          h('div',{style:{width:'100%',height:Math.round(b.spent/maxSpent*94)+'px',minHeight:b.spent>0?'2px':'0',borderRadius:'3px 3px 0 0',
+            background:isToday?this._accent:'var(--chip-bg)',border:isToday?'none':'1px solid var(--divider)',borderBottom:'none'}}),
+          h('span',{style:{fontSize:'8.5px',color:'var(--text-faint)'}}, days<=14?String(dt.getDate()):(dt.getDate()===1||i===0?(dt.getMonth()+1)+'/'+dt.getDate():''))); }));
+    /* per-tag spent */
+    const tagMax=Math.max(1,...d.byTag.map(x=>x.min));
+    const tagRows=d.byTag.slice(0,8).map((x,i)=>{ const col=this.STATS_TAG_COLORS()[i%this.STATS_TAG_COLORS().length];
+      return h('div',{key:x.tag,style:{display:'flex',alignItems:'center',gap:'8px'}},
+        h('span',{style:{flex:'0 0 90px',fontSize:'11.5px',color:'var(--text-2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},x.tag),
+        h('div',{style:{flex:1,height:'10px',background:'var(--chip-bg)',borderRadius:'5px',overflow:'hidden'}},
+          h('div',{style:{height:'100%',width:Math.round(x.min/tagMax*100)+'%',background:col,borderRadius:'5px'}})),
+        h('span',{style:{flex:'0 0 auto',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},this.fmtDur(Math.round(x.min)))); });
+    /* adherence meter */
+    const adhPct=d.adherence.allotted>0?Math.round(d.adherence.actual/d.adherence.allotted*100):0;
+    const adh=h('div',{style:{display:'flex',flexDirection:'column',gap:'8px'}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',fontSize:'12px',color:'var(--text-2)'}},
+        h('span',{},'Recorded '+this.fmtDur(Math.round(d.adherence.actual))),
+        h('span',{},'Allotted '+this.fmtDur(Math.round(d.adherence.allotted)))),
+      h('div',{style:{height:'12px',background:'var(--chip-bg)',borderRadius:'6px',overflow:'hidden'}},
+        h('div',{style:{height:'100%',width:Math.min(100,adhPct)+'%',background:this._accent,borderRadius:'6px'}})),
+      h('span',{style:{fontSize:'11px',color:'var(--text-mut2)'}}, adhPct+'% of today’s plan recorded so far'));
+    const acc=d.accuracy.n>0 ? Math.round(d.accuracy.spentSum/Math.max(1,d.accuracy.planSum)*100) : null;
+    /* window selector */
+    const winSel=h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
+      [14,30,90].map(n=>h('div',{key:n,onClick:()=>this.setState({statsDays:n}),
+        style:{padding:'2px 9px',fontSize:'11px',fontWeight:600,borderRadius:'5px',cursor:'pointer',
+          color:days===n?'#fff':'var(--text-mut2)',background:days===n?this._accent:'transparent'}},n+'d')));
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',padding:'12px 16px',borderBottom:'1px solid var(--top-border)'}},
+      h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'📈 Stats'),
+      h('div',{style:{flex:1}}), winSel);
+    const grid=h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(280px,1fr))',gap:'16px',alignContent:'start'}},
+      card('Time spent · last '+days+'d',
+        h('div',{style:{display:'flex',flexDirection:'column',gap:'10px'}}, trend,
+          h('div',{style:{display:'flex',gap:'22px'}}, stat(this.fmtDur(Math.round(d.windowSpent)),'total tracked'), stat(String(d.completedWin),'tasks completed'))),
+        'Daily tracked minutes from your timers (spentByDay ledger). Today is highlighted.'),
+      card('Time by tag', d.byTag.length?h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},...tagRows)
+        :h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'No tracked time in this window yet.'),
+        'Tracked minutes grouped by each task’s first @tag, over the selected window.'),
+      card('Completion & planning',
+        h('div',{style:{display:'flex',gap:'22px',flexWrap:'wrap'}},
+          stat(String(d.completedWin),'completed'),
+          stat(String(d.overdue),'overdue', d.overdue?'#e5484d':null),
+          stat(String(d.unplanned),'to plan'),
+          stat(acc==null?'—':acc+'%','spent÷planned', acc!=null&&acc>120?'#e5484d':null)),
+        'Completed in the window, plus current overdue + unplanned backlog. “spent÷planned” = how actual time compared to your plan on completed tasks (100% = on target).'),
+      card('Today: plan vs actual', adh,
+        'How today’s allotted schedule compares to what your timers have recorded so far.'),
+      card('Habit streaks',
+        h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'Available once Habits ship (next Phase 9 PR).'),
+        'Streak grid + consistency per habit — arrives with the Habits entity.'));
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, grid);
+  }
+  /* ==== /PP-EXT Phase 9: Stats page ==== */
 
   renderBoard(tasks){
     const h=React.createElement;
