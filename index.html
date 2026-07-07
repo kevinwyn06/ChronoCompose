@@ -216,7 +216,7 @@ class Component extends DCLogic {
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
-    autoArchiveDays:7, /* PP-EXT: auto-archive completed tasks after N days (0 = off) */
+    autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
     notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true } /* PP-EXT Phase 8: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
@@ -1111,7 +1111,7 @@ class Component extends DCLogic {
   /* ==== /PP-EXT Phase 7 core ==== */
   visibleTasks(){
     const ts=this.state.tasks;
-    const anyArch=!this.state.showArchived && ts.some(t=>t.archivedAt);
+    const anyArch=ts.some(t=>t.archivedAt); /* PP-EXT: archived tasks always leave the task page (Archive page holds them) */
     const {byId}=this.buildKids(ts);
     const col=this.state.collapsed||{};
     const anyCol=ts.some(t=>t.parentId!=null && byId[t.parentId] && this.isHiddenByCollapse(t,byId)); /* PP-EXT: collapsed subtrees hide */
@@ -1135,24 +1135,35 @@ class Component extends DCLogic {
   unarchiveMulti(ids){
     this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=null; }); });
   }
-  /* PURE: archive completed tasks whose completion is older than `days`. Never touches a recurring series
-     that is still live (no until, or until in the future) — its completions are per-occurrence. */
+  /* PURE: archive completed tasks off the task page (they live on the Archive page). Default is IMMEDIATE
+     (owner choice 2026-07): a completed non-recurring task archives at once; `days>0` keeps it visible for a
+     grace period first. Recurring series are never auto-archived — their completions are per-occurrence.
+     Milestones stay as markers. Cascade to subtrees is handled by archiveDone on the interactive path. */
   sweepAutoArchive(tasks, now, days){
-    if(!(days>0)) return 0;
     let n=0;
     tasks.forEach(t=>{
-      if(t.archivedAt) return;
-      if(t.recur && (t.recur.until==null || t.recur.until>now)) return;
-      if(t.pct>=100 && t.completion && (now-t.completion)>days*this.DAY){ t.archivedAt=now; n++; }
+      if(t.archivedAt || t.recur || this.isMilestone(t)) return;
+      if(!(t.pct>=100 && t.completion)) return;
+      if(days>0 && (now-t.completion)<=days*this.DAY) return;
+      t.archivedAt=now; n++;
     });
     return n;
+  }
+  /* PP-EXT: archive-on-complete — a completed non-recurring, non-milestone task (and its subtree) leaves the
+     task page the moment it reaches 100%; retrieve it on the Archive page. Only fires on the completion
+     TRANSITION (called from the completion mutators), so unarchive — which leaves pct at 100 — never re-archives. */
+  archiveDone(tasks, id, now){
+    const t=tasks.find(x=>x.id===id);
+    if(!t || t.archivedAt || t.recur || this.isMilestone(t)) return;
+    if(!(t.pct>=100 && t.completion)) return;
+    const ids=this.expandSubtrees([id]); /* completing a parent archives its whole family (no orphan rows) */
+    tasks.forEach(x=>{ if(ids.includes(x.id) && !x.archivedAt) x.archivedAt=now; });
   }
   maybeAutoArchive(){
     const now=Date.now();
     if(now-(this._lastArchSweep||0) < this.ARCH_SWEEP_MS) return;
     this._lastArchSweep=now;
     const days=this.state.settings.autoArchiveDays;
-    if(!(days>0)) return;
     /* only commit when the sweep will actually change something (don't churn undo history hourly) */
     const probe=this.state.tasks.map(t=>({...t, recur:t.recur}));
     if(this.sweepAutoArchive(probe, now, days)>0)
@@ -1299,7 +1310,8 @@ class Component extends DCLogic {
   setPriorityMulti(ids,p){ this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.priority=p; }); }); this.closeMenu(); }
   completeMulti(ids){ ids=this.expandSubtrees(ids); /* PP-EXT: completing a parent completes its subtree */
     const allDone=this.state.tasks.filter(t=>ids.includes(t.id)).every(t=>t.pct>=100);
-    this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)){ if(allDone){ t.pct=0; t.completion=null; } else { t.pct=100; t.completion=Date.now(); } } }); }); this.closeMenu(); }
+    this.commit(tasks=>{ const now=Date.now(); tasks.forEach(t=>{ if(ids.includes(t.id)){ if(allDone){ t.pct=0; t.completion=null; } else { t.pct=100; t.completion=now; } } });
+      if(!allDone) ids.forEach(id=>this.archiveDone(tasks,id,now)); /* PP-EXT: completed → straight to the Archive page */ }); this.closeMenu(); }
   duplicateMulti(ids){ this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)){ const c={...tasks[i],id:'t'+Math.random().toString(36).slice(2,8),deps:[...(tasks[i].deps||[])],name:tasks[i].name+' copy'}; tasks.splice(i+1,0,c); } } }); this.closeMenu(); }
   deleteMulti(ids){
     if(ids.length===1){ const t=this.state.tasks.find(x=>x.id===ids[0]); if(t&&t.recur){ this.setState({menu:null}); this.openScope('delete',t.id,this.mostRecentOccIdx(t)); return; } }
@@ -1362,7 +1374,7 @@ class Component extends DCLogic {
       if(firstDone){ setDone([firstDone.idx],false); }
       return; }
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
-      if(t.pct>=100){ t.pct=0; t.completion=null; } else { t.pct=100; t.completion=Date.now(); }
+      if(t.pct>=100){ t.pct=0; t.completion=null; } else { const now=Date.now(); t.pct=100; t.completion=now; this.archiveDone(tasks,id,now); /* PP-EXT: archive-on-complete */ }
     });
   }
   setPct(id,pct){
@@ -1374,6 +1386,7 @@ class Component extends DCLogic {
       return; }
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       t.pct=pct; t.completion = pct>=100 ? (t.completion||Date.now()) : null;
+      if(pct>=100) this.archiveDone(tasks,id,t.completion); /* PP-EXT: archive-on-complete */
     });
   }
   /* PP-EXT: nudge % Done by ±PCT_STEP (occurrence-aware via setPct); used by the −/+ buttons in the pct cell. */
@@ -1941,11 +1954,11 @@ class Component extends DCLogic {
     const showCP = this.props.showCriticalPath !== false;
     this.rowH = this.ROWH[this.state.rowMode] || 40;
     this._accent = accent; this._showCP = showCP;
-    /* PP-EXT: archived tasks are hidden from the board unless showArchived. The filtered array is cached so
-       its IDENTITY stays stable across renders — the structural memoization below depends on it. */
-    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived || this._visCol!==this.state.collapsed
+    /* PP-EXT: archived tasks are ALWAYS hidden from the board (they live on the Archive page). The filtered
+       array is cached so its IDENTITY stays stable across renders — the structural memoization below depends on it. */
+    if(this._visSrcRef!==this.state.tasks || this._visCol!==this.state.collapsed
        || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips){ /* PP-EXT Phase 7: sort/filter changes must re-derive the visible list too */
-      this._visSrcRef=this.state.tasks; this._visArch=!!this.state.showArchived; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
+      this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
       this._visTasks=this.visibleTasks();
       /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
@@ -2594,9 +2607,9 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Break between tasks (min)',
           this.infoNote('Minutes of breathing room reserved after each scheduled task in the day timeline (0 = back-to-back). Reduces the allotment pool so tasks still fit around their breaks; meals and fixed events already count as breaks.')),
         inp(s.breakMin,v=>this.saveSettings({breakMin:Math.max(0,parseInt(v)||0)}))),
-      /* PP-EXT: auto-archive (ROADMAP Phase 3) */
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto-archive done after (days)',
-          this.infoNote('Completed tasks archive automatically after this many days (0 = never). Archived tasks are hidden but kept for stats — see the "N archived" chip under the task list. Live recurring series are never auto-archived.')),
+      /* PP-EXT: auto-archive (ROADMAP Phase 3; immediate by default since Phase 9) */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Archive done after (days)',
+          this.infoNote('Completed tasks leave the task page and move to the Archive page. 0 = immediately on 100%; a higher number keeps a task visible for that many grace days first. Recurring series are never auto-archived (they complete per-occurrence).')),
         inp(s.autoArchiveDays,v=>this.saveSettings({autoArchiveDays:Math.max(0,parseInt(v)||0)}))),
       /* PP-EXT Phase 8: notifications — opt-in permission + per-trigger toggles. Toggles default ON but only
          fire once the browser grants permission (see notifyTick's granted-gate). */
@@ -2719,12 +2732,31 @@ class Component extends DCLogic {
   renderViewToggle(){
     const h=React.createElement; const cur=this.state.mainView;
     const VIEWS=[['gantt','📊','Gantt'],['day4','🗓','4-Day'],['week','📆','Week'],['month','📅','Month'],['schedule','📋','Schedule'],['today','☀','Today']];
-    return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
+    const seg=h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       VIEWS.map(v=>{ const active=cur===v[0];
         return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
           style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
             fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'#fff':'var(--text-mut2)',
             background:active?this._accent:'transparent'}}, h('span',{style:{fontSize:'12px'}},v[1]), v[2]); }));
+    return h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}}, seg, this.renderPageNav());
+  }
+  /* PP-EXT Phase 9: which main-views are stand-alone "pages" (full-width, no task sheet + Gantt split). */
+  isPageView(v){ return v==='archive'||v==='stats'||v==='habits'||v==='journal'; }
+  /* PP-EXT Phase 9: a SEPARATE nav group beside the six time-views — review/manage pages (Archive today;
+     Stats/Habits/Journal land in later PRs). Kept distinct so scheduling views stay uncluttered. */
+  renderPageNav(){
+    const h=React.createElement; const cur=this.state.mainView;
+    const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
+    const PAGES=[['archive','🗄','Archive',archN]];
+    return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
+      PAGES.map(v=>{ const active=cur===v[0];
+        return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
+          style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
+            fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'#fff':'var(--text-mut2)',
+            background:active?this._accent:'transparent'}},
+          h('span',{style:{fontSize:'12px'}},v[1]), v[2],
+          v[3]?h('span',{style:{fontSize:'9px',fontWeight:700,padding:'0 5px',borderRadius:'8px',
+            background:active?'rgba(255,255,255,0.25)':'var(--divider)',color:active?'#fff':'var(--text-mut2)'}},String(v[3])):null); }));
   }
   /* Port of buildTodayTimeline (timeline.gs): greedily pack today's active tasks' allotted minutes into the
      free slots (window − meals − freeTime, from dayIntervals); order priority → EDF (due) → longer-first;
@@ -3235,26 +3267,67 @@ class Component extends DCLogic {
       case 'month':    return this.renderMonthView();
       case 'schedule': return this.renderScheduleView();
       case 'today':    return this.renderTodayView();
+      case 'archive':  return this.renderArchiveView(); /* PP-EXT Phase 9 */
       default:         return this.renderGantt(tasks);
     }
   }
   /* ==== /PP-EXT ==== */
 
+  /* ==== PP-EXT Phase 9: Archive page — completed/archived tasks live here (off the task board). Restore with
+     Unarchive (returns intact, gcal untouched) or remove permanently with Delete (deletes the linked gcal event). */
+  renderArchiveView(){
+    const h=React.createElement;
+    const fmtD=ms=>ms?new Date(ms).toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}):'—';
+    const arch=this.state.tasks.filter(t=>t.archivedAt).slice().sort((a,b)=>(b.archivedAt||0)-(a.archivedAt||0));
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',padding:'12px 16px',borderBottom:'1px solid var(--top-border)'}},
+      h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'🗄 Archive'),
+      h('span',{style:{fontSize:'12px',color:'var(--text-mut2)'}},arch.length+(arch.length===1?' task':' tasks')),
+      this.infoNote('Tasks archive here automatically the moment they hit 100% (and can be archived by hand from a row menu). They are kept for stats, never scheduled or synced. Unarchive returns a task intact; Delete removes it permanently (and its Google Calendar event).'));
+    if(!arch.length)
+      return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header,
+        h('div',{style:{flex:1,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--text-faint)',fontSize:'13px'}},
+          'Nothing archived yet. Completed tasks land here.'));
+    const row=t=>{ const pcol=this.PCOL[t.priority]||'var(--divider)'; const spent=this.getSpent(t);
+      return h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:'12px',padding:'9px 16px',borderBottom:'1px solid var(--row-border)'}},
+        h('span',{style:{flex:'none',width:'8px',height:'8px',borderRadius:'50%',background:pcol}}),
+        h('div',{onClick:()=>this.openDetail(t.id),title:'Open details',
+          style:{flex:1,minWidth:0,cursor:'pointer',display:'flex',flexDirection:'column',gap:'2px'}},
+          h('span',{style:{fontSize:'13px',fontWeight:600,color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name||'(untitled)'),
+          (t.labels&&t.labels.length)?h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}},t.labels.join(' ')):null),
+        h('span',{style:{flex:'none',fontSize:'11px',color:'var(--text-mut2)',width:'96px'}},'Done '+fmtD(t.completion||t.archivedAt)),
+        h('span',{style:{flex:'none',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',width:'70px',textAlign:'right'}},spent>0?this.fmtDur(spent):'—'),
+        h('button',{onClick:()=>this.unarchiveMulti([t.id]),
+          style:{flex:'none',fontSize:'11px',fontWeight:600,cursor:'pointer',padding:'4px 10px',borderRadius:'6px',
+            border:'1px solid var(--divider)',background:'var(--chip-bg)',color:'var(--text-mut2)'}},'↩ Unarchive'),
+        h('button',{onClick:()=>{ if(confirm('Delete "'+(t.name||'this task')+'" permanently? This also deletes its linked Google Calendar event.')) this.deleteMulti([t.id]); },
+          style:{flex:'none',fontSize:'11px',fontWeight:600,cursor:'pointer',padding:'4px 10px',borderRadius:'6px',
+            border:'1px solid var(--divider)',background:'transparent',color:'#e5484d'}},'🗑 Delete')); };
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header,
+      h('div',{style:{flex:1,overflow:'auto'}}, arch.map(row)));
+  }
+  /* ==== /PP-EXT Phase 9: Archive page ==== */
+
   renderBoard(tasks){
     const h=React.createElement;
+    /* PP-EXT Phase 9: stand-alone pages (Archive/Stats/…) take the FULL width — no task sheet, split, or
+       filter bar; just the page. The shared overlays (menus/detail/settings/…) still render. */
+    const body = this.isPageView(this.state.mainView)
+      ? h('div',{style:{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+          this.renderMainPane(tasks))
+      : /* PP-EXT Phase 7: stack the full-width filter bar ABOVE the board row (this wrapper is a flex COLUMN;
+           the parent slot is a flex ROW, so without it the bar became a left-hand column — the "floating on
+           the left" bug). Row alignment between sheet + Gantt is preserved because the bar spans both. */
+        h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
+          this.renderFilterBar(),
+          h('div',{ref:el=>this.boardEl=el, style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'}},
+            h('div',{style:{flex:'0 0 '+this.state.splitPct+'%',minWidth:0,display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
+              this.renderSheet(tasks)),
+            h('div',{onMouseDown:e=>this.startSplit(e),
+              style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
+            h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+              this.renderMainPane(tasks)))); /* PP-EXT: main-view selector picks the right pane */
     return h(React.Fragment,{},
-      /* PP-EXT Phase 7: stack the full-width filter bar ABOVE the board row (this wrapper is a flex COLUMN;
-         the parent slot is a flex ROW, so without it the bar became a left-hand column — the "floating on
-         the left" bug). Row alignment between sheet + Gantt is preserved because the bar spans both. */
-      h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
-        this.renderFilterBar(),
-        h('div',{ref:el=>this.boardEl=el, style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'}},
-          h('div',{style:{flex:'0 0 '+this.state.splitPct+'%',minWidth:0,display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
-            this.renderSheet(tasks)),
-          h('div',{onMouseDown:e=>this.startSplit(e),
-            style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
-          h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-            this.renderMainPane(tasks)))), /* PP-EXT: main-view selector picks the right pane */
+      body,
       this.state.menu ? this.renderMenu() : null,
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
@@ -3311,17 +3384,9 @@ class Component extends DCLogic {
 
     const rows = tasks.map((t,i)=>this.sheetRow(t,i,cols,totalW,byId));
 
-    /* PP-EXT: archived-tasks chip — count + show/hide toggle (archived rows render dimmed when shown) */
-    const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
-    const archChip = archN ? h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 12px',minWidth:totalW+'px'}},
-      h('span',{onClick:()=>this.setState(s=>({showArchived:!s.showArchived})),
-        title:this.state.showArchived?'Hide archived tasks':'Show archived tasks (kept for stats; never scheduled or synced)',
-        style:{cursor:'pointer',fontSize:'11px',fontWeight:600,color:'var(--text-mut2)',border:'1px solid var(--divider)',
-          borderRadius:'10px',padding:'2px 10px',background:this.state.showArchived?'var(--sel)':'var(--chip-bg)',userSelect:'none'}},
-        (this.state.showArchived?'▾ ':'▸ ')+archN+' archived')) : null;
-
+    /* PP-EXT: archived tasks no longer show inline — they live on the Archive page (top-bar nav group). */
     const inner = h('div',{onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
-      style:{minWidth:totalW+'px'}}, header, ...rows, archChip);
+      style:{minWidth:totalW+'px'}}, header, ...rows);
 
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },

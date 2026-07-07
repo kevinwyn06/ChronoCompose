@@ -4,25 +4,49 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');
 
-test('sweepAutoArchive archives long-completed tasks, spares recent/live-recurring ones', () => {
+test('sweepAutoArchive (immediate, days=0) archives completed tasks; spares open, recurring, milestones', () => {
+  const c = make();
+  const now = Date.now();
+  const done = activeTask(c, { id: 'done', pct: 100, completion: now - 2 * DAY });
+  const open = activeTask(c, { id: 'open', pct: 40 });
+  const rec = activeTask(c, { id: 'rec', pct: 100, completion: now - 30 * DAY,
+    recur: { kind: 'day', n: 1, overrides: {}, shifts: [] } });
+  const mile = activeTask(c, { id: 'mile', type: 'Milestone', pct: 100, completion: now - 2 * DAY });
+  const tasks = [done, open, rec, mile];
+  const n = c.sweepAutoArchive(tasks, now, 0);
+  assert.equal(n, 1);
+  assert.ok(tasks.find(t => t.id === 'done').archivedAt, 'completed task archives immediately');
+  assert.ok(!tasks.find(t => t.id === 'open').archivedAt);
+  assert.ok(!tasks.find(t => t.id === 'rec').archivedAt, 'recurring series never auto-archived');
+  assert.ok(!tasks.find(t => t.id === 'mile').archivedAt, 'milestones stay as markers');
+});
+
+test('sweepAutoArchive with a grace period (days>0) keeps recent completions on the page', () => {
   const c = make();
   const now = Date.now();
   const old = activeTask(c, { id: 'old', pct: 100, completion: now - 10 * DAY });
   const recent = activeTask(c, { id: 'recent', pct: 100, completion: now - 2 * DAY });
-  const open = activeTask(c, { id: 'open', pct: 40 });
-  const liveRec = activeTask(c, { id: 'liverec', pct: 100, completion: now - 30 * DAY,
-    recur: { kind: 'day', n: 1, overrides: {}, shifts: [] } }); // no until → still live
-  const deadRec = activeTask(c, { id: 'deadrec', pct: 100, completion: now - 30 * DAY,
-    recur: { kind: 'day', n: 1, until: now - 20 * DAY, overrides: {}, shifts: [] } });
-  const tasks = [old, recent, open, liveRec, deadRec];
+  const tasks = [old, recent];
   const n = c.sweepAutoArchive(tasks, now, 7);
-  assert.equal(n, 2);
-  assert.ok(tasks.find(t => t.id === 'old').archivedAt, 'old completed task archived');
-  assert.ok(tasks.find(t => t.id === 'deadrec').archivedAt, 'ended recurring series archived');
-  assert.ok(!tasks.find(t => t.id === 'recent').archivedAt);
-  assert.ok(!tasks.find(t => t.id === 'open').archivedAt);
-  assert.ok(!tasks.find(t => t.id === 'liverec').archivedAt, 'live recurring series never auto-archived');
-  assert.equal(c.sweepAutoArchive([activeTask(c, { pct: 100, completion: now - 90 * DAY })], now, 0), 0, 'days=0 disables');
+  assert.equal(n, 1);
+  assert.ok(tasks.find(t => t.id === 'old').archivedAt, 'past the grace window → archived');
+  assert.ok(!tasks.find(t => t.id === 'recent').archivedAt, 'within the grace window → still visible');
+});
+
+test('archiveDone archives a completing task and its subtree; ignores open/recurring/milestone', () => {
+  const c = make();
+  const now = Date.now();
+  const parent = activeTask(c, { id: 'p', pct: 100, completion: now });
+  const child = activeTask(c, { id: 'ch', parentId: 'p', pct: 40 }); // incomplete child still travels with the parent
+  const other = activeTask(c, { id: 'o', pct: 100, completion: now });
+  const rec = activeTask(c, { id: 'r', pct: 100, completion: now, recur: { kind: 'day', n: 1, overrides: {}, shifts: [] } });
+  c.state.tasks = [parent, child, other, rec];
+  c.archiveDone(c.state.tasks, 'p', now);
+  assert.ok(parent.archivedAt, 'completed parent archives');
+  assert.ok(child.archivedAt, 'its subtree archives too (no orphan rows)');
+  assert.ok(!other.archivedAt, 'unrelated task untouched');
+  c.archiveDone(c.state.tasks, 'r', now);
+  assert.ok(!rec.archivedAt, 'recurring series never auto-archived on complete');
 });
 
 test('archived tasks are excluded from allotment and the day timeline', () => {
@@ -39,15 +63,13 @@ test('archived tasks are excluded from allotment and the day timeline', () => {
   assert.ok(!ids.includes('arch'));
 });
 
-test('visibleTasks hides archived (identity-stable when nothing is archived)', () => {
+test('visibleTasks always hides archived (identity-stable when nothing is archived)', () => {
   const c = make();
   const plain = [activeTask(c, { id: 'a' }), activeTask(c, { id: 'b' })];
   c.state.tasks = plain;
   assert.equal(c.visibleTasks(), plain, 'same array identity when nothing is archived');
   plain[1].archivedAt = Date.now();
-  assert.equal(c.visibleTasks().length, 1);
-  c.state.showArchived = true;
-  assert.equal(c.visibleTasks().length, 2, 'showArchived reveals them');
+  assert.equal(c.visibleTasks().length, 1, 'archived tasks leave the task page (they live on the Archive page)');
 });
 
 test('pruneDeletedEvents keeps archived tasks even when their event is gone', () => {
