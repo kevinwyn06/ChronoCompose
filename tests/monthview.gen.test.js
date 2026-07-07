@@ -70,6 +70,23 @@ test('month: tasksOnDay and daysOfTask are symmetric over a range', () => {
   }
 });
 
+// Phase 7: an active filter thins the calendar chips. tasksOnDay defaults to the pre-filtered
+// _calTasks list (set in renderVals) so the month/day/schedule views honor the filter like the sheet.
+test('month: tasksOnDay defaults to the filtered _calTasks set when a filter is active', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const keep = activeTask(c, { id: 'keep', start: B, end: B + DAY, priority: 1 });
+  const drop = activeTask(c, { id: 'drop', start: B, end: B + DAY, priority: 4 });
+  c.state.tasks = [keep, drop];
+  // No cache set → default falls through to state.tasks (both appear).
+  assert.deepEqual(c.tasksOnDay(B).sort(), ['drop', 'keep']);
+  // Simulate renderVals' pre-filtered list (P1 only) → only the kept task shows on the calendar.
+  c._calTasks = [keep];
+  assert.deepEqual(c.tasksOnDay(B), ['keep'], 'filtered calendar excludes the P4 task');
+  // An explicit tasks arg still wins over the cache (used by the sheet-glow path).
+  assert.deepEqual(c.tasksOnDay(B, c.state.tasks).sort(), ['drop', 'keep']);
+});
+
 // monthGrid: 42 cells, starts on the Sunday on/before the 1st, flags in-month days.
 test('month: monthGrid is a 7×6 grid starting on Sunday with correct in-month flags', () => {
   const c = make();

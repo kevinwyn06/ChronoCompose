@@ -95,29 +95,20 @@ input,select,button{font-family:inherit}
 </helmet>
 <div style="display:flex;flex-direction:column;height:100vh;overflow:hidden">
 
-  <div style="display:flex;align-items:center;gap:13px;padding:0 16px;height:54px;background:var(--top-bg);border-bottom:1px solid var(--top-border);flex:none">
+  <!-- PP-EXT: slimmed top bar — dropped the subtitle chip + the P1–P4/critical-path legend (priority now lives
+       in the filter bar as clickable chips), and made Undo/Redo icon-only to reclaim horizontal space. -->
+  <div style="display:flex;align-items:center;gap:10px;padding:0 16px;height:46px;background:var(--top-bg);border-bottom:1px solid var(--top-border);flex:none">
     <div style="display:flex;align-items:center;gap:9px">
       <div style="width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,#3b82f6,#8957e5);display:flex;align-items:center;justify-content:center;font-size:13px">◧</div>
       <div style="font-weight:600;font-size:15px;color:var(--text-strong);letter-spacing:-0.2px">Life Planner</div>
-      <span style="font-size:11px;color:var(--text-mut);background:var(--chip-bg);padding:2px 7px;border-radius:5px;font-weight:500">Tasks · Gantt · Timeline</span>
     </div>
     <div style="width:1px;height:24px;background:var(--divider);margin:0 2px"></div>
-    <button class="pp-tbtn" onClick="{{ undo }}" title="Undo (Ctrl+Z)"><span style="font-size:14px">↶</span>Undo</button>
-    <button class="pp-tbtn" onClick="{{ redo }}" title="Redo (Ctrl+Y)"><span style="font-size:14px">↷</span>Redo</button>
+    <button class="pp-iconbtn" onClick="{{ undo }}" title="Undo (Ctrl+Z)">↶</button>
+    <button class="pp-iconbtn" onClick="{{ redo }}" title="Redo (Ctrl+Y)">↷</button>
     <button class="pp-tbtn" onClick="{{ addTask }}" style="background:#2f6fed;border-color:#2f6fed;color:#fff"><span style="font-size:15px;margin-top:-1px">+</span>Add Task</button>
 
     <div style="flex:1"></div>
 
-    <div style="display:flex;align-items:center;gap:13px;font-size:11px;color:var(--text-mut)">
-      <div style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#d1453b;display:inline-block"></span>P1</div>
-      <div style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#eb8909;display:inline-block"></span>P2</div>
-      <div style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#246fe0;display:inline-block"></span>P3</div>
-      <div style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:9px;border-radius:50%;background:#7b8794;display:inline-block"></span>P4</div>
-      <div style="width:1px;height:16px;background:var(--divider)"></div>
-      <div style="display:flex;align-items:center;gap:5px"><span style="width:14px;height:7px;border-radius:2px;background:#e5484d;display:inline-block"></span>Critical path</div>
-    </div>
-
-    <div style="width:1px;height:24px;background:var(--divider);margin:0 2px"></div>
     <button class="pp-tbtn" onClick="{{ jumpToday }}" title="Scroll Gantt to today">Today</button>
     {{ viewtoggle }}
     {{ drawertoggle }}
@@ -201,7 +192,10 @@ class Component extends DCLogic {
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
-      descOpen:pf.descOpen||{} /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */ };
+      descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
+      /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
+         sort={key,dir}|null (null=manual order); colFilters={[key]:spec}; chips=[] active smart-chip keys. */
+      sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[] };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -884,18 +878,156 @@ class Component extends DCLogic {
      Archive = hidden from board/timeline/allotment, kept in pp-tasks for stats, gcal untouched
      (computeOutboundOps ignores archivedAt; pruneDeletedEvents skips archived). Delete = permanent
      (and deletes the linked gcal event via the Phase 2 funnel). */
+  /* ==== PP-EXT: Phase 7 — sort / filter / smart-chip core (pure, testable in tests/_load) ====
+     Sort is recursive-hierarchical and NON-DESTRUCTIVE: siblings sort among siblings at every tree
+     level, subtrees stay glued under their parent, and the manual pp-tasks order is the stable
+     tiebreak + the exact order restored when the sort is cleared (sort.key null). Filters (column +
+     smart chips) feed the sheet, the row-aligned Gantt, AND the calendar chips off one dataset. */
+  SORT_KEYS(){ return ['name','incl','start','end','dur','planned','spent','predicted','pct','priority','tags','calendar']; }
+  SMART_CHIPS(){ return [
+    {k:'activeToday', l:'Active today'}, {k:'startable', l:'Startable'}, {k:'unplanned', l:'Unplanned'},
+    {k:'overdue', l:'Overdue'}, {k:'running', l:'Running'} ]; }
+  colType(k){ /* type drives the comparator + the filter widget */
+    if(k==='name'||k==='tags'||k==='calendar') return 'text';
+    if(k==='start'||k==='end') return 'date';
+    if(k==='incl') return 'bool';
+    return 'num'; /* dur, planned, spent, predicted, pct, priority */
+  }
+  /* A comparable primitive for a sort/filter key; '' / null mean "empty" (always sorted last). */
+  sortValue(t, key){
+    switch(key){
+      case 'name':      return (t.name||'').toLowerCase();
+      case 'incl':      return this.isActiveToday(t) ? 1 : 0;
+      case 'start':     return t.start==null?null:t.start;
+      case 'end':       return t.end==null?null:this.dueMsOf(t, this.startOfToday()); /* current occurrence's due */
+      case 'dur':       return this.durDays(t);
+      case 'planned':   return +t.planned||0;
+      case 'spent':     return this.getSpent(t);
+      case 'predicted': return +t.predicted||0;
+      case 'pct':       return +t.pct||0;
+      case 'priority':  return +t.priority||4; /* 1=highest → ascending shows P1 first */
+      case 'tags':      return ((t.labels||[]).slice().sort()[0]||'').toLowerCase();
+      case 'calendar':  return (this.calNameOf(t)||'').toLowerCase();
+      default:          return null;
+    }
+  }
+  calNameOf(t){ /* human calendar label for sort/filter: the source calendar's summary, else its @tag, else '' */
+    if(!t.calendarId) return '';
+    const c=(this.state.gcal&&this.state.gcal.calendars||[]).find(x=>x.id===t.calendarId);
+    if(c&&c.summary) return c.summary;
+    const tag=(t.labels||[])[0]; return tag?('@'+tag):t.calendarId;
+  }
+  cmpTasks(a, b, key, dir){
+    const mul=dir==='desc'?-1:1;
+    let va=this.sortValue(a,key), vb=this.sortValue(b,key);
+    const na=(va==null||va===''), nb=(vb==null||vb===''); /* empties always last, regardless of dir */
+    if(na&&nb) return 0; if(na) return 1; if(nb) return -1;
+    if(typeof va==='string'||typeof vb==='string'){ va=''+va; vb=''+vb; return (va<vb?-1:va>vb?1:0)*mul; }
+    return (va-vb)*mul;
+  }
+  /* Recursive hierarchical sort. `list` is the (already archive/collapse-filtered) flat tree order.
+     Returns a new DFS-flattened array with siblings sorted at each level; subtrees stay contiguous.
+     sort=null → returns `list` unchanged (manual order restored). */
+  sortTree(list, sort){
+    if(!sort||!sort.key||this.SORT_KEYS().indexOf(sort.key)<0) return list;
+    const idx=new Map(); list.forEach((t,i)=>idx.set(t.id,i)); /* stable tiebreak = manual order */
+    const kids=new Map(); const roots=[];
+    list.forEach(t=>{ const p=(t.parentId!=null && idx.has(t.parentId))?t.parentId:null; /* parent outside the set → treat as root */
+      if(p==null) roots.push(t); else { if(!kids.has(p)) kids.set(p,[]); kids.get(p).push(t); } });
+    const cmp=(a,b)=>{ const c=this.cmpTasks(a,b,sort.key,sort.dir); return c!==0?c:(idx.get(a.id)-idx.get(b.id)); };
+    const out=[]; const walk=list2=>{ list2.slice().sort(cmp).forEach(t=>{ out.push(t); const ch=kids.get(t.id); if(ch) walk(ch); }); };
+    walk(roots); return out;
+  }
+  /* One column filter spec: text {contains}, num/date {min,max}, bool {val}. Empty spec = pass. */
+  matchColFilter(t, key, f){
+    if(!f) return true;
+    const type=this.colType(key);
+    if(type==='text'){
+      const q=(f.contains||'').trim().toLowerCase(); if(!q) return true;
+      if(key==='tags') return (t.labels||[]).some(l=>(''+l).toLowerCase().includes(q));
+      const v=(this.sortValue(t,key)||'')+''; return v.includes(q);
+    }
+    if(type==='bool'){ if(f.val==null) return true; return (this.sortValue(t,key)===1)===!!f.val; }
+    /* num / date range (+ optional set-membership, used by the priority P1–P4 chips) */
+    const v=this.sortValue(t,key); if(v==null) return f.min==null&&f.max==null&&!(f.set&&f.set.length);
+    if(f.set&&f.set.length && f.set.indexOf(v)<0) return false;
+    if(f.min!=null && v<f.min) return false; if(f.max!=null && v>f.max) return false; return true;
+  }
+  matchChip(t, chip, byId){
+    switch(chip){
+      case 'activeToday': return this.isActiveToday(t);
+      case 'startable':   return (t.deps||[]).every(id=>{ const d=byId[id]; return !d || (+d.pct||0)>=100; });
+      case 'unplanned':   return (+t.planned||0)===0 && (+t.pct||0)<100 && t.type!=='Milestone'; /* needs planning (feeds Phase 9) */
+      case 'overdue':     return (+t.pct||0)<100 && this.dueMsOf(t, this.startOfToday()) < Date.now();
+      case 'running':     return this.isRunning(t.id);
+      default: return true;
+    }
+  }
+  hasFilters(){ const cf=this.state.colFilters||{}; return (this.state.chips||[]).length>0 || this.SORT_KEYS().some(k=>this.filterActive(cf[k])); }
+  filterActive(f){ if(!f) return false;
+    if(f.contains) return true; if(f.val!=null) return true; if(f.min!=null||f.max!=null) return true;
+    if(f.set&&f.set.length) return true; /* PP-EXT Phase 7: set-membership filter (priority P1–P4 chips) */
+    return false; }
+  /* Apply active column filters + smart chips (AND) to a flat list. Pure over (list, byId, state). */
+  filterTasks(list, byId){
+    const cf=this.state.colFilters||{}; const chips=this.state.chips||[];
+    if(!this.hasFilters()) return list;
+    return list.filter(t=>{
+      for(const k of this.SORT_KEYS()){ if(this.filterActive(cf[k]) && !this.matchColFilter(t,k,cf[k])) return false; }
+      for(const c of chips){ if(!this.matchChip(t,c,byId)) return false; }
+      return true;
+    });
+  }
+  /* Phase 7 view-state mutators — persist to pp-prefs; render-time only (never touch pp-tasks). */
+  setSort(key, dir){ const sort = key ? {key, dir:dir||'asc'} : null; this.setState({sort}); this.savePrefs({sort}); }
+  cycleSort(key){ /* asc → desc → cleared (restores manual order) */
+    if(this.SORT_KEYS().indexOf(key)<0) return;
+    const s=this.state.sort;
+    if(!s||s.key!==key) return this.setSort(key,'asc');
+    if(s.dir==='asc') return this.setSort(key,'desc');
+    return this.setSort(null);
+  }
+  sortArrow(key){ const s=this.state.sort; if(!s||s.key!==key) return ''; return s.dir==='desc'?'▼':'▲'; }
+  /* Column-filter mutators. Each writes a NEW colFilters object so renderVals' cache guard re-derives the
+     visible list; an empty spec is dropped so hasFilters()/the funnel indicator stay accurate. */
+  setColFilter(key, patch){
+    const cf=Object.assign({}, this.state.colFilters||{});
+    const cur=Object.assign({}, cf[key]||{});
+    Object.keys(patch).forEach(p=>{ const v=patch[p]; if(v===''||v==null||(typeof v==='number'&&isNaN(v))) delete cur[p]; else cur[p]=v; });
+    if(this.filterActive(cur)) cf[key]=cur; else delete cf[key];
+    this.setState({colFilters:cf}); this.savePrefs({colFilters:cf});
+  }
+  clearColFilter(key){ const cf=Object.assign({}, this.state.colFilters||{}); delete cf[key]; this.setState({colFilters:cf}); this.savePrefs({colFilters:cf}); }
+  toggleChip(k){ const chips=(this.state.chips||[]).slice(); const i=chips.indexOf(k); if(i>=0) chips.splice(i,1); else chips.push(k); this.setState({chips}); this.savePrefs({chips}); }
+  /* PP-EXT Phase 7: priority quick-filter — toggles membership of P`p` in colFilters.priority.set (multi-select).
+     Reuses the column-filter funnel so Clear-all + the visible-list cache pick it up automatically. */
+  togglePriority(p){
+    const cf=Object.assign({}, this.state.colFilters||{});
+    const cur=Object.assign({}, cf.priority||{});
+    const set=(cur.set||[]).slice(); const i=set.indexOf(p);
+    if(i>=0) set.splice(i,1); else set.push(p);
+    if(set.length) cur.set=set; else delete cur.set;
+    if(this.filterActive(cur)) cf.priority=cur; else delete cf.priority;
+    this.setState({colFilters:cf}); this.savePrefs({colFilters:cf});
+  }
+  clearAllFilters(){ this.setState({colFilters:{}, chips:[]}); this.savePrefs({colFilters:{}, chips:[]}); }
+  /* ==== /PP-EXT Phase 7 core ==== */
   visibleTasks(){
     const ts=this.state.tasks;
     const anyArch=!this.state.showArchived && ts.some(t=>t.archivedAt);
     const {byId}=this.buildKids(ts);
     const col=this.state.collapsed||{};
     const anyCol=ts.some(t=>t.parentId!=null && byId[t.parentId] && this.isHiddenByCollapse(t,byId)); /* PP-EXT: collapsed subtrees hide */
-    if(!anyArch && !anyCol) return ts; /* keep identity stable when nothing is hidden */
-    return ts.filter(t=>{
+    const anyFilter=this.hasFilters(); const sort=this.state.sort; /* PP-EXT Phase 7 */
+    if(!anyArch && !anyCol && !anyFilter && !(sort&&sort.key)) return ts; /* keep identity stable when nothing is hidden/sorted */
+    let out=ts.filter(t=>{
       if(anyArch && t.archivedAt) return false;
       if(anyCol && this.isHiddenByCollapse(t,byId)) return false;
       return true;
     });
+    if(anyFilter) out=this.filterTasks(out, byId); /* PP-EXT Phase 7: column filters + smart chips */
+    if(sort&&sort.key) out=this.sortTree(out, sort); /* PP-EXT Phase 7: recursive hierarchical, restorable */
+    return out;
   }
   archiveMulti(ids){
     ids=this.expandSubtrees(ids); /* PP-EXT: archiving a parent archives its subtree */
@@ -1527,7 +1659,10 @@ class Component extends DCLogic {
     if(this.headPending){
       const p=this.headPending; this.headPending=null;
       if(this.colReorder){ const r=this.colReorder; this.colReorder=null; if(r.fromK!==r.overK){ const sel=this.state.selCols; const keys=(sel.includes(r.fromK)&&sel.length>1)?sel.slice():[r.fromK]; this.moveColumns(keys, r.overK); } else this.forceUpdate(); return; }
-      this.selectCol({shiftKey:p.shiftKey,ctrlKey:p.ctrlKey,metaKey:p.metaKey}, p.k);
+      /* PP-EXT Phase 7: a plain click on the header body cycles the sort (asc→desc→clear); a modifier click
+         still selects the column (for multi-hide / multi-resize / multi-reorder). Drag/right-click branched above. */
+      if(p.shiftKey||p.ctrlKey||p.metaKey) this.selectCol({shiftKey:p.shiftKey,ctrlKey:p.ctrlKey,metaKey:p.metaKey}, p.k);
+      else this.cycleSort(p.k);
       return;
     }
     if(this._rowDrag){
@@ -1710,13 +1845,18 @@ class Component extends DCLogic {
     this._accent = accent; this._showCP = showCP;
     /* PP-EXT: archived tasks are hidden from the board unless showArchived. The filtered array is cached so
        its IDENTITY stays stable across renders — the structural memoization below depends on it. */
-    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived || this._visCol!==this.state.collapsed){
+    if(this._visSrcRef!==this.state.tasks || this._visArch!==!!this.state.showArchived || this._visCol!==this.state.collapsed
+       || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips){ /* PP-EXT Phase 7: sort/filter changes must re-derive the visible list too */
       this._visSrcRef=this.state.tasks; this._visArch=!!this.state.showArchived; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
+      this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
       this._visTasks=this.visibleTasks();
       /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
       const kb=this.buildKids(this.state.tasks);
       this._kids=kb.kids; this._byId=kb.byId; this._depth={}; /* PP-EXT: _byId cached for the drag-to-nest ancestor walk */
       this.state.tasks.forEach(t=>{ this._depth[t.id]=this.depthOf(t.id, kb.byId); });
+      /* PP-EXT Phase 7: filter-only list (column filters + smart chips, but NOT collapse/sort — those are sheet-only)
+         feeding the calendar-view chips + hover-glow so an active filter thins the calendars like it thins the sheet. */
+      this._calTasks = this.hasFilters() ? this.filterTasks(this.state.tasks, kb.byId) : this.state.tasks;
     }
     const tasks = this._visTasks;
     /* PP-EXT: the structural caches (CPM, slack, recurrence expansion, timeline range) depend only on the task
@@ -2865,7 +3005,7 @@ class Component extends DCLogic {
   /* Ids of non-archived scheduled tasks with an occurrence overlapping [dayStart, dayStart+DAY). Half-open on
      the end (all-day/exclusive ends don't leak onto the next day); zero-length points (milestones) match their day. */
   tasksOnDay(dayStart, tasks){
-    tasks=tasks||this.state.tasks; const dayEnd=dayStart+this.DAY; const out=[];
+    tasks=tasks||this._calTasks||this.state.tasks; const dayEnd=dayStart+this.DAY; const out=[]; /* PP-EXT Phase 7: default to the filtered set so calendars honor the filter */
     tasks.forEach(t=>{ if(t.archivedAt || !this.isScheduled(t)) return;
       const occs=this.expandTask(t, dayEnd);
       const hit=occs.some(o=> (o.end>o.start) ? (o.start<dayEnd && o.end>dayStart) : (o.start>=dayStart && o.start<dayEnd));
@@ -2956,13 +3096,18 @@ class Component extends DCLogic {
   renderBoard(tasks){
     const h=React.createElement;
     return h(React.Fragment,{},
-      h('div',{ref:el=>this.boardEl=el, style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'}},
-        h('div',{style:{flex:'0 0 '+this.state.splitPct+'%',minWidth:0,display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
-          this.renderSheet(tasks)),
-        h('div',{onMouseDown:e=>this.startSplit(e),
-          style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
-        h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-          this.renderMainPane(tasks))), /* PP-EXT: main-view selector picks the right pane */
+      /* PP-EXT Phase 7: stack the full-width filter bar ABOVE the board row (this wrapper is a flex COLUMN;
+         the parent slot is a flex ROW, so without it the bar became a left-hand column — the "floating on
+         the left" bug). Row alignment between sheet + Gantt is preserved because the bar spans both. */
+      h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
+        this.renderFilterBar(),
+        h('div',{ref:el=>this.boardEl=el, style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'}},
+          h('div',{style:{flex:'0 0 '+this.state.splitPct+'%',minWidth:0,display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
+            this.renderSheet(tasks)),
+          h('div',{onMouseDown:e=>this.startSplit(e),
+            style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
+          h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
+            this.renderMainPane(tasks)))), /* PP-EXT: main-view selector picks the right pane */
       this.state.menu ? this.renderMenu() : null,
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
@@ -2988,7 +3133,7 @@ class Component extends DCLogic {
       return h('div',{key:c.k,'data-colk':c.k,
         onMouseDown:c.lock?null:(e=>this.headPointerDown(e,c.k)),
         onContextMenu:e=>this.colCtx(e,c.k),
-        title:c.lock?'':'Click to select · drag to reorder · right-click to hide',
+        title:c.lock?'':'Click to sort · Ctrl-click to select · drag to reorder · right-click to filter/hide',
         style:{flex:'0 0 '+c.w+'px',padding:'0 9px',display:'flex',alignItems:'center',
           fontSize:'11px',fontWeight:600,color:selected?'var(--text)':'var(--text-mut)',letterSpacing:'0.3px',textTransform:'uppercase',
           borderRight:'1px solid var(--col-border)',height:'100%',position:'relative',
@@ -2996,6 +3141,12 @@ class Component extends DCLogic {
           background:selected?'var(--sel)':(isOver?'var(--hover)':'transparent'),
           boxShadow:isOver?'inset 2px 0 0 '+this._accent:'none',transition:'background .1s'}},
         c.l||'',
+        /* PP-EXT Phase 7: sort + filter indicators — DISPLAY ONLY (pointer-events:none so the header body owns the
+           click that cycles the sort). ↕ = sortable/unsorted, ▲/▼ = active sort dir; the accent dot = active filter. */
+        c.lock?null:(()=>{ const ar=this.sortArrow(c.k); const on=!!ar; const filt=this.filterActive((this.state.colFilters||{})[c.k]);
+          return h('span',{key:'ind',style:{marginLeft:'4px',display:'inline-flex',alignItems:'center',gap:'3px',pointerEvents:'none'}},
+            h('span',{style:{fontSize:'9px',lineHeight:1,color:on?this._accent:'var(--text-faint)',opacity:on?1:0.4}}, ar||'↕'),
+            filt?h('span',{title:'Filtered',style:{width:'6px',height:'6px',borderRadius:'50%',background:this._accent}}):null); })(),
         c.lock?null:h('div',{key:'rsz',className:'pp-rsz',title:'Drag to resize · double-click to reset',
           onMouseDown:e=>this.startColDrag(e,c.k,c.w),
           onDoubleClick:e=>{e.stopPropagation(); this.resetColW(c.k);}}));
@@ -3021,6 +3172,70 @@ class Component extends DCLogic {
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}}, inner);
+  }
+  /* PP-EXT Phase 7: always-visible filter bar spanning the FULL board width (above both panes, so sheet rows stay
+     aligned with the Gantt bars). Smart chips toggle; active column-filter pills clear on click; Clear-all also
+     drops the sort. This is the discoverable filter surface — no new columns, per the owner's decision. */
+  renderFilterBar(){
+    const h=React.createElement;
+    const byKcol={}; this.colDefs().forEach(c=>byKcol[c.k]=c);
+    const chips=this.state.chips||[]; const cf=this.state.colFilters||{};
+    const prioSet=(cf.priority&&cf.priority.set)||[]; /* PP-EXT Phase 7: shown as P1–P4 chips, so exclude from the generic pills */
+    const filtCols=this.SORT_KEYS().filter(k=>this.filterActive(cf[k]) && !(k==='priority'&&prioSet.length));
+    const anyActive=this.hasFilters()||(this.state.sort&&this.state.sort.key);
+    const mkChip=(key,label,on,onClick,title,extra)=>h('span',{key,onClick,title,
+      style:Object.assign({cursor:'pointer',userSelect:'none',fontSize:'11px',fontWeight:600,padding:'3px 10px',borderRadius:'11px',
+        border:'1px solid '+(on?this._accent:'var(--divider)'),color:on?'#fff':'var(--text-mut2)',
+        background:on?this._accent:'var(--chip-bg)',whiteSpace:'nowrap'},extra||{})},label);
+    /* PP-EXT Phase 7: a priority chip is a filled dot + label; active state uses the priority's own colour. */
+    const mkPrio=(p)=>{ const on=prioSet.indexOf(p)>=0; const col=this.PCOL[p];
+      return h('span',{key:'pr-'+p, onClick:()=>this.togglePriority(p), title:'Filter to '+this.PNAME[p],
+        style:{cursor:'pointer',userSelect:'none',display:'inline-flex',alignItems:'center',gap:'5px',fontSize:'11px',fontWeight:600,
+          padding:'3px 9px',borderRadius:'11px',whiteSpace:'nowrap',
+          border:'1px solid '+(on?col:'var(--divider)'),color:on?'#fff':'var(--text-mut2)',background:on?col:'var(--chip-bg)'}},
+        h('span',{style:{width:'8px',height:'8px',borderRadius:'50%',background:on?'#fff':col,display:'inline-block'}}), this.PNAME[p]); };
+    /* PP-EXT Phase 7: priority SORT chip — priority isn't a sheet column (no-new-columns), so expose its sort here
+       next to the P1–P4 filter chips. Cycles asc (P1 first) → desc (P4 first) → off; reuses cycleSort/sortArrow. */
+    const pSort=this.state.sort, pSortOn=!!(pSort&&pSort.key==='priority'), pSortArr=this.sortArrow('priority');
+    const mkPrioSort=()=>mkChip('psort', 'Sort '+(pSortOn?pSortArr:'↕'), pSortOn, ()=>this.cycleSort('priority'),
+      'Sort by priority (P1 first → P4 first → off)');
+    /* PP-EXT Phase 7: "Sort/Filter by…" control for the meta-keys with no sheet column (tags/calendar — the columns
+       stay header-click sortable). A native Sort-by select drives the same state.sort as headers/chips; a
+       field-select + text box filters Tags or Calendar (colFilters[key].contains). No-new-columns per the owner. */
+    const keyLabel=k=>(byKcol[k]&&byKcol[k].l)||({tags:'Tags',calendar:'Calendar',priority:'Priority'}[k])||k;
+    const selSty={fontSize:'11px',fontWeight:600,color:'var(--text-mut2)',background:'var(--chip-bg)',
+      border:'1px solid var(--divider)',borderRadius:'8px',padding:'3px 6px',cursor:'pointer',maxWidth:'128px'};
+    const sortKey=(this.state.sort&&this.state.sort.key)||'';
+    const sortSel=h('select',{key:'sortsel',value:sortKey,title:'Sort by — siblings sort within each parent; Manual restores the drag order',
+      onChange:e=>this.setSort(e.target.value||null,'asc'),style:selSty},
+      h('option',{key:'',value:''},'Sort: Manual'),
+      ...this.SORT_KEYS().map(k=>h('option',{key:k,value:k},'Sort: '+keyLabel(k))));
+    const sortDir=sortKey?mkChip('sortdir',(this.sortArrow(sortKey)||'▲'),true,
+      ()=>this.setSort(sortKey,this.state.sort.dir==='asc'?'desc':'asc'),'Toggle ascending / descending'):null;
+    const findField=this.state.findField||'tags';
+    const findSel=h('select',{key:'findsel',value:findField,title:'Which field to filter',
+      onChange:e=>this.setState({findField:e.target.value}),style:selSty},
+      h('option',{key:'tags',value:'tags'},'Tag'), h('option',{key:'calendar',value:'calendar'},'Calendar'));
+    const findInp=h('input',{key:'findinp-'+findField+'-'+((cf[findField]&&cf[findField].contains)||''),type:'text',
+      placeholder:'contains…',defaultValue:(cf[findField]&&cf[findField].contains)||'',
+      onBlur:e=>this.setColFilter(findField,{contains:e.target.value.trim()}),
+      onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
+      style:{fontSize:'11px',color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'8px',padding:'3px 7px',width:'92px'}});
+    return h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',padding:'6px 12px',flex:'none',
+        borderBottom:'1px solid var(--top-border)',background:'var(--top-bg)'}},
+      h('span',{key:'lbl',style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)',marginRight:'2px'}},'Filter',
+        this.infoNote('Smart filters (combined with AND): Active today = counts toward today’s schedule · Startable = every dependency is 100% done · Unplanned = no Planned time yet · Overdue = past due and not complete · Running = a timer is going. Add priority (P1–P4) chips, the priority Sort, or per-column filters (right-click a header). Filters thin the sheet, Gantt and calendars together; Clear all also drops the sort.')),
+      ...this.SMART_CHIPS().map(c=>mkChip('sc-'+c.k, c.l, chips.includes(c.k), ()=>this.toggleChip(c.k), 'Show only: '+c.l)),
+      h('span',{key:'psep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
+      ...[1,2,3,4].map(mkPrio),
+      mkPrioSort(),
+      h('span',{key:'sfsep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
+      sortSel, sortDir, findSel, findInp,
+      ...filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear')),
+      anyActive
+        ? mkChip('clr','Clear all', false, ()=>{ this.clearAllFilters(); this.setSort(null); }, 'Clear all filters and sorting',
+            {marginLeft:'auto',background:'transparent',border:'1px solid var(--divider)'})
+        : h('span',{key:'hint',style:{marginLeft:'auto',fontSize:'10.5px',color:'var(--text-faint2)',whiteSpace:'nowrap'}},'click a header to sort · right-click to filter'));
   }
 
   /* PP-EXT: drag-to-nest visuals — the indented insertion bar for row `i` (offset to the projected depth so a
@@ -3536,13 +3751,52 @@ class Component extends DCLogic {
     const h=React.createElement; const m=this.state.colMenu; const keys=(m.keys||[]).filter(k=>k!=='check');
     const byK={}; this.colDefs().forEach(c=>byK[c.k]=c);
     const anyHidden=Object.keys(this.state.colHidden).some(k=>this.state.colHidden[k]);
-    const W=236; const x=Math.min(m.x, window.innerWidth-W-8); const y=Math.min(m.y, window.innerHeight-200);
+    const W=236; const x=Math.min(m.x, window.innerWidth-W-8); const y=Math.min(m.y, window.innerHeight-320); /* PP-EXT Phase 7: taller reserve — the filter widget adds height */
     const row=(g,label,onClick,extra)=>h('div',{onClick,
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',onMouseLeave:e=>e.currentTarget.style.background='transparent',
       style:Object.assign({display:'flex',alignItems:'center',gap:'11px',padding:'8px 14px',cursor:'pointer',fontSize:'13px',color:'var(--text-2)'},extra||{})},
       h('span',{style:{width:'16px',textAlign:'center',color:'var(--text-mut2)'}},g), label);
     const divider=h('div',{style:{height:'1px',background:'var(--menu-hover)',margin:'5px 0'}});
     const items=[];
+    /* PP-EXT Phase 7: sort actions for a single sortable column (asc/desc + clear = restore manual order) */
+    if(keys.length===1 && this.SORT_KEYS().indexOf(keys[0])>=0){
+      const sk=keys[0]; const s=this.state.sort; const cur=(s&&s.key===sk)?s.dir:null;
+      items.push(row(cur==='asc'?'●':'▲','Sort ascending',()=>{ this.setSort(sk,'asc'); this.setState({colMenu:null}); }));
+      items.push(row(cur==='desc'?'●':'▼','Sort descending',()=>{ this.setSort(sk,'desc'); this.setState({colMenu:null}); }));
+      if(cur) items.push(row('↺','Clear sort (manual order)',()=>{ this.setSort(null); this.setState({colMenu:null}); }));
+      items.push(divider);
+    }
+    /* PP-EXT Phase 7: per-column filter widget (single sortable column). colType() picks the input shape;
+       matchColFilter() consumes the spec. Typing stays inside the menu (inputs stopPropagation the mousedown). */
+    if(keys.length===1 && this.SORT_KEYS().indexOf(keys[0])>=0){
+      const fk=keys[0]; const ftype=this.colType(fk); const f=(this.state.colFilters||{})[fk]||{};
+      const inp=(props)=>h('input',Object.assign({onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
+        style:{width:'100%',boxSizing:'border-box',background:'var(--input-bg)',border:'1px solid var(--divider)',
+          borderRadius:'6px',padding:'5px 7px',fontSize:'12px',color:'var(--text)',outline:'none'}},props));
+      items.push(h('div',{key:'flab',style:{padding:'2px 14px 5px',fontSize:'11px',fontWeight:600,color:'var(--text-mut)'}},'Filter'));
+      if(ftype==='text'){
+        items.push(h('div',{key:'fw',style:{padding:'0 14px 8px'}},
+          inp({type:'text',placeholder:'contains…',value:f.contains||'',onChange:e=>this.setColFilter(fk,{contains:e.target.value})})));
+      } else if(ftype==='bool'){
+        const opt=(v,l)=>{ const on=(v==null?f.val==null:f.val===v);
+          return h('div',{key:''+l,onMouseDown:e=>e.stopPropagation(),onClick:()=>this.setColFilter(fk,{val:v}),
+            style:{flex:1,textAlign:'center',cursor:'pointer',fontSize:'11px',fontWeight:600,padding:'5px 0',borderRadius:'6px',
+              border:'1px solid '+(on?this._accent:'var(--divider)'),color:on?'#fff':'var(--text-mut2)',background:on?this._accent:'var(--input-bg)'}}, l); };
+        items.push(h('div',{key:'fw',style:{display:'flex',gap:'6px',padding:'0 14px 8px'}}, opt(null,'Any'), opt(true,'Yes'), opt(false,'No')));
+      } else { /* num / date range */
+        const isDate=ftype==='date';
+        const dstr=(ms)=>{ if(ms==null) return ''; const d=new Date(ms); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+        const dparse=(s,end)=>{ if(!s) return ''; const p=s.split('-').map(Number); if(p.length<3||p.some(isNaN)) return ''; return new Date(p[0],p[1]-1,p[2], end?23:0, end?59:0, end?59:0, end?999:0).getTime(); };
+        const numOf=v=>{ if(v==='') return ''; const n=parseFloat(v); return isNaN(n)?'':n; };
+        items.push(h('div',{key:'fw',style:{display:'flex',gap:'6px',padding:'0 14px 8px'}},
+          isDate ? inp({type:'date',value:dstr(f.min),onChange:e=>this.setColFilter(fk,{min:dparse(e.target.value,false)})})
+                 : inp({type:'number',placeholder:'min',value:f.min==null?'':f.min,onChange:e=>this.setColFilter(fk,{min:numOf(e.target.value)})}),
+          isDate ? inp({type:'date',value:dstr(f.max),onChange:e=>this.setColFilter(fk,{max:dparse(e.target.value,true)})})
+                 : inp({type:'number',placeholder:'max',value:f.max==null?'':f.max,onChange:e=>this.setColFilter(fk,{max:numOf(e.target.value)})})));
+      }
+      if(this.filterActive(f)) items.push(row('⌫','Clear filter',()=>this.clearColFilter(fk)));
+      items.push(divider);
+    }
     if(keys.length){
       const lbl = keys.length>1 ? ('Hide '+keys.length+' columns') : ('Hide “'+(byK[keys[0]]?byK[keys[0]].l:'')+'”');
       items.push(row('×', lbl, ()=>this.setColHidden(keys,true)));
@@ -3751,7 +4005,7 @@ class Component extends DCLogic {
     const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
-      field('Include today',inclCtl),
+      field(h('span',null,'Include today',this.infoNote('Whether this task counts toward today’s schedule and allotment. Auto = included when today falls in [start, due]; click to force it on/off ("manual"). Milestones and tasks with no Planned time never allot. When it happens is set by Schedule pins, not here.')),inclCtl),
       /* PP-EXT: subtasks — parent link + one-click unnest */
       (t.parentId&&byId[t.parentId])?field('Subtask of',h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
         h('span',{onClick:()=>this.openDetail(t.parentId),style:{cursor:'pointer',fontSize:'13px',color:this._accent,
@@ -3774,7 +4028,7 @@ class Component extends DCLogic {
       h('div',{style:{display:'flex'}},
         field('Planned', durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
         field('Spent',spentField,{flex:1})),
-      field('Allotted (remaining)',allotField),
+      field(h('span',null,'Allotted (remaining)',this.infoNote('Auto-scheduled time for this task today: its share of the day’s free time (window minus meals, reserved free time and fixed blocks), scaled by remaining Planned work and split across active tasks by priority then due date. Click ∿ auto → ✎ manual to pin a fixed amount off the top (a Predict override) instead of the computed value.')),allotField),
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
       field('Priority',prioRow),
       field('Progress',pctBig),
