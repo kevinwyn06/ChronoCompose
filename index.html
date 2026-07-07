@@ -145,6 +145,13 @@ class Component extends DCLogic {
     /* PP-EXT: pin-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
        occurrence / re-fire an auto-pause. Keyed by `taskId:occurrenceStartMs`. */
     this._autoDone = {}; this._autoPaused = {};
+    /* PP-EXT Phase 8: browser notifications. LEAD = how early the start-pinned heads-up fires; GRACE = a
+       just-missed trigger won't re-fire on reload/tick if its moment passed more than this ago; SUMMARY_TTL =
+       morning-popup auto-dismiss. Fired-once ledger + last morning-summary day persist in pp-notify. */
+    this.NOTIFY_LEAD_MS = 5*60000;
+    this.NOTIFY_GRACE_MS = 5*60000;
+    this.SUMMARY_TTL_MS = 12000;
+    this._notify = this.loadNotify();
     this.HISTORY_MAX = 200;       // undo/redo depth (applies to BOTH stacks)
     /* PP-EXT: two-way gcal sync (see computeOutboundOps / gcalFlushQueue). */
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
@@ -190,6 +197,7 @@ class Component extends DCLogic {
       selCols:[], colMenu:null, rowDrag:null,
       /* PP-EXT state */
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
+      summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
@@ -207,7 +215,8 @@ class Component extends DCLogic {
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
-    autoArchiveDays:7 /* PP-EXT: auto-archive completed tasks after N days (0 = off) */ }; }
+    autoArchiveDays:7, /* PP-EXT: auto-archive completed tasks after N days (0 = off) */
+    notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true } /* PP-EXT Phase 8: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
   loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
@@ -416,11 +425,12 @@ class Component extends DCLogic {
     window.addEventListener('mouseup', this._onUp);
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
-    this._tickRun=setInterval(()=>{ if(this.anyRunning()){ this.timerHeartbeat(); this.autoTimerTick(); if(this.anyRunning()) this.setState({nowTick:Date.now()}); } }, 1000);
-    this._tickIdle=setInterval(()=>{ if(!this.anyRunning()) this.setState({nowTick:Date.now()}); this.autoTimerTick(); /* PP-EXT: catch pin-driven auto-starts while idle */ this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
+    this._tickRun=setInterval(()=>{ if(this.anyRunning()){ this.timerHeartbeat(); this.autoTimerTick(); this.notifyTick(); if(this.anyRunning()) this.setState({nowTick:Date.now()}); } }, 1000);
+    this._tickIdle=setInterval(()=>{ if(!this.anyRunning()) this.setState({nowTick:Date.now()}); this.autoTimerTick(); /* PP-EXT: catch pin-driven auto-starts while idle */ this.notifyTick(); /* PP-EXT Phase 8 */ this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
     /* PP-EXT: a run restored from pp-run may be stale (tab was closed mid-run) — settle it before it accrues */
     this.timerHeartbeat();
     this.autoTimerTick(); /* PP-EXT: fire any pin-driven auto-starts already due on load */
+    this.notifyTick(); /* PP-EXT Phase 8: raise the morning summary + any due notifications on load */
     this.maybeAutoArchive(); /* PP-EXT: sweep long-completed tasks once on load (then hourly via the idle tick) */
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
        (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
@@ -433,7 +443,7 @@ class Component extends DCLogic {
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
-    clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); /* PP-EXT */
+    clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
   }
 
   /* ---------- history ---------- */
@@ -686,6 +696,76 @@ class Component extends DCLogic {
       this._autoDone[id+':'+this.occOf(t).start]=true; this.startTimer(id); });
     plan.pause.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
       this._autoPaused[id+':'+this.occOf(t).start]=true; this.stopTimer(id); /* PP-EXT: silent — no prompt/note */ }); }
+
+  /* ===== PP-EXT Phase 8: notifications ===== */
+  /* Fired-once ledger + last morning-summary day. Persisted so a reload doesn't re-fire a passed trigger.
+     Prune fired keys older than a few days so the map stays bounded (they're one-shot per occurrence). */
+  loadNotify(){ let n; try{ n=JSON.parse(localStorage.getItem('pp-notify')||'{}'); }catch(e){ n={}; }
+    n=n||{}; if(!n.fired||typeof n.fired!=='object') n.fired={};
+    const cut=Date.now()-3*86400000; Object.keys(n.fired).forEach(k=>{ if((+n.fired[k]||0)<cut) delete n.fired[k]; });
+    return { fired:n.fired, summaryDay:n.summaryDay||null }; }
+  saveNotify(){ try{ localStorage.setItem('pp-notify', JSON.stringify(this._notify)); }catch(e){} }
+  notifyOn(key){ const n=(this.state.settings&&this.state.settings.notify)||{}; return n[key]!==false; } /* default ON */
+  notifyPermission(){ try{ return (typeof Notification!=='undefined') ? Notification.permission : 'unsupported'; }catch(e){ return 'unsupported'; } }
+  notifySupported(){ return this.notifyPermission()!=='unsupported'; }
+  requestNotifyPermission(){ if(!this.notifySupported()) return;
+    try{ Notification.requestPermission().then(()=>this.forceUpdate()); }catch(e){} }
+  clockLabel(ms){ const d=new Date(ms); let hh=d.getHours(), mm=d.getMinutes(); const ap=hh<12?'a':'p'; hh=(hh%12)||12; return hh+':'+String(mm).padStart(2,'0')+ap; }
+
+  /* Pure decision: which browser notifications are DUE at `now` and not yet in `fired`. IO-free & unit-tested
+     (mirrors autoTimerPlan). Each spec: {key, type, urgent, title, body}. Enable/permission gating is in notifyTick. */
+  notifyPlan(now, fired){ const out=[]; fired=fired||{}; const dayKey=this.startOfDay(now);
+    (this.state.tasks||[]).forEach(t=>{
+      if(this.isMilestone(t)||t.archivedAt) return;
+      const p=this.effPins(t); const active=this.isActiveToday(t); const oc=this.occOf(t);
+      /* Urgent: start-pinned block about to start (T−LEAD .. start) */
+      if(active && p.ps && oc.start!=null){ const k='start:'+t.id+':'+oc.start;
+        if(!fired[k] && now>=oc.start-this.NOTIFY_LEAD_MS && now<oc.start)
+          out.push({key:k, type:'startPin', urgent:true, title:'Starting soon', body:t.name+' starts at '+this.clockLabel(oc.start)}); }
+      /* Normal: a fixed (both-pinned) scheduled block just ended */
+      if(active && p.ps && p.pe && oc.end!=null){ const k='blockend:'+t.id+':'+oc.end;
+        if(!fired[k] && now>=oc.end && now<oc.end+this.NOTIFY_GRACE_MS)
+          out.push({key:k, type:'blockEnd', urgent:false, title:'Block ended', body:t.name+' — scheduled block is over'}); }
+      /* Urgent: deadline at risk — remaining work exceeds the time left before it's due (throttled once/day) */
+      if((+t.pct||0)<100){ const due=this.dueMsOf(t, this.startOfToday());
+        if(due!=null && due>now){ const remainingMin=Math.max(0,(+t.planned||0)*(1-(+t.pct||0)/100)); const leftMin=(due-now)/60000;
+          if(remainingMin>0 && remainingMin>leftMin){ const k='risk:'+t.id+':'+dayKey;
+            if(!fired[k]) out.push({key:k, type:'deadlineRisk', urgent:true, title:'Deadline at risk',
+              body:t.name+': needs '+this.fmtDur(Math.round(remainingMin))+' but only '+this.fmtDur(Math.round(leftMin))+' left before due'}); } } }
+    }); return out; }
+
+  /* Map a spec's type → its settings toggle. */
+  notifyTypeEnabled(type){ return this.notifyOn(type); }
+  /* Apply the plan: fire enabled specs whose permission is granted, mark them fired, persist. Also raises the
+     once-a-day in-app morning summary. Called from the tick loops (safe to call every tick — dedup guards it). */
+  notifyTick(now){ now=now||Date.now();
+    if(this.notifyPermission()==='granted'){
+      const plan=this.notifyPlan(now, this._notify.fired);
+      plan.forEach(spec=>{ if(!this.notifyTypeEnabled(spec.type)) return;
+        this._notify.fired[spec.key]=now; /* mark before firing so a throw can't loop it */
+        try{ const n=new Notification(spec.title,{ body:spec.body, requireInteraction:!!spec.urgent, tag:spec.key });
+          if(!spec.urgent) setTimeout(()=>{ try{ n.close(); }catch(e){} }, 8000); }catch(e){} });
+      if(plan.length) this.saveNotify();
+    }
+    this.maybeMorningSummary(now);
+  }
+  /* Morning summary: once per calendar day, on the first tick of the day, raise the in-app popup. Gated by the
+     toggle; auto-dismisses after SUMMARY_TTL. Persist the day even when toggled off so it stays once-a-day. */
+  maybeMorningSummary(now){ now=now||Date.now(); const day=this.startOfDay(now);
+    if(this._notify.summaryDay===day) return; this._notify.summaryDay=day; this.saveNotify();
+    if(!this.notifyOn('morningSummary')) return;
+    const data=this.morningSummaryData(now); this.setState({summary:data});
+    clearTimeout(this._summaryT); this._summaryT=setTimeout(()=>this.closeSummary(), this.SUMMARY_TTL_MS); }
+  closeSummary(){ clearTimeout(this._summaryT); this.setState({summary:null}); }
+  /* Pure-ish snapshot for the popup: today's counts + the tasks that still need planning (Phase 7 'unplanned'). */
+  morningSummaryData(now){ now=now||Date.now(); const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
+    const live=(this.state.tasks||[]).filter(t=>!t.archivedAt && !this.isMilestone(t));
+    const activeToday=live.filter(t=>this.isActiveToday(t));
+    const done=activeToday.filter(t=>(+t.pct||0)>=100).length;
+    const overdue=live.filter(t=>(+t.pct||0)<100 && this.dueMsOf(t, this.startOfToday())<now).length;
+    const unplanned=live.filter(t=>this.matchChip(t,'unplanned',byId));
+    return { day:this.startOfDay(now), activeCount:activeToday.length, doneCount:done, overdueCount:overdue,
+      unplanned:unplanned.slice(0,8).map(t=>t.name), unplannedTotal:unplanned.length }; }
 
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
      freeTime block (pinned to the end of the window), optionally clamped to `from` for pack-from-now. Single
@@ -2500,6 +2580,28 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto-archive done after (days)',
           this.infoNote('Completed tasks archive automatically after this many days (0 = never). Archived tasks are hidden but kept for stats — see the "N archived" chip under the task list. Live recurring series are never auto-archived.')),
         inp(s.autoArchiveDays,v=>this.saveSettings({autoArchiveDays:Math.max(0,parseInt(v)||0)}))),
+      /* PP-EXT Phase 8: notifications — opt-in permission + per-trigger toggles. Toggles default ON but only
+         fire once the browser grants permission (see notifyTick's granted-gate). */
+      secTitle('Notifications'),
+      (()=>{ const perm=this.notifyPermission();
+        if(perm==='unsupported') return h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},'This browser does not support notifications.');
+        if(perm==='granted') return h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},'✓ Browser notifications enabled.');
+        if(perm==='denied') return h('div',{style:{fontSize:'11.5px',color:'#e5484d',padding:'2px 0 8px'}},'Notifications are blocked — re-enable them in your browser’s site settings.');
+        return h('div',{style:{padding:'2px 0 8px'}},
+          h('button',{className:'pp-tbtn',onClick:()=>this.requestNotifyPermission()},'Enable browser notifications'),
+          h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},'Notifications only fire while this tab is open (no backend). Nothing is sent until you enable them.')); })(),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Start-pin heads-up (5 min before)',
+          this.infoNote('An urgent notification 5 minutes before a start-pinned task’s scheduled start. Requires a start pin on the task.')),
+        toggle(this.notifyOn('startPin'),()=>this.saveSettings({notify:Object.assign({},s.notify,{startPin:!this.notifyOn('startPin')})}))),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Deadline at risk',
+          this.infoNote('An urgent notification when a task’s remaining work no longer fits in the time left before it’s due. Fires at most once per task per day.')),
+        toggle(this.notifyOn('deadlineRisk'),()=>this.saveSettings({notify:Object.assign({},s.notify,{deadlineRisk:!this.notifyOn('deadlineRisk')})}))),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Scheduled block ended',
+          this.infoNote('A normal notification when a fixed (both start- and end-pinned) block reaches its end.')),
+        toggle(this.notifyOn('blockEnd'),()=>this.saveSettings({notify:Object.assign({},s.notify,{blockEnd:!this.notifyOn('blockEnd')})}))),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Morning summary popup',
+          this.infoNote('An in-app popup on the first open of each day with today’s counts and the tasks that still need planning. Auto-dismisses; not a browser notification (works without permission).')),
+        toggle(this.notifyOn('morningSummary'),()=>this.saveSettings({notify:Object.assign({},s.notify,{morningSummary:!this.notifyOn('morningSummary')})}))),
       /* PP-EXT: Google Calendar — one-click sign-in; Client ID comes from config.js (else a field) */
       secTitle('Google Calendar'),
       cfgId ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},'Client ID loaded from config.js')
@@ -2547,6 +2649,33 @@ class Component extends DCLogic {
       this.hiddenColList());
     return h('div',{onMouseDown:()=>this.setState({settingsOpen:false}),
       style:{position:'fixed',inset:0,zIndex:2200,background:'rgba(0,0,0,0.4)',display:'flex',alignItems:'flex-start',justifyContent:'flex-end',padding:'62px 16px 0 0'}},
+      card);
+  }
+
+  /* PP-EXT Phase 8: the morning summary popup (in-app; auto-dismisses via SUMMARY_TTL). Big, centered card. */
+  renderSummary(){ const h=React.createElement; const d=this.state.summary; if(!d) return null;
+    const stat=(n,label)=>h('div',{style:{textAlign:'center',padding:'0 14px'}},
+      h('div',{style:{fontSize:'26px',fontWeight:800,color:'var(--text-strong)',lineHeight:1.1}},String(n)),
+      h('div',{style:{fontSize:'11px',color:'var(--text-mut)',marginTop:'2px'}},label));
+    const card=h('div',{onMouseDown:e=>e.stopPropagation(),
+      style:{width:'420px',maxWidth:'92vw',maxHeight:'82vh',overflow:'auto',background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'14px',boxShadow:'0 24px 70px rgba(0,0,0,0.55)',padding:'22px 24px'}},
+      h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'2px'}},
+        h('div',{style:{fontSize:'17px',fontWeight:800,color:'var(--text-strong)'}},'Good morning'),
+        h('div',{onClick:()=>this.closeSummary(),style:{cursor:'pointer',fontSize:'18px',color:'var(--text-mut2)',lineHeight:1,padding:'2px 6px'}},'×')),
+      h('div',{style:{fontSize:'12px',color:'var(--text-mut)',marginBottom:'14px'}},
+        new Date(d.day).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})),
+      h('div',{style:{display:'flex',justifyContent:'center',gap:'6px',padding:'6px 0 16px',borderBottom:'1px solid var(--modal-border)'}},
+        stat(d.activeCount,'today'), stat(d.doneCount,'done'), stat(d.overdueCount,'overdue'), stat(d.unplannedTotal,'to plan')),
+      d.unplanned.length
+        ? h('div',{style:{paddingTop:'12px'}},
+            h('div',{style:{fontSize:'11px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)',marginBottom:'6px'}},'Needs planning'),
+            h('ul',{style:{margin:0,paddingLeft:'18px'}}, d.unplanned.map((nm,i)=>h('li',{key:i,style:{fontSize:'13px',color:'var(--text-2)',padding:'2px 0'}},nm))),
+            d.unplannedTotal>d.unplanned.length ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',paddingTop:'4px'}},'+'+(d.unplannedTotal-d.unplanned.length)+' more') : null)
+        : h('div',{style:{paddingTop:'12px',fontSize:'13px',color:'var(--text-mut2)'}},'Everything on today is planned. 🎉'),
+      h('div',{style:{display:'flex',justifyContent:'flex-end',paddingTop:'16px'}},
+        h('button',{className:'pp-tbtn',onClick:()=>this.closeSummary()},'Got it')));
+    return h('div',{onMouseDown:()=>this.closeSummary(),
+      style:{position:'fixed',inset:0,zIndex:2300,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}},
       card);
   }
 
@@ -3112,6 +3241,7 @@ class Component extends DCLogic {
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
       this.state.settingsOpen ? this.renderSettings() : null,
+      this.state.summary ? this.renderSummary() : null, /* PP-EXT Phase 8: morning summary popup */
       this.state.scopePrompt ? this.renderScopePrompt() : null,
       this.state.rowDrag ? this.renderRowDragGhost() : null /* PP-EXT: floating drag-to-nest ghost */
     );
