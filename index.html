@@ -200,6 +200,7 @@ class Component extends DCLogic {
       summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
+      journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
       /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
@@ -264,7 +265,7 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits']; /* pp-habits: Phase 9 */ }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal']; /* pp-habits/pp-journal: Phase 9 */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=localStorage.getItem(k); if(v==null) return;
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
@@ -1216,6 +1217,26 @@ class Component extends DCLogic {
     if(!s.days||!s.days.length) return 'No days'; const L=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     return s.days.slice().sort((a,b)=>a-b).map(d=>L[d]).join(' '); }
   /* ==== /PP-EXT Phase 9: Habits ==== */
+
+  /* ==== PP-EXT Phase 9: Journaling / next-day planning — an end-of-day ritual. One free-text entry per day
+     (pp-journal, keyed by ymd), the day's actuals (allotted vs recorded), and the "needs planning" queue
+     (Phase-7 unplanned) with inline Planned editing so tomorrow gets scheduled. ==== */
+  loadJournal(){ try{ const o=JSON.parse(localStorage.getItem('pp-journal')||'{}'); return (o&&typeof o==='object')?o:{}; }catch(e){ return {}; } }
+  journalTextFor(dayMs){ const e=this.state.journal&&this.state.journal[this.ymdOf(dayMs)]; return (e&&e.text)||''; }
+  saveJournalText(dayMs, text){ const ymd=this.ymdOf(dayMs); const j=Object.assign({}, this.state.journal);
+    if(text&&text.trim()) j[ymd]={text:text, updatedAt:Date.now()}; else delete j[ymd];
+    try{ localStorage.setItem('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
+  journalDayMs(){ return this.state.journalDay==null ? this.startOfToday() : this.state.journalDay; }
+  shiftJournalDay(dir){ const cur=this.journalDayMs(); const next=cur + dir*this.DAY;
+    this.setState({journalDay: next>=this.startOfToday() ? null : next}); } /* clamp forward to today */
+  /* PURE-ish: a day's actuals — per-task allotted (that day's plan) vs recorded (getSpentOn), + totals. */
+  journalActuals(B){ const tasks=this.state.tasks||[]; const allot=this.computeAllotted(tasks, B);
+    const rows=[]; let totalAllot=0, totalSpent=0;
+    tasks.forEach(t=>{ if(this.isMilestone(t)) return; const a=allot[t.id]; const al=a?(+a.allotted||0):0; const sp=this.getSpentOn(t, B);
+      if(al<=0 && sp<=0) return; rows.push({id:t.id, name:t.name, allotted:al, spent:sp}); totalAllot+=al; totalSpent+=sp; });
+    rows.sort((x,y)=>y.spent-x.spent);
+    return { rows, totalAllot, totalSpent }; }
+  /* ==== /PP-EXT Phase 9: Journaling ==== */
 
   /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
   togglePin(id, which){
@@ -2794,7 +2815,7 @@ class Component extends DCLogic {
   renderPageNav(){
     const h=React.createElement; const cur=this.state.mainView;
     const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
-    const PAGES=[['stats','📈','Stats',0],['habits','🔁','Habits',0],['archive','🗄','Archive',archN]];
+    const PAGES=[['stats','📈','Stats',0],['habits','🔁','Habits',0],['journal','📓','Journal',0],['archive','🗄','Archive',archN]];
     return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       PAGES.map(v=>{ const active=cur===v[0];
         return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
@@ -3317,6 +3338,7 @@ class Component extends DCLogic {
       case 'archive':  return this.renderArchiveView(); /* PP-EXT Phase 9 */
       case 'stats':    return this.renderStatsView();   /* PP-EXT Phase 9 */
       case 'habits':   return this.renderHabitsView();  /* PP-EXT Phase 9 */
+      case 'journal':  return this.renderJournalView(); /* PP-EXT Phase 9 */
       default:         return this.renderGantt(tasks);
     }
   }
@@ -3555,6 +3577,61 @@ class Component extends DCLogic {
           h('span',{},done?'✓':'○'), hb.name); }));
   }
   /* ==== /PP-EXT Phase 9: Habits page ==== */
+
+  /* ==== PP-EXT Phase 9: Journal page — end-of-day ritual: the day's actuals, a free-text entry, and the
+     "needs planning" queue (unplanned tasks) with inline Planned editing so tomorrow gets scheduled. ==== */
+  renderJournalView(){
+    const h=React.createElement;
+    const B=this.journalDayMs(); const today=this.startOfToday(); const isToday=B===today;
+    const dstr=new Date(B).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
+    const act=this.journalActuals(B);
+    const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
+    const unplanned=(this.state.tasks||[]).filter(t=>!t.archivedAt && this.matchChip(t,'unplanned',byId));
+    const card=(title,body,note)=>h('div',{style:{background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',padding:'14px 16px',display:'flex',flexDirection:'column',gap:'10px',minWidth:0}},
+      h('div',{style:{display:'flex',alignItems:'center',fontSize:'12px',fontWeight:700,color:'var(--text-mut2)',textTransform:'uppercase',letterSpacing:'0.4px'}}, title, note?this.infoNote(note):null), body);
+    const nav=h('div',{style:{display:'flex',alignItems:'center',gap:'6px'}},
+      h('span',{onClick:()=>this.shiftJournalDay(-1),style:{cursor:'pointer',fontSize:'15px',color:'var(--text-mut2)',padding:'0 4px'}},'‹'),
+      h('span',{style:{fontSize:'12.5px',fontWeight:600,color:'var(--text-2)',minWidth:'150px',textAlign:'center'}},dstr),
+      h('span',{onClick:()=>isToday?null:this.shiftJournalDay(1),style:{cursor:isToday?'default':'pointer',fontSize:'15px',color:isToday?'var(--text-faint)':'var(--text-mut2)',padding:'0 4px'}},'›'),
+      isToday?null:h('span',{onClick:()=>this.setState({journalDay:null}),style:{cursor:'pointer',fontSize:'11px',fontWeight:600,color:this._accent}},'Today'));
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'10px',padding:'12px 16px',borderBottom:'1px solid var(--top-border)'}},
+      h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'📓 Journal'),
+      h('div',{style:{flex:1}}), nav);
+    /* actuals rows */
+    const maxV=Math.max(1,...act.rows.map(r=>Math.max(r.allotted,r.spent)));
+    const actBody = act.rows.length ? h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},
+      h('div',{style:{display:'flex',gap:'18px',marginBottom:'2px'}},
+        h('span',{style:{fontSize:'13px',fontWeight:700,color:'var(--text)'}},'Recorded '+this.fmtDur(Math.round(act.totalSpent))),
+        h('span',{style:{fontSize:'13px',color:'var(--text-mut2)'}},'of '+this.fmtDur(Math.round(act.totalAllot))+' planned')),
+      ...act.rows.slice(0,12).map(r=>h('div',{key:r.id,onClick:()=>this.openDetail(r.id),style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer'}},
+        h('span',{style:{flex:'0 0 120px',fontSize:'11.5px',color:'var(--text-2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},r.name),
+        h('div',{style:{flex:1,height:'12px',background:'var(--chip-bg)',borderRadius:'6px',overflow:'hidden',position:'relative'}},
+          h('div',{style:{position:'absolute',left:0,top:0,height:'100%',width:Math.round(r.allotted/maxV*100)+'%',background:'var(--divider)'}}),
+          h('div',{style:{position:'absolute',left:0,top:0,height:'100%',width:Math.round(r.spent/maxV*100)+'%',background:this._accent,borderRadius:'6px'}})),
+        h('span',{style:{flex:'0 0 96px',textAlign:'right',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},this.fmtDur(Math.round(r.spent))+' / '+this.fmtDur(Math.round(r.allotted))))))
+      : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}}, isToday?'No planned or recorded time yet today.':'Nothing planned or recorded on this day.');
+    /* journal textarea (uncontrolled, keyed per day so switching days reloads it) */
+    const ymd=this.ymdOf(B);
+    const jBody=h('textarea',{key:'j'+ymd, defaultValue:this.journalTextFor(B), placeholder:'How did today go? What got in the way? What matters tomorrow…',
+      onBlur:e=>this.saveJournalText(B, e.target.value),
+      style:{width:'100%',minHeight:'150px',resize:'vertical',fontSize:'13px',lineHeight:1.5,fontFamily:'inherit',color:'var(--text)',
+        background:'var(--gantt-bg)',border:'1px solid var(--divider)',borderRadius:'8px',padding:'10px',outline:'none',boxSizing:'border-box'}});
+    /* needs-planning queue with inline Planned editing */
+    const planned=h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
+      unplanned.length ? unplanned.slice(0,30).map(t=>h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:'10px'}},
+        h('span',{onClick:()=>this.openDetail(t.id),style:{flex:1,minWidth:0,fontSize:'12.5px',color:'var(--text)',cursor:'pointer',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name),
+        h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}},'Planned'),
+        h('input',{className:'pp-num',type:'text',key:'pl'+t.planned,defaultValue:this.fmtDur(t.planned),placeholder:'0:00',
+          onBlur:e=>this.setDur(t.id,'planned',e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
+          style:{width:'56px',textAlign:'right',fontSize:'12px',padding:'3px 6px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}})))
+      : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'Nothing needs planning — every task has a Planned budget. 🎉'));
+    const grid=h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'16px',alignContent:'start'}},
+      card(isToday?'Today’s actuals':'Actuals', actBody, 'Recorded (timer) vs allotted (that day’s plan) per task. Accent = recorded, grey = allotted.'),
+      card('Journal — '+dstr, jBody, 'One free-text entry per day, saved automatically. This is the hook the morning summary + later AI features build on.'),
+      card('Needs planning'+(unplanned.length?' ('+unplanned.length+')':''), planned, 'Upcoming tasks with no Planned budget (Phase-7 “Unplanned”). Give them time here so tomorrow’s timeline can schedule them.'));
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, grid);
+  }
+  /* ==== /PP-EXT Phase 9: Journal page ==== */
 
   renderBoard(tasks){
     const h=React.createElement;
