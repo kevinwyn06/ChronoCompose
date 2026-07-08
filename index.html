@@ -167,6 +167,11 @@ class Component extends DCLogic {
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
+    /* PP-EXT Phase 9 (PR5): journal mood scale + keyless auto-weather (Open-Meteo — no API key / no secret to commit). */
+    this.MOODS = [{k:'great',e:'😄',l:'Great'},{k:'good',e:'🙂',l:'Good'},{k:'ok',e:'😐',l:'Okay'},{k:'low',e:'😕',l:'Low'},{k:'rough',e:'😣',l:'Rough'}];
+    this.OPENMETEO_URL = 'https://api.open-meteo.com/v1/forecast';
+    this.WEATHER_GEO_TIMEOUT_MS = 10000; // geolocation getCurrentPosition timeout
+    this._weatherTried = {};             // session guard: ymd → auto-fetch already attempted (don't re-prompt geolocation every render)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
        day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
        toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
@@ -219,6 +224,7 @@ class Component extends DCLogic {
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
+    journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true } /* PP-EXT Phase 8: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
@@ -1222,10 +1228,18 @@ class Component extends DCLogic {
      (pp-journal, keyed by ymd), the day's actuals (allotted vs recorded), and the "needs planning" queue
      (Phase-7 unplanned) with inline Planned editing so tomorrow gets scheduled. ==== */
   loadJournal(){ try{ const o=JSON.parse(localStorage.getItem('pp-journal')||'{}'); return (o&&typeof o==='object')?o:{}; }catch(e){ return {}; } }
-  journalTextFor(dayMs){ const e=this.state.journal&&this.state.journal[this.ymdOf(dayMs)]; return (e&&e.text)||''; }
-  saveJournalText(dayMs, text){ const ymd=this.ymdOf(dayMs); const j=Object.assign({}, this.state.journal);
-    if(text&&text.trim()) j[ymd]={text:text, updatedAt:Date.now()}; else delete j[ymd];
+  journalEntryFor(dayMs){ return (this.state.journal&&this.state.journal[this.ymdOf(dayMs)])||{}; }
+  journalTextFor(dayMs){ return this.journalEntryFor(dayMs).text||''; }
+  /* PURE: merge a patch into a day's entry ({text,mood,weather}); a key set to null/'' is removed. An entry with no
+     meaningful field (text/mood/weather) is deleted so empty days don't linger. Persists + round-trips in BACKUP_KEYS. */
+  updateJournal(dayMs, patch){ const ymd=this.ymdOf(dayMs); const j=Object.assign({}, this.state.journal);
+    const cur=Object.assign({}, j[ymd]||{});
+    Object.keys(patch).forEach(k=>{ const v=patch[k]; if(v==null||v==='') delete cur[k]; else cur[k]=v; });
+    cur.updatedAt=Date.now();
+    if((cur.text&&cur.text.trim())||cur.mood||cur.weather) j[ymd]=cur; else delete j[ymd];
     try{ localStorage.setItem('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
+  saveJournalText(dayMs, text){ this.updateJournal(dayMs, {text:(text&&text.trim())?text:null}); }
+  setJournalMood(dayMs, k){ const cur=this.journalEntryFor(dayMs).mood; this.updateJournal(dayMs, {mood: cur===k?null:k}); } /* click same mood → clear */
   journalDayMs(){ return this.state.journalDay==null ? this.startOfToday() : this.state.journalDay; }
   shiftJournalDay(dir){ const cur=this.journalDayMs(); const next=cur + dir*this.DAY;
     this.setState({journalDay: next>=this.startOfToday() ? null : next}); } /* clamp forward to today */
@@ -1236,6 +1250,48 @@ class Component extends DCLogic {
       if(al<=0 && sp<=0) return; rows.push({id:t.id, name:t.name, allotted:al, spent:sp}); totalAllot+=al; totalSpent+=sp; });
     rows.sort((x,y)=>y.spent-x.spent);
     return { rows, totalAllot, totalSpent }; }
+  /* PURE: auto-record of what actually happened on a day — tasks completed that day (own or a recurring occurrence),
+     tasks worked on (timer) but not completed, and habits done. Derived from stored data — nothing to fill in by hand. */
+  journalAutoLog(B){ const ymd=this.ymdOf(B); const tasks=this.state.tasks||[]; const byId={}; tasks.forEach(t=>byId[t.id]=t);
+    const completed=[], worked=[];
+    tasks.forEach(t=>{ if(this.isMilestone(t)) return; const sp=this.getSpentOn(t, B);
+      let done = !!(t.completion && this.ymdOf(t.completion)===ymd);
+      if(!done && t.recur){ const ov=t.recur.overrides||{}; done=Object.keys(ov).some(oi=>ov[oi]&&ov[oi].completion&&this.ymdOf(ov[oi].completion)===ymd); }
+      if(done) completed.push({id:t.id, name:t.name, spent:sp});
+      else if(sp>0) worked.push({id:t.id, name:t.name, spent:sp}); });
+    worked.sort((a,b)=>b.spent-a.spent);
+    const habits=(this.state.habits||[]).filter(hb=>this.habitDoneOn(hb, B, byId)).map(hb=>({id:hb.id, name:hb.name}));
+    return { completed, worked, habits }; }
+  /* WMO weather-code → {e:emoji, l:label}. Compact grouping of Open-Meteo's current.weather_code. */
+  weatherDesc(code){ const c=+code;
+    if(c===0) return {e:'☀️', l:'Clear'};
+    if(c<=2) return {e:'🌤️', l:'Partly cloudy'};
+    if(c===3) return {e:'☁️', l:'Overcast'};
+    if(c<=48) return {e:'🌫️', l:'Fog'};
+    if(c<=57) return {e:'🌦️', l:'Drizzle'};
+    if(c<=67) return {e:'🌧️', l:'Rain'};
+    if(c<=77) return {e:'❄️', l:'Snow'};
+    if(c<=82) return {e:'🌧️', l:'Rain showers'};
+    if(c<=86) return {e:'🌨️', l:'Snow showers'};
+    if(c<=99) return {e:'⛈️', l:'Thunderstorm'};
+    return {e:'🌡️', l:'Weather'}; }
+  journalWeatherFor(dayMs){ return this.journalEntryFor(dayMs).weather||null; }
+  /* Auto-weather: geolocate once, fetch current conditions from Open-Meteo (keyless, CORS-ok), store on the day's
+     entry. Only for TODAY (no historical backfill). Fails soft to state.weatherErr — never throws into render. */
+  fetchJournalWeather(dayMs){
+    if(this.ymdOf(dayMs)!==this.ymdOf(this.startOfToday())) return;      /* weather is a today-only snapshot */
+    if(this._weatherBusy) return;
+    if(!(typeof navigator!=='undefined' && navigator.geolocation && typeof fetch!=='undefined')){ this.setState({weatherErr:'Location/network unavailable'}); return; }
+    this._weatherBusy=true; this.setState({weatherErr:null});
+    navigator.geolocation.getCurrentPosition(pos=>{
+      const lat=+pos.coords.latitude.toFixed(3), lon=+pos.coords.longitude.toFixed(3);
+      const url=this.OPENMETEO_URL+'?latitude='+lat+'&longitude='+lon+'&current=temperature_2m,weather_code';
+      fetch(url).then(r=>r.ok?r.json():Promise.reject(new Error('HTTP '+r.status))).then(d=>{ this._weatherBusy=false;
+        const cur=d&&d.current; if(!cur || cur.temperature_2m==null){ this.setState({weatherErr:'No weather data'}); return; }
+        this.updateJournal(dayMs, {weather:{tempC:Math.round(cur.temperature_2m), code:cur.weather_code, at:Date.now(), lat:lat, lon:lon}});
+      }).catch(()=>{ this._weatherBusy=false; this.setState({weatherErr:'Weather fetch failed'}); });
+    }, err=>{ this._weatherBusy=false; this.setState({weatherErr: (err&&err.code===1)?'Location permission denied':'Location unavailable'}); },
+      {timeout:this.WEATHER_GEO_TIMEOUT_MS, maximumAge:3600000}); }
   /* ==== /PP-EXT Phase 9: Journaling ==== */
 
   /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
@@ -2701,6 +2757,11 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Morning summary popup',
           this.infoNote('An in-app popup on the first open of each day with today’s counts and the tasks that still need planning. Auto-dismisses; not a browser notification (works without permission).')),
         toggle(this.notifyOn('morningSummary'),()=>this.saveSettings({notify:Object.assign({},s.notify,{morningSummary:!this.notifyOn('morningSummary')})}))),
+      /* PP-EXT Phase 9 (PR5): Journal auto-weather toggle — off = no geolocation prompt on the Journal page */
+      secTitle('Journal'),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto weather (location)',
+          this.infoNote('When on, opening today’s Journal fetches current weather once from Open-Meteo using your device location. Keyless — no account, nothing stored server-side. Off = no location prompt; you can still tap “Get weather” manually.')),
+        toggle(s.journalWeather!==false,()=>this.saveSettings({journalWeather:!(s.journalWeather!==false)}))),
       /* PP-EXT: Google Calendar — one-click sign-in; Client ID comes from config.js (else a field) */
       secTitle('Google Calendar'),
       cfgId ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},'Client ID loaded from config.js')
@@ -3585,6 +3646,12 @@ class Component extends DCLogic {
     const B=this.journalDayMs(); const today=this.startOfToday(); const isToday=B===today;
     const dstr=new Date(B).toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'});
     const act=this.journalActuals(B);
+    const log=this.journalAutoLog(B); /* PP-EXT PR5: auto-record of completed/worked/habits that day */
+    const entry=this.journalEntryFor(B); const mood=entry.mood; const wx=this.journalWeatherFor(B);
+    const ymd=this.ymdOf(B);
+    /* PP-EXT PR5: auto-fetch today's weather once per session (guarded) — only when enabled + not already stored. */
+    if(isToday && this.state.settings.journalWeather!==false && !wx && !this._weatherTried[ymd] && !this._weatherBusy){
+      this._weatherTried[ymd]=true; Promise.resolve().then(()=>this.fetchJournalWeather(B)); }
     const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
     const unplanned=(this.state.tasks||[]).filter(t=>!t.archivedAt && this.matchChip(t,'unplanned',byId));
     const card=(title,body,note)=>h('div',{style:{background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',padding:'14px 16px',display:'flex',flexDirection:'column',gap:'10px',minWidth:0}},
@@ -3610,8 +3677,40 @@ class Component extends DCLogic {
           h('div',{style:{position:'absolute',left:0,top:0,height:'100%',width:Math.round(r.spent/maxV*100)+'%',background:this._accent,borderRadius:'6px'}})),
         h('span',{style:{flex:'0 0 96px',textAlign:'right',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},this.fmtDur(Math.round(r.spent))+' / '+this.fmtDur(Math.round(r.allotted))))))
       : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}}, isToday?'No planned or recorded time yet today.':'Nothing planned or recorded on this day.');
+    /* mood selector — 5-face scale; click the active face to clear it */
+    const moodBody=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
+      ...this.MOODS.map(m=>{ const on=mood===m.k;
+        return h('div',{key:m.k,onClick:()=>this.setJournalMood(B,m.k),title:m.l,
+          style:{display:'flex',flexDirection:'column',alignItems:'center',gap:'2px',cursor:'pointer',padding:'6px 8px',borderRadius:'10px',
+            border:'1px solid '+(on?this._accent:'transparent'),background:on?'var(--sel)':'transparent',opacity:on?1:0.65}},
+          h('span',{style:{fontSize:'22px',lineHeight:1}},m.e),
+          h('span',{style:{fontSize:'9.5px',fontWeight:600,color:on?this._accent:'var(--text-faint)'}},m.l)); }));
+    /* weather — auto (Open-Meteo) for today; a stored snapshot otherwise */
+    let wxBody;
+    if(wx){ const wd=this.weatherDesc(wx.code);
+      wxBody=h('div',{style:{display:'flex',alignItems:'center',gap:'10px'}},
+        h('span',{style:{fontSize:'26px',lineHeight:1}},wd.e),
+        h('div',{style:{display:'flex',flexDirection:'column'}},
+          h('span',{style:{fontSize:'18px',fontWeight:700,color:'var(--text)'}}, wx.tempC+'°C'),
+          h('span',{style:{fontSize:'11px',color:'var(--text-mut2)'}}, wd.l)),
+        isToday?h('span',{onClick:()=>this.fetchJournalWeather(B),title:'Refresh',style:{marginLeft:'auto',cursor:'pointer',fontSize:'12px',color:'var(--text-faint)'}},'↻'):null); }
+    else if(!isToday) wxBody=h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'No weather recorded for this day.');
+    else if(this._weatherBusy) wxBody=h('span',{style:{fontSize:'12px',color:'var(--text-mut2)'}},'Locating…');
+    else wxBody=h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
+      this.state.weatherErr?h('span',{style:{fontSize:'11.5px',color:'#e5484d'}}, this.state.weatherErr):null,
+      h('button',{className:'pp-tbtn',onClick:()=>this.fetchJournalWeather(B),style:{alignSelf:'flex-start'}}, this.state.weatherErr?'Try again':'Get weather'));
+    /* auto-log — what actually happened (derived, read-only) */
+    const logRow=(icon,name,extra)=>h('div',{style:{display:'flex',alignItems:'center',gap:'8px',fontSize:'12px'}},
+      h('span',{style:{fontSize:'12px'}},icon),
+      h('span',{style:{flex:1,minWidth:0,color:'var(--text-2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},name),
+      extra?h('span',{style:{fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},extra):null);
+    const logBody=(log.completed.length||log.worked.length||log.habits.length)
+      ? h('div',{style:{display:'flex',flexDirection:'column',gap:'5px'}},
+          ...log.completed.map(r=>logRow('✓', r.name, r.spent>0?this.fmtDur(Math.round(r.spent)):null)),
+          ...log.worked.map(r=>logRow('⏱', r.name, this.fmtDur(Math.round(r.spent)))),
+          ...log.habits.map(hb=>logRow('🔁', hb.name, null)))
+      : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}}, isToday?'Nothing logged yet — complete a task or run a timer.':'Nothing was logged on this day.');
     /* journal textarea (uncontrolled, keyed per day so switching days reloads it) */
-    const ymd=this.ymdOf(B);
     const jBody=h('textarea',{key:'j'+ymd, defaultValue:this.journalTextFor(B), placeholder:'How did today go? What got in the way? What matters tomorrow…',
       onBlur:e=>this.saveJournalText(B, e.target.value),
       style:{width:'100%',minHeight:'150px',resize:'vertical',fontSize:'13px',lineHeight:1.5,fontFamily:'inherit',color:'var(--text)',
@@ -3626,6 +3725,9 @@ class Component extends DCLogic {
           style:{width:'56px',textAlign:'right',fontSize:'12px',padding:'3px 6px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}})))
       : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'Nothing needs planning — every task has a Planned budget. 🎉'));
     const grid=h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'16px',alignContent:'start'}},
+      card('Mood', moodBody, 'How the day felt, on a five-point scale. Click a face to set it; click it again to clear.'),
+      card('Weather', wxBody, 'Today’s conditions, fetched once from Open-Meteo using your device location (keyless, no account). Turn off in Settings → Journal.'),
+      card(isToday?'Done today':'Done', logBody, 'Auto-recorded: ✓ tasks completed, ⏱ tasks you logged time on, 🔁 habits done. Derived from your data — nothing to fill in.'),
       card(isToday?'Today’s actuals':'Actuals', actBody, 'Recorded (timer) vs allotted (that day’s plan) per task. Accent = recorded, grey = allotted.'),
       card('Journal — '+dstr, jBody, 'One free-text entry per day, saved automatically. This is the hook the morning summary + later AI features build on.'),
       card('Needs planning'+(unplanned.length?' ('+unplanned.length+')':''), planned, 'Upcoming tasks with no Planned budget (Phase-7 “Unplanned”). Give them time here so tomorrow’s timeline can schedule them.'));
