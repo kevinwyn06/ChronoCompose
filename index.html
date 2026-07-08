@@ -270,8 +270,23 @@ class Component extends DCLogic {
       /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
          sort={key,dir}|null (null=manual order); colFilters={[key]:spec}; chips=[] active smart-chip keys. */
       sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[],
-      spentScope: pf.spentScope==='life' ? 'life' : 'today' /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */ };
+      spentScope: pf.spentScope==='life' ? 'life' : 'today', /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */
+      dash: pf.dash||null, dashConfig:false /* PP-EXT Phase 11: composable-dashboard layout (persisted) + config-mode toggle (transient) */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
+    /* PP-EXT Phase 11 (PR1): composable dashboard. Modules (existing self-contained pane/page renderers) are
+       laid out on a 12-column flex-wrap grid; each has an on/off flag, a column width (DASH_WIDTHS) and a pixel
+       height. The layout persists in pp-prefs.dash = {preset, mods:[{k,on,w,h}]}. Presets are named default
+       layouts; any manual toggle/move/resize clears `preset` (→ custom). Pure normalization (dashNormalizeLayout)
+       reconciles a stored layout with the current module registry. PR2 will add free-form drag-arrange. */
+    this.DASH_WIDTHS = [4,6,12];   // selectable column spans (out of 12)
+    this.DASH_HMIN = 120;          // min tile height (px)
+    this.DASH_HMAX = 1000;         // max tile height (px)
+    this.DASH_HSTEP = 60;          // tile height +/- step (px)
+    this.DASH_PRESETS = {
+      plan:   [{k:'sheet',w:6,h:440},{k:'gantt',w:6,h:440},{k:'today',w:6,h:420},{k:'pomodoro',w:6,h:150}],
+      review: [{k:'stats',w:12,h:480},{k:'habits',w:6,h:360},{k:'month',w:6,h:360}],
+      focus:  [{k:'pomodoro',w:12,h:160},{k:'today',w:6,h:480},{k:'habits',w:6,h:480}],
+    };
   }
 
   /* ==== PP-EXT: persistence for tasks / spent-timer / settings / gcal ==== */
@@ -3001,7 +3016,7 @@ class Component extends DCLogic {
     return this.isPageView(cur) ? null : seg;
   }
   /* PP-EXT Phase 9: which main-views are stand-alone "pages" (full-width, no task sheet + Gantt split). */
-  isPageView(v){ return v==='archive'||v==='stats'||v==='habits'||v==='journal'; }
+  isPageView(v){ return v==='archive'||v==='stats'||v==='habits'||v==='journal'||v==='dashboard'; }
   /* PP-EXT: left icon-rail top-level nav (post-Phase-10 UI ask) — Planner (the six scheduling views) + the four
      review/manage pages. Replaces the old top-bar page-nav group; keeps the top bar for Planner's sub-view
      selector only. Planner is "active" for any scheduling view and returns to the last one used (_lastPlanner). */
@@ -3011,6 +3026,7 @@ class Component extends DCLogic {
     const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
     const ITEMS=[
       {k:'planner',ic:'🗓',l:'Planner',on:plannerOn,go:()=>this.setView(plannerOn?cur:(this._lastPlanner||'gantt'))},
+      {k:'dashboard',ic:'🧩',l:'Dash',on:cur==='dashboard',go:()=>this.setView('dashboard')},
       {k:'stats',ic:'📈',l:'Stats',on:cur==='stats',go:()=>this.setView('stats')},
       {k:'habits',ic:'🔁',l:'Habits',on:cur==='habits',go:()=>this.setView('habits')},
       {k:'journal',ic:'📓',l:'Journal',on:cur==='journal',go:()=>this.setView('journal')},
@@ -3585,10 +3601,95 @@ class Component extends DCLogic {
       case 'stats':    return this.renderStatsView();   /* PP-EXT Phase 9 */
       case 'habits':   return this.renderHabitsView();  /* PP-EXT Phase 9 */
       case 'journal':  return this.renderJournalView(); /* PP-EXT Phase 9 */
+      case 'dashboard':return this.renderDashboardView(tasks); /* PP-EXT Phase 11 */
       default:         return this.renderGantt(tasks);
     }
   }
   /* ==== /PP-EXT ==== */
+
+  /* ==== PP-EXT Phase 11 (PR1): composable dashboard — show/hide/reorder/resize modules + presets ==== */
+  /* Module registry: each entry reuses an existing self-contained pane/page renderer as a tile body. */
+  dashModules(){ return [
+    {k:'sheet',   ic:'📋', l:'Task list', render:(tasks)=>this.renderSheet(tasks)},
+    {k:'gantt',   ic:'📊', l:'Gantt',     render:(tasks)=>this.renderGantt(tasks)},
+    {k:'today',   ic:'☀',  l:'Today',     render:()=>this.renderTodayView()},
+    {k:'month',   ic:'📅', l:'Month',     render:()=>this.renderMonthView()},
+    {k:'stats',   ic:'📈', l:'Stats',     render:()=>this.renderStatsView()},
+    {k:'habits',  ic:'🔁', l:'Habits',    render:()=>this.renderHabitsView()},
+    {k:'pomodoro',ic:'🍅', l:'Pomodoro',  render:()=>this.renderPomodoroBar()},
+  ]; }
+  dashModuleKeys(){ return this.dashModules().map(m=>m.k); }
+  dashClampW(w){ w=Math.round(+w||6); return Math.max(3, Math.min(12, w)); }
+  dashClampH(h){ return Math.max(this.DASH_HMIN, Math.min(this.DASH_HMAX, Math.round(+h||300))); }
+  /* Pure: reconcile a stored layout ({mods:[{k,on,w,h}]} or a bare preset array) with the current registry —
+     keep known modules in order, coerce w/h, drop unknown, append any missing module as off. */
+  dashNormalizeLayout(stored){
+    const keys=this.dashModuleKeys();
+    const base = (stored && Array.isArray(stored.mods)) ? stored.mods
+      : (Array.isArray(stored) ? stored : this.DASH_PRESETS.plan);
+    const seen={}, out=[];
+    base.forEach(m=>{ if(m && keys.indexOf(m.k)>=0 && !seen[m.k]){ seen[m.k]=1;
+      out.push({k:m.k, on:m.on!==false, w:this.dashClampW(m.w), h:this.dashClampH(m.h)}); } });
+    keys.forEach(k=>{ if(!seen[k]) out.push({k, on:false, w:6, h:320}); });
+    return out;
+  }
+  dashLayout(){ return this.dashNormalizeLayout(this.state.dash); }
+  dashSave(mods, preset){ const dash={preset:preset||null, mods}; this.setState({dash}); this.savePrefs({dash}); }
+  dashApplyPreset(name){ const p=this.DASH_PRESETS[name]||this.DASH_PRESETS.plan;
+    this.dashSave(this.dashNormalizeLayout({mods:p}), name); }
+  dashToggle(k){ this.dashSave(this.dashLayout().map(m=>m.k===k?Object.assign({},m,{on:!m.on}):m), null); }
+  dashMove(k,dir){ const mods=this.dashLayout(); const i=mods.findIndex(m=>m.k===k); const j=i+dir;
+    if(i<0||j<0||j>=mods.length) return; const c=mods.slice(); const t=c[i]; c[i]=c[j]; c[j]=t; this.dashSave(c,null); }
+  dashCycleW(k){ const W=this.DASH_WIDTHS; this.dashSave(this.dashLayout().map(m=>{ if(m.k!==k) return m;
+    let i=W.indexOf(this.dashClampW(m.w)); const nw=(i<0)?W[1]:W[(i+1)%W.length]; return Object.assign({},m,{w:nw}); }), null); }
+  dashBumpH(k,dh){ this.dashSave(this.dashLayout().map(m=>m.k===k?Object.assign({},m,{h:this.dashClampH(m.h+dh)}):m), null); }
+
+  renderDashboardView(tasks){
+    const h=React.createElement; const cfg=this.state.dashConfig;
+    const layout=this.dashLayout(); const reg={}; this.dashModules().forEach(m=>reg[m.k]=m);
+    const preset=this.state.dash&&this.state.dash.preset;
+    const on=layout.filter(m=>m.on), off=layout.filter(m=>!m.on);
+    const pBtn=(name,label)=>h('div',{key:name,onClick:()=>this.dashApplyPreset(name),title:'Preset: '+label,
+      style:{padding:'4px 10px',borderRadius:'6px',cursor:'pointer',fontSize:'11px',fontWeight:600,
+        color:preset===name?'#fff':'var(--text-mut2)',background:preset===name?this._accent:'var(--chip-bg)'}}, label);
+    const ctl=(label,onClick,title)=>h('span',{onClick:e=>{e.stopPropagation();onClick();},title:title||label,
+      style:{cursor:'pointer',fontSize:'11px',fontWeight:700,color:'var(--text-mut2)',padding:'0 4px',userSelect:'none'}}, label);
+    const header=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'12px 16px',borderBottom:'1px solid var(--top-border)',flexWrap:'wrap'}},
+      h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'🧩 Dashboard'),
+      h('div',{style:{display:'flex',gap:'4px',marginLeft:'6px'}}, pBtn('plan','Plan'), pBtn('review','Review'), pBtn('focus','Focus')),
+      h('div',{style:{flex:1}}),
+      h('div',{onClick:()=>this.setState({dashConfig:!cfg}),title:'Toggle configure mode',
+        style:{padding:'5px 12px',borderRadius:'7px',cursor:'pointer',fontSize:'11.5px',fontWeight:600,
+          color:cfg?'#fff':'var(--text-mut2)',background:cfg?this._accent:'var(--chip-bg)'}}, cfg?'✓ Done':'⚙ Configure'));
+    const tile=(m,idx)=>{ const mod=reg[m.k]; const pct=(m.w/12*100);
+      return h('div',{key:m.k,style:{flex:'1 1 calc('+pct+'% - 12px)',maxWidth:'calc('+pct+'% - 12px)',minWidth:'260px',
+          display:'flex',flexDirection:'column',background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',overflow:'hidden'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:'6px',padding:'6px 10px',borderBottom:'1px solid var(--divider)',background:'var(--chip-bg)'}},
+          h('span',{style:{fontSize:'13px'}},mod.ic),
+          h('span',{style:{fontSize:'12px',fontWeight:700,color:'var(--text-2)'}},mod.l),
+          h('div',{style:{flex:1}}),
+          cfg?h('div',{style:{display:'flex',alignItems:'center',gap:'2px'}},
+            ctl('↑',()=>this.dashMove(m.k,-1),'Move earlier'),
+            ctl('↓',()=>this.dashMove(m.k,1),'Move later'),
+            ctl('⇔ '+m.w,()=>this.dashCycleW(m.k),'Cycle width'),
+            ctl('–',()=>this.dashBumpH(m.k,-this.DASH_HSTEP),'Shorter'),
+            ctl('+',()=>this.dashBumpH(m.k,this.DASH_HSTEP),'Taller'),
+            ctl('✕',()=>this.dashToggle(m.k),'Hide module')):null),
+        h('div',{style:{height:m.h+'px',overflow:'auto',position:'relative',display:'flex',flexDirection:'column'}}, mod.render(tasks)));
+    };
+    const grid=on.length
+      ? h('div',{style:{display:'flex',flexWrap:'wrap',gap:'12px',alignContent:'flex-start'}}, on.map(tile))
+      : h('div',{style:{padding:'40px',textAlign:'center',color:'var(--text-faint)',fontSize:'13px'}},'No modules shown. Turn on Configure and add some below, or pick a preset.');
+    const adder = cfg && off.length ? h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginTop:'14px',paddingTop:'12px',borderTop:'1px dashed var(--divider)'}},
+      h('span',{style:{fontSize:'11px',fontWeight:700,color:'var(--text-faint)',textTransform:'uppercase',letterSpacing:'0.4px'}},'Add module'),
+      off.map(m=>{ const mod=reg[m.k]; return h('div',{key:m.k,onClick:()=>this.dashToggle(m.k),
+        style:{display:'flex',alignItems:'center',gap:'5px',padding:'5px 10px',borderRadius:'999px',cursor:'pointer',
+          fontSize:'11.5px',fontWeight:600,color:'var(--text-2)',background:'var(--chip-bg)',border:'1px solid var(--divider)'}},
+        h('span',null,mod.ic),'＋ '+mod.l); })) : null;
+    const body=h('div',{style:{flex:1,overflow:'auto',padding:'16px'}}, grid, adder);
+    return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, body);
+  }
+  /* ==== /PP-EXT Phase 11: composable dashboard ==== */
 
   /* ==== PP-EXT Phase 9: Archive page — completed/archived tasks live here (off the task board). Restore with
      Unarchive (returns intact, gcal untouched) or remove permanently with Delete (deletes the linked gcal event). */
