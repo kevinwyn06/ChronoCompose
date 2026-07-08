@@ -273,19 +273,23 @@ class Component extends DCLogic {
       spentScope: pf.spentScope==='life' ? 'life' : 'today', /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */
       dash: pf.dash||null, dashConfig:false /* PP-EXT Phase 11: composable-dashboard layout (persisted) + config-mode toggle (transient) */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
-    /* PP-EXT Phase 11 (PR1): composable dashboard. Modules (existing self-contained pane/page renderers) are
-       laid out on a 12-column flex-wrap grid; each has an on/off flag, a column width (DASH_WIDTHS) and a pixel
-       height. The layout persists in pp-prefs.dash = {preset, mods:[{k,on,w,h}]}. Presets are named default
-       layouts; any manual toggle/move/resize clears `preset` (→ custom). Pure normalization (dashNormalizeLayout)
-       reconciles a stored layout with the current module registry. PR2 will add free-form drag-arrange. */
+    /* PP-EXT Phase 11: composable dashboard. Modules (existing self-contained pane/page renderers) are placed on
+       a 12-column CSS grid with explicit cells — each has {on, x, y, w, hr} (x/y = grid origin 0-based; w = column
+       span; hr = row span, each row DASH_ROW px). PR2 adds **free-form drag-arrange**: in ⚙ Configure mode you
+       drag a tile's header to move it and its corner handle to resize; on drop `dashResolve` compacts the layout
+       upward and de-overlaps it (react-grid-layout-style). The layout persists in pp-prefs.dash =
+       {preset, mods:[{k,on,x,y,w,hr}]}; any manual edit clears `preset` (→ custom). Pure helpers
+       (dashNormalizeLayout / dashResolve / dashShelfPack) are unit-tested; PR1's `h` px height migrates to `hr`. */
     this.DASH_WIDTHS = [4,6,12];   // selectable column spans (out of 12)
-    this.DASH_HMIN = 120;          // min tile height (px)
-    this.DASH_HMAX = 1000;         // max tile height (px)
-    this.DASH_HSTEP = 60;          // tile height +/- step (px)
+    this.DASH_COLS = 12;           // grid columns
+    this.DASH_ROW = 80;            // px per grid row unit
+    this.DASH_GAP = 12;            // px gap between tiles
+    this.DASH_HRMIN = 2;           // min tile height in rows
+    this.DASH_HRMAX = 12;          // max tile height in rows
     this.DASH_PRESETS = {
-      plan:   [{k:'sheet',w:6,h:440},{k:'gantt',w:6,h:440},{k:'today',w:6,h:420},{k:'pomodoro',w:6,h:150}],
-      review: [{k:'stats',w:12,h:480},{k:'habits',w:6,h:360},{k:'month',w:6,h:360}],
-      focus:  [{k:'pomodoro',w:12,h:160},{k:'today',w:6,h:480},{k:'habits',w:6,h:480}],
+      plan:   [{k:'sheet',w:6,hr:6},{k:'gantt',w:6,hr:6},{k:'today',w:6,hr:6},{k:'pomodoro',w:6,hr:2}],
+      review: [{k:'stats',w:12,hr:6},{k:'habits',w:6,hr:5},{k:'month',w:6,hr:5}],
+      focus:  [{k:'pomodoro',w:12,hr:2},{k:'today',w:6,hr:6},{k:'habits',w:6,hr:6}],
     };
   }
 
@@ -3607,7 +3611,7 @@ class Component extends DCLogic {
   }
   /* ==== /PP-EXT ==== */
 
-  /* ==== PP-EXT Phase 11 (PR1): composable dashboard — show/hide/reorder/resize modules + presets ==== */
+  /* ==== PP-EXT Phase 11: composable dashboard — modules on a free-form 12-col grid + presets ==== */
   /* Module registry: each entry reuses an existing self-contained pane/page renderer as a tile body. */
   dashModules(){ return [
     {k:'sheet',   ic:'📋', l:'Task list', render:(tasks)=>this.renderSheet(tasks)},
@@ -3619,36 +3623,106 @@ class Component extends DCLogic {
     {k:'pomodoro',ic:'🍅', l:'Pomodoro',  render:()=>this.renderPomodoroBar()},
   ]; }
   dashModuleKeys(){ return this.dashModules().map(m=>m.k); }
-  dashClampW(w){ w=Math.round(+w||6); return Math.max(3, Math.min(12, w)); }
-  dashClampH(h){ return Math.max(this.DASH_HMIN, Math.min(this.DASH_HMAX, Math.round(+h||300))); }
-  /* Pure: reconcile a stored layout ({mods:[{k,on,w,h}]} or a bare preset array) with the current registry —
-     keep known modules in order, coerce w/h, drop unknown, append any missing module as off. */
+  dashClampW(w){ w=Math.round(+w||6); return Math.max(3, Math.min(this.DASH_COLS, w)); }
+  dashClampHr(hr){ return Math.max(this.DASH_HRMIN, Math.min(this.DASH_HRMAX, Math.round(+hr||4))); }
+  /* Pure layout resolver (react-grid-layout style): de-overlap the ON tiles and pull them upward. Each tile is
+     placed at the lowest free integer row for its [x,x+w) columns, processed in (y,x) order. When `dragKey` is
+     given (a live drag/drop), that tile is placed FIRST at its exact dropped row (its target y is honoured so it
+     stays where you let go, up or down) and the others flow around it; otherwise everything compacts to the top.
+     Returns a new mods array (original order preserved); only x/y/w/hr of ON tiles change. */
+  dashResolve(mods, dragKey){
+    const on=mods.filter(m=>m.on).map(m=>Object.assign({},m));
+    const occ=[]; /* occ[row] = list of [x0,x1) occupied spans */
+    const fits=(x,y,w,hr)=>{ for(let r=y;r<y+hr;r++){ const sp=occ[r]||[]; for(let i=0;i<sp.length;i++){ if(x<sp[i][1]&&x+w>sp[i][0]) return false; } } return true; };
+    const mark=(x,y,w,hr)=>{ for(let r=y;r<y+hr;r++){ (occ[r]=occ[r]||[]).push([x,x+w]); } };
+    const place=(m, honor)=>{ const w=this.dashClampW(m.w), hr=this.dashClampHr(m.hr);
+      const x=Math.max(0, Math.min(Math.round(m.x)||0, this.DASH_COLS-w));
+      let y=honor?Math.max(0,Math.round(m.y)):0; while(!fits(x,y,w,hr)) y++;
+      m.x=x; m.y=y; m.w=w; m.hr=hr; mark(x,y,w,hr); };
+    const dragged = dragKey ? on.find(m=>m.k===dragKey) : null;
+    if(dragged) place(dragged, true); /* honour the dropped row */
+    on.filter(m=>m!==dragged).sort((a,b)=>(a.y-b.y)||(a.x-b.x)).forEach(m=>place(m,false));
+    const byK={}; on.forEach(m=>byK[m.k]=m);
+    return mods.map(m=> byK[m.k] ? Object.assign({},m,{x:byK[m.k].x,y:byK[m.k].y,w:byK[m.k].w,hr:byK[m.k].hr}) : m);
+  }
+  /* Pure shelf-pack: assign x/y to ON tiles left→right, wrapping at 12 cols (used to seed positions when a stored
+     layout / preset has none — matches PR1's flex-wrap starting look). */
+  dashShelfPack(mods){
+    let cx=0, cy=0, rowH=0;
+    mods.forEach(m=>{ if(!m.on) return; const w=this.dashClampW(m.w), hr=this.dashClampHr(m.hr);
+      if(cx+w>this.DASH_COLS){ cx=0; cy+=rowH; rowH=0; }
+      m.x=cx; m.y=cy; cy=cy; cx+=w; rowH=Math.max(rowH,hr); });
+    return mods;
+  }
+  /* Pure: reconcile a stored layout ({mods:[…]} or a bare preset array) with the registry — keep known modules in
+     order, coerce w/hr, migrate PR1's px `h`→`hr`, drop unknown, append missing as off. Seeds positions: if any
+     ON tile lacks x/y, shelf-pack all ON tiles; then compact/de-overlap via dashResolve. */
   dashNormalizeLayout(stored){
     const keys=this.dashModuleKeys();
     const base = (stored && Array.isArray(stored.mods)) ? stored.mods
       : (Array.isArray(stored) ? stored : this.DASH_PRESETS.plan);
     const seen={}, out=[];
     base.forEach(m=>{ if(m && keys.indexOf(m.k)>=0 && !seen[m.k]){ seen[m.k]=1;
-      out.push({k:m.k, on:m.on!==false, w:this.dashClampW(m.w), h:this.dashClampH(m.h)}); } });
-    keys.forEach(k=>{ if(!seen[k]) out.push({k, on:false, w:6, h:320}); });
-    return out;
+      const hr = m.hr!=null ? this.dashClampHr(m.hr) : this.dashClampHr(Math.round((+m.h||320)/this.DASH_ROW));
+      out.push({k:m.k, on:m.on!==false, w:this.dashClampW(m.w), hr,
+        x:(m.x!=null?Math.max(0,Math.round(m.x)):null), y:(m.y!=null?Math.max(0,m.y):null)}); } });
+    keys.forEach(k=>{ if(!seen[k]) out.push({k, on:false, w:6, hr:4, x:0, y:0}); });
+    if(out.some(m=>m.on && (m.x==null||m.y==null))) this.dashShelfPack(out);
+    out.forEach(m=>{ if(m.x==null)m.x=0; if(m.y==null)m.y=0; });
+    return this.dashResolve(out);
   }
   dashLayout(){ return this.dashNormalizeLayout(this.state.dash); }
   dashSave(mods, preset){ const dash={preset:preset||null, mods}; this.setState({dash}); this.savePrefs({dash}); }
   dashApplyPreset(name){ const p=this.DASH_PRESETS[name]||this.DASH_PRESETS.plan;
     this.dashSave(this.dashNormalizeLayout({mods:p}), name); }
-  dashToggle(k){ this.dashSave(this.dashLayout().map(m=>m.k===k?Object.assign({},m,{on:!m.on}):m), null); }
-  dashMove(k,dir){ const mods=this.dashLayout(); const i=mods.findIndex(m=>m.k===k); const j=i+dir;
-    if(i<0||j<0||j>=mods.length) return; const c=mods.slice(); const t=c[i]; c[i]=c[j]; c[j]=t; this.dashSave(c,null); }
-  dashCycleW(k){ const W=this.DASH_WIDTHS; this.dashSave(this.dashLayout().map(m=>{ if(m.k!==k) return m;
-    let i=W.indexOf(this.dashClampW(m.w)); const nw=(i<0)?W[1]:W[(i+1)%W.length]; return Object.assign({},m,{w:nw}); }), null); }
-  dashBumpH(k,dh){ this.dashSave(this.dashLayout().map(m=>m.k===k?Object.assign({},m,{h:this.dashClampH(m.h+dh)}):m), null); }
+  dashToggle(k){ /* turning a tile ON drops it at the bottom, then compaction pulls it up */
+    const mods=this.dashLayout(); const maxY=mods.reduce((a,m)=>m.on?Math.max(a,m.y+m.hr):a,0);
+    this.dashSave(this.dashResolve(mods.map(m=>m.k===k?Object.assign({},m,{on:!m.on, y:m.on?m.y:maxY, x:0}):m)), null); }
+  dashCycleW(k){ const W=this.DASH_WIDTHS; this.dashSave(this.dashResolve(this.dashLayout().map(m=>{ if(m.k!==k) return m;
+    let i=W.indexOf(this.dashClampW(m.w)); const nw=(i<0)?W[1]:W[(i+1)%W.length]; return Object.assign({},m,{w:nw}); })), null); }
+  dashBumpHr(k,d){ this.dashSave(this.dashResolve(this.dashLayout().map(m=>m.k===k?Object.assign({},m,{hr:this.dashClampHr(m.hr+d)}):m)), null); }
+  /* Commit a drag/resize: set the tile's tentative x/y (y may be fractional to bias tie-breaking) + w/hr, compact. */
+  dashPlace(k, x, y, w, hr){ this.dashSave(this.dashResolve(this.dashLayout().map(m=>m.k===k
+    ? Object.assign({},m,{x, y, w:this.dashClampW(w), hr:this.dashClampHr(hr)}) : m), k), null); }
+
+  /* ---- free-form drag (move) + corner-resize, active only in Configure mode ---- */
+  dashDragStart(e, k, mode){
+    if(!this.state.dashConfig) return; e.preventDefault(); e.stopPropagation();
+    const grid=this._dashGridEl; if(!grid) return; const rect=grid.getBoundingClientRect();
+    const colW=(rect.width - (this.DASH_COLS-1)*this.DASH_GAP)/this.DASH_COLS;
+    const m=this.dashLayout().find(x=>x.k===k); if(!m) return;
+    this._dashDrag={k, mode, sx:e.clientX, sy:e.clientY, orig:{x:m.x,y:m.y,w:m.w,hr:m.hr},
+      colW:colW+this.DASH_GAP, rowH:this.DASH_ROW+this.DASH_GAP};
+    const mm=(ev)=>this.dashDragMove(ev); const mu=(ev)=>{ document.removeEventListener('mousemove',mm); document.removeEventListener('mouseup',mu); this.dashDragEnd(ev); };
+    document.addEventListener('mousemove',mm); document.addEventListener('mouseup',mu);
+    this.setState({dashConfig:true}); /* force a re-render tick */
+  }
+  dashDragMove(ev){ const d=this._dashDrag; if(!d) return;
+    const dxCells=(ev.clientX-d.sx)/d.colW, dyCells=(ev.clientY-d.sy)/d.rowH;
+    if(d.mode==='move'){ const w=d.orig.w;
+      const x=Math.max(0, Math.min(Math.round(d.orig.x+dxCells), this.DASH_COLS-w));
+      const y=Math.max(0, d.orig.y+dyCells); /* fractional y → tie-break bias */
+      d.preview={x, y, w, hr:d.orig.hr};
+    } else { /* resize from bottom-right corner */
+      const w=Math.max(3, Math.min(Math.round(d.orig.w+dxCells), this.DASH_COLS-d.orig.x));
+      const hr=Math.max(this.DASH_HRMIN, Math.min(Math.round(d.orig.hr+dyCells), this.DASH_HRMAX));
+      d.preview={x:d.orig.x, y:d.orig.y, w, hr};
+    }
+    this.setState({nowTick:Date.now()}); /* cheap re-render; preview read from _dashDrag */
+  }
+  dashDragEnd(){ const d=this._dashDrag; this._dashDrag=null;
+    if(d&&d.preview){ const p=d.preview; this.dashPlace(d.k, p.x, p.y, p.w, p.hr); }
+    else this.setState({nowTick:Date.now()}); }
 
   renderDashboardView(tasks){
     const h=React.createElement; const cfg=this.state.dashConfig;
-    const layout=this.dashLayout(); const reg={}; this.dashModules().forEach(m=>reg[m.k]=m);
+    let layout=this.dashLayout(); const reg={}; this.dashModules().forEach(m=>reg[m.k]=m);
     const preset=this.state.dash&&this.state.dash.preset;
+    /* overlay the live drag/resize preview so the tile follows the cursor before commit */
+    const drag=this._dashDrag;
+    if(drag&&drag.preview){ layout=layout.map(m=>m.k===drag.k?Object.assign({},m,{x:drag.preview.x,y:Math.round(drag.preview.y),w:drag.preview.w,hr:drag.preview.hr}):m); }
     const on=layout.filter(m=>m.on), off=layout.filter(m=>!m.on);
+    const rows=on.reduce((a,m)=>Math.max(a,m.y+m.hr),0)||1;
     const pBtn=(name,label)=>h('div',{key:name,onClick:()=>this.dashApplyPreset(name),title:'Preset: '+label,
       style:{padding:'4px 10px',borderRadius:'6px',cursor:'pointer',fontSize:'11px',fontWeight:600,
         color:preset===name?'#fff':'var(--text-mut2)',background:preset===name?this._accent:'var(--chip-bg)'}}, label);
@@ -3658,27 +3732,38 @@ class Component extends DCLogic {
       h('span',{style:{fontSize:'15px',fontWeight:700,color:'var(--text-strong)'}},'🧩 Dashboard'),
       h('div',{style:{display:'flex',gap:'4px',marginLeft:'6px'}}, pBtn('plan','Plan'), pBtn('review','Review'), pBtn('focus','Focus')),
       h('div',{style:{flex:1}}),
+      cfg?h('span',{style:{fontSize:'11px',color:'var(--text-faint)'}},'Drag headers to move · corner to resize'):null,
       h('div',{onClick:()=>this.setState({dashConfig:!cfg}),title:'Toggle configure mode',
         style:{padding:'5px 12px',borderRadius:'7px',cursor:'pointer',fontSize:'11.5px',fontWeight:600,
           color:cfg?'#fff':'var(--text-mut2)',background:cfg?this._accent:'var(--chip-bg)'}}, cfg?'✓ Done':'⚙ Configure'));
-    const tile=(m,idx)=>{ const mod=reg[m.k]; const pct=(m.w/12*100);
-      return h('div',{key:m.k,style:{flex:'1 1 calc('+pct+'% - 12px)',maxWidth:'calc('+pct+'% - 12px)',minWidth:'260px',
-          display:'flex',flexDirection:'column',background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'10px',overflow:'hidden'}},
-        h('div',{style:{display:'flex',alignItems:'center',gap:'6px',padding:'6px 10px',borderBottom:'1px solid var(--divider)',background:'var(--chip-bg)'}},
+    const isDragged=drag&&drag.preview;
+    const tile=(m)=>{ const mod=reg[m.k]; const active=isDragged&&drag.k===m.k;
+      return h('div',{key:m.k,style:{gridColumn:(m.x+1)+' / span '+m.w, gridRow:(m.y+1)+' / span '+m.hr,
+          display:'flex',flexDirection:'column',background:'var(--sheet-bg)',border:'1px solid '+(active?this._accent:'var(--divider)'),
+          borderRadius:'10px',overflow:'hidden',minWidth:0, boxShadow:active?'0 8px 24px rgba(0,0,0,0.18)':'none', opacity:active?0.92:1,
+          transition:isDragged?'none':'box-shadow .12s'}},
+        h('div',{onMouseDown:cfg?(e=>this.dashDragStart(e,m.k,'move')):null,
+          style:{display:'flex',alignItems:'center',gap:'6px',padding:'6px 10px',borderBottom:'1px solid var(--divider)',
+            background:'var(--chip-bg)',cursor:cfg?'grab':'default',userSelect:'none'}},
+          cfg?h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'⠿'):null,
           h('span',{style:{fontSize:'13px'}},mod.ic),
           h('span',{style:{fontSize:'12px',fontWeight:700,color:'var(--text-2)'}},mod.l),
           h('div',{style:{flex:1}}),
           cfg?h('div',{style:{display:'flex',alignItems:'center',gap:'2px'}},
-            ctl('↑',()=>this.dashMove(m.k,-1),'Move earlier'),
-            ctl('↓',()=>this.dashMove(m.k,1),'Move later'),
             ctl('⇔ '+m.w,()=>this.dashCycleW(m.k),'Cycle width'),
-            ctl('–',()=>this.dashBumpH(m.k,-this.DASH_HSTEP),'Shorter'),
-            ctl('+',()=>this.dashBumpH(m.k,this.DASH_HSTEP),'Taller'),
+            ctl('–',()=>this.dashBumpHr(m.k,-1),'Shorter'),
+            ctl('+',()=>this.dashBumpHr(m.k,1),'Taller'),
             ctl('✕',()=>this.dashToggle(m.k),'Hide module')):null),
-        h('div',{style:{height:m.h+'px',overflow:'auto',position:'relative',display:'flex',flexDirection:'column'}}, mod.render(tasks)));
+        h('div',{style:{flex:1,minHeight:0,overflow:'auto',position:'relative',display:'flex',flexDirection:'column',
+          pointerEvents:cfg?'none':'auto' /* in configure mode the body is inert so drags don't hit module content */}}, mod.render(tasks)),
+        cfg?h('div',{onMouseDown:e=>this.dashDragStart(e,m.k,'resize'),title:'Resize',
+          style:{position:'absolute',right:'2px',bottom:'2px',width:'16px',height:'16px',cursor:'nwse-resize',
+            color:'var(--text-faint)',fontSize:'12px',lineHeight:'16px',textAlign:'center'}},'◢'):null);
     };
     const grid=on.length
-      ? h('div',{style:{display:'flex',flexWrap:'wrap',gap:'12px',alignContent:'flex-start'}}, on.map(tile))
+      ? h('div',{ref:el=>this._dashGridEl=el, style:{position:'relative',display:'grid',
+          gridTemplateColumns:'repeat('+this.DASH_COLS+',1fr)', gridAutoRows:this.DASH_ROW+'px',
+          gridTemplateRows:'repeat('+rows+','+this.DASH_ROW+'px)', gap:this.DASH_GAP+'px'}}, on.map(tile))
       : h('div',{style:{padding:'40px',textAlign:'center',color:'var(--text-faint)',fontSize:'13px'}},'No modules shown. Turn on Configure and add some below, or pick a preset.');
     const adder = cfg && off.length ? h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginTop:'14px',paddingTop:'12px',borderTop:'1px dashed var(--divider)'}},
       h('span',{style:{fontSize:'11px',fontWeight:700,color:'var(--text-faint)',textTransform:'uppercase',letterSpacing:'0.4px'}},'Add module'),
