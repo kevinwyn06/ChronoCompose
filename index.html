@@ -204,6 +204,7 @@ class Component extends DCLogic {
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      pomo:this.loadPomo(), /* PP-EXT Phase 10: active pomodoro session {taskId,phase,phaseStart,cycle} or null (pp-pomo) */
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
       journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
@@ -225,7 +226,8 @@ class Component extends DCLogic {
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
-    notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true } /* PP-EXT Phase 8: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
+    pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
+    notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true, pomodoro:true } /* PP-EXT Phase 8/10: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
   loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
   loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
@@ -435,11 +437,12 @@ class Component extends DCLogic {
     window.addEventListener('mouseup', this._onUp);
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
     /* PP-EXT: clock ticks — 1s while a timer runs (live spent/allotted), 30s idle (now-line) */
-    this._tickRun=setInterval(()=>{ if(this.anyRunning()){ this.timerHeartbeat(); this.autoTimerTick(); this.notifyTick(); if(this.anyRunning()) this.setState({nowTick:Date.now()}); } }, 1000);
-    this._tickIdle=setInterval(()=>{ if(!this.anyRunning()) this.setState({nowTick:Date.now()}); this.autoTimerTick(); /* PP-EXT: catch pin-driven auto-starts while idle */ this.notifyTick(); /* PP-EXT Phase 8 */ this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
+    this._tickRun=setInterval(()=>{ if(this.anyRunning()||this.pomoActive()){ this.timerHeartbeat(); this.autoTimerTick(); this.pomoTick(); /* PP-EXT Phase 10 */ this.notifyTick(); if(this.anyRunning()||this.pomoActive()) this.setState({nowTick:Date.now()}); } }, 1000);
+    this._tickIdle=setInterval(()=>{ if(!this.anyRunning()) this.setState({nowTick:Date.now()}); this.autoTimerTick(); /* PP-EXT: catch pin-driven auto-starts while idle */ this.pomoTick(); /* PP-EXT Phase 10 */ this.notifyTick(); /* PP-EXT Phase 8 */ this.maybeAutoArchive(); /* PP-EXT */ }, 30000);
     /* PP-EXT: a run restored from pp-run may be stale (tab was closed mid-run) — settle it before it accrues */
     this.timerHeartbeat();
     this.autoTimerTick(); /* PP-EXT: fire any pin-driven auto-starts already due on load */
+    this.pomoTick(); /* PP-EXT Phase 10: settle a pomodoro session restored from pp-pomo */
     this.notifyTick(); /* PP-EXT Phase 8: raise the morning summary + any due notifications on load */
     this.maybeAutoArchive(); /* PP-EXT: sweep long-completed tasks once on load (then hourly via the idle tick) */
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
@@ -721,6 +724,51 @@ class Component extends DCLogic {
       this._autoDone[id+':'+this.occOf(t).start]=true; this.startTimer(id); });
     plan.pause.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
       this._autoPaused[id+':'+this.occOf(t).start]=true; this.stopTimer(id); /* PP-EXT: silent — no prompt/note */ }); }
+
+  /* ==== PP-EXT Phase 10: Pomodoro — work/break cycles bound to the existing task timer. Session persists in
+     `pp-pomo` so a reload resumes it (transitions only advance while the tab is open — the same "no background
+     worker" limit as notifications). The decision logic (pomoState / pomoAdvance) is pure & unit-tested; the
+     control methods apply it (bind the task timer, fire the interval-end notification). ==== */
+  loadPomo(){ try{ const p=JSON.parse(localStorage.getItem('pp-pomo')||'null'); return (p&&typeof p==='object'&&p.phase)?p:null; }catch(e){ return null; } }
+  savePomo(p){ try{ if(p) localStorage.setItem('pp-pomo', JSON.stringify(p)); else localStorage.removeItem('pp-pomo'); }catch(e){} }
+  pomoActive(){ return !!this.state.pomo; }
+  pomoCfg(){ return Object.assign({work:25,break:5,long:15,cycles:4}, (this.state.settings&&this.state.settings.pomo)||{}); }
+  /* PURE: minutes → ms for a phase (min 1 min so a mis-set 0 can't spin). */
+  pomoPhaseDur(phase, s){ s=s||this.pomoCfg(); const m = phase==='break'?s.break : phase==='long'?s.long : s.work; return Math.max(1, +m||1)*60000; }
+  /* PURE: the live state of a session at `now` — current phase, elapsed/remaining, and whether the phase is done. */
+  pomoState(pomo, now, s){ if(!pomo||!pomo.phase) return null; s=s||this.pomoCfg();
+    const durMs=this.pomoPhaseDur(pomo.phase, s); const elapsedMs=Math.max(0, now-(pomo.phaseStart||now));
+    return { phase:pomo.phase, cycle:pomo.cycle||0, durMs, elapsedMs, remainingMs:Math.max(0, durMs-elapsedMs), done: elapsedMs>=durMs }; }
+  /* PURE: the next session after a phase completes. work → break (or long every `cycles` work sessions);
+     break/long → work. `phaseStart` restarts at `now` (a closed tab pauses the cycle rather than skipping many). */
+  pomoAdvance(pomo, s, now){ s=s||this.pomoCfg(); const cyc=pomo.cycle||0; let phase, cycle;
+    if(pomo.phase==='work'){ const nc=cyc+1; if(nc>=Math.max(1, s.cycles||4)){ phase='long'; cycle=nc; } else { phase='break'; cycle=nc; } }
+    else if(pomo.phase==='long'){ phase='work'; cycle=0; }
+    else { phase='work'; cycle=cyc; }
+    return { taskId:pomo.taskId||null, phase, cycle, phaseStart: now }; }
+  /* Bind the task timer to the phase: work → its timer runs; break/long → paused. No-op when standalone (no task). */
+  applyPomoTimer(pomo){ const tid=pomo&&pomo.taskId; if(!tid || !this.state.tasks.find(t=>t.id===tid)) return;
+    const work=pomo.phase==='work';
+    if(work && !this.isRunning(tid)) this.startTimer(tid);
+    else if(!work && this.isRunning(tid)) this.stopTimer(tid); }
+  startPomodoro(taskId){ const now=Date.now(); const pomo={ taskId: taskId||null, phase:'work', phaseStart:now, cycle:0 };
+    this.setState({pomo}); this.savePomo(pomo); this.applyPomoTimer(pomo); }
+  stopPomodoro(){ const p=this.state.pomo; if(p && p.taskId && p.phase==='work' && this.isRunning(p.taskId)) this.stopTimer(p.taskId);
+    this.setState({pomo:null}); this.savePomo(null); }
+  /* Manual skip → jump to the next phase now (undo-free; it's ephemeral session state, not a task mutation). */
+  skipPomoPhase(){ const p=this.state.pomo; if(!p) return; const next=this.pomoAdvance(p, this.pomoCfg(), Date.now());
+    this.setState({pomo:next}); this.savePomo(next); this.applyPomoTimer(next); this.pomoNotify(p.phase, next); }
+  /* Called from the tick loops: when the current phase is done, roll to the next and fire the interval-end alert. */
+  pomoTick(now){ now=now||Date.now(); const p=this.state.pomo; if(!p) return;
+    const st=this.pomoState(p, now); if(!st || !st.done) return;
+    const next=this.pomoAdvance(p, this.pomoCfg(), now);
+    this.setState({pomo:next}); this.savePomo(next); this.applyPomoTimer(next); this.pomoNotify(p.phase, next); }
+  pomoNotify(fromPhase, next){ if(!this.notifyOn('pomodoro')) return; if(this.notifyPermission()!=='granted') return;
+    const toBreak = fromPhase==='work';
+    const title = toBreak ? (next.phase==='long'?'🍅 Long break':'🍅 Break time') : '🍅 Back to focus';
+    const body = toBreak ? ('Work interval done — take a'+(next.phase==='long'?' long':'')+' break.') : 'Break over — start your next focus interval.';
+    try{ const n=new Notification(title,{ body, tag:'pomo' }); setTimeout(()=>{ try{ n.close(); }catch(e){} }, 8000); }catch(e){} }
+  /* ==== /PP-EXT Phase 10: Pomodoro ==== */
 
   /* ===== PP-EXT Phase 8: notifications ===== */
   /* Fired-once ledger + last morning-summary day. Persisted so a reload doesn't re-fire a passed trigger.
@@ -2757,6 +2805,17 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Morning summary popup',
           this.infoNote('An in-app popup on the first open of each day with today’s counts and the tasks that still need planning. Auto-dismisses; not a browser notification (works without permission).')),
         toggle(this.notifyOn('morningSummary'),()=>this.saveSettings({notify:Object.assign({},s.notify,{morningSummary:!this.notifyOn('morningSummary')})}))),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Pomodoro interval ended',
+          this.infoNote('A normal notification each time a pomodoro focus or break interval ends. Start a pomodoro from the Today view.')),
+        toggle(this.notifyOn('pomodoro'),()=>this.saveSettings({notify:Object.assign({},s.notify,{pomodoro:!this.notifyOn('pomodoro')})}))),
+      /* PP-EXT Phase 10: pomodoro interval durations (minutes) + long-break cadence */
+      secTitle('Pomodoro'),
+      (()=>{ const pm=this.pomoCfg(); const setPomo=(k,v)=>this.saveSettings({pomo:Object.assign({},pm,{[k]:Math.max(1,parseInt(v)||pm[k])})});
+        return h(React.Fragment,{},
+          setRow('Focus (min)', inp(pm.work,v=>setPomo('work',v))),
+          setRow('Break (min)', inp(pm.break,v=>setPomo('break',v))),
+          setRow('Long break (min)', inp(pm.long,v=>setPomo('long',v))),
+          setRow('Sessions before long break', inp(pm.cycles,v=>setPomo('cycles',v)))); })(),
       /* PP-EXT Phase 9 (PR5): Journal auto-weather toggle — off = no geolocation prompt on the Journal page */
       secTitle('Journal'),
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto weather (location)',
@@ -3238,9 +3297,55 @@ class Component extends DCLogic {
        scroll wrapper's height minus its ~12px vertical padding (the body clips its last hour label). */
     const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-      header, gerr, note, runbar, this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
+      header, gerr, note, runbar, this.renderPomodoroBar(), /* PP-EXT Phase 10 */ this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
       h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
-        this.renderDayColumn(B, {showLabels:true, availH})));
+        this.renderDayColumn(B, {showLabels:true, availH})),
+      this.renderMusicDock()); /* PP-EXT Phase 10: placeholder music dock (engine chosen later) */
+  }
+  /* PP-EXT Phase 10: pomodoro control bar (Today view). Idle → task picker + Start; active → phase + live
+     countdown + Skip/Stop, colour-coded (focus = red, break = green). Minimal scaffold; Claude Design styles later. */
+  renderPomodoroBar(){
+    const h=React.createElement; const p=this.state.pomo; const now=this.state.nowTick||Date.now(); const cfg=this.pomoCfg();
+    const wrap=(bg,fg,kids)=>h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'7px 14px',flex:'none',
+      borderBottom:'1px solid var(--top-border)',background:bg,color:fg,fontSize:'12.5px'}}, ...kids);
+    const cd=ms=>{ const s=Math.max(0,Math.round(ms/1000)); return Math.floor(s/60)+':'+String(s%60).padStart(2,'0'); };
+    if(!p){
+      const active=(this.state.tasks||[]).filter(t=>!t.archivedAt && !this.isMilestone(t) && this.isActiveToday(t));
+      const sel=h('select',{value:this._pomoPick||'', onChange:e=>{ this._pomoPick=e.target.value; this.forceUpdate(); },
+        style:{fontSize:'12px',padding:'3px 6px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--sheet-bg)',color:'var(--text-2)',maxWidth:'190px'}},
+        h('option',{value:''},'No task (standalone)'), ...active.map(t=>h('option',{key:t.id,value:t.id},t.name)));
+      return wrap('var(--sheet-bg)','var(--text-2)',[
+        h('span',{style:{fontWeight:700}},'🍅 Pomodoro'),
+        this.infoNote('Focus/break intervals ('+cfg.work+'/'+cfg.break+' min, long break '+cfg.long+' min every '+cfg.cycles+' sessions — change in Settings). Bind a task and its timer runs during focus and pauses on breaks.'),
+        sel,
+        h('div',{onClick:()=>this.startPomodoro(this._pomoPick||null),style:{marginLeft:'auto',cursor:'pointer',fontWeight:700,color:'#fff',background:'#c0392b',borderRadius:'6px',padding:'4px 12px'}},'Start')]);
+    }
+    const st=this.pomoState(p, now); const isWork=p.phase==='work';
+    const phaseLabel = p.phase==='long'?'Long break' : p.phase==='break'?'Break' : 'Focus';
+    const task=p.taskId?this.state.tasks.find(t=>t.id===p.taskId):null;
+    const sessN=Math.min(cfg.cycles, (p.cycle % cfg.cycles) + (isWork?1:0)) || (isWork?1:cfg.cycles);
+    const btn=(label,on,solid)=>h('div',{onClick:on,style:{cursor:'pointer',fontWeight:600,padding:'4px 11px',borderRadius:'6px',
+      background:solid?'rgba(255,255,255,0.25)':'transparent',border:'1px solid rgba(255,255,255,0.5)'}},label);
+    return wrap(isWork?'#c0392b':'#2e7d32','#fff',[
+      h('span',{style:{fontWeight:700}}, (isWork?'🍅 ':'☕ ')+phaseLabel),
+      task?h('span',{style:{opacity:0.9,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'160px'}}, '· '+task.name):null,
+      h('span',{style:{fontSize:'15px',fontWeight:700,fontVariantNumeric:'tabular-nums',marginLeft:'4px'}}, cd(st.remainingMs)),
+      h('span',{style:{fontSize:'10.5px',opacity:0.85}}, 'session '+sessN+'/'+cfg.cycles),
+      h('div',{style:{flex:1}}),
+      btn('Skip',()=>this.skipPomoPhase(),false),
+      btn('Stop',()=>this.stopPomodoro(),true)]);
+  }
+  /* PP-EXT Phase 10: music dock — placeholder only (no audio engine yet). Controls surface a note explaining so. */
+  renderMusicDock(){
+    const h=React.createElement;
+    const note=()=>this.setState({timerNote:'Music player is a placeholder — the audio engine arrives in a later phase.'});
+    const ctl=(label,title)=>h('div',{title,onClick:note,style:{cursor:'pointer',fontSize:'13px',color:'var(--text-mut2)',padding:'2px 5px',borderRadius:'5px'}},label);
+    return h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',flex:'none',
+      borderTop:'1px solid var(--top-border)',background:'var(--sheet-bg)'}},
+      h('span',{style:{fontSize:'11px',fontWeight:700,color:'var(--text-mut2)',letterSpacing:'0.3px'}},'♪ Music'),
+      h('span',{style:{fontSize:'11.5px',color:'var(--text-faint)',flex:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'Nothing playing'),
+      ctl('⏮','Previous'), ctl('▶','Play'), ctl('⏭','Next'),
+      h('span',{style:{fontSize:'9.5px',color:'var(--text-faint2)',fontStyle:'italic'}},'placeholder'));
   }
   /* Schedule (agenda) view — one column, a divider per day (next 7), each day's scheduled blocks as chips with
      start–end times. Leaf flexible chips are draggable (vertical drag → pin at a time for that day, 15-min snap,
