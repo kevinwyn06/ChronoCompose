@@ -117,3 +117,62 @@ test('journalAutoLog auto-records completed, worked-on, and habits-done', () => 
   assert.equal(Math.round(log.worked[0].spent), 45);
   assert.equal(log.habits.map(hb => hb.id).join(','), 'h1', 'only habits done that day');
 });
+
+// ---- tiered emotion wheel (post-Phase-10 UI ask) ----
+
+test('EMOTION_WHEEL is the Roberts feelings wheel: 7 cores, 41 secondary, 82 leaves, unique paths', () => {
+  const c = make();
+  const wheel = c.EMOTION_WHEEL;
+  assert.equal(wheel.length, 7, 'seven core emotions');
+  let sec = 0, leaves = 0;
+  const paths = new Set();
+  for (const core of wheel) {
+    assert.ok(core.e && core.c, 'each core has an emoji + colour');
+    sec += core.kids.length;
+    for (const s of core.kids) {
+      for (const leaf of s.kids) {
+        leaves++;
+        paths.add(core.k + '/' + s.k + '/' + leaf.k);
+      }
+    }
+  }
+  assert.equal(sec, 41, '41 secondary emotions');
+  assert.equal(leaves, 82, '82 tertiary leaf words');
+  assert.equal(paths.size, 82, 'every leaf path is globally unique');
+});
+
+test('moodInfo resolves wheel paths (core/secondary/leaf) and legacy tokens', () => {
+  const c = make();
+  // leaf path
+  const leaf = c.moodInfo('happy/playful/aroused');
+  assert.equal(leaf.path.join(' › '), 'Happy › Playful › Aroused');
+  assert.equal(leaf.coreKey, 'happy');
+  assert.ok(leaf.color.startsWith('#'), 'leaf carries the core colour');
+  // stop at a core
+  assert.equal(c.moodInfo('sad').path.join(''), 'Sad');
+  // stop at a secondary
+  assert.equal(c.moodInfo('angry/mad').path.join(' › '), 'Angry › Mad');
+  // duplicate leaf word disambiguated by path (overwhelmed lives under both fearful and bad)
+  assert.equal(c.moodInfo('fearful/anxious/overwhelmed').path[0], 'Fearful');
+  assert.equal(c.moodInfo('bad/stressed/overwhelmed').path[0], 'Bad');
+  // legacy single-token mood still renders
+  const lg = c.moodInfo('good');
+  assert.ok(lg.legacy && lg.label === 'Good');
+  // unknown + null degrade safely
+  assert.equal(c.moodInfo('happy/bogus').label, 'happy/bogus');
+  assert.equal(c.moodInfo(null), null);
+});
+
+test('setJournalMood stores the wheel path and drilling deeper replaces it', () => {
+  const c = make();
+  c.state.journal = {};
+  const today = c.startOfToday();
+  c.setJournalMood(today, 'happy');
+  assert.equal(c.journalEntryFor(today).mood, 'happy');
+  c.setJournalMood(today, 'happy/playful');
+  assert.equal(c.journalEntryFor(today).mood, 'happy/playful', 'drilling into a secondary replaces the core');
+  c.setJournalMood(today, 'happy/playful/cheeky');
+  assert.equal(c.journalEntryFor(today).mood, 'happy/playful/cheeky');
+  c.setJournalMood(today, 'happy/playful/cheeky'); // click the active leaf again → clear
+  assert.equal(c.journalEntryFor(today).mood, undefined, 'clicking the active chip clears the mood');
+});

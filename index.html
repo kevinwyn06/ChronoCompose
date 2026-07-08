@@ -169,6 +169,64 @@ class Component extends DCLogic {
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
     /* PP-EXT Phase 9 (PR5): journal mood scale + keyless auto-weather (Open-Meteo — no API key / no secret to commit). */
     this.MOODS = [{k:'great',e:'😄',l:'Great'},{k:'good',e:'🙂',l:'Good'},{k:'ok',e:'😐',l:'Okay'},{k:'low',e:'😕',l:'Low'},{k:'rough',e:'😣',l:'Rough'}];
+    /* PP-EXT: tiered emotion wheel (post-Phase-10 UI ask) — Geoffrey Roberts' Feelings Wheel, an adaptation of
+       Gloria Willcox's research-based Feeling Wheel (1982). Three tiers: 7 core → 41 secondary → 82 tertiary
+       leaves (~130 words total). Picked tier-by-tier (CYOA style); the mood is stored as a `/`-joined path
+       (e.g. 'happy/playful/aroused', or just 'happy' if you stop at the core). Core keys never collide, so the
+       path disambiguates leaf words that repeat across cores (overwhelmed, inferior, embarrassed…). The core
+       tier doubles as the quick one-tap row. `MOODS` above stays for back-compat with pre-wheel single-token
+       entries. Kids: a node with `kids` is a branch (core/secondary); a bare {k,l} is a leaf. */
+    const L=(k,l)=>({k,l}); // leaf
+    this.EMOTION_WHEEL = [
+      {k:'happy',l:'Happy',e:'😊',c:'#f0b429',kids:[
+        {k:'playful',l:'Playful',kids:[L('aroused','Aroused'),L('cheeky','Cheeky')]},
+        {k:'content',l:'Content',kids:[L('free','Free'),L('joyful','Joyful')]},
+        {k:'interested',l:'Interested',kids:[L('curious','Curious'),L('inquisitive','Inquisitive')]},
+        {k:'proud',l:'Proud',kids:[L('successful','Successful'),L('confident','Confident')]},
+        {k:'accepted',l:'Accepted',kids:[L('respected','Respected'),L('valued','Valued')]},
+        {k:'powerful',l:'Powerful',kids:[L('courageous','Courageous'),L('creative','Creative')]},
+        {k:'peaceful',l:'Peaceful',kids:[L('loving','Loving'),L('thankful','Thankful')]},
+        {k:'trusting',l:'Trusting',kids:[L('sensitive','Sensitive'),L('intimate','Intimate')]},
+        {k:'optimistic',l:'Optimistic',kids:[L('hopeful','Hopeful'),L('inspired','Inspired')]}]},
+      {k:'surprised',l:'Surprised',e:'😲',c:'#46b1c9',kids:[
+        {k:'startled',l:'Startled',kids:[L('shocked','Shocked'),L('dismayed','Dismayed')]},
+        {k:'confused',l:'Confused',kids:[L('disillusioned','Disillusioned'),L('perplexed','Perplexed')]},
+        {k:'amazed',l:'Amazed',kids:[L('astonished','Astonished'),L('awe','In awe')]},
+        {k:'excited',l:'Excited',kids:[L('eager','Eager'),L('energetic','Energetic')]}]},
+      {k:'bad',l:'Bad',e:'😞',c:'#9a8f5c',kids:[
+        {k:'bored',l:'Bored',kids:[L('indifferent','Indifferent'),L('apathetic','Apathetic')]},
+        {k:'busy',l:'Busy',kids:[L('pressured','Pressured'),L('rushed','Rushed')]},
+        {k:'stressed',l:'Stressed',kids:[L('overwhelmed','Overwhelmed'),L('outofcontrol','Out of control')]},
+        {k:'tired',l:'Tired',kids:[L('sleepy','Sleepy'),L('unfocused','Unfocused')]}]},
+      {k:'fearful',l:'Fearful',e:'😨',c:'#e5872e',kids:[
+        {k:'scared',l:'Scared',kids:[L('helpless','Helpless'),L('frightened','Frightened')]},
+        {k:'anxious',l:'Anxious',kids:[L('overwhelmed','Overwhelmed'),L('worried','Worried')]},
+        {k:'insecure',l:'Insecure',kids:[L('inadequate','Inadequate'),L('inferior','Inferior')]},
+        {k:'weak',l:'Weak',kids:[L('worthless','Worthless'),L('insignificant','Insignificant')]},
+        {k:'rejected',l:'Rejected',kids:[L('excluded','Excluded'),L('persecuted','Persecuted')]},
+        {k:'threatened',l:'Threatened',kids:[L('nervous','Nervous'),L('exposed','Exposed')]}]},
+      {k:'angry',l:'Angry',e:'😠',c:'#d94a3d',kids:[
+        {k:'letdown',l:'Let down',kids:[L('betrayed','Betrayed'),L('resentful','Resentful')]},
+        {k:'humiliated',l:'Humiliated',kids:[L('disrespected','Disrespected'),L('ridiculed','Ridiculed')]},
+        {k:'bitter',l:'Bitter',kids:[L('indignant','Indignant'),L('violated','Violated')]},
+        {k:'mad',l:'Mad',kids:[L('furious','Furious'),L('jealous','Jealous')]},
+        {k:'aggressive',l:'Aggressive',kids:[L('provoked','Provoked'),L('hostile','Hostile')]},
+        {k:'frustrated',l:'Frustrated',kids:[L('infuriated','Infuriated'),L('annoyed','Annoyed')]},
+        {k:'distant',l:'Distant',kids:[L('withdrawn','Withdrawn'),L('numb','Numb')]},
+        {k:'critical',l:'Critical',kids:[L('skeptical','Skeptical'),L('dismissive','Dismissive')]}]},
+      {k:'disgusted',l:'Disgusted',e:'🤢',c:'#6a9a3f',kids:[
+        {k:'disapproving',l:'Disapproving',kids:[L('judgmental','Judgmental'),L('embarrassed','Embarrassed')]},
+        {k:'disappointed',l:'Disappointed',kids:[L('appalled','Appalled'),L('revolted','Revolted')]},
+        {k:'awful',l:'Awful',kids:[L('nauseated','Nauseated'),L('detestable','Detestable')]},
+        {k:'repelled',l:'Repelled',kids:[L('horrified','Horrified'),L('hesitant','Hesitant')]}]},
+      {k:'sad',l:'Sad',e:'😢',c:'#3b82c4',kids:[
+        {k:'lonely',l:'Lonely',kids:[L('isolated','Isolated'),L('abandoned','Abandoned')]},
+        {k:'vulnerable',l:'Vulnerable',kids:[L('victimized','Victimized'),L('fragile','Fragile')]},
+        {k:'despair',l:'Despair',kids:[L('grief','Grief'),L('powerless','Powerless')]},
+        {k:'guilty',l:'Guilty',kids:[L('ashamed','Ashamed'),L('remorseful','Remorseful')]},
+        {k:'depressed',l:'Depressed',kids:[L('empty','Empty'),L('inferior','Inferior')]},
+        {k:'hurt',l:'Hurt',kids:[L('embarrassed','Embarrassed'),L('disappointed','Disappointed')]}]}
+    ];
     this.OPENMETEO_URL = 'https://api.open-meteo.com/v1/forecast';
     this.WEATHER_GEO_TIMEOUT_MS = 10000; // geolocation getCurrentPosition timeout
     this._weatherTried = {};             // session guard: ymd → auto-fetch already attempted (don't re-prompt geolocation every render)
@@ -1288,6 +1346,17 @@ class Component extends DCLogic {
     try{ localStorage.setItem('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
   saveJournalText(dayMs, text){ this.updateJournal(dayMs, {text:(text&&text.trim())?text:null}); }
   setJournalMood(dayMs, k){ const cur=this.journalEntryFor(dayMs).mood; this.updateJournal(dayMs, {mood: cur===k?null:k}); } /* click same mood → clear */
+  /* PP-EXT: resolve a stored mood value into display info. Emotion-wheel values are `/`-joined paths
+     (core[/secondary[/leaf]]); pre-wheel values are single MOODS tokens (great/good/ok/low/rough). Returns
+     {label, emoji, color, path:[labels…], coreKey} or null. Unknown keys degrade to the raw token. */
+  moodInfo(k){
+    if(k==null||k==='') return null;
+    if(k.indexOf('/')<0){ const lg=this.MOODS.find(m=>m.k===k);
+      if(lg) return {label:lg.l, emoji:lg.e, color:'var(--text-mut2)', path:[lg.l], coreKey:null, legacy:true}; }
+    const parts=k.split('/'); let nodes=this.EMOTION_WHEEL, node=null, core=null; const labels=[];
+    for(const p of parts){ node=(nodes||[]).find(n=>n.k===p); if(!node) return {label:k, color:'var(--text-mut2)', path:[k], coreKey:null};
+      if(!core) core=node; labels.push(node.l); nodes=node.kids; }
+    return {label:labels[labels.length-1], emoji:core.e, color:core.c, path:labels, coreKey:core.k}; }
   journalDayMs(){ return this.state.journalDay==null ? this.startOfToday() : this.state.journalDay; }
   shiftJournalDay(dir){ const cur=this.journalDayMs(); const next=cur + dir*this.DAY;
     this.setState({journalDay: next>=this.startOfToday() ? null : next}); } /* clamp forward to today */
@@ -2912,6 +2981,7 @@ class Component extends DCLogic {
     return 'cal'; /* day4 · week · month */
   }
   setView(v){ const key=this.splitKeyFor(v);
+    if(!this.isPageView(v)) this._lastPlanner=v; /* PP-EXT: remember the last scheduling view so the sidebar's Planner returns to it */
     this.setState({mainView:v, splitPct:(this.state.viewSplit&&this.state.viewSplit[key])||55, hoverDay:null});
     this.savePrefs({mainView:v});
   }
@@ -2926,25 +2996,35 @@ class Component extends DCLogic {
           style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
             fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'#fff':'var(--text-mut2)',
             background:active?this._accent:'transparent'}}, h('span',{style:{fontSize:'12px'}},v[1]), v[2]); }));
-    return h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}}, seg, this.renderPageNav());
+    /* PP-EXT: the six-view selector only applies inside Planner; on a stand-alone page it's hidden (the page
+       has its own header). Page switching moved to the left sidebar (renderSidebar). */
+    return this.isPageView(cur) ? null : seg;
   }
   /* PP-EXT Phase 9: which main-views are stand-alone "pages" (full-width, no task sheet + Gantt split). */
   isPageView(v){ return v==='archive'||v==='stats'||v==='habits'||v==='journal'; }
-  /* PP-EXT Phase 9: a SEPARATE nav group beside the six time-views — review/manage pages (Archive today;
-     Stats/Habits/Journal land in later PRs). Kept distinct so scheduling views stay uncluttered. */
-  renderPageNav(){
+  /* PP-EXT: left icon-rail top-level nav (post-Phase-10 UI ask) — Planner (the six scheduling views) + the four
+     review/manage pages. Replaces the old top-bar page-nav group; keeps the top bar for Planner's sub-view
+     selector only. Planner is "active" for any scheduling view and returns to the last one used (_lastPlanner). */
+  renderSidebar(){
     const h=React.createElement; const cur=this.state.mainView;
+    const plannerOn=!this.isPageView(cur);
     const archN=this.state.tasks.reduce((a,t)=>a+(t.archivedAt?1:0),0);
-    const PAGES=[['stats','📈','Stats',0],['habits','🔁','Habits',0],['journal','📓','Journal',0],['archive','🗄','Archive',archN]];
-    return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
-      PAGES.map(v=>{ const active=cur===v[0];
-        return h('div',{key:v[0],onClick:()=>this.setView(v[0]),title:v[2],
-          style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
-            fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'#fff':'var(--text-mut2)',
-            background:active?this._accent:'transparent'}},
-          h('span',{style:{fontSize:'12px'}},v[1]), v[2],
-          v[3]?h('span',{style:{fontSize:'9px',fontWeight:700,padding:'0 5px',borderRadius:'8px',
-            background:active?'rgba(255,255,255,0.25)':'var(--divider)',color:active?'#fff':'var(--text-mut2)'}},String(v[3])):null); }));
+    const ITEMS=[
+      {k:'planner',ic:'🗓',l:'Planner',on:plannerOn,go:()=>this.setView(plannerOn?cur:(this._lastPlanner||'gantt'))},
+      {k:'stats',ic:'📈',l:'Stats',on:cur==='stats',go:()=>this.setView('stats')},
+      {k:'habits',ic:'🔁',l:'Habits',on:cur==='habits',go:()=>this.setView('habits')},
+      {k:'journal',ic:'📓',l:'Journal',on:cur==='journal',go:()=>this.setView('journal')},
+      {k:'archive',ic:'🗄',l:'Archive',on:cur==='archive',go:()=>this.setView('archive'),badge:archN}];
+    return h('div',{style:{flex:'0 0 62px',display:'flex',flexDirection:'column',gap:'4px',padding:'8px 5px',
+        background:'var(--sheet-bg)',borderRight:'1px solid var(--top-border)'}},
+      ITEMS.map(it=>h('div',{key:it.k,onClick:it.go,title:it.l,
+        style:{position:'relative',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:'3px',
+          padding:'8px 2px',borderRadius:'9px',cursor:'pointer',
+          background:it.on?this._accent:'transparent',color:it.on?'#fff':'var(--text-mut2)'}},
+        h('span',{style:{fontSize:'18px',lineHeight:1}},it.ic),
+        h('span',{style:{fontSize:'9px',fontWeight:700}},it.l),
+        it.badge?h('span',{style:{position:'absolute',top:'3px',right:'6px',fontSize:'8px',fontWeight:700,minWidth:'13px',textAlign:'center',
+          padding:'0 3px',borderRadius:'8px',background:it.on?'rgba(255,255,255,0.3)':'var(--divider)',color:it.on?'#fff':'var(--text-mut2)'}},String(it.badge)):null)));
   }
   /* Port of buildTodayTimeline (timeline.gs): greedily pack today's active tasks' allotted minutes into the
      free slots (window − meals − freeTime, from dayIntervals); order priority → EDF (due) → longer-first;
@@ -3782,14 +3862,8 @@ class Component extends DCLogic {
           h('div',{style:{position:'absolute',left:0,top:0,height:'100%',width:Math.round(r.spent/maxV*100)+'%',background:this._accent,borderRadius:'6px'}})),
         h('span',{style:{flex:'0 0 96px',textAlign:'right',fontSize:'11px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums'}},this.fmtDur(Math.round(r.spent))+' / '+this.fmtDur(Math.round(r.allotted))))))
       : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}}, isToday?'No planned or recorded time yet today.':'Nothing planned or recorded on this day.');
-    /* mood selector — 5-face scale; click the active face to clear it */
-    const moodBody=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
-      ...this.MOODS.map(m=>{ const on=mood===m.k;
-        return h('div',{key:m.k,onClick:()=>this.setJournalMood(B,m.k),title:m.l,
-          style:{display:'flex',flexDirection:'column',alignItems:'center',gap:'2px',cursor:'pointer',padding:'6px 8px',borderRadius:'10px',
-            border:'1px solid '+(on?this._accent:'transparent'),background:on?'var(--sel)':'transparent',opacity:on?1:0.65}},
-          h('span',{style:{fontSize:'22px',lineHeight:1}},m.e),
-          h('span',{style:{fontSize:'9.5px',fontWeight:600,color:on?this._accent:'var(--text-faint)'}},m.l)); }));
+    /* mood selector — tiered emotion wheel (see renderMoodPicker); click the active chip to clear */
+    const moodBody=this.renderMoodPicker(B, mood);
     /* weather — auto (Open-Meteo) for today; a stored snapshot otherwise */
     let wxBody;
     if(wx){ const wd=this.weatherDesc(wx.code);
@@ -3830,13 +3904,48 @@ class Component extends DCLogic {
           style:{width:'56px',textAlign:'right',fontSize:'12px',padding:'3px 6px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}})))
       : h('span',{style:{fontSize:'12px',color:'var(--text-faint)'}},'Nothing needs planning — every task has a Planned budget. 🎉'));
     const grid=h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'16px',alignContent:'start'}},
-      card('Mood', moodBody, 'How the day felt, on a five-point scale. Click a face to set it; click it again to clear.'),
+      card('Mood', moodBody, 'How the day felt. Tap a core emotion for a one-tap read, then drill into more specific feelings (Feelings Wheel — Roberts/Willcox). Click the active chip to clear.'),
       card('Weather', wxBody, 'Today’s conditions, fetched once from Open-Meteo using your device location (keyless, no account). Turn off in Settings → Journal.'),
       card(isToday?'Done today':'Done', logBody, 'Auto-recorded: ✓ tasks completed, ⏱ tasks you logged time on, 🔁 habits done. Derived from your data — nothing to fill in.'),
       card(isToday?'Today’s actuals':'Actuals', actBody, 'Recorded (timer) vs allotted (that day’s plan) per task. Accent = recorded, grey = allotted.'),
       card('Journal — '+dstr, jBody, 'One free-text entry per day, saved automatically. This is the hook the morning summary + later AI features build on.'),
       card('Needs planning'+(unplanned.length?' ('+unplanned.length+')':''), planned, 'Upcoming tasks with no Planned budget (Phase-7 “Unplanned”). Give them time here so tomorrow’s timeline can schedule them.'));
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, grid);
+  }
+  /* PP-EXT: tiered emotion-wheel mood picker (CYOA). Row 1 = the 7 core emotions (one-tap coarse mood). Picking
+     a core reveals its secondaries (row 2, tinted by the core's colour); picking a secondary reveals its tertiary
+     leaves (row 3). The stored mood is the deepest chip you picked, as a `/`-joined path; every click funnels
+     through setJournalMood (so re-clicking the active chip, or "clear", removes it). Rows derive purely from the
+     stored value — no extra state. Legacy single-token moods still render in the badge and can be replaced by
+     picking any core. */
+  renderMoodPicker(B, mood){
+    const h=React.createElement;
+    const parts=(mood&&mood.indexOf('/')>=0)?mood.split('/'):[];
+    const coreKey=parts[0]||null, secKey=parts[1]||null, leafKey=parts[2]||null;
+    const info=this.moodInfo(mood);
+    const chip=(label,on,onClick,accent)=>h('div',{key:label,onClick,title:label,
+      style:{cursor:'pointer',padding:'5px 10px',borderRadius:'999px',fontSize:'11.5px',fontWeight:600,whiteSpace:'nowrap',
+        border:'1px solid '+(on?accent:'var(--divider)'), background:on?accent+'22':'var(--chip-bg)', color:on?accent:'var(--text-2)'}}, label);
+    const coreRow=h('div',{key:'core',style:{display:'flex',flexWrap:'wrap',gap:'6px'}},
+      this.EMOTION_WHEEL.map(core=>{ const on=coreKey===core.k;
+        return h('div',{key:core.k,onClick:()=>this.setJournalMood(B, core.k),title:core.l,
+          style:{display:'flex',alignItems:'center',gap:'5px',cursor:'pointer',padding:'5px 10px',borderRadius:'999px',fontSize:'12px',fontWeight:700,
+            border:'1px solid '+(on?core.c:'var(--divider)'), background:on?core.c+'22':'var(--chip-bg)', color:on?core.c:'var(--text-2)'}},
+          h('span',{style:{fontSize:'15px',lineHeight:1}},core.e), core.l); }));
+    const rows=[coreRow];
+    const core=coreKey?this.EMOTION_WHEEL.find(c=>c.k===coreKey):null;
+    if(core) rows.push(h('div',{key:'sec',style:{display:'flex',flexWrap:'wrap',gap:'6px',paddingLeft:'10px',borderLeft:'2px solid '+core.c}},
+      core.kids.map(sec=>chip(sec.l, secKey===sec.k, ()=>this.setJournalMood(B, coreKey+'/'+sec.k), core.c))));
+    const sec=core&&secKey?core.kids.find(s=>s.k===secKey):null;
+    if(sec) rows.push(h('div',{key:'leaf',style:{display:'flex',flexWrap:'wrap',gap:'6px',paddingLeft:'10px',borderLeft:'2px solid '+core.c}},
+      sec.kids.map(leaf=>chip(leaf.l, leafKey===leaf.k, ()=>this.setJournalMood(B, coreKey+'/'+secKey+'/'+leaf.k), core.c))));
+    const badge=info?h('div',{key:'badge',style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
+      h('span',{style:{fontSize:'11px',color:'var(--text-faint)'}},'Feeling'),
+      h('span',{style:{display:'flex',alignItems:'center',gap:'6px',fontSize:'13px',fontWeight:700,color:info.color}},
+        info.emoji?h('span',{style:{fontSize:'15px'}},info.emoji):null, info.path.join(' › ')),
+      h('span',{onClick:()=>this.setJournalMood(B, mood),style:{cursor:'pointer',fontSize:'11px',color:'var(--text-faint)',textDecoration:'underline'}},'clear')):
+      h('div',{key:'badge',style:{fontSize:'11px',color:'var(--text-faint)'}},'Tap a core emotion, then refine.');
+    return h('div',{style:{display:'flex',flexDirection:'column',gap:'10px'}}, badge, ...rows);
   }
   /* ==== /PP-EXT Phase 9: Journal page ==== */
 
@@ -3860,7 +3969,8 @@ class Component extends DCLogic {
             h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
               this.renderMainPane(tasks)))); /* PP-EXT: main-view selector picks the right pane */
     return h(React.Fragment,{},
-      body,
+      /* PP-EXT: left icon-rail nav + the section body share a flex row; overlays stay siblings above it. */
+      h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0}}, this.renderSidebar(), body),
       this.state.menu ? this.renderMenu() : null,
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
