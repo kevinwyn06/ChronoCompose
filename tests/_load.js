@@ -19,6 +19,9 @@ function loadComponent(){
     localStorage,
     document:{ documentElement:{ setAttribute(){} } },
     window:{ matchMedia:undefined, PP_CONFIG:{ googleClientId:'' }, localStorage },
+    // Minimal React shim: enough for logic tests to call render helpers (e.g. renderMoodPicker) and
+    // inspect the resulting element tree's shape, without a real React/DOM dependency.
+    React: { createElement:(type, props, ...children)=>({ type, props:props||{}, children }) },
     setInterval:()=>0, clearInterval:()=>{},
     setTimeout:()=>0, clearTimeout:()=>{}, // two-way sync queue debounce is a no-op under test
     DCLogic: class {

@@ -163,6 +163,22 @@ test('moodInfo resolves wheel paths (core/secondary/leaf) and legacy tokens', ()
   assert.equal(c.moodInfo(null), null);
 });
 
+test('renderMoodPicker reveals secondary/leaf rows for a bare-core stored mood (C1 drill-down fix)', () => {
+  const c = make();
+  // children = [badge, coreRow, secRow?, leafRow?] — count tells us how many tiers unlocked.
+  const rowsOf = mood => c.renderMoodPicker(Date.now(), mood).children.length;
+  // no mood yet: badge + core row only
+  assert.equal(rowsOf(null), 2, 'no mood -> badge + core row only');
+  // bare core key (what setJournalMood actually stores on a top-level tap) must unlock the secondary row
+  assert.equal(rowsOf('happy'), 3, 'bare core mood reveals the secondary row');
+  // core/secondary unlocks the leaf row too
+  assert.equal(rowsOf('happy/playful'), 4, 'core/secondary mood reveals the leaf row');
+  // full leaf path stays at 4 (badge+core+sec+leaf, no deeper tier)
+  assert.equal(rowsOf('happy/playful/cheeky'), 4, 'full leaf path keeps all tiers');
+  // legacy single-token mood (not a wheel core) must not blow up and shows no secondary row
+  assert.equal(rowsOf('good'), 2, 'legacy single-token mood has no wheel children to reveal');
+});
+
 test('setJournalMood stores the wheel path and drilling deeper replaces it', () => {
   const c = make();
   c.state.journal = {};
