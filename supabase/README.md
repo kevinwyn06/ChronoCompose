@@ -9,6 +9,7 @@ schema change goes through a PR like the rest of the app.
 | Path | What |
 |---|---|
 | `migrations/0001_init.sql` | tasks / habits / journal tables mirroring `normalizeTask` + `pp-habits` / `pp-journal`; `owner_id` + RLS (`owner_id = auth.uid()`); `updated_at` LWW clock; realtime publication. |
+| `migrations/0002_grants.sql` | CRUD table privileges for the `authenticated` role (RLS filters rows, but Postgres still needs base grants; raw-SQL migrations don't inherit Supabase's defaults). |
 | `tests/rls_isolation.sql` | B0 milestone check — two accounts, cross-account read/write rejected. Manual (not `npm test`). |
 
 `config.toml` is **not committed here** — it holds your `project_id` and is created by
