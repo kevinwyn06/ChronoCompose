@@ -37,11 +37,13 @@ assembles a `dist/` with **only the 3 runtime files** (`index.html`, `config.js`
 `archive/`, `tests/`, and docs are never published. One-time setup:
 
 1. Vercel dashboard → **Add New… → Project** → import the `ChronoCompose` repo (authorize the Vercel GitHub app).
-2. Project **Settings → Git → Production Branch = `dev`** (the live site tracks the working branch; single-user,
-   active development). Leave build settings to `vercel.json` (framework: Other). Deploy → note the production
-   URL, e.g. `https://chronocompose.vercel.app`.
-3. **Google Cloud** → your OAuth Client → **Authorized JavaScript origins**: add `https://<your-app>.vercel.app`.
-4. **Supabase** → Authentication → **URL Configuration**: set **Site URL** to `https://<your-app>.vercel.app/`
+2. Leave build settings empty so `vercel.json` supplies them (framework: Other; no env vars needed — keys live
+   in `config.js`). Deploy → note the production URL, e.g. `https://chronocompose.vercel.app`.
+3. **Branch model:** `main` is the **deployment branch** (Vercel production = the default branch); `dev` is for
+   ongoing work. Deploy a new version by merging `dev → main` (a normal release merge, same as the git workflow)
+   — Vercel auto-builds `main` on every push. Pushes to `dev`/feature branches get preview URLs, not production.
+4. **Google Cloud** → your OAuth Client → **Authorized JavaScript origins**: add `https://<your-app>.vercel.app`.
+5. **Supabase** → Authentication → **URL Configuration**: set **Site URL** to `https://<your-app>.vercel.app/`
    and add it (and `…/index.html`) to **Redirect URLs**, so the magic link returns to the deployed app.
 
 Public keys in `config.js` (gcal Client ID, Supabase publishable key) ship in the bundle — that's fine (they're
