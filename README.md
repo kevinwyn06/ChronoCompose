@@ -38,13 +38,20 @@ assembles a `dist/` with **only the 3 runtime files** (`index.html`, `config.js`
 
 1. Vercel dashboard → **Add New… → Project** → import the `ChronoCompose` repo (authorize the Vercel GitHub app).
 2. Leave build settings empty so `vercel.json` supplies them (framework: Other; no env vars needed — keys live
-   in `config.js`). Deploy → note the production URL, e.g. `https://chronocompose.vercel.app`.
+   in `config.js`). Deploy → note the production URL. **This project is live at
+   <https://chrono-compose.vercel.app/>** (note the hyphen).
 3. **Branch model:** `main` is the **deployment branch** (Vercel production = the default branch); `dev` is for
    ongoing work. Deploy a new version by merging `dev → main` (a normal release merge, same as the git workflow)
    — Vercel auto-builds `main` on every push. Pushes to `dev`/feature branches get preview URLs, not production.
-4. **Google Cloud** → your OAuth Client → **Authorized JavaScript origins**: add `https://<your-app>.vercel.app`.
-5. **Supabase** → Authentication → **URL Configuration**: set **Site URL** to `https://<your-app>.vercel.app/`
-   and add it (and `…/index.html`) to **Redirect URLs**, so the magic link returns to the deployed app.
+4. **Google Cloud** → your OAuth Client → **Authorized JavaScript origins**: add your production origin
+   (for this project: `https://chrono-compose.vercel.app` — no trailing slash, no path).
+5. **Supabase** → Authentication → **URL Configuration**: set **Site URL** to your production URL with a trailing
+   slash (`https://chrono-compose.vercel.app/`) and add both it and `…/index.html` to **Redirect URLs**, so the
+   magic link returns to the deployed app.
+
+> **Allow-listed origins on record (2026-07-12):** `https://chrono-compose.vercel.app` is registered in the
+> Google OAuth client's JavaScript origins, and `https://chrono-compose.vercel.app/` + `…/index.html` in
+> Supabase's Redirect URLs. Magic-link sign-in on the deployed site is verified working (B2 owner e2e passed).
 
 Public keys in `config.js` (gcal Client ID, Supabase publishable key) ship in the bundle — that's fine (they're
 public by design). No secret ever ships. Your data is protected by Supabase Row-Level Security, not by the

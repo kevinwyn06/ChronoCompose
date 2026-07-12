@@ -281,3 +281,56 @@ test('syncConfigured: false when Supabase keys are absent (app stays fully local
   const c = make(); // sandbox PP_CONFIG has only googleClientId, no supabase keys
   assert.equal(c.syncConfigured(), false);
 });
+
+// =======================================================================
+// B3a — habits/journal per-change sync (PURE blob layer: kvFp / kvStamp / computeKvOps / kvMergeDecision)
+// =======================================================================
+test('kvFp: ignores updatedAt and is order-insensitive (a clock bump is not a change)', () => {
+  const c = make();
+  assert.equal(c.kvFp({ name:'A', done:{x:1}, updatedAt:1 }), c.kvFp({ done:{x:1}, name:'A', updatedAt:999 }));
+  assert.notEqual(c.kvFp({ name:'A' }), c.kvFp({ name:'B' }));
+  assert.equal(c.kvFp(null), 'null');
+});
+
+test('kvStamp: stamps updatedAt only on new or content-changed rows', () => {
+  const c = make();
+  const before = { a:{ name:'A', updatedAt:100 }, b:{ name:'B', updatedAt:100 } };
+  const after  = { a:{ name:'A', updatedAt:100 }, b:{ name:'B2', updatedAt:100 }, c:{ name:'C' } };
+  c.kvStamp(before, after, 555);
+  assert.equal(after.a.updatedAt, 100); // unchanged -> untouched clock
+  assert.equal(after.b.updatedAt, 555); // content changed -> stamped
+  assert.equal(after.c.updatedAt, 555); // brand new -> stamped
+});
+
+test('computeKvOps: insert / update / delete / no-op over two id->data maps', () => {
+  const c = make();
+  const before = { keep:{ name:'K', updatedAt:1 }, gone:{ name:'G', updatedAt:1 } };
+  const after  = { keep:{ name:'K', updatedAt:9 }, edit:{ name:'E', updatedAt:2 } };
+  // keep: only clock moved -> no op; gone: deleted; edit: inserted
+  const before2 = Object.assign({ edit:{ name:'old', updatedAt:1 } }, before);
+  const ops = c.computeKvOps(before2, after).sort((x,y)=>x.id<y.id?-1:1);
+  const byId = {}; ops.forEach(o=>byId[o.id]=o);
+  assert.equal(byId.edit.op, 'update');
+  assert.equal(byId.edit.data.name, 'E');
+  assert.equal(byId.gone.op, 'delete');
+  assert.equal(byId.keep, undefined); // idempotent: clock-only move is no op
+});
+
+test('kvMergeDecision: row-level LWW with tombstone guard', () => {
+  const c = make();
+  const older = { name:'X', updatedAt:100 }, newer = { name:'X2', updatedAt:200 };
+  assert.equal(c.kvMergeDecision(undefined, newer, null), 'set');     // no local -> take remote
+  assert.equal(c.kvMergeDecision(older, newer, null), 'set');         // remote newer -> take it
+  assert.equal(c.kvMergeDecision(newer, older, null), 'none');        // remote older -> keep local
+  assert.equal(c.kvMergeDecision(older, older, null), 'none');        // tie -> keep local (no churn)
+  assert.equal(c.kvMergeDecision(older, null, null), 'delete');       // remote delete of an existing row
+  assert.equal(c.kvMergeDecision(undefined, null, null), 'none');     // delete of a row we don't have
+  assert.equal(c.kvMergeDecision(undefined, newer, 300), 'none');     // our newer tombstone blocks resurrection
+  assert.equal(c.kvMergeDecision(undefined, newer, 150), 'set');      // older tombstone -> remote re-create wins
+});
+
+test('normalizeHabit: carries an updatedAt clock (null until first sync stamp)', () => {
+  const c = make();
+  assert.equal(c.normalizeHabit({ name:'H' }).updatedAt, null);
+  assert.equal(c.normalizeHabit({ name:'H', updatedAt:42 }).updatedAt, 42);
+});

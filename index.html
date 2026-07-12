@@ -237,6 +237,7 @@ class Component extends DCLogic {
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
     this.SYNC_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-row ids kept this long so a pull can't resurrect them
     this._syncApplying = false;                // echo guard: true while committing a pulled remote snapshot
+    this._syncKvSending = false;               // PP-EXT B3a: in-flight guard for the habits/journal blob flush
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
     this.barH = 16;
@@ -620,7 +621,7 @@ class Component extends DCLogic {
     window.removeEventListener('mouseup', this._onUp);
     window.removeEventListener('storage', this._onStorage); /* PP-EXT */
     clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
-    clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 */
+    clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); clearTimeout(this._syncKvFlushT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 + B3a */
   }
 
   /* ---------- history ---------- */
@@ -1472,12 +1473,14 @@ class Component extends DCLogic {
      (`done` ledger) OR automatically when any linked task (`taskIds`) was worked on / completed that day. Streaks
      count only scheduled days (today isn't broken until it ends). Pure helpers so streak/consistency are testable. */
   loadHabits(){ try{ const a=JSON.parse(localStorage.getItem('pp-habits')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeHabit(x)):[]; }catch(e){ return []; } }
-  saveHabits(habits){ try{ localStorage.setItem('pp-habits', JSON.stringify(habits)); }catch(e){} this.setState({habits}); }
+  saveHabits(habits){ this.syncKvOut('habits', this.habitsToMap(this.state.habits), this.habitsToMap(habits)); /* PP-EXT B3a: stamps+enqueues before persist so the LWW clock is saved */
+    try{ localStorage.setItem('pp-habits', JSON.stringify(habits)); }catch(e){} this.setState({habits}); }
   normalizeHabit(hb){ hb=hb||{}; const sk=(hb.schedule&&hb.schedule.kind==='weekdays')?'weekdays':'daily';
     return { id: hb.id||('h'+Math.random().toString(36).slice(2,8)), name: hb.name||'New habit',
       schedule: { kind:sk, days: Array.isArray(hb.schedule&&hb.schedule.days)?hb.schedule.days.slice():[] },
       taskIds: Array.isArray(hb.taskIds)?hb.taskIds.slice():[],
-      done: (hb.done&&typeof hb.done==='object')?Object.assign({},hb.done):{}, createdAt: hb.createdAt||Date.now() }; }
+      done: (hb.done&&typeof hb.done==='object')?Object.assign({},hb.done):{}, createdAt: hb.createdAt||Date.now(),
+      updatedAt: hb.updatedAt!=null?hb.updatedAt:null /* PP-EXT B3a: row-level LWW clock for habits sync (stamped on change by the sync funnel) */ }; }
   addHabit(){ const hb=this.normalizeHabit({name:'New habit'}); this.saveHabits([...(this.state.habits||[]), hb]); return hb.id; }
   updateHabit(id, patch){ this.saveHabits((this.state.habits||[]).map(hb=> hb.id===id ? this.normalizeHabit(Object.assign({}, hb, patch)) : hb)); }
   deleteHabit(id){ this.saveHabits((this.state.habits||[]).filter(hb=>hb.id!==id)); }
@@ -1525,6 +1528,7 @@ class Component extends DCLogic {
     Object.keys(patch).forEach(k=>{ const v=patch[k]; if(v==null||v==='') delete cur[k]; else cur[k]=v; });
     cur.updatedAt=Date.now();
     if((cur.text&&cur.text.trim())||(cur.html&&cur.html.trim())||cur.mood||cur.weather) j[ymd]=cur; else delete j[ymd];
+    this.syncKvOut('journal', this.state.journal, j); /* PP-EXT B3a: enqueue the one changed/removed day */
     try{ localStorage.setItem('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
   saveJournalText(dayMs, text){ this.updateJournal(dayMs, {text:(text&&text.trim())?text:null}); }
   setJournalMood(dayMs, k){ const cur=this.journalEntryFor(dayMs).mood; this.updateJournal(dayMs, {mood: cur===k?null:k}); } /* click same mood → clear */
@@ -2787,6 +2791,41 @@ class Component extends DCLogic {
     });
     return order.map(id=>byId[id]);
   }
+  /* ==== PP-EXT B3a: habits/journal per-change sync — PURE layer. The backend rows are opaque
+     {id, data jsonb, updated_at} blobs (supabase habits/journal tables), so unlike tasks the diff is a
+     fingerprint of the whole `data` value (minus its embedded updatedAt clock) with row-level LWW.
+     Choke points that feed this: saveHabits (all habit mutations) + updateJournal (all journal mutations).
+     IO-free and unit-tested in tests/sync.gen.test.js alongside the tasks (B1) layer. ==== */
+  KV_TABLES(){ return ['habits','journal']; }
+  habitsToMap(arr){ const m={}; (arr||[]).forEach(hb=>{ if(hb&&hb.id) m[hb.id]=hb; }); return m; }
+  kvTombKey(table, id){ return table+':'+id; }
+  /* fingerprint of a blob's data for change detection: stable JSON minus the LWW clock (updatedAt moving
+     alone is not a user edit). Keys sorted so insertion order can't spoof a change. */
+  kvFp(data){ if(data==null) return 'null'; const o={};
+    Object.keys(data).filter(k=>k!=='updatedAt').sort().forEach(k=>{ o[k]=data[k]; }); return JSON.stringify(o); }
+  kvTs(data){ return this.syncTs(data && data.updatedAt); }
+  /* PURE: stamp updatedAt=now on new/changed blobs (mirrors stampUpdated for tasks). Mutates `after`'s
+     values in place — callers pass freshly-built objects, never shared state. */
+  kvStamp(before, after, now){ now=now||Date.now(); before=before||{}; after=after||{};
+    Object.keys(after).forEach(id=>{ const b=before[id];
+      if(b===undefined || this.kvFp(b)!==this.kvFp(after[id])) after[id].updatedAt=now; }); }
+  /* PURE: diff two id->data maps into insert/update/delete ops (mirrors computeSyncOps for the blob tables). */
+  computeKvOps(before, after){ const ops=[]; before=before||{}; after=after||{};
+    Object.keys(after).forEach(id=>{ const b=before[id];
+      if(b===undefined){ ops.push({op:'insert', id:id, data:after[id]}); return; }
+      if(this.kvFp(b)!==this.kvFp(after[id])) ops.push({op:'update', id:id, data:after[id]}); });
+    Object.keys(before).forEach(id=>{ if(after[id]===undefined) ops.push({op:'delete', id:id}); });
+    return ops; }
+  /* PURE: given the local value for an id (or undefined), an incoming remote value (null = a remote delete),
+     and our tombstone ts for it (or null), decide the merge: 'set' (take remote), 'delete', or 'none'.
+     Row-level LWW by updatedAt; a remote row older-or-equal to local, or not newer than our tombstone, loses. */
+  kvMergeDecision(local, remote, tombTs){
+    if(remote==null) return (local!=null) ? 'delete' : 'none';
+    if(tombTs!=null && this.syncTs(tombTs) >= this.kvTs(remote)) return 'none';
+    if(local==null) return 'set';
+    return this.kvTs(remote) > this.kvTs(local) ? 'set' : 'none';
+  }
+  /* ==== /PP-EXT B3a pure ==== */
   /* Queue + tombstone persistence (pp-sync-queue / pp-sync-tombstones) — survives reloads so writes
      made offline flush after reconnecting. Mirrors loadQueue/loadTombstones for gcal. */
   loadSyncQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-sync-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
@@ -2855,6 +2894,7 @@ class Component extends DCLogic {
       if(!this.state.settings.syncEnabled) this.saveSettings({syncEnabled:true});
       this.syncSubscribeRealtime();
       this.syncInitialSync();
+      this.syncFlushSoon(); this.syncKvFlushSoon(); /* PP-EXT B3a: drain any writes queued while offline */
     } else if(event==='SIGNED_OUT'){
       this._session=null; this.syncUnsubscribeRealtime();
       this.saveSync({connected:false, msg:'Signed out.'});
@@ -2933,34 +2973,126 @@ class Component extends DCLogic {
         const ops=this.computeSyncOps(remote, merged);        /* inserts/updates/deletes the backend needs */
         if(ops.length) this.syncEnqueue(ops);
         this.saveSync({pulling:false, msg:'Synced.', lastError:null});
-        this.syncBackupHabitsJournal();
+        this.syncInitialSyncKv();
       })
       .catch(e=>{ this.saveSync({pulling:false}); this.syncError(e); });
   }
-  /* B2 habits/journal: one-time, non-destructive backup+restore at sign-in only (a proper per-change funnel
-     + delete handling lands in B3 with cross-device). Union by natural key — habits by id, journal by ymd
-     (journal ties broken by its updatedAt clock). Never deletes; local-only rows push up, remote-only rows
-     come down. */
-  syncBackupHabitsJournal(){
+  /* ==== PP-EXT B3a: habits/journal network wiring — reuses the B2 Supabase client + Realtime, mirroring the
+     tasks path but over the {id,data} blob tables (kvFp/computeKvOps/kvMergeDecision above). Separate queue
+     (pp-sync-kv-queue) + tombstones (pp-sync-kv-tombstones) so the tasks flush stays untouched. ==== */
+  loadKvQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-sync-kv-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveKvQueue(q){ try{ localStorage.setItem('pp-sync-kv-queue', JSON.stringify(q)); }catch(e){} }
+  loadKvTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-sync-kv-tombstones')||'{}')||{};
+      const cut=Date.now()-this.SYNC_TOMBSTONE_TTL_MS; let ch=false;
+      Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
+      if(ch) this.saveKvTombstones(t); return t; }catch(e){ return {}; } }
+  saveKvTombstones(t){ try{ localStorage.setItem('pp-sync-kv-tombstones', JSON.stringify(t)); }catch(e){} }
+  /* Coalescing enqueue (mirrors syncEnqueue): a delete supersedes any pending write for its (table,id) and
+     drops a tombstone; an insert/update coalesces to the latest full-row write and clears a stale tombstone. */
+  syncKvEnqueue(table, ops){
+    if(!ops || !ops.length) return;
+    let q=this.loadKvQueue(); const ts=this.loadKvTombstones(); let tsCh=false;
+    ops.forEach(op=>{
+      const tk=this.kvTombKey(table, op.id);
+      if(op.op==='delete'){
+        q=q.filter(x=>!(x.table===table && x.id===op.id));
+        ts[tk]=Date.now(); tsCh=true;
+        q.push({op:'delete', table:table, id:op.id}); return;
+      }
+      q=q.filter(x=>!(x.table===table && x.id===op.id && (x.op==='insert' || x.op==='update')));
+      if(ts[tk]!=null){ delete ts[tk]; tsCh=true; }
+      q.push({op:op.op, table:table, id:op.id, data:op.data});
+    });
+    if(tsCh) this.saveKvTombstones(ts);
+    this.saveKvQueue(q); this.syncKvFlushSoon();
+  }
+  syncKvFlushSoon(){ clearTimeout(this._syncKvFlushT);
+    this._syncKvFlushT=setTimeout(()=>this.syncKvFlushQueue(), this.SYNC_FLUSH_DEBOUNCE_MS); }
+  /* the outbound funnel for a whole id->data map (habits) or one entry (journal). Stamps the LWW clock on
+     changed rows, diffs, enqueues. Inert unless sync is on and we're not echoing a pulled snapshot. */
+  syncKvOut(table, before, after){
+    if(!this.state.settings || !this.state.settings.syncEnabled || this._syncApplying) return;
+    try{ this.kvStamp(before, after, Date.now());
+      const ops=this.computeKvOps(before, after); if(ops.length) this.syncKvEnqueue(table, ops); }
+    catch(e){ this._syncLastError={ msg:String(e&&e.message||e), at:Date.now() }; }
+  }
+  syncKvOpKey(o){ return (o.op==='delete'?'d:':'u:')+o.table+':'+o.id+':'+(o.op==='delete'?'':JSON.stringify(o.data||null)); }
+  /* real flush: per-table coalesced upserts ({id,data}) + a bulk delete. Keeps the queue on failure and
+     drains anything enqueued mid-send, exactly like syncFlushQueue for tasks. */
+  syncKvFlushQueue(){
+    if(!this._sb || !this._session || this._syncKvSending) return;
+    const q=this.loadKvQueue(); if(!q.length) return;
+    this._syncKvSending=true;
+    const sentKeys=q.map(o=>this.syncKvOpKey(o));
+    const byTable={}; this.KV_TABLES().forEach(t=>byTable[t]={rows:[], dead:[]});
+    q.forEach(o=>{ if(!byTable[o.table]) return;
+      if(o.op==='delete') byTable[o.table].dead.push(o.id); else byTable[o.table].rows.push({id:o.id, data:o.data}); });
+    const finish=()=>{ this._syncKvSending=false;
+      const set={}; sentKeys.forEach(k=>set[k]=1);
+      const now=this.loadKvQueue(); this.saveKvQueue(now.filter(o=>!set[this.syncKvOpKey(o)]));
+      this.syncClearError();
+      if(this.loadKvQueue().length) this.syncKvFlushSoon(); };
+    let chain=Promise.resolve();
+    this.KV_TABLES().forEach(t=>{ const g=byTable[t];
+      if(g.rows.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).upsert(g.rows)).then(r=>{ if(r&&r.error) throw r.error; }));
+      if(g.dead.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).delete().in('id', g.dead)).then(r=>{ if(r&&r.error) throw r.error; }));
+    });
+    chain.then(finish).catch(e=>{ this._syncKvSending=false; this.syncError(e); });
+  }
+  /* one-time reconcile at sign-in (replaces B2's backup): pull each blob table, merge into local by the pure
+     row-level LWW (kvMergeDecision), then enqueue whatever the backend is missing or stale on. Never deletes
+     on the initial reconcile — a row absent remotely just means "not backed up yet", not "deleted". */
+  syncInitialSyncKv(){
     if(!this._sb || !this._session) return;
+    const tomb=this.loadKvTombstones();
     this._sb.from('habits').select('*').then(({data, error})=>{ if(error) throw error;
-      const local=this.state.habits||[]; const localIds={}; local.forEach(hb=>localIds[hb.id]=1);
-      const remoteIds={}; (data||[]).forEach(r=>remoteIds[r.id]=1);
-      const merged=local.slice(); (data||[]).forEach(r=>{ if(!localIds[r.id]) merged.push(this.normalizeHabit(r.data||{})); });
-      if(merged.length!==local.length) this.saveHabits(merged);
-      const push=local.filter(hb=>!remoteIds[hb.id]).map(hb=>({id:hb.id, data:hb}));
-      if(push.length) this._sb.from('habits').upsert(push).then(({error})=>{ if(error) this.syncError(error); });
+      let local=(this.state.habits||[]).slice(); const byId={}; local.forEach(h=>byId[h.id]=h);
+      const remoteMap={};
+      (data||[]).forEach(r=>{ const inc=this.normalizeHabit(Object.assign({}, r.data||{}, {id:r.id})); remoteMap[r.id]=inc;
+        if(this.kvMergeDecision(byId[r.id], inc, tomb[this.kvTombKey('habits', r.id)])==='set'){
+          if(byId[r.id]) local=local.map(h=>h.id===r.id?inc:h); else local.push(inc); byId[r.id]=inc; } });
+      this._syncApplying=true; try{ this.saveHabits(local); } finally{ this._syncApplying=false; }
+      const ops=this.computeKvOps(remoteMap, this.habitsToMap(local)).filter(o=>o.op!=='delete');
+      if(ops.length) this.syncKvEnqueue('habits', ops);
     }).catch(e=>this.syncError(e));
     this._sb.from('journal').select('*').then(({data, error})=>{ if(error) throw error;
-      const local=Object.assign({}, this.state.journal||{}); const merged=Object.assign({}, local);
-      const remoteById={}; (data||[]).forEach(r=>{ remoteById[r.id]=r; const l=local[r.id];
-        if(!l || this.syncTs(r.data&&r.data.updatedAt) > this.syncTs(l&&l.updatedAt)) merged[r.id]=r.data; });
-      this.setState({journal:merged}); try{ localStorage.setItem('pp-journal', JSON.stringify(merged)); }catch(e){}
-      const push=Object.keys(local).filter(k=>{ const r=remoteById[k];
-        return !r || this.syncTs(local[k]&&local[k].updatedAt) > this.syncTs(r.data&&r.data.updatedAt); }).map(k=>({id:k, data:local[k]}));
-      if(push.length) this._sb.from('journal').upsert(push).then(({error})=>{ if(error) this.syncError(error); });
+      const jmap=Object.assign({}, this.state.journal||{}); const remoteMap={};
+      (data||[]).forEach(r=>{ const inc=r.data||{}; remoteMap[r.id]=inc;
+        if(this.kvMergeDecision(jmap[r.id], inc, tomb[this.kvTombKey('journal', r.id)])==='set') jmap[r.id]=inc; });
+      this._syncApplying=true;
+      try{ try{ localStorage.setItem('pp-journal', JSON.stringify(jmap)); }catch(e){} this.setState({journal:jmap}); }
+      finally{ this._syncApplying=false; }
+      const ops=this.computeKvOps(remoteMap, jmap).filter(o=>o.op!=='delete');
+      if(ops.length) this.syncKvEnqueue('journal', ops);
     }).catch(e=>this.syncError(e));
   }
+  /* a single habits/journal Realtime changefeed event -> merge one row (INSERT/UPDATE) or a delete into local,
+     echo-suppressed (_syncApplying). Our own writes echo back but kvMergeDecision makes them no-ops. */
+  syncOnKvChange(table, p){
+    if(!p) return; const type=p.eventType||p.type;
+    if(type==='DELETE'){ const id=p.old && p.old.id; if(id) this.syncApplyKvRemote(table, id, null); }
+    else { const row=p.new; if(row) this.syncApplyKvRemote(table, row.id, row.data); }
+  }
+  syncApplyKvRemote(table, id, data){
+    const tomb=this.loadKvTombstones()[this.kvTombKey(table, id)];
+    this._syncApplying=true;
+    try{
+      if(table==='habits'){
+        const inc = data==null ? null : this.normalizeHabit(Object.assign({}, data, {id:id}));
+        const local=this.state.habits||[]; const ex=local.find(h=>h.id===id);
+        const dec=this.kvMergeDecision(ex, inc, tomb);
+        if(dec==='delete') this.saveHabits(local.filter(h=>h.id!==id));
+        else if(dec==='set') this.saveHabits(ex ? local.map(h=>h.id===id?inc:h) : [...local, inc]);
+      } else {
+        const jmap=this.state.journal||{}; const dec=this.kvMergeDecision(jmap[id], data==null?null:data, tomb);
+        if(dec==='delete' || dec==='set'){ const nx=Object.assign({}, jmap);
+          if(dec==='delete') delete nx[id]; else nx[id]=data;
+          try{ localStorage.setItem('pp-journal', JSON.stringify(nx)); }catch(e){} this.setState({journal:nx}); }
+      }
+    }catch(e){ this.syncError(e); }
+    finally{ this._syncApplying=false; }
+  }
+  /* ==== /PP-EXT B3a wiring ==== */
   /* apply pulled/pushed remote task rows into local state, echo-suppressed (_syncApplying) so the merge
      doesn't re-enter the outbound funnel. No undo snapshot — a remote pull isn't a user step. */
   syncApplyRemote(remoteRows, deletedIds){
@@ -2981,8 +3113,16 @@ class Component extends DCLogic {
         .on('postgres_changes', {event:'*', schema:'public', table:'tasks'}, p=>this.syncOnRemoteChange(p))
         .subscribe(); }
     catch(e){ this.syncError(e); }
+    /* PP-EXT B3a: habits/journal share one changefeed channel (both in the B0 realtime publication). */
+    if(this._syncKvChan) return;
+    try{ this._syncKvChan=this._sb.channel('pp-kv-sync')
+        .on('postgres_changes', {event:'*', schema:'public', table:'habits'}, p=>this.syncOnKvChange('habits', p))
+        .on('postgres_changes', {event:'*', schema:'public', table:'journal'}, p=>this.syncOnKvChange('journal', p))
+        .subscribe(); }
+    catch(e){ this.syncError(e); }
   }
-  syncUnsubscribeRealtime(){ if(this._syncChan){ try{ this._sb.removeChannel(this._syncChan); }catch(e){} this._syncChan=null; } }
+  syncUnsubscribeRealtime(){ if(this._syncChan){ try{ this._sb.removeChannel(this._syncChan); }catch(e){} this._syncChan=null; }
+    if(this._syncKvChan){ try{ this._sb.removeChannel(this._syncKvChan); }catch(e){} this._syncKvChan=null; } /* PP-EXT B3a */ }
   /* a single Realtime changefeed event -> apply one row (INSERT/UPDATE) or one delete. Our own writes echo
      back here; applyRemoteSnapshot's LWW makes them content-identical no-ops (no re-queue loop). */
   syncOnRemoteChange(p){
