@@ -67,6 +67,6 @@ begin
   if n <> 1 then raise exception 'RLS FAIL: user cannot read own row'; end if;
 end $$;
 
-raise notice 'RLS isolation checks passed.';
+do $$ begin raise notice 'RLS isolation checks passed.'; end $$;
 
 rollback; -- leave no test rows behind
