@@ -229,6 +229,11 @@ class Component extends DCLogic {
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
     this.GCAL_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped
     this.GCAL_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-event ids kept this long to block re-import
+    /* PP-EXT B1: offline-first Supabase sync — same shape as the gcal queue above (see computeSyncOps). */
+    this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
+    this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
+    this.SYNC_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-row ids kept this long so a pull can't resurrect them
+    this._syncApplying = false;                // echo guard: true while committing a pulled remote snapshot
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
     this.barH = 16;
@@ -359,6 +364,7 @@ class Component extends DCLogic {
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:false, dayStart:'07:00', dayEnd:'23:00',
     lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
+    syncEnabled:false, /* PP-EXT B1: offline-first Supabase sync; off until the owner signs in (B2 flips it on). Funnel + updatedAt stamping are inert while false. */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
@@ -390,6 +396,7 @@ class Component extends DCLogic {
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       pin:null, /* PP-EXT: drag-pin {day, start, dur} — a block dragged in the drawer, fixed for that day only (Phase 5; see dragBlock) */
+      updatedAt:null, /* PP-EXT B1: row-level last-write-wins clock (epoch ms). Stamped by commit() when sync is on; null until then (see stampUpdated / applyRemoteSnapshot). */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
@@ -609,9 +616,11 @@ class Component extends DCLogic {
     const tasks = this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
     fn(tasks);
     this.autoSchedule(tasks); /* PP-EXT: enforce finish-to-start deps (dependency-driven scheduling) */
+    this.stampUpdated(prev, tasks); /* PP-EXT B1: bump updatedAt on changed rows (LWW clock) before persisting */
     this.setState({tasks});
     this.saveTasks(tasks); /* PP-EXT */
     this.gcalSyncOut(prev, tasks); /* PP-EXT: single outbound funnel — every task mutation flows through here */
+    this.syncOut(prev, tasks); /* PP-EXT B1: second funnel — same before/after diff feeds the Supabase sync queue */
   }
   undo(){
     if(!this.history.length) return;
@@ -621,6 +630,7 @@ class Component extends DCLogic {
     this.setState({tasks:prev});
     this.saveTasks(prev); /* PP-EXT */
     this.gcalSyncOut(cur, prev); /* PP-EXT: an undone change is pushed out too (remote follows local) */
+    this.syncOut(cur, prev); /* PP-EXT B1: undo propagates to the backend too (server touch_updated_at freshens the clock) */
   }
   redo(){
     if(!this.future.length) return;
@@ -630,6 +640,7 @@ class Component extends DCLogic {
     this.setState({tasks:nx});
     this.saveTasks(nx); /* PP-EXT */
     this.gcalSyncOut(cur, nx); /* PP-EXT */
+    this.syncOut(cur, nx); /* PP-EXT B1 */
   }
 
   /* ---------- keyboard ---------- */
@@ -2697,6 +2708,108 @@ class Component extends DCLogic {
       }
     });
     return ops;
+  }
+  /* ==== PP-EXT B1: offline-first Supabase sync — PURE diff/merge layer (no network; B2 wires it).
+     Mirrors the proven gcal two-way pattern (computeOutboundOps / pp-gcal-queue / _gcalApplying):
+       - syncRowOf(t): the row we mirror to public.tasks (SYNC_FIELDS + updatedAt), lock-step with
+         supabase/migrations/0001_init.sql. owner_id is omitted (server fills it from auth.uid()).
+       - syncRowFp(t): change-detection fingerprint (row minus the LWW clock).
+       - computeSyncOps(before, after): insert/update/delete ops. Unlike gcal, EVERY task syncs —
+         subtasks, milestones and dateless tasks all belong in the backend.
+       - applyRemoteSnapshot(local, remote, tombstones): merge a pulled snapshot, row-level
+         last-write-wins via updatedAt; tombstones block a just-deleted row from resurrecting.
+       - pp-sync-queue / pp-sync-tombstones persistence + coalescing enqueue, echo-suppressed by
+         _syncApplying. syncFlushQueue is a stub here (the network lands in B2).
+     All IO-free and unit-tested in tests/sync.gen.test.js (CLAUDE.md "keep new logic pure"). */
+  SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
+    'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
+    'type','allDay','calendarId','eventId','pinStart','pinEnd','included','archivedAt','parentId','pin']; }
+  syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
+    r.updatedAt = t.updatedAt || null; return r; }
+  /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
+     a user edit). Fixed SYNC_FIELDS order -> stable JSON. */
+  syncRowFp(t){ const r=this.syncRowOf(t); delete r.updatedAt; return JSON.stringify(r); }
+  /* epoch-ms of a clock value, tolerant of numbers (local), ISO strings (Postgres timestamptz) or null. */
+  syncTs(v){ if(v==null) return 0; if(typeof v==='number') return v; const n=Date.parse(v); return isNaN(n)?0:n; }
+  /* stamp updatedAt=now on rows that are new or whose fingerprint changed vs `before`. Runs in commit()
+     only while sync is on, so non-sync users see no churn. The server touch_updated_at trigger is the
+     ultimate authority on write; this keeps offline multi-edit ordering sane before a flush. */
+  stampUpdated(before, after){
+    if(!this.state.settings || !this.state.settings.syncEnabled) return;
+    const bById={}; (before||[]).forEach(t=>bById[t.id]=t); const now=Date.now();
+    (after||[]).forEach(t=>{ const b=bById[t.id]; if(!b || this.syncRowFp(b)!==this.syncRowFp(t)) t.updatedAt=now; });
+  }
+  computeSyncOps(before, after){
+    const ops=[];
+    const bById={}; (before||[]).forEach(t=>bById[t.id]=t);
+    const aById={}; (after||[]).forEach(t=>aById[t.id]=t);
+    (after||[]).forEach(t=>{
+      const b=bById[t.id];
+      if(!b){ ops.push({op:'insert', id:t.id, row:this.syncRowOf(t)}); return; }
+      if(this.syncRowFp(b)!==this.syncRowFp(t)) ops.push({op:'update', id:t.id, row:this.syncRowOf(t)});
+      /* unchanged -> no op (idempotency) */
+    });
+    (before||[]).forEach(t=>{ if(!aById[t.id]) ops.push({op:'delete', id:t.id}); });
+    return ops;
+  }
+  /* a pulled Postgres row -> a normalized local task (drop owner_id, map updated_at -> updatedAt). */
+  rowToTask(row){ const o=Object.assign({}, row); delete o.owner_id;
+    if('updated_at' in o){ o.updatedAt=o.updated_at; delete o.updated_at; }
+    return this.normalizeTask(o); }
+  /* merge a pulled snapshot into local tasks. Row-level LWW: newer updatedAt wins; a tie keeps local
+     (avoids needless churn/echo). Local-only rows are kept (pending pushes). A remote row whose id was
+     tombstoned locally more recently than the row's own clock is skipped (don't resurrect our delete). */
+  applyRemoteSnapshot(local, remote, tombstones){
+    const ts=tombstones||{};
+    const byId={}; (local||[]).forEach(t=>byId[t.id]=t);
+    const order=(local||[]).map(t=>t.id);
+    (remote||[]).forEach(row=>{
+      const r=this.rowToTask(row);
+      if(ts[r.id]!=null && this.syncTs(ts[r.id]) >= this.syncTs(r.updatedAt)) return; /* our delete is newer */
+      const l=byId[r.id];
+      if(!l){ byId[r.id]=r; order.push(r.id); return; }
+      if(this.syncTs(r.updatedAt) > this.syncTs(l.updatedAt)) byId[r.id]=r;
+    });
+    return order.map(id=>byId[id]);
+  }
+  /* Queue + tombstone persistence (pp-sync-queue / pp-sync-tombstones) — survives reloads so writes
+     made offline flush after reconnecting. Mirrors loadQueue/loadTombstones for gcal. */
+  loadSyncQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-sync-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveSyncQueue(q){ try{ localStorage.setItem('pp-sync-queue', JSON.stringify(q)); }catch(e){} }
+  loadSyncTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-sync-tombstones')||'{}')||{};
+      const cut=Date.now()-this.SYNC_TOMBSTONE_TTL_MS; let ch=false;
+      Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
+      if(ch) this.saveSyncTombstones(t); return t; }catch(e){ return {}; } }
+  saveSyncTombstones(t){ try{ localStorage.setItem('pp-sync-tombstones', JSON.stringify(t)); }catch(e){} }
+  /* Coalescing enqueue: a delete supersedes any pending write for its id and drops a tombstone; an
+     insert/update coalesces to the latest full-row write and clears any stale tombstone (re-create). */
+  syncEnqueue(ops){
+    if(!ops || !ops.length) return;
+    let q=this.loadSyncQueue(); const ts=this.loadSyncTombstones(); let tsCh=false;
+    ops.forEach(op=>{
+      if(op.op==='delete'){
+        q=q.filter(x=>x.id!==op.id);
+        ts[op.id]=Date.now(); tsCh=true;
+        q.push({op:'delete', id:op.id}); return;
+      }
+      q=q.filter(x=>!(x.id===op.id && (x.op==='insert' || x.op==='update')));
+      if(ts[op.id]!=null){ delete ts[op.id]; tsCh=true; }
+      q.push(op);
+    });
+    if(tsCh) this.saveSyncTombstones(ts);
+    this.saveSyncQueue(q);
+    this.syncFlushSoon();
+  }
+  syncFlushSoon(){ clearTimeout(this._syncFlushT);
+    this._syncFlushT=setTimeout(()=>this.syncFlushQueue(), this.SYNC_FLUSH_DEBOUNCE_MS); }
+  /* B2 wires the Supabase network flush here; B1 is offline-only (the queue just persists). */
+  syncFlushQueue(){ /* no-op until B2 */ }
+  /* Outbound funnel — called by commit/undo/redo alongside gcalSyncOut. Inert unless sync is enabled
+     (B2 flips it on at sign-in) and not echoing a just-pulled remote snapshot (_syncApplying). */
+  syncOut(before, after){
+    if(!this.state.settings || !this.state.settings.syncEnabled || this._syncApplying) return;
+    try{ const ops=this.computeSyncOps(before, after); if(ops.length) this.syncEnqueue(ops); }
+    catch(e){ this._syncLastError={ msg:String(e&&e.message||e), at:Date.now() }; } /* surfaced in Settings in B2, mirroring gcal.lastError */
   }
   /* PURE: diff two task arrays into outbound ops. Skips subtasks (parentId), archived, Milestones, and
      anything that appeared already linked (that's the import writing, not the user). */

@@ -23,3 +23,9 @@ tmp/
 .env
 .env.local
 config.local.js
+
+# Supabase local state — holds project_id / secrets; migrations & tests ARE committed (see supabase/README.md)
+supabase/config.toml
+supabase/.branches/
+supabase/.temp/
+.supabase/
