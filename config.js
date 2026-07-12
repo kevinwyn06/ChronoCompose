@@ -19,6 +19,6 @@
 
 window.PP_CONFIG = {
   googleClientId: "1020034689909-9v15v4867nhdnn7bolqdspgr8r9c20j2.apps.googleusercontent.com",   // e.g. "123456789-abcdef.apps.googleusercontent.com"
-  supabaseUrl: "",        // e.g. "https://abcdefghijklm.supabase.co"
-  supabaseAnonKey: ""     // the anon / public key (a long JWT). Public — never the service_role key.
+  supabaseUrl: "https://yoyfwyyrgdjdggkqsvge.supabase.co",
+  supabaseAnonKey: "sb_publishable_fpr8Od_NlHmK_L9IIaiapg_XMIjR9gz"   // publishable ("anon/public") key. Public — never the secret / service_role key.
 };
