@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "echo no-deps",
+  "buildCommand": "mkdir -p dist && cp index.html config.js support.js dist/",
+  "outputDirectory": "dist",
+  "cleanUrls": true
+}

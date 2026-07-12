@@ -24,6 +24,9 @@ tmp/
 .env.local
 config.local.js
 
+# Vercel CLI local state (project link / build cache)
+.vercel/
+
 # Supabase local state — holds project_id / secrets; migrations & tests ARE committed (see supabase/README.md)
 supabase/config.toml
 supabase/.branches/

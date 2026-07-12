@@ -26,8 +26,27 @@ Then open <http://localhost:8000/>.
 npm test        # node --test over tests/*.test.js — no dependencies to install
 ```
 
-Files that must sit next to each other: `index.html`, `support.js`. The app also loads React, ReactDOM,
-and Google Identity Services from CDNs, so you need an internet connection on first load.
+Files that must sit next to each other: `index.html`, `support.js`, `config.js`. The app also loads React,
+ReactDOM, Google Identity Services, and the Supabase client from CDNs, so you need an internet connection
+on first load.
+
+### Deploy it (Vercel — private repo, free)
+
+The app is a static site (no build) — Vercel serves it straight from the private GitHub repo. `vercel.json`
+assembles a `dist/` with **only the 3 runtime files** (`index.html`, `config.js`, `support.js`), so `plans/`,
+`archive/`, `tests/`, and docs are never published. One-time setup:
+
+1. Vercel dashboard → **Add New… → Project** → import the `ChronoCompose` repo (authorize the Vercel GitHub app).
+2. Project **Settings → Git → Production Branch = `dev`** (the live site tracks the working branch; single-user,
+   active development). Leave build settings to `vercel.json` (framework: Other). Deploy → note the production
+   URL, e.g. `https://chronocompose.vercel.app`.
+3. **Google Cloud** → your OAuth Client → **Authorized JavaScript origins**: add `https://<your-app>.vercel.app`.
+4. **Supabase** → Authentication → **URL Configuration**: set **Site URL** to `https://<your-app>.vercel.app/`
+   and add it (and `…/index.html`) to **Redirect URLs**, so the magic link returns to the deployed app.
+
+Public keys in `config.js` (gcal Client ID, Supabase publishable key) ship in the bundle — that's fine (they're
+public by design). No secret ever ships. Your data is protected by Supabase Row-Level Security, not by the
+repo being private.
 
 ## Google Calendar setup (one time)
 
