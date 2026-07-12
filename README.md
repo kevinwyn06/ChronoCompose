@@ -3,7 +3,10 @@
 A single-page Gantt + daily-timeline planner. It replaces the old Google Sheets / Apps Script time
 tracker: tasks live in a Gantt chart with dependencies and a critical path, the old auto-scheduling
 "today" timeline lives in a right-hand **drawer**, time tracking is done with per-task timers, and Google
-Calendar can be imported/exported. All data is stored in the browser's **localStorage** (no backend yet).
+Calendar can be imported/exported. Data is stored in the browser's **localStorage** and, if you connect
+an account, synced to a **Supabase** backend (offline-first — localStorage stays authoritative on-device).
+Cloud sync is **optional**: with no Supabase keys in `config.js` the app runs entirely local, exactly as
+before. See "Cloud sync setup" below and `plans/backend-migration-roadmap.md`.
 
 ## Run it
 
@@ -62,6 +65,25 @@ ID**. You create it a single time; after that you just click **Sign in with Goog
   and pins stay local. When off, import is one-way (Calendar → app) as before.
 - **Descriptions** are rich text (bold/italic, bullet + numbered lists). Edit them in a task's detail view,
   or click the ▸ chevron next to a task name to expand an inline editor beneath the row.
+
+## Cloud sync setup (optional, one time)
+
+Sync backs up your data and syncs it across devices via a free Supabase project. Skip this to stay fully
+local. Full walkthrough (project creation, migrations, RLS): `plans/backend-migration-roadmap.md`.
+
+1. Create a Supabase project and apply the migrations in `supabase/` (see that plan's B0 steps).
+2. In the Supabase dashboard → **Project Settings → API**, copy the **Project URL** and the **anon / public**
+   key. Both are public and safe to commit — the same rule as the Google Client ID. **Never** copy the
+   `service_role` key anywhere in the repo.
+3. Paste them into `config.js` as `supabaseUrl` and `supabaseAnonKey`.
+4. In the dashboard → **Authentication → URL Configuration → Redirect URLs**, add the exact URL you serve
+   the app at (e.g. `http://localhost:8000/index.html`) so the sign-in link returns to the app.
+5. In the app: **Settings → Integrations → Account**, enter your email, **Send magic link**, then open the
+   link **in the same browser**. You're signed in and your data syncs automatically.
+
+The sign-in session is kept **in memory only** — reloading the tab signs you out (re-send a link), a
+deliberate security tradeoff (no token is ever written to disk). Your local data is untouched by signing
+out; edits made while signed out queue and push on the next sign-in.
 
 ## Where things live
 

@@ -8,7 +8,10 @@
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- PP-EXT: Google Identity Services for client-side Calendar OAuth -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
-<!-- PP-EXT: local config (Google Client ID etc). Not overwritten by design re-syncs; safe to commit. -->
+<!-- PP-EXT B2: Supabase JS client (offline-first cloud sync). UMD build exposes window.supabase.createClient.
+     Loaded the same CDN-<script> way as React/GIS — no build step. Inert unless config.js has a Supabase URL+key. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+<!-- PP-EXT: local config (Google Client ID, Supabase URL/anon key). Not overwritten by design re-syncs; safe to commit. -->
 <script src="./config.js"></script>
 <!-- /PP-EXT -->
 <script src="./support.js"></script>
@@ -338,7 +341,7 @@ class Component extends DCLogic {
       /* PP-EXT state */
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
-      running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), nowTick:Date.now(),
+      running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), sync:this.loadSync(), nowTick:Date.now(),
       pomo:this.loadPomo(), /* PP-EXT Phase 10: active pomodoro session {taskId,phase,phaseStart,cycle} or null (pp-pomo) */
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
       journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
@@ -380,6 +383,14 @@ class Component extends DCLogic {
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
     try{ localStorage.setItem('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
       ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
+  /* PP-EXT B2: Supabase sync UI state. connected/session are NEVER persisted (rule 5 — re-auth on reload,
+     same tradeoff as the gcal token); only the last-used email is remembered to pre-fill the sign-in field.
+     `sending` gates the magic-link button, `sent` shows the check-your-email prompt, lastError/needsReauth
+     drive the Settings + banner error surface exactly like gcal. */
+  loadSync(){ let email=''; try{ email=(JSON.parse(localStorage.getItem('pp-sync')||'{}').email)||''; }catch(e){}
+    return {email:email, connected:false, sending:false, sent:false, pulling:false, msg:'', lastError:null, needsReauth:false}; }
+  saveSync(patch){ const sy=Object.assign({}, this.state.sync, patch); this.setState({sync:sy});
+    try{ localStorage.setItem('pp-sync', JSON.stringify({email:sy.email||''})); }catch(e){} }
   /* PP-EXT: running timers are a MAP { [taskId]: {startedAt, beat} } (multitasking). Migrate the old
      single-timer shape {id,startedAt,beat} on load. */
   loadRun(){ try{ const raw=JSON.parse(localStorage.getItem('pp-run')||'null'); if(!raw) return {};
@@ -596,6 +607,9 @@ class Component extends DCLogic {
     /* PP-EXT: Google Calendar background auto-sync — poll tick every 15s, gated by the configurable interval
        (settings.gcalPollSec, default 60), tab visibility and auth. True push (events.watch) needs a server. */
     this._gcalPoll=setInterval(()=>this.gcalMaybeSync(), 15000);
+    /* PP-EXT B2: stand up the Supabase client if configured, adopting a magic-link session if the redirect
+       just landed here. Also drains any pp-sync-queue writes made offline (they flush once a session exists). */
+    this.syncMaybeInit();
     /* PP-EXT: first paint renders the full timeline (scroll pos unknown); re-render once mounted so the
        Gantt windows to the viewport (see ganttVWin / renderGantt virtualization). */
     requestAnimationFrame(()=>this.forceUpdate());
@@ -606,6 +620,7 @@ class Component extends DCLogic {
     window.removeEventListener('mouseup', this._onUp);
     window.removeEventListener('storage', this._onStorage); /* PP-EXT */
     clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
+    clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 */
   }
 
   /* ---------- history ---------- */
@@ -2802,8 +2817,179 @@ class Component extends DCLogic {
   }
   syncFlushSoon(){ clearTimeout(this._syncFlushT);
     this._syncFlushT=setTimeout(()=>this.syncFlushQueue(), this.SYNC_FLUSH_DEBOUNCE_MS); }
-  /* B2 wires the Supabase network flush here; B1 is offline-only (the queue just persists). */
-  syncFlushQueue(){ /* no-op until B2 */ }
+  /* ==== PP-EXT B2: Supabase network layer — the queue from B1 actually talks to the backend.
+     Mirrors the gcal client (in-memory-only session per rule 5, lastError/needsReauth surface, debounced
+     flush). Config (public URL + anon key) comes from config.js/window.PP_CONFIG, same as the gcal Client ID.
+     Pull is via the Realtime changefeed enabled in B0 (no second polling tick alongside gcal). All of this is
+     inert when unconfigured, so the app still runs fully local. Network calls are NOT in the Node-vm test
+     harness (same as gcal's) — only the pure B1 diff/merge layer above is unit-tested. */
+  syncConfigured(){ const c=window.PP_CONFIG||{}; return !!(c.supabaseUrl && c.supabaseAnonKey); }
+  /* create the Supabase client once. persistSession:false keeps the auth session in memory only (rule 5 —
+     re-auth on reload, same as the gcal token); detectSessionInUrl:true consumes the magic-link hash on load. */
+  syncInitClient(){
+    if(this._sb) return this._sb;
+    if(!this.syncConfigured() || !(window.supabase && window.supabase.createClient)) return null;
+    const c=window.PP_CONFIG;
+    try{
+      this._sb=window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey,
+        { auth:{ persistSession:false, autoRefreshToken:true, detectSessionInUrl:true } });
+      this._sb.auth.onAuthStateChange((event, session)=>this.syncOnAuth(event, session));
+    }catch(e){ this.syncError(e); return null; }
+    return this._sb;
+  }
+  /* componentDidMount hook: stand the client up if configured, adopting a session the magic-link redirect
+     may have just established. Retries briefly if the CDN script hasn't parsed yet. */
+  syncMaybeInit(){
+    if(!this.syncConfigured()) return;
+    if(!(window.supabase && window.supabase.createClient)){ this._syncInitT=setTimeout(()=>this.syncMaybeInit(), 400); return; }
+    const sb=this.syncInitClient(); if(!sb) return;
+    try{ sb.auth.getSession().then(({data})=>{ if(data && data.session) this.syncOnAuth('INITIAL_SESSION', data.session); }); }catch(e){}
+  }
+  /* auth callback: on a real session, flip sync on, subscribe to Realtime and run the one-time reconcile. */
+  syncOnAuth(event, session){
+    if(session && session.user){
+      if(this._session && this._session.user && this._session.user.id===session.user.id){ this._session=session; return; } /* token refresh — not a fresh sign-in */
+      this._session=session;
+      this.saveSync({connected:true, email:session.user.email||this.state.sync.email, sending:false, sent:false,
+        msg:'Signed in — syncing…', lastError:null, needsReauth:false});
+      if(!this.state.settings.syncEnabled) this.saveSettings({syncEnabled:true});
+      this.syncSubscribeRealtime();
+      this.syncInitialSync();
+    } else if(event==='SIGNED_OUT'){
+      this._session=null; this.syncUnsubscribeRealtime();
+      this.saveSync({connected:false, msg:'Signed out.'});
+    }
+  }
+  /* Settings → Account: email a magic link. The link lands on this page URL (must be an allowed Supabase
+     redirect); Supabase parses it on next load and fires syncOnAuth. We never see or store a password. */
+  syncSendMagicLink(){
+    const email=(this.state.sync.email||'').trim();
+    if(!email || email.indexOf('@')<1){ this.saveSync({msg:'Enter a valid email address.'}); return; }
+    const sb=this.syncInitClient();
+    if(!sb){ this.saveSync({msg:'Cloud sync is not configured — add supabaseUrl + supabaseAnonKey to config.js.'}); return; }
+    this.saveSync({sending:true, msg:'Sending magic link…', lastError:null});
+    try{
+      sb.auth.signInWithOtp({ email, options:{ emailRedirectTo:(location.origin+location.pathname) } })
+        .then(({error})=>{ if(error) throw error;
+          this.saveSync({sending:false, sent:true, msg:'Check '+email+' for a sign-in link, then open it in this browser.'}); })
+        .catch(e=>{ this.saveSync({sending:false}); this.syncError(e); });
+    }catch(e){ this.saveSync({sending:false}); this.syncError(e); }
+  }
+  syncSignOut(){
+    const sb=this._sb; this.saveSettings({syncEnabled:false});
+    this.syncUnsubscribeRealtime(); this._session=null;
+    this.saveSync({connected:false, sent:false, msg:'Signed out. Local data is unchanged.'});
+    if(sb) try{ sb.auth.signOut(); }catch(e){}
+  }
+  /* error surface, mirroring gcalError: record + flag needsReauth on an expired/invalid session (the
+     in-memory token dies on reload, so this is expected and self-heals on the next sign-in). */
+  syncError(e){ const msg=String((e&&e.message)||e||'sync error'); const status=e&&(e.status||e.code);
+    const reauth = status===401 || status===403 || /jwt|expired|invalid.*(token|claim)|not.*authenticated|auth session/i.test(msg);
+    this._syncLastError={msg:msg, at:Date.now()};
+    this.saveSync({lastError:{msg:msg, at:Date.now()}, needsReauth:reauth?true:this.state.sync.needsReauth, sending:false, pulling:false, msg:''}); }
+  syncClearError(){ this._syncLastError=null;
+    if(this.state.sync.lastError || this.state.sync.needsReauth) this.saveSync({lastError:null, needsReauth:false}); }
+  /* stable per-op key so the flush can drop exactly what it sent even if the localStorage round-trip loses
+     object identity, while KEEPING any newer op (different row content -> different key) that a commit
+     enqueued during the in-flight write. */
+  syncOpKey(o){ return (o.op==='delete'?'d:':'u:')+o.id+':'+(o.op==='delete'?'':JSON.stringify(o.row||null)); }
+  /* the row PostgREST writes: mirrored row minus updatedAt (the DB column is snake updated_at and its
+     default/trigger owns the clock) and minus owner_id (server fills it from auth.uid()). */
+  syncRowForWrite(row){ const r=Object.assign({}, row); delete r.updatedAt; return r; }
+  /* real flush: coalesced upserts + a single bulk delete. Keeps the queue on failure (retried on the next
+     commit / re-auth) and drains anything enqueued mid-send. */
+  syncFlushQueue(){
+    if(!this._sb || !this._session || this._syncSending) return;
+    const q=this.loadSyncQueue(); if(!q.length) return;
+    this._syncSending=true; this.saveSync({sending:true});
+    const sentKeys=q.map(o=>this.syncOpKey(o));
+    const rows=q.filter(o=>o.op!=='delete').map(o=>this.syncRowForWrite(o.row));
+    const dead=q.filter(o=>o.op==='delete').map(o=>o.id);
+    const finish=()=>{ this._syncSending=false;
+      const set={}; sentKeys.forEach(k=>set[k]=1);
+      const now=this.loadSyncQueue(); this.saveSyncQueue(now.filter(o=>!set[this.syncOpKey(o)]));
+      this.saveSync({sending:false}); this.syncClearError();
+      if(this.loadSyncQueue().length) this.syncFlushSoon(); };
+    const write = rows.length ? Promise.resolve(this._sb.from('tasks').upsert(rows)) : Promise.resolve({error:null});
+    write.then(r=>{ if(r && r.error) throw r.error;
+        return dead.length ? Promise.resolve(this._sb.from('tasks').delete().in('id', dead)) : {error:null}; })
+      .then(r=>{ if(r && r.error) throw r.error; finish(); })
+      .catch(e=>{ this._syncSending=false; this.saveSync({sending:false}); this.syncError(e); });
+  }
+  /* one-time reconcile at sign-in: pull the backend, merge into local (row-level LWW via the pure B1
+     applyRemoteSnapshot), then push whatever the backend is missing or is stale on (computeSyncOps of
+     remote->merged). Restores a fresh device AND backs up a never-synced one, reusing the tested layer. */
+  syncInitialSync(){
+    if(!this._sb || !this._session) return;
+    this.saveSync({pulling:true});
+    this._sb.from('tasks').select('*')
+      .then(({data, error})=>{ if(error) throw error;
+        const remote=(data||[]).map(r=>this.rowToTask(r));
+        /* compute the merge locally (do NOT read this.state.tasks after setState — it's async in React) */
+        let merged=this.applyRemoteSnapshot(this.state.tasks, data||[], this.loadSyncTombstones()).map(t=>this.normalizeTask(t));
+        this._syncApplying=true;                              /* echo guard while we persist the pull */
+        try{ this.autoSchedule(merged); this.setState({tasks:merged}); this.saveTasks(merged); }
+        finally{ this._syncApplying=false; }
+        const ops=this.computeSyncOps(remote, merged);        /* inserts/updates/deletes the backend needs */
+        if(ops.length) this.syncEnqueue(ops);
+        this.saveSync({pulling:false, msg:'Synced.', lastError:null});
+        this.syncBackupHabitsJournal();
+      })
+      .catch(e=>{ this.saveSync({pulling:false}); this.syncError(e); });
+  }
+  /* B2 habits/journal: one-time, non-destructive backup+restore at sign-in only (a proper per-change funnel
+     + delete handling lands in B3 with cross-device). Union by natural key — habits by id, journal by ymd
+     (journal ties broken by its updatedAt clock). Never deletes; local-only rows push up, remote-only rows
+     come down. */
+  syncBackupHabitsJournal(){
+    if(!this._sb || !this._session) return;
+    this._sb.from('habits').select('*').then(({data, error})=>{ if(error) throw error;
+      const local=this.state.habits||[]; const localIds={}; local.forEach(hb=>localIds[hb.id]=1);
+      const remoteIds={}; (data||[]).forEach(r=>remoteIds[r.id]=1);
+      const merged=local.slice(); (data||[]).forEach(r=>{ if(!localIds[r.id]) merged.push(this.normalizeHabit(r.data||{})); });
+      if(merged.length!==local.length) this.saveHabits(merged);
+      const push=local.filter(hb=>!remoteIds[hb.id]).map(hb=>({id:hb.id, data:hb}));
+      if(push.length) this._sb.from('habits').upsert(push).then(({error})=>{ if(error) this.syncError(error); });
+    }).catch(e=>this.syncError(e));
+    this._sb.from('journal').select('*').then(({data, error})=>{ if(error) throw error;
+      const local=Object.assign({}, this.state.journal||{}); const merged=Object.assign({}, local);
+      const remoteById={}; (data||[]).forEach(r=>{ remoteById[r.id]=r; const l=local[r.id];
+        if(!l || this.syncTs(r.data&&r.data.updatedAt) > this.syncTs(l&&l.updatedAt)) merged[r.id]=r.data; });
+      this.setState({journal:merged}); try{ localStorage.setItem('pp-journal', JSON.stringify(merged)); }catch(e){}
+      const push=Object.keys(local).filter(k=>{ const r=remoteById[k];
+        return !r || this.syncTs(local[k]&&local[k].updatedAt) > this.syncTs(r.data&&r.data.updatedAt); }).map(k=>({id:k, data:local[k]}));
+      if(push.length) this._sb.from('journal').upsert(push).then(({error})=>{ if(error) this.syncError(error); });
+    }).catch(e=>this.syncError(e));
+  }
+  /* apply pulled/pushed remote task rows into local state, echo-suppressed (_syncApplying) so the merge
+     doesn't re-enter the outbound funnel. No undo snapshot — a remote pull isn't a user step. */
+  syncApplyRemote(remoteRows, deletedIds){
+    this._syncApplying=true;
+    try{
+      let tasks=this.state.tasks;
+      if(remoteRows && remoteRows.length) tasks=this.applyRemoteSnapshot(tasks, remoteRows, this.loadSyncTombstones());
+      if(deletedIds && deletedIds.length){ const del={}; deletedIds.forEach(id=>del[id]=1); tasks=tasks.filter(t=>!del[t.id]); }
+      tasks=tasks.map(t=>this.normalizeTask(t));
+      this.autoSchedule(tasks);
+      this.setState({tasks}); this.saveTasks(tasks);
+    }catch(e){ this.syncError(e); }
+    finally{ this._syncApplying=false; }
+  }
+  syncSubscribeRealtime(){
+    if(!this._sb || this._syncChan) return;
+    try{ this._syncChan=this._sb.channel('pp-tasks-sync')
+        .on('postgres_changes', {event:'*', schema:'public', table:'tasks'}, p=>this.syncOnRemoteChange(p))
+        .subscribe(); }
+    catch(e){ this.syncError(e); }
+  }
+  syncUnsubscribeRealtime(){ if(this._syncChan){ try{ this._sb.removeChannel(this._syncChan); }catch(e){} this._syncChan=null; } }
+  /* a single Realtime changefeed event -> apply one row (INSERT/UPDATE) or one delete. Our own writes echo
+     back here; applyRemoteSnapshot's LWW makes them content-identical no-ops (no re-queue loop). */
+  syncOnRemoteChange(p){
+    if(!p) return; const type=p.eventType||p.type;
+    if(type==='DELETE'){ const id=p.old && p.old.id; if(id) this.syncApplyRemote(null, [id]); }
+    else { const row=p.new; if(row) this.syncApplyRemote([row], null); }
+  }
   /* Outbound funnel — called by commit/undo/redo alongside gcalSyncOut. Inert unless sync is enabled
      (B2 flips it on at sign-in) and not echoing a just-pulled remote snapshot (_syncApplying). */
   syncOut(before, after){
@@ -3190,7 +3376,35 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Pomodoro interval ended',
           this.infoNote('A normal notification each time a pomodoro focus or break interval ends. Start a pomodoro from the Today view.')),
         toggle(this.notifyOn('pomodoro'),()=>this.saveSettings({notify:Object.assign({},s.notify,{pomodoro:!this.notifyOn('pomodoro')})}))));
+    const sy=this.state.sync;
     const paneIntegrations=tab!=='integrations'?null:h(React.Fragment,{},
+      /* PP-EXT B2: Account & cloud sync — magic-link sign-in to Supabase (offline-first; local stays
+         authoritative). Session lives in memory only (rule 5) so a reload signs out; the queue persists. */
+      secTitle('Account & cloud sync'),
+      !this.syncConfigured()
+        ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},
+            'Cloud sync is off. Paste your Supabase Project URL and anon key into config.js to back up and sync across devices. The app works fully local without it.')
+        : (sy.connected
+            ? h('div',{style:{padding:'2px 0 8px'}},
+                h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px'}},
+                  h('div',{style:{fontSize:'12px',color:'var(--text-2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
+                    '✓ Signed in'+(sy.email?(' as '+sy.email):'')),
+                  h('button',{className:'pp-tbtn',onClick:()=>this.syncSignOut()},'Sign out')),
+                h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},
+                  sy.pulling?'Syncing…':(sy.sending?'Saving changes…':'Changes sync automatically. Reloading signs you out (session is kept in memory only).')))
+            : h('div',{style:{padding:'2px 0 8px'}},
+                setRow('Email', h('input',{className:'pp-num',type:'email',defaultValue:sy.email,key:'syncemail',
+                  onChange:e=>this.saveSync({email:e.target.value}),
+                  onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.syncSendMagicLink(); } },
+                  style:{width:'190px',border:'1px solid var(--divider)',textAlign:'left'}})),
+                h('div',{style:{display:'flex',gap:'7px',padding:'8px 0 2px'}},
+                  h('button',{className:'pp-tbtn',onClick:()=>this.syncSendMagicLink(),disabled:!!sy.sending,
+                    style:sy.sending?{opacity:0.5}:null}, sy.sending?'Sending…':(sy.sent?'Resend link':'Send magic link'))),
+                h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},
+                  'We email a one-time sign-in link — no password. Open the link in this browser to finish signing in.'))),
+      sy.msg? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 6px'}}, sy.msg) : null,
+      sy.lastError? h('div',{style:{fontSize:'11.5px',color:'var(--danger)',padding:'2px 0 6px'}},
+        '⚠ '+(sy.needsReauth?'Sign-in expired — send a new magic link above. ':'Last sync error: ')+sy.lastError.msg) : null,
       /* PP-EXT Phase 9 (PR5): Journal auto-weather toggle — off = no geolocation prompt on the Journal page */
       secTitle('Journal'),
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Auto weather (location)',
@@ -3739,11 +3953,17 @@ class Component extends DCLogic {
       style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
       background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
       '⚠ '+(this.state.gcal.needsReauth?'Google sign-in expired — click to reconnect':'Calendar sync failing — click for details')):null;
+    /* PP-EXT B2: cloud-sync error banner — same click-to-open-Settings pattern as the gcal one above. */
+    const se=this.state.sync&&this.state.sync.lastError;
+    const serr=se?h('div',{onClick:()=>this.setState({settingsOpen:true,settingsTab:'integrations'}),title:se.msg+' — click to open Settings',
+      style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 14px',fontSize:'11.5px',cursor:'pointer',
+      background:'rgba(229,72,77,0.12)',borderBottom:'1px solid rgba(229,72,77,0.35)',color:'var(--text-2)',flex:'none'}},
+      '⚠ '+(this.state.sync.needsReauth?'Cloud sign-in expired — click to sign in again':'Cloud sync failing — click for details')):null;
     /* PP-EXT: fit today's timeline to the pane (no scroll unless an Unscheduled list overflows). availH = the
        scroll wrapper's height minus its ~12px vertical padding (the body clips its last hour label). */
     const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
-      header, gerr, note, runbar, this.renderPomodoroBar(), /* PP-EXT Phase 10 */ this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
+      header, gerr, serr, /* PP-EXT B2 */ note, runbar, this.renderPomodoroBar(), /* PP-EXT Phase 10 */ this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
       h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
         this.renderDayColumn(B, {showLabels:true, availH})),
       this.renderMusicDock()); /* PP-EXT Phase 10: placeholder music dock (engine chosen later) */

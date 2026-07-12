@@ -8,6 +8,17 @@
 // How to get one (one time): see README.md → "Google Calendar setup".
 // Remember to add your serve origin (e.g. http://localhost:8000) as an Authorized JavaScript origin.
 
+// Supabase backend (offline-first cloud sync, backend-migration-roadmap.md → sub-phase B2).
+// Both values below are PUBLIC and safe to commit — same rule as the Google Client ID above.
+// The Project URL and the "anon / public" key are shipped in every browser Supabase app; only the
+// `service_role` key is sensitive and must NEVER go here (it bypasses Row-Level Security).
+//   Get them: Supabase dashboard → Project Settings (gear) → API → Project URL + anon/public key.
+// Leave blank to run fully local (no Account panel, no cloud sync — the app works exactly as before).
+// After pasting these, add your serve origin (http://localhost:8000) AND the exact page URL to the
+// Supabase dashboard → Authentication → URL Configuration → Redirect URLs, so the magic link returns.
+
 window.PP_CONFIG = {
-  googleClientId: "1020034689909-9v15v4867nhdnn7bolqdspgr8r9c20j2.apps.googleusercontent.com"   // e.g. "123456789-abcdef.apps.googleusercontent.com"
+  googleClientId: "1020034689909-9v15v4867nhdnn7bolqdspgr8r9c20j2.apps.googleusercontent.com",   // e.g. "123456789-abcdef.apps.googleusercontent.com"
+  supabaseUrl: "",        // e.g. "https://abcdefghijklm.supabase.co"
+  supabaseAnonKey: ""     // the anon / public key (a long JWT). Public — never the service_role key.
 };

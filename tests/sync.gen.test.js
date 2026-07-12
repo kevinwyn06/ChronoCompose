@@ -251,3 +251,33 @@ test('commit funnel: _syncApplying suppresses echo (a pulled snapshot does not r
   assert.deepEqual(c.loadSyncQueue(), []);
   c._syncApplying = false;
 });
+
+// =======================================================================
+// B2 network-layer pure helpers (the network calls themselves aren't vm-testable, same as gcal —
+// only these IO-free pieces the flush relies on are).
+// =======================================================================
+test('syncRowForWrite: strips updatedAt (the DB owns updated_at) and never sends owner_id', () => {
+  const c = make();
+  const r = c.syncRowForWrite(c.syncRowOf(task(c, { updatedAt: 12345 })));
+  assert.equal('updatedAt' in r, false);
+  assert.equal('updated_at' in r, false);
+  assert.equal('owner_id' in r, false);
+  assert.equal(r.name, 'Task'); // real columns survive
+});
+
+test('syncOpKey: distinct per id/op, stable across a JSON round-trip, changes when the row content changes', () => {
+  const c = make();
+  const put1 = { op:'update', id:'t1', row:{ id:'t1', name:'A' } };
+  const put1b = JSON.parse(JSON.stringify(put1)); // the localStorage round-trip loses object identity
+  const put2 = { op:'update', id:'t1', row:{ id:'t1', name:'B' } }; // a newer edit during an in-flight write
+  const del1 = { op:'delete', id:'t1' };
+  assert.equal(c.syncOpKey(put1), c.syncOpKey(put1b));   // same content -> dropped after send
+  assert.notEqual(c.syncOpKey(put1), c.syncOpKey(put2)); // newer edit -> kept, flushed next round
+  assert.notEqual(c.syncOpKey(put1), c.syncOpKey(del1)); // op type participates
+  assert.equal(c.syncOpKey(del1), c.syncOpKey({ op:'delete', id:'t1' }));
+});
+
+test('syncConfigured: false when Supabase keys are absent (app stays fully local)', () => {
+  const c = make(); // sandbox PP_CONFIG has only googleClientId, no supabase keys
+  assert.equal(c.syncConfigured(), false);
+});
