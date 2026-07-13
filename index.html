@@ -2596,7 +2596,12 @@ class Component extends DCLogic {
       .then(({data, error})=>{ if(error) throw error;
         if(!data || !data.access_token) throw new Error('no access token returned');
         this._token=data.access_token; this._tokenExp=Date.now()+((data.expires_in||3600)*1000);
-        this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.',lastError:null,needsReauth:false})}));
+        /* Google only returns a refresh token on first consent; if it didn't (data.stored===false) the
+           connection works now but won't survive a reload. Tell the user how to make it durable. */
+        const msg=(data.stored===false)
+          ? 'Connected — but Google didn’t issue a refresh token, so this won’t persist across reloads. Remove this app at myaccount.google.com/permissions, then Sign in with Google again to grant durable access.'
+          : 'Connected.';
+        this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:msg,lastError:null,needsReauth:false})}));
         this.gcalListCalendars(); })
       .catch(e=>{ this.gcalMsg('Connect failed: '+(e&&e.message||e)); });
   }
