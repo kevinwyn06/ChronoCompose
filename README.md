@@ -68,13 +68,25 @@ ID**. You create it a single time; after that you just click **Sign in with Goog
 3. **APIs & Services → OAuth consent screen →** configure it (External is fine; add yourself as a Test user).
 4. **APIs & Services → Credentials → Create credentials → OAuth client ID → Web application.**
    - Under **Authorized JavaScript origins** add the exact origin you serve from, e.g.
-     `http://localhost:8000`.
-   - You do **not** need a redirect URI (the token flow is popup-based).
-5. Copy the **Client ID** (looks like `xx...apps.googleusercontent.com`).
-6. Paste it **once** into `config.js` (`googleClientId: "..."`). A Client ID is public and safe to commit —
-   only a client *secret* is sensitive, and this browser flow uses none.
+     `http://localhost:8000` (and your production origin).
+   - No redirect URI is needed (the popup auth-code flow uses `postmessage`).
+5. Copy the **Client ID** (`xx...apps.googleusercontent.com`) **and** the **client secret**.
+6. Paste the **Client ID** once into `config.js` (`googleClientId: "..."`) — it is public and safe to
+   commit. The **client secret is sensitive**: do **not** put it in `config.js`. Instead give it to the
+   Supabase Edge Function (durable sign-in step below).
 7. In the app: **⚙ Settings → Google Calendar → Sign in with Google** (popup) → approve → tick the
    calendars you want → **Import**.
+
+**Durable sign-in (stay connected across reloads).** Persistent Calendar login uses the OAuth
+*auth-code* flow backed by the `gcal-oauth` Supabase Edge Function, which holds the client secret and a
+per-user refresh token server-side (the browser never stores either). One-time owner setup:
+```
+supabase secrets set GCAL_CLIENT_SECRET=<the client secret from step 5>
+supabase db push                        # applies supabase/migrations/0003_gcal_tokens.sql
+supabase functions deploy gcal-oauth
+```
+Persistent Calendar sign-in also requires being **signed into your account** (Supabase), because the
+refresh token is scoped to your user. Without this setup the button still works but is not durable.
 
 > Prefer not to touch `config.js`? You can instead type the Client ID into the field that appears in
 > Settings when `config.js` has none — but pasting it into `config.js` once means you never type it again.
