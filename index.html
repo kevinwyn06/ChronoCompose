@@ -2572,7 +2572,13 @@ class Component extends DCLogic {
         client_id:g.clientId, scope:'https://www.googleapis.com/auth/calendar',
         callback:(resp)=>{ if(resp && resp.access_token){ this._token=resp.access_token;
           this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.',lastError:null,needsReauth:false})})); this.gcalListCalendars(); }
-          else this.gcalMsg('Authorization failed.'); } });
+          else this.gcalMsg('Authorization failed.'); },
+        /* PP-EXT: without this, a blocked/closed popup or an unauthorized-origin error is swallowed and
+           the button looks dead. Surface it (popup_closed/popup_failed_to_open/etc.) so the user knows why. */
+        error_callback:(err)=>{ const t=(err&&(err.type||err.message))||'unknown';
+          this.gcalMsg(t==='popup_closed'?'Sign-in cancelled.'
+            :t==='popup_failed_to_open'?'Sign-in popup was blocked — allow pop-ups for this site and try again.'
+            :'Google sign-in failed: '+t+'. Check that this origin is an authorized JavaScript origin for the OAuth client.'); } });
       this._tokenClient.requestAccessToken({prompt: this._token?'':'consent'});
     }catch(e){ this.gcalMsg('OAuth error: '+e.message); }
   }
