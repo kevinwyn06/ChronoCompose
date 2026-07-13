@@ -2563,15 +2563,22 @@ class Component extends DCLogic {
         background:'var(--on-accent)',color:'#3c4043',border:'1px solid #dadce0',borderRadius:'6px',fontSize:'13px',fontWeight:600,cursor:'pointer'}},
       G, g.connected?'Reconnect Google':'Sign in with Google');
   }
+  /* PP-EXT: durable Calendar sign-in via the OAuth *auth-code* flow. The popup code-client returns a
+     one-time code; the gcal-oauth Edge Function swaps it for a refresh token it holds server-side (the
+     client secret and refresh token never touch the browser — rule 7). This needs an active account
+     session (the Edge Function is JWT-authed and scopes the refresh token by uid), so persistent gcal
+     rides on persistent account login. The short-lived access token is cached in _token/_tokenExp and
+     re-minted on demand by gcalEnsureToken; _token stays set while connected so the existing
+     `if(!this._token)` guards keep meaning "connected". */
   gcalConnect(){
     const g=this.state.gcal;
     if(!g.clientId){ this.gcalMsg('Enter an OAuth Client ID first.'); return; }
     if(!(window.google && google.accounts && google.accounts.oauth2)){ this.gcalMsg('Google Identity Services not loaded (check network / http origin).'); return; }
+    if(!this._sb || !this._session){ this.gcalMsg('Sign in to your account first — that’s what keeps Google Calendar connected across reloads.'); return; }
     try{
-      this._tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id:g.clientId, scope:'https://www.googleapis.com/auth/calendar',
-        callback:(resp)=>{ if(resp && resp.access_token){ this._token=resp.access_token;
-          this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.',lastError:null,needsReauth:false})})); this.gcalListCalendars(); }
+      this._codeClient = google.accounts.oauth2.initCodeClient({
+        client_id:g.clientId, scope:'https://www.googleapis.com/auth/calendar', ux_mode:'popup',
+        callback:(resp)=>{ if(resp && resp.code){ this.gcalExchangeCode(resp.code); }
           else this.gcalMsg('Authorization failed.'); },
         /* PP-EXT: without this, a blocked/closed popup or an unauthorized-origin error is swallowed and
            the button looks dead. Surface it (popup_closed/popup_failed_to_open/etc.) so the user knows why. */
@@ -2579,13 +2586,56 @@ class Component extends DCLogic {
           this.gcalMsg(t==='popup_closed'?'Sign-in cancelled.'
             :t==='popup_failed_to_open'?'Sign-in popup was blocked — allow pop-ups for this site and try again.'
             :'Google sign-in failed: '+t+'. Check that this origin is an authorized JavaScript origin for the OAuth client.'); } });
-      this._tokenClient.requestAccessToken({prompt: this._token?'':'consent'});
+      this._codeClient.requestCode();
     }catch(e){ this.gcalMsg('OAuth error: '+e.message); }
   }
-  gcalFetch(url,opts){ opts=opts||{}; opts.headers=Object.assign({Authorization:'Bearer '+this._token,'Content-Type':'application/json'},opts.headers||{});
-    return fetch(url,opts).then(r=>{ if(!r.ok) return r.text().then(t=>{const e=new Error(r.status+' '+t.slice(0,120)); e.status=r.status; throw e;}); return r.status===204?{}:r.json(); }); }
+  /* send the one-time code to the Edge Function; on success we're connected and durable. */
+  gcalExchangeCode(code){
+    this.gcalMsg('Connecting…');
+    this._sb.functions.invoke('gcal-oauth', {body:{action:'exchange', code, clientId:this.state.gcal.clientId}})
+      .then(({data, error})=>{ if(error) throw error;
+        if(!data || !data.access_token) throw new Error('no access token returned');
+        this._token=data.access_token; this._tokenExp=Date.now()+((data.expires_in||3600)*1000);
+        this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:'Connected.',lastError:null,needsReauth:false})}));
+        this.gcalListCalendars(); })
+      .catch(e=>{ this.gcalMsg('Connect failed: '+(e&&e.message||e)); });
+  }
+  /* PP-EXT: pure — is the cached access token missing or within skewMs of expiry? (unit-tested) */
+  gcalTokenExpired(exp, now, skewMs){ return !exp || (now+(skewMs||60000))>=exp; }
+  /* ensure a live access token, re-minting via the Edge Function when the cached one is stale. Resolves
+     to the token, or rejects (caller surfaces via gcalError). Coalesces concurrent refreshes. */
+  gcalEnsureToken(){
+    if(this._token && !this.gcalTokenExpired(this._tokenExp, Date.now())) return Promise.resolve(this._token);
+    if(this._tokenRefresh) return this._tokenRefresh; /* one in-flight refresh */
+    if(!this._sb || !this._session){ return Promise.reject(Object.assign(new Error('Sign in to your account to refresh Google access.'),{status:401})); }
+    this._tokenRefresh = this._sb.functions.invoke('gcal-oauth', {body:{action:'token', clientId:this.state.gcal.clientId}})
+      .then(({data, error})=>{ this._tokenRefresh=null;
+        if(error || !data || !data.access_token){ const e=new Error((data&&data.error)||'token refresh failed'); e.status=401; throw e; }
+        this._token=data.access_token; this._tokenExp=Date.now()+((data.expires_in||3600)*1000); return this._token; })
+      .catch(e=>{ this._tokenRefresh=null; throw e; });
+    return this._tokenRefresh;
+  }
+  /* on sign-in (or restore), silently re-mint an access token if the account has a stored gcal refresh
+     token; success => reconnect Calendar and resume auto-sync. A 404 (never connected) is a no-op. */
+  gcalRestore(){
+    if(!this._sb || !this._session) return;
+    this.gcalEnsureToken()
+      .then(()=>{ this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,lastError:null,needsReauth:false})}));
+        this.gcalListCalendars(); this.gcalSyncSoon(); })
+      .catch(()=>{ /* not connected on this account — stay local */ });
+  }
+  gcalFetch(url,opts){ opts=opts||{};
+    return this.gcalEnsureToken().then(tok=>{
+      const headers=Object.assign({Authorization:'Bearer '+tok,'Content-Type':'application/json'},opts.headers||{});
+      const doFetch=(t)=>fetch(url,Object.assign({},opts,{headers:Object.assign({},headers,{Authorization:'Bearer '+t})}))
+        .then(r=>{ if(!r.ok) return r.text().then(txt=>{const e=new Error(r.status+' '+txt.slice(0,120)); e.status=r.status; throw e;}); return r.status===204?{}:r.json(); });
+      return doFetch(tok).catch(e=>{ /* one silent re-mint + retry on 401 (access token expired mid-flight) */
+        if(e&&e.status===401){ this._token=null; this._tokenExp=0; return this.gcalEnsureToken().then(t2=>doFetch(t2)); }
+        throw e; });
+    }); }
   /* PP-EXT: record a sync failure so silent polls are never invisible (Settings + drawer render lastError);
-     a 401 additionally flags needsReauth — the ~1h GIS token has expired and the user must re-sign-in. */
+     a 401 additionally flags needsReauth. With durable sign-in gcalFetch first tries a silent token
+     re-mint, so a surfaced 401 means the server-held refresh token is gone/revoked — a real re-sign-in. */
   gcalError(e){ this.setState(s=>({gcal:Object.assign({},s.gcal,{lastError:{msg:String(e&&e.message||e),at:Date.now()},
     needsReauth:(e&&e.status===401)?true:s.gcal.needsReauth})})); }
   gcalClearError(){ if(this.state.gcal.lastError||this.state.gcal.needsReauth)
@@ -2905,6 +2955,7 @@ class Component extends DCLogic {
       this.syncSubscribeRealtime();
       this.syncInitialSync();
       this.syncFlushSoon(); this.syncKvFlushSoon(); /* PP-EXT B3a: drain any writes queued while offline */
+      this.gcalRestore(); /* PP-EXT: reconnect Google Calendar from the server-held refresh token, if any */
     } else if(event==='SIGNED_OUT'){
       this._session=null; this.syncUnsubscribeRealtime();
       try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} /* PP-EXT: back to the anon workspace */
