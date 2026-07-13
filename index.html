@@ -2869,15 +2869,18 @@ class Component extends DCLogic {
      inert when unconfigured, so the app still runs fully local. Network calls are NOT in the Node-vm test
      harness (same as gcal's) — only the pure B1 diff/merge layer above is unit-tested. */
   syncConfigured(){ const c=window.PP_CONFIG||{}; return !!(c.supabaseUrl && c.supabaseAnonKey); }
-  /* create the Supabase client once. persistSession:false keeps the auth session in memory only (rule 5 —
-     re-auth on reload, same as the gcal token); detectSessionInUrl:true consumes the magic-link hash on load. */
+  /* create the Supabase client once. persistSession:true persists the account session under the pp-auth
+     localStorage key (owner-approved override of the old in-memory-only policy — see CLAUDE.md rule 5), so
+     you stay signed in across reloads; autoRefreshToken keeps it fresh. storageKey pins it to the pp-* name-
+     space (Supabase also writes a transient pp-auth-code-verifier during the OTP/PKCE round-trip). Only the
+     last-used email in pp-sync remains separate. detectSessionInUrl:true consumes the magic-link hash on load. */
   syncInitClient(){
     if(this._sb) return this._sb;
     if(!this.syncConfigured() || !(window.supabase && window.supabase.createClient)) return null;
     const c=window.PP_CONFIG;
     try{
       this._sb=window.supabase.createClient(c.supabaseUrl, c.supabaseAnonKey,
-        { auth:{ persistSession:false, autoRefreshToken:true, detectSessionInUrl:true } });
+        { auth:{ persistSession:true, storageKey:'pp-auth', autoRefreshToken:true, detectSessionInUrl:true } }); /* PP-EXT: was persistSession:false (rule 5, in-memory) */
       this._sb.auth.onAuthStateChange((event, session)=>this.syncOnAuth(event, session));
     }catch(e){ this.syncError(e); return null; }
     return this._sb;
@@ -2895,6 +2898,7 @@ class Component extends DCLogic {
     if(session && session.user){
       if(this._session && this._session.user && this._session.user.id===session.user.id){ this._session=session; return; } /* token refresh — not a fresh sign-in */
       this._session=session;
+      this.syncRecordAccount(session.user); /* PP-EXT: stamp active workspace/uid for the future per-account namespacing */
       this.saveSync({connected:true, email:session.user.email||this.state.sync.email, sending:false, sent:false,
         msg:'Signed in — syncing…', lastError:null, needsReauth:false});
       if(!this.state.settings.syncEnabled) this.saveSettings({syncEnabled:true});
@@ -2903,8 +2907,18 @@ class Component extends DCLogic {
       this.syncFlushSoon(); this.syncKvFlushSoon(); /* PP-EXT B3a: drain any writes queued while offline */
     } else if(event==='SIGNED_OUT'){
       this._session=null; this.syncUnsubscribeRealtime();
+      try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} /* PP-EXT: back to the anon workspace */
       this.saveSync({connected:false, msg:'Signed out.'});
     }
+  }
+  /* PP-EXT: remember the active account (uid ↔ email) so the later per-account namespacing project can pick
+     the active workspace with no schema change. pp-workspace = active uid; pp-accounts = known uids. These are
+     identifiers only (no tokens); the session itself lives under pp-auth (Supabase-managed). */
+  syncRecordAccount(user){
+    if(!user || !user.id) return;
+    try{ localStorage.setItem('pp-workspace', user.id); }catch(e){}
+    try{ const m=JSON.parse(localStorage.getItem('pp-accounts')||'{}');
+      m[user.id]={email:user.email||'', seen:Date.now()}; localStorage.setItem('pp-accounts', JSON.stringify(m)); }catch(e){}
   }
   /* Settings → Account: email a magic link. The link lands on this page URL (must be an allowed Supabase
      redirect); Supabase parses it on next load and fires syncOnAuth. We never see or store a password. */
@@ -2924,8 +2938,9 @@ class Component extends DCLogic {
   syncSignOut(){
     const sb=this._sb; this.saveSettings({syncEnabled:false});
     this.syncUnsubscribeRealtime(); this._session=null;
+    try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} /* PP-EXT: back to the anon workspace */
     this.saveSync({connected:false, sent:false, msg:'Signed out. Local data is unchanged.'});
-    if(sb) try{ sb.auth.signOut(); }catch(e){}
+    if(sb) try{ sb.auth.signOut(); }catch(e){} /* Supabase clears pp-auth via its storage adapter */
   }
   /* error surface, mirroring gcalError: record + flag needsReauth on an expired/invalid session (the
      in-memory token dies on reload, so this is expected and self-heals on the next sign-in). */
@@ -3525,7 +3540,8 @@ class Component extends DCLogic {
     const sy=this.state.sync;
     const paneIntegrations=tab!=='integrations'?null:h(React.Fragment,{},
       /* PP-EXT B2: Account & cloud sync — magic-link sign-in to Supabase (offline-first; local stays
-         authoritative). Session lives in memory only (rule 5) so a reload signs out; the queue persists. */
+         authoritative). Session persists under pp-auth (see CLAUDE.md rule 5) so you stay signed in across
+         reloads; the queue persists too. */
       secTitle('Account & cloud sync'),
       !this.syncConfigured()
         ? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'2px 0 8px'}},
@@ -3537,7 +3553,7 @@ class Component extends DCLogic {
                     '✓ Signed in'+(sy.email?(' as '+sy.email):'')),
                   h('button',{className:'pp-tbtn',onClick:()=>this.syncSignOut()},'Sign out')),
                 h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},
-                  sy.pulling?'Syncing…':(sy.sending?'Saving changes…':'Changes sync automatically. Reloading signs you out (session is kept in memory only).')))
+                  sy.pulling?'Syncing…':(sy.sending?'Saving changes…':'Changes sync automatically. You stay signed in across reloads until you sign out.')))
             : h('div',{style:{padding:'2px 0 8px'}},
                 setRow('Email', h('input',{className:'pp-num',type:'email',defaultValue:sy.email,key:'syncemail',
                   onChange:e=>this.saveSync({email:e.target.value}),
