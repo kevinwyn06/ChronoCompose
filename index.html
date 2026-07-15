@@ -210,6 +210,11 @@ input,select,button{font-family:inherit}
 class Component extends DCLogic {
   constructor(props){
     super(props);
+    /* PP-EXT: active per-account workspace ('anon' or a Supabase uid) — MUST be set before the first
+       scoped localStorage read (this.loadNotify() below routes through lsGet). pp-workspace is our
+       synchronous proxy for the last session; the async Supabase session restore confirms/switches it
+       later in syncOnAuth. See plans/account-namespacing-plan.md. */
+    try{ this._workspace = localStorage.getItem('pp-workspace') || 'anon'; }catch(e){ this._workspace = 'anon'; }
     this.DAY = 86400000;
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
@@ -323,7 +328,10 @@ class Component extends DCLogic {
     const pf = this.loadPrefs();
     this.ROWH = {compact:30, default:40, comfy:52};
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
-    let seed = this.loadTasks() || this.buildSeed();
+    /* PP-EXT: the demo seed is only for the anon (signed-out/first-run) workspace. An ACCOUNT namespace
+       starts empty and is populated by syncInitialSync's cloud pull — otherwise a fresh account would
+       seed stable-id tasks (t1,t2,…) and push them up, re-triggering the cross-account id collision. */
+    let seed = this.loadTasks() || (this._workspace==='anon' ? this.buildSeed() : []);
     seed = seed.map(t=>this.normalizeTask(t));
     seed = this.runOnceMigrations(seed); /* PP-EXT: scrub old all-day planned defaults, once */
     if(Array.isArray(pf.rowOrder)) seed = this.applyOrder(seed, pf.rowOrder);
@@ -373,16 +381,27 @@ class Component extends DCLogic {
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
     notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true, pomodoro:true } /* PP-EXT Phase 8/10: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
-  loadTasks(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
-  saveTasks(tasks){ try{ localStorage.setItem('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
-  loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(localStorage.getItem('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
-  saveSettings(patch){ const s=Object.assign({}, this.state.settings, patch); this.setState({settings:s}); try{ localStorage.setItem('pp-settings', JSON.stringify(s)); }catch(e){} }
+  /* PP-EXT: per-account localStorage namespacing (clean-switch isolation). Active workspace = 'anon'
+     (signed-out/local-only, bare pp-* keys) or a Supabase uid (keys suffixed '::'+uid). Global keys
+     (device UI pref, sign-in prefill, the workspace/account bookkeeping, and the Supabase-managed
+     session) never get suffixed. Anon == the legacy bare keys, so single-user needs no migration.
+     See plans/account-namespacing-plan.md. */
+  WS_GLOBAL_KEYS(){ return {'pp-theme':1,'pp-sync':1,'pp-workspace':1,'pp-accounts':1,'pp-auth':1}; }
+  wsKey(base){ const ws=this._workspace; return (!ws || ws==='anon' || this.WS_GLOBAL_KEYS()[base]) ? base : (base+'::'+ws); }
+  lsGet(base){ try{ return localStorage.getItem(this.wsKey(base)); }catch(e){ return null; } }
+  lsSet(base,val){ try{ localStorage.setItem(this.wsKey(base), val); }catch(e){} }
+  lsRemove(base){ try{ localStorage.removeItem(this.wsKey(base)); }catch(e){} }
+  /* /PP-EXT */
+  loadTasks(){ try{ const s=this.lsGet('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
+  saveTasks(tasks){ try{ this.lsSet('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
+  loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(this.lsGet('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
+  saveSettings(patch){ const s=Object.assign({}, this.state.settings, patch); this.setState({settings:s}); try{ this.lsSet('pp-settings', JSON.stringify(s)); }catch(e){} }
   loadGcal(){ const cfg=(window.PP_CONFIG&&window.PP_CONFIG.googleClientId)||''; /* PP-EXT: Client ID from config.js by default */
-    try{ const saved=JSON.parse(localStorage.getItem('pp-gcal')||'{}');
+    try{ const saved=JSON.parse(this.lsGet('pp-gcal')||'{}');
       return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg)}); }
     catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30}; } }
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
-    try{ localStorage.setItem('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
+    try{ this.lsSet('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
       ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
   /* PP-EXT B2: Supabase sync UI state. connected/session are NEVER persisted (rule 5 — re-auth on reload,
      same tradeoff as the gcal token); only the last-used email is remembered to pre-fill the sign-in field.
@@ -394,10 +413,10 @@ class Component extends DCLogic {
     try{ localStorage.setItem('pp-sync', JSON.stringify({email:sy.email||''})); }catch(e){} }
   /* PP-EXT: running timers are a MAP { [taskId]: {startedAt, beat} } (multitasking). Migrate the old
      single-timer shape {id,startedAt,beat} on load. */
-  loadRun(){ try{ const raw=JSON.parse(localStorage.getItem('pp-run')||'null'); if(!raw) return {};
+  loadRun(){ try{ const raw=JSON.parse(this.lsGet('pp-run')||'null'); if(!raw) return {};
       if(raw.id!==undefined) return { [raw.id]: { startedAt:raw.startedAt, beat:raw.beat||raw.startedAt } };
       return raw; }catch(e){ return {}; } }
-  saveRun(r){ try{ if(r && Object.keys(r).length) localStorage.setItem('pp-run', JSON.stringify(r)); else localStorage.removeItem('pp-run'); }catch(e){} }
+  saveRun(r){ try{ if(r && Object.keys(r).length) this.lsSet('pp-run', JSON.stringify(r)); else this.lsRemove('pp-run'); }catch(e){} }
   normalizeTask(t){
     return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, spentByDay:{}, /* PP-EXT: per-day timer ledger {ymd:minutes}; spent stays the lifetime total, spentByDay is the daily slice (getSpentOn). Fixes computeAllotted over-subtracting lifetime spent from today's pool. */
@@ -416,9 +435,9 @@ class Component extends DCLogic {
      stays user-editable afterwards (it is NOT re-zeroed on every load). Returns the number of tasks changed. */
   migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned){ t.planned=0; n++; } }); return n; }
   runOnceMigrations(tasks){
-    try{ const done=JSON.parse(localStorage.getItem('pp-migrations')||'{}')||{};
+    try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
       if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
-        localStorage.setItem('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
@@ -429,12 +448,12 @@ class Component extends DCLogic {
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
   BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal']; /* pp-habits/pp-journal: Phase 9 */ }
   collectBackup(){ const data={};
-    this.BACKUP_KEYS().forEach(k=>{ const v=localStorage.getItem(k); if(v==null) return;
+    this.BACKUP_KEYS().forEach(k=>{ const v=this.lsGet(k); if(v==null) return; /* PP-EXT: active-workspace scoped (pp-theme stays global) */
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
     return {app:'ChronoCompose', version:1, exportedAt:new Date().toISOString(), data}; }
   applyBackup(obj){ if(!obj||obj.app!=='ChronoCompose'||!obj.data||typeof obj.data!=='object') throw new Error('Not a ChronoCompose backup file.');
     let n=0; this.BACKUP_KEYS().forEach(k=>{ if(!(k in obj.data)) return; const v=obj.data[k];
-      try{ localStorage.setItem(k, (v&&typeof v==='object'&&typeof v.__raw==='string')?v.__raw:JSON.stringify(v)); n++; }catch(e){} });
+      try{ this.lsSet(k, (v&&typeof v==='object'&&typeof v.__raw==='string')?v.__raw:JSON.stringify(v)); n++; }catch(e){} }); /* PP-EXT: active-workspace scoped */
     return n; }
   exportBackup(){ try{ const blob=new Blob([JSON.stringify(this.collectBackup(),null,1)],{type:'application/json'});
     const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
@@ -449,8 +468,8 @@ class Component extends DCLogic {
   /* ==== /PP-EXT ==== */
 
   /* ---------- prefs persistence ---------- */
-  loadPrefs(){ try{ return JSON.parse(localStorage.getItem('pp-prefs')||'{}')||{}; }catch(e){ return {}; } }
-  savePrefs(patch){ try{ const p=Object.assign(this.loadPrefs(),patch); localStorage.setItem('pp-prefs', JSON.stringify(p)); }catch(e){} }
+  loadPrefs(){ try{ return JSON.parse(this.lsGet('pp-prefs')||'{}')||{}; }catch(e){ return {}; } }
+  savePrefs(patch){ try{ const p=Object.assign(this.loadPrefs(),patch); this.lsSet('pp-prefs', JSON.stringify(p)); }catch(e){} }
   applyOrder(tasks, order){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
     const out=[]; order.forEach(id=>{ if(byId[id]){ out.push(byId[id]); delete byId[id]; } });
@@ -960,8 +979,8 @@ class Component extends DCLogic {
      `pp-pomo` so a reload resumes it (transitions only advance while the tab is open — the same "no background
      worker" limit as notifications). The decision logic (pomoState / pomoAdvance) is pure & unit-tested; the
      control methods apply it (bind the task timer, fire the interval-end notification). ==== */
-  loadPomo(){ try{ const p=JSON.parse(localStorage.getItem('pp-pomo')||'null'); return (p&&typeof p==='object'&&p.phase)?p:null; }catch(e){ return null; } }
-  savePomo(p){ try{ if(p) localStorage.setItem('pp-pomo', JSON.stringify(p)); else localStorage.removeItem('pp-pomo'); }catch(e){} }
+  loadPomo(){ try{ const p=JSON.parse(this.lsGet('pp-pomo')||'null'); return (p&&typeof p==='object'&&p.phase)?p:null; }catch(e){ return null; } }
+  savePomo(p){ try{ if(p) this.lsSet('pp-pomo', JSON.stringify(p)); else this.lsRemove('pp-pomo'); }catch(e){} }
   pomoActive(){ return !!this.state.pomo; }
   /* PP-EXT: the task whose block currently spans "now" in today's packed timeline — the pomodoro picker
      defaults to this so starting a session binds the thing you're actually supposed to be doing right now. */
@@ -1014,11 +1033,11 @@ class Component extends DCLogic {
   /* ===== PP-EXT Phase 8: notifications ===== */
   /* Fired-once ledger + last morning-summary day. Persisted so a reload doesn't re-fire a passed trigger.
      Prune fired keys older than a few days so the map stays bounded (they're one-shot per occurrence). */
-  loadNotify(){ let n; try{ n=JSON.parse(localStorage.getItem('pp-notify')||'{}'); }catch(e){ n={}; }
+  loadNotify(){ let n; try{ n=JSON.parse(this.lsGet('pp-notify')||'{}'); }catch(e){ n={}; }
     n=n||{}; if(!n.fired||typeof n.fired!=='object') n.fired={};
     const cut=Date.now()-3*86400000; Object.keys(n.fired).forEach(k=>{ if((+n.fired[k]||0)<cut) delete n.fired[k]; });
     return { fired:n.fired, summaryDay:n.summaryDay||null }; }
-  saveNotify(){ try{ localStorage.setItem('pp-notify', JSON.stringify(this._notify)); }catch(e){} }
+  saveNotify(){ try{ this.lsSet('pp-notify', JSON.stringify(this._notify)); }catch(e){} }
   notifyOn(key){ const n=(this.state.settings&&this.state.settings.notify)||{}; return n[key]!==false; } /* default ON */
   notifyPermission(){ try{ return (typeof Notification!=='undefined') ? Notification.permission : 'unsupported'; }catch(e){ return 'unsupported'; } }
   notifySupported(){ return this.notifyPermission()!=='unsupported'; }
@@ -1472,9 +1491,9 @@ class Component extends DCLogic {
      funnel). A habit is scheduled daily or on specific weekdays; a day counts as done via a MANUAL check-off
      (`done` ledger) OR automatically when any linked task (`taskIds`) was worked on / completed that day. Streaks
      count only scheduled days (today isn't broken until it ends). Pure helpers so streak/consistency are testable. */
-  loadHabits(){ try{ const a=JSON.parse(localStorage.getItem('pp-habits')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeHabit(x)):[]; }catch(e){ return []; } }
+  loadHabits(){ try{ const a=JSON.parse(this.lsGet('pp-habits')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeHabit(x)):[]; }catch(e){ return []; } }
   saveHabits(habits){ this.syncKvOut('habits', this.habitsToMap(this.state.habits), this.habitsToMap(habits)); /* PP-EXT B3a: stamps+enqueues before persist so the LWW clock is saved */
-    try{ localStorage.setItem('pp-habits', JSON.stringify(habits)); }catch(e){} this.setState({habits}); }
+    try{ this.lsSet('pp-habits', JSON.stringify(habits)); }catch(e){} this.setState({habits}); }
   normalizeHabit(hb){ hb=hb||{}; const sk=(hb.schedule&&hb.schedule.kind==='weekdays')?'weekdays':'daily';
     return { id: hb.id||('h'+Math.random().toString(36).slice(2,8)), name: hb.name||'New habit',
       schedule: { kind:sk, days: Array.isArray(hb.schedule&&hb.schedule.days)?hb.schedule.days.slice():[] },
@@ -1518,7 +1537,7 @@ class Component extends DCLogic {
   /* ==== PP-EXT Phase 9: Journaling / next-day planning — an end-of-day ritual. One free-text entry per day
      (pp-journal, keyed by ymd), the day's actuals (allotted vs recorded), and the "needs planning" queue
      (Phase-7 unplanned) with inline Planned editing so tomorrow gets scheduled. ==== */
-  loadJournal(){ try{ const o=JSON.parse(localStorage.getItem('pp-journal')||'{}'); return (o&&typeof o==='object')?o:{}; }catch(e){ return {}; } }
+  loadJournal(){ try{ const o=JSON.parse(this.lsGet('pp-journal')||'{}'); return (o&&typeof o==='object')?o:{}; }catch(e){ return {}; } }
   journalEntryFor(dayMs){ return (this.state.journal&&this.state.journal[this.ymdOf(dayMs)])||{}; }
   journalTextFor(dayMs){ return this.journalEntryFor(dayMs).text||''; }
   /* PURE: merge a patch into a day's entry ({text,mood,weather}); a key set to null/'' is removed. An entry with no
@@ -1529,7 +1548,7 @@ class Component extends DCLogic {
     cur.updatedAt=Date.now();
     if((cur.text&&cur.text.trim())||(cur.html&&cur.html.trim())||cur.mood||cur.weather) j[ymd]=cur; else delete j[ymd];
     this.syncKvOut('journal', this.state.journal, j); /* PP-EXT B3a: enqueue the one changed/removed day */
-    try{ localStorage.setItem('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
+    try{ this.lsSet('pp-journal', JSON.stringify(j)); }catch(e){} this.setState({journal:j}); }
   saveJournalText(dayMs, text){ this.updateJournal(dayMs, {text:(text&&text.trim())?text:null}); }
   setJournalMood(dayMs, k){ const cur=this.journalEntryFor(dayMs).mood; this.updateJournal(dayMs, {mood: cur===k?null:k}); } /* click same mood → clear */
   /* PP-EXT: resolve a stored mood value into display info. Emotion-wheel values are `/`-joined paths
@@ -2893,13 +2912,13 @@ class Component extends DCLogic {
   /* ==== /PP-EXT B3a pure ==== */
   /* Queue + tombstone persistence (pp-sync-queue / pp-sync-tombstones) — survives reloads so writes
      made offline flush after reconnecting. Mirrors loadQueue/loadTombstones for gcal. */
-  loadSyncQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-sync-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
-  saveSyncQueue(q){ try{ localStorage.setItem('pp-sync-queue', JSON.stringify(q)); }catch(e){} }
-  loadSyncTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-sync-tombstones')||'{}')||{};
+  loadSyncQueue(){ try{ const q=JSON.parse(this.lsGet('pp-sync-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveSyncQueue(q){ try{ this.lsSet('pp-sync-queue', JSON.stringify(q)); }catch(e){} }
+  loadSyncTombstones(){ try{ const t=JSON.parse(this.lsGet('pp-sync-tombstones')||'{}')||{};
       const cut=Date.now()-this.SYNC_TOMBSTONE_TTL_MS; let ch=false;
       Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
       if(ch) this.saveSyncTombstones(t); return t; }catch(e){ return {}; } }
-  saveSyncTombstones(t){ try{ localStorage.setItem('pp-sync-tombstones', JSON.stringify(t)); }catch(e){} }
+  saveSyncTombstones(t){ try{ this.lsSet('pp-sync-tombstones', JSON.stringify(t)); }catch(e){} }
   /* Coalescing enqueue: a delete supersedes any pending write for its id and drops a tombstone; an
      insert/update coalesces to the latest full-row write and clears any stale tombstone (re-create). */
   syncEnqueue(ops){
@@ -2956,8 +2975,13 @@ class Component extends DCLogic {
   syncOnAuth(event, session){
     if(session && session.user){
       if(this._session && this._session.user && this._session.user.id===session.user.id){ this._session=session; return; } /* token refresh — not a fresh sign-in */
+      /* PP-EXT: clean-switch namespacing. If this session's account differs from the active workspace,
+         switch to that account's namespace (reloads) BEFORE any sync — otherwise syncInitialSync would
+         diff another account's local rows against this cloud and push them up (the RLS id-collision bug).
+         Common steady state: workspace already == uid (booted into it), so we fall through to reconcile. */
+      if(this._workspace !== session.user.id){ this.syncBeginWorkspaceSwitch(session); return; }
       this._session=session;
-      this.syncRecordAccount(session.user); /* PP-EXT: stamp active workspace/uid for the future per-account namespacing */
+      this.syncRecordAccount(session.user); /* keep pp-accounts fresh (pp-workspace already == this uid) */
       this.saveSync({connected:true, email:session.user.email||this.state.sync.email, sending:false, sent:false,
         msg:'Signed in — syncing…', lastError:null, needsReauth:false});
       if(!this.state.settings.syncEnabled) this.saveSettings({syncEnabled:true});
@@ -2967,8 +2991,9 @@ class Component extends DCLogic {
       this.gcalRestore(); /* PP-EXT: reconnect Google Calendar from the server-held refresh token, if any */
     } else if(event==='SIGNED_OUT'){
       this._session=null; this.syncUnsubscribeRealtime();
-      try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} /* PP-EXT: back to the anon workspace */
       this.saveSync({connected:false, msg:'Signed out.'});
+      if(this._workspace!=='anon') this.switchWorkspace('anon'); /* PP-EXT: reload into anon so local-only data reappears */
+      else { try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} }
     }
   }
   /* PP-EXT: remember the active account (uid ↔ email) so the later per-account namespacing project can pick
@@ -2979,6 +3004,35 @@ class Component extends DCLogic {
     try{ localStorage.setItem('pp-workspace', user.id); }catch(e){}
     try{ const m=JSON.parse(localStorage.getItem('pp-accounts')||'{}');
       m[user.id]={email:user.email||'', seen:Date.now()}; localStorage.setItem('pp-accounts', JSON.stringify(m)); }catch(e){}
+  }
+  /* PP-EXT: clean-switch namespacing helpers (plans/account-namespacing-plan.md). The scoped keys are the
+     per-account user data; the constructor reads them through lsGet/wsKey, so switching = persist the new
+     workspace id and reload (the constructor then re-hydrates ALL state from that namespace). */
+  WS_SCOPED_KEYS(){ return ['pp-tasks','pp-settings','pp-prefs','pp-gcal','pp-run','pp-pomo','pp-notify',
+    'pp-migrations','pp-habits','pp-journal','pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
+    'pp-sync-kv-tombstones','pp-gcal-queue','pp-gcal-tombstones']; }
+  /* does the anon (signed-out) workspace hold real task data worth offering to import on first sign-in? */
+  anonHasData(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length>0; }catch(e){ return false; } }
+  /* one-time first-sign-in import: copy each anon (bare) key into the uid namespace where that account has
+     nothing yet. Reads bare, writes suffixed directly (this._workspace is still 'anon' at call time). */
+  importAnonInto(uid){ if(!uid) return; this.WS_SCOPED_KEYS().forEach(base=>{ try{ const v=localStorage.getItem(base);
+    if(v==null) return; const tgt=base+'::'+uid; if(localStorage.getItem(tgt)==null) localStorage.setItem(tgt, v); }catch(e){} }); }
+  /* persist the active workspace and reload so the constructor re-hydrates every state field from the new
+     namespace — simpler and safer than manually re-reading ~15 fields mid-session. */
+  switchWorkspace(ws){ ws=ws||'anon'; this._workspace=ws; try{ localStorage.setItem('pp-workspace', ws); }catch(e){}
+    try{ location.reload(); }catch(e){} }
+  /* account change seen in syncOnAuth: on a brand-new account that has local anon data, offer a one-time
+     import; then stamp the account and switch (reload) into its namespace. Guarded so the duplicate
+     INITIAL_SESSION callback can't double-fire the prompt/switch. */
+  syncBeginWorkspaceSwitch(session){
+    if(this._wsSwitching || !session || !session.user) return; this._wsSwitching=true;
+    const user=session.user, uid=user.id;
+    let firstSignIn=false; try{ firstSignIn=!(JSON.parse(localStorage.getItem('pp-accounts')||'{}')[uid]); }catch(e){}
+    const finish=(doImport)=>{ if(doImport) this.importAnonInto(uid); this.syncRecordAccount(user); this.switchWorkspace(uid); };
+    if(firstSignIn && this.anonHasData()){
+      let yes=false; try{ yes=window.confirm('Import this device’s local (signed-out) data into this account?\n\nOK = copy it into '+(user.email||'this account')+'.   Cancel = start this account clean.'); }catch(e){}
+      finish(yes);
+    } else finish(false);
   }
   /* Settings → Account: email a magic link. The link lands on this page URL (must be an allowed Supabase
      redirect); Supabase parses it on next load and fires syncOnAuth. We never see or store a password. */
@@ -2998,9 +3052,12 @@ class Component extends DCLogic {
   syncSignOut(){
     const sb=this._sb; this.saveSettings({syncEnabled:false});
     this.syncUnsubscribeRealtime(); this._session=null;
-    try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} /* PP-EXT: back to the anon workspace */
     this.saveSync({connected:false, sent:false, msg:'Signed out. Local data is unchanged.'});
-    if(sb) try{ sb.auth.signOut(); }catch(e){} /* Supabase clears pp-auth via its storage adapter */
+    /* PP-EXT: signOut clears pp-auth then fires SIGNED_OUT → syncOnAuth reloads into the anon workspace.
+       Fallback (no client): switch here so local-only data reappears. */
+    if(sb) try{ sb.auth.signOut(); }catch(e){ if(this._workspace!=='anon') this.switchWorkspace('anon'); }
+    else if(this._workspace!=='anon') this.switchWorkspace('anon');
+    else { try{ localStorage.setItem('pp-workspace','anon'); }catch(e){} }
   }
   /* error surface, mirroring gcalError: record + flag needsReauth on an expired/invalid session (the
      in-memory token dies on reload, so this is expected and self-heals on the next sign-in). */
@@ -3068,13 +3125,13 @@ class Component extends DCLogic {
   /* ==== PP-EXT B3a: habits/journal network wiring — reuses the B2 Supabase client + Realtime, mirroring the
      tasks path but over the {id,data} blob tables (kvFp/computeKvOps/kvMergeDecision above). Separate queue
      (pp-sync-kv-queue) + tombstones (pp-sync-kv-tombstones) so the tasks flush stays untouched. ==== */
-  loadKvQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-sync-kv-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
-  saveKvQueue(q){ try{ localStorage.setItem('pp-sync-kv-queue', JSON.stringify(q)); }catch(e){} }
-  loadKvTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-sync-kv-tombstones')||'{}')||{};
+  loadKvQueue(){ try{ const q=JSON.parse(this.lsGet('pp-sync-kv-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveKvQueue(q){ try{ this.lsSet('pp-sync-kv-queue', JSON.stringify(q)); }catch(e){} }
+  loadKvTombstones(){ try{ const t=JSON.parse(this.lsGet('pp-sync-kv-tombstones')||'{}')||{};
       const cut=Date.now()-this.SYNC_TOMBSTONE_TTL_MS; let ch=false;
       Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
       if(ch) this.saveKvTombstones(t); return t; }catch(e){ return {}; } }
-  saveKvTombstones(t){ try{ localStorage.setItem('pp-sync-kv-tombstones', JSON.stringify(t)); }catch(e){} }
+  saveKvTombstones(t){ try{ this.lsSet('pp-sync-kv-tombstones', JSON.stringify(t)); }catch(e){} }
   /* Coalescing enqueue (mirrors syncEnqueue): a delete supersedes any pending write for its (table,id) and
      drops a tombstone; an insert/update coalesces to the latest full-row write and clears a stale tombstone. */
   syncKvEnqueue(table, ops){
@@ -3148,7 +3205,7 @@ class Component extends DCLogic {
       (data||[]).forEach(r=>{ const inc=r.data||{}; remoteMap[r.id]=inc;
         if(this.kvMergeDecision(jmap[r.id], inc, tomb[this.kvTombKey('journal', r.id)])==='set') jmap[r.id]=inc; });
       this._syncApplying=true;
-      try{ try{ localStorage.setItem('pp-journal', JSON.stringify(jmap)); }catch(e){} this.setState({journal:jmap}); }
+      try{ try{ this.lsSet('pp-journal', JSON.stringify(jmap)); }catch(e){} this.setState({journal:jmap}); }
       finally{ this._syncApplying=false; }
       const ops=this.computeKvOps(remoteMap, jmap).filter(o=>o.op!=='delete');
       if(ops.length) this.syncKvEnqueue('journal', ops);
@@ -3175,7 +3232,7 @@ class Component extends DCLogic {
         const jmap=this.state.journal||{}; const dec=this.kvMergeDecision(jmap[id], data==null?null:data, tomb);
         if(dec==='delete' || dec==='set'){ const nx=Object.assign({}, jmap);
           if(dec==='delete') delete nx[id]; else nx[id]=data;
-          try{ localStorage.setItem('pp-journal', JSON.stringify(nx)); }catch(e){} this.setState({journal:nx}); }
+          try{ this.lsSet('pp-journal', JSON.stringify(nx)); }catch(e){} this.setState({journal:nx}); }
       }
     }catch(e){ this.syncError(e); }
     finally{ this._syncApplying=false; }
@@ -3258,13 +3315,13 @@ class Component extends DCLogic {
   }
   /* Queue + tombstone persistence (pp-gcal-queue / pp-gcal-tombstones). The queue survives reloads so
      writes made while offline/expired flush after reconnecting. */
-  loadQueue(){ try{ const q=JSON.parse(localStorage.getItem('pp-gcal-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
-  saveQueue(q){ try{ localStorage.setItem('pp-gcal-queue', JSON.stringify(q)); }catch(e){} }
-  loadTombstones(){ try{ const t=JSON.parse(localStorage.getItem('pp-gcal-tombstones')||'{}')||{};
+  loadQueue(){ try{ const q=JSON.parse(this.lsGet('pp-gcal-queue')||'[]'); return Array.isArray(q)?q:[]; }catch(e){ return []; } }
+  saveQueue(q){ try{ this.lsSet('pp-gcal-queue', JSON.stringify(q)); }catch(e){} }
+  loadTombstones(){ try{ const t=JSON.parse(this.lsGet('pp-gcal-tombstones')||'{}')||{};
       const cut=Date.now()-this.GCAL_TOMBSTONE_TTL_MS; let ch=false;
       Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
       if(ch) this.saveTombstones(t); return t; }catch(e){ return {}; } }
-  saveTombstones(t){ try{ localStorage.setItem('pp-gcal-tombstones', JSON.stringify(t)); }catch(e){} }
+  saveTombstones(t){ try{ this.lsSet('pp-gcal-tombstones', JSON.stringify(t)); }catch(e){} }
   clearTombstone(eid){ const t=this.loadTombstones(); if(t[eid]!=null){ delete t[eid]; this.saveTombstones(t); } }
   /* Outbound funnel (called by commit/undo/redo). Inert unless two-way is on; _gcalApplying suppresses
      echoes while an import is being committed. */
