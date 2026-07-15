@@ -241,6 +241,9 @@ class Component extends DCLogic {
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
     this.SYNC_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-row ids kept this long so a pull can't resurrect them
+    /* PP-EXT B3b: gcal events.watch push (gcal-watch/gcal-notify Edge Functions + gcal_pings doorbell). */
+    this.GCAL_WATCH_RESYNC_MS = 6*3600000;     // re-assert watch channels at most this often per tab
+    this.GCAL_PING_DEBOUNCE_MS = 1200;         // coalesce a burst of pushes (a bulk edit) into one import
     this._syncApplying = false;                // echo guard: true while committing a pulled remote snapshot
     this._syncKvSending = false;               // PP-EXT B3a: in-flight guard for the habits/journal blob flush
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
@@ -641,6 +644,7 @@ class Component extends DCLogic {
     window.removeEventListener('storage', this._onStorage); /* PP-EXT */
     clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
     clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); clearTimeout(this._syncKvFlushT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 + B3a */
+    this.gcalPingUnsubscribe(); /* PP-EXT B3b */
   }
 
   /* ---------- history ---------- */
@@ -2621,7 +2625,8 @@ class Component extends DCLogic {
           ? 'Connected — but Google didn’t issue a refresh token, so this won’t persist across reloads. Remove this app at myaccount.google.com/permissions, then Sign in with Google again to grant durable access.'
           : 'Connected.';
         this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,msg:msg,lastError:null,needsReauth:false})}));
-        this.gcalListCalendars(); })
+        this.gcalListCalendars();
+        this.gcalPingSubscribe(); this.gcalWatchSync(); /* PP-EXT B3b: start push for the new connection */ })
       .catch(e=>{ this.gcalMsg('Connect failed: '+(e&&e.message||e)); });
   }
   /* PP-EXT: pure — is the cached access token missing or within skewMs of expiry? (unit-tested) */
@@ -2645,7 +2650,8 @@ class Component extends DCLogic {
     if(!this._sb || !this._session) return;
     this.gcalEnsureToken()
       .then(()=>{ this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,lastError:null,needsReauth:false})}));
-        this.gcalListCalendars(); this.gcalSyncSoon(); })
+        this.gcalListCalendars(); this.gcalSyncSoon();
+        this.gcalPingSubscribe(); /* PP-EXT B3b (gcalSyncSoon re-asserts the channels themselves) */ })
       .catch(()=>{ /* not connected on this account — stay local */ });
   }
   gcalFetch(url,opts){ opts=opts||{};
@@ -3270,7 +3276,9 @@ class Component extends DCLogic {
     catch(e){ this.syncError(e); }
   }
   syncUnsubscribeRealtime(){ if(this._syncChan){ try{ this._sb.removeChannel(this._syncChan); }catch(e){} this._syncChan=null; }
-    if(this._syncKvChan){ try{ this._sb.removeChannel(this._syncKvChan); }catch(e){} this._syncKvChan=null; } /* PP-EXT B3a */ }
+    if(this._syncKvChan){ try{ this._sb.removeChannel(this._syncKvChan); }catch(e){} this._syncKvChan=null; } /* PP-EXT B3a */
+    this.gcalPingUnsubscribe(); /* PP-EXT B3b: the gcal doorbell dies with the session too */
+    this._gcalWatchAt=0; this._gcalWatchIds=null; }
   /* a single Realtime changefeed event -> apply one row (INSERT/UPDATE) or one delete. Our own writes echo
      back here; applyRemoteSnapshot's LWW makes them content-identical no-ops (no re-queue loop). */
   syncOnRemoteChange(p){
@@ -3556,6 +3564,7 @@ class Component extends DCLogic {
       if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return;
       const g=this.state.gcal; if(!g||!g.connected||!this._token) return;
       const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]); if(!ids.length) return;
+      this.gcalWatchSync(); /* PP-EXT B3b: cheap no-op unless the periodic re-assert is due (see gcalWatchNeedsSync) */
       /* PP-EXT: push before pull — while local writes are pending, importing would clobber them */
       if(this.loadQueue().length || this._gcalFlushing){ this.gcalFlushQueue(); return; }
       const sec=Math.max(20, parseInt(this.state.settings&&this.state.settings.gcalPollSec)||60);
@@ -3566,8 +3575,63 @@ class Component extends DCLogic {
   }
   /* Debounced sync after a settings edit (calendar selection / window change). */
   gcalSyncSoon(){ if(!this._token) return; clearTimeout(this._gcalSoon);
-    this._gcalSoon=setTimeout(()=>{ if(this.loadQueue().length||this._gcalFlushing){ this.gcalFlushQueue(); return; } /* PP-EXT: push first */
+    this._gcalSoon=setTimeout(()=>{ this.gcalWatchSync(); /* PP-EXT B3b: selection may have changed — re-assert channels */
+      if(this.loadQueue().length||this._gcalFlushing){ this.gcalFlushQueue(); return; } /* PP-EXT: push first */
       this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); }, 800); }
+
+  /* PP-EXT B3b: Google Calendar push (events.watch -> gcal-notify -> gcal_pings -> Realtime -> here).
+     This AUGMENTS the poll above, it doesn't replace it: watch channels expire (~1 week) and a tab that
+     stays closed past that would otherwise go silent, so the poll remains the backstop. */
+
+  /* pure — should we (re-)assert watch channels? True when the selection changed, or we never have,
+     or the periodic re-assert is due (cheap idempotent insurance against a channel we lost track of). */
+  gcalWatchNeedsSync(prevIds, nextIds, lastAt, now, resyncMs){
+    const norm=a=>(a||[]).slice().sort().join(' ');
+    if(!(nextIds||[]).length) return false;              /* nothing selected -> nothing to watch */
+    if(!lastAt) return true;
+    if(norm(prevIds)!==norm(nextIds)) return true;
+    return (now-lastAt) >= resyncMs;
+  }
+  /* Ask the gcal-watch Edge Function to make Google's channels match the selected calendars. Failure is
+     DEGRADED, not broken (the poll still imports), so this never raises the gcalError banner — it records
+     a push status line for Settings instead, and clears _gcalWatchAt so the next tick retries. */
+  gcalWatchSync(){
+    if(!this._sb || !this._session) return;
+    const g=this.state.gcal; if(!g || !g.connected) return;
+    const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]);
+    if(!this.gcalWatchNeedsSync(this._gcalWatchIds, ids, this._gcalWatchAt, Date.now(), this.GCAL_WATCH_RESYNC_MS)) return;
+    this._gcalWatchIds=ids; this._gcalWatchAt=Date.now();
+    this._sb.functions.invoke('gcal-watch', {body:{action:'sync', calendarIds:ids, clientId:g.clientId}})
+      .then(({data, error})=>{ if(error) throw error;
+        const n=(data&&data.watched||[]).length, bad=(data&&data.failed||[]);
+        this.setState(s=>({gcal:Object.assign({},s.gcal,{push:bad.length
+          ? {ok:false, msg:'Push unavailable for '+bad.length+' calendar(s) — polling instead.', at:Date.now()}
+          : {ok:true, msg:'Live push on '+n+' calendar'+(n===1?'':'s')+'.', at:Date.now()}})}));
+        if(bad.length) this._gcalWatchAt=0; })
+      .catch(e=>{ this._gcalWatchAt=0; /* retry on the next selection change / poll tick */
+        this.setState(s=>({gcal:Object.assign({},s.gcal,{push:{ok:false,
+          msg:'Push unavailable ('+String(e&&e.message||e).slice(0,80)+') — polling instead.', at:Date.now()}})})); });
+  }
+  /* Realtime doorbell: gcal-notify bumps our gcal_pings row; RLS means we only ever see our own. */
+  gcalPingSubscribe(){
+    if(!this._sb || this._gcalPingChan) return;
+    try{ this._gcalPingChan=this._sb.channel('pp-gcal-ping')
+        .on('postgres_changes', {event:'*', schema:'public', table:'gcal_pings'}, ()=>this.gcalOnPing())
+        .subscribe(); }
+    catch(e){ /* push is optional — a failed subscribe just leaves us on the poll */ }
+  }
+  gcalPingUnsubscribe(){ if(this._gcalPingChan){ try{ this._sb.removeChannel(this._gcalPingChan); }catch(e){} this._gcalPingChan=null; }
+    clearTimeout(this._gcalPingT); }
+  /* A push means a real remote change, so — unlike the poll — we import even in a background tab.
+     Debounced: one bulk edit in Google fans out as many notifications. */
+  gcalOnPing(){
+    if(!this.state.gcal || !this.state.gcal.connected || !this._token) return;
+    clearTimeout(this._gcalPingT);
+    this._gcalPingT=setTimeout(()=>{
+      if(this.loadQueue().length||this._gcalFlushing){ this.gcalFlushQueue(); return; } /* PP-EXT: push before pull */
+      this._lastGcalSync=Date.now(); this.gcalImport({silent:true});
+    }, this.GCAL_PING_DEBOUNCE_MS);
+  }
   /* ==== /PP-EXT ==== */
 
   /* ---------- settings ---------- */
@@ -3731,6 +3795,10 @@ class Component extends DCLogic {
           h('span',{style:{width:'9px',height:'9px',borderRadius:'2px',background:c.color||'#888',flex:'none'}}),
           h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},c.summary)))) : null,
       g.msg? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'6px 0'}}, g.msg) : null,
+      /* PP-EXT B3b: push status. Losing push is degraded-not-broken (the poll still imports), so it's a
+         plain status line here rather than the red error banner below. */
+      (g.connected&&g.push)? h('div',{style:{fontSize:'11.5px',color:g.push.ok?'var(--text-mut2)':'var(--warn, var(--text-mut2))',padding:'2px 0 4px'}},
+        (g.push.ok?'⚡ ':'· ')+g.push.msg) : null,
       /* PP-EXT: sync failures are never silent — last error + reauth hint render here (and as a drawer banner) */
       g.lastError? h('div',{style:{fontSize:'11.5px',color:'var(--danger)',padding:'2px 0 6px'}},
         '⚠ '+(g.needsReauth?'Sign-in expired — use "Sign in with Google" above. ':'Last sync error: ')+g.lastError.msg) : null);

@@ -12,6 +12,9 @@ schema change goes through a PR like the rest of the app.
 | `migrations/0002_grants.sql` | CRUD table privileges for the `authenticated` role (RLS filters rows, but Postgres still needs base grants; raw-SQL migrations don't inherit Supabase's defaults). |
 | `migrations/0003_gcal_tokens.sql` | `gcal_tokens` table for **durable Google Calendar sign-in**. RLS **on with no client policies** — the anon/JWT client gets zero access; only the `gcal-oauth` Edge Function (service_role) reads/writes the per-user refresh token. |
 | `functions/gcal-oauth/index.ts` | Edge Function (JWT-authed) for the Calendar auth-code flow. `exchange`: swap the browser's one-time code for a refresh token (stored in `gcal_tokens`) + first access token. `token`: re-mint an access token from the stored refresh token (or 404 `{connected:false}`). Holds the OAuth **client secret** (`GCAL_CLIENT_SECRET`), which never ships to the browser (rule 7). |
+| `migrations/0006_gcal_push.sql` | **B3b** push tables. `gcal_channels`: one `events.watch` channel per (owner, calendar) + its webhook token — secret, RLS-on-no-policies, service_role only (like `gcal_tokens`). `gcal_pings`: a content-free "something changed" doorbell the client reads over Realtime — normal `owner_id = auth.uid()` select policy. |
+| `functions/gcal-watch/index.ts` | **B3b** Edge Function (JWT-authed), one action: `sync` — make Google's watch channels match the calendars the client has selected (register / renew near-expiry / stop deselected). Idempotent. Gets its access token by calling `gcal-oauth`'s `token` action, so refresh-token handling lives in one place. |
+| `functions/gcal-notify/index.ts` | **B3b** the public webhook Google POSTs on every calendar change. Deployed `--no-verify-jwt` (Google cannot present a Supabase JWT); authenticates instead by the per-channel token in `gcal_channels`. Bumps `gcal_pings`; reads/writes no calendar data. |
 | `tests/rls_isolation.sql` | B0 milestone check — two accounts, cross-account read/write rejected. Manual (not `npm test`). |
 
 `config.toml` is **not committed here** — it holds your `project_id` and is created by
@@ -41,6 +44,24 @@ The OAuth client (Google Cloud) must be a **Web application** type; add each ser
 auto-injected `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY`; the client sends the
 public `clientId` in the request body.
 
+### Google Calendar push — B3b (owner setup)
+
+```sh
+supabase db push                                    # applies migrations/0006_gcal_push.sql
+supabase functions deploy gcal-watch                # JWT-authed (default)
+supabase functions deploy gcal-notify --no-verify-jwt   # PUBLIC — Google can't send a Supabase JWT
+```
+
+`--no-verify-jwt` is **required and deliberate** on `gcal-notify` only. It is safe because the function
+takes no request body, authenticates every hit against the per-channel secret token in `gcal_channels`
+(which RLS hides from all clients), and does nothing but bump a content-free `gcal_pings` doorbell — a
+forged hit can at most make your own client re-pull its own calendar, which it already does on a poll.
+
+No Google Cloud / Search Console step is needed: the Calendar API requires only that the receiving URL be
+HTTPS with a valid certificate (the domain-verification requirement is Drive-specific), and the Supabase
+functions origin satisfies that. Channels are registered by API call using the stored refresh token, so
+there is nothing to configure by hand.
+
 ## What is NOT synced (stays localStorage-only)
 
 `pp-run` (timer heartbeats), `pp-pomo`, `pp-notify` (fire-once ledger), `pp-prefs` (device-local UI
@@ -49,4 +70,6 @@ state). Device-local / ephemeral by nature — syncing them is overhead for no u
 ## Next
 
 B1 (pure, offline sync-diff layer + `tests/sync.gen.test.js`) lands in `index.html`; B2 wires the
-Supabase JS client and a Settings → Account magic-link panel. No network code exists yet at B0/B1.
+Supabase JS client and a Settings → Account magic-link panel. B3a gives habits/journal the same
+per-change funnel as tasks; **B3b (this change)** adds Google Calendar push. B3c (email morning summary)
+was **dropped by the owner (2026-07-15)** — the in-app popup stays the only summary channel.
