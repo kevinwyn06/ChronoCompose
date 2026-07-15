@@ -21,12 +21,44 @@ schema change goes through a PR like the rest of the app.
 `supabase link` in your own checkout. Don't commit it if it contains anything beyond the public ref;
 treat the DB password and `service_role` key as secrets (never in the repo or chat — CLAUDE.md rule 7).
 
+## ⚠ ALWAYS reconcile history before `db push`
+
+**Run `supabase migration list` first, every time.** Several migrations here (`0004`, `0005`) were
+originally applied **by hand in the SQL editor**, so the remote `supabase_migrations.schema_migrations`
+table had no record of them. `db push` then considers them pending and **replays them**.
+
+That is not hypothetical — it happened on 2026-07-15 while pushing `0006`: `db push` silently re-ran
+`0004` **and** `0005`. `0004` is only `GRANT`s (idempotent, harmless), but `0005` is
+
+```sql
+alter column spent type int using (spent * 60)
+```
+
+and Postgres **re-applies a non-trivial `USING` expression even when the column type is already `int`**
+(verified: a temp-table probe turned `5` into `300`). So every `tasks.spent` was multiplied by 60 a
+second time. It was silent — the values still fit in `int`, so nothing errored. It self-healed only by
+luck: a table rewrite doesn't fire `touch_updated_at`, so the untouched `updated_at` let the clients'
+correct local rows win row-level LWW and push back over the corruption. **Don't count on that.**
+
+If `migration list` shows a migration applied remotely but missing from history, record it **without
+re-running** it:
+
+```sh
+supabase migration list                     # compare Local vs Remote columns FIRST
+supabase migration repair --status applied 0004   # mark as applied, do NOT execute
+supabase db push                            # now only genuinely-new migrations run
+```
+
+Rule of thumb for authoring: a migration that rewrites data with `USING` is **not** idempotent. Prefer
+applying migrations only via `db push` so history stays honest.
+
 ## Applying (owner terminal steps — B0)
 
 Prereq: the owner's manual walkthrough steps 1–7 in `backend-migration-roadmap.md` are done
 (project created, CLI installed, `supabase login`, `supabase link --project-ref <ref>`).
 
 ```sh
+supabase migration list                # ALWAYS first — see the warning above
 supabase db push                       # apply migrations/000{1,2,3}_*.sql to the linked project
 # then, in the Supabase SQL editor, run supabase/tests/rls_isolation.sql and confirm every
 # RAISE NOTICE prints its "expect" value (no "RLS FAIL"). This satisfies the B0 milestone.
