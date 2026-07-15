@@ -63,11 +63,25 @@ test('anon workspace still gets the first-run demo seed (gating must not disable
   assert.ok(Array.isArray(c.state.tasks) && c.state.tasks.length > 0, 'anon should seed demo tasks');
 });
 
-test('importAnonInto: copies anon keys into a uid namespace but never clobbers existing account data', () => {
+test('WS_IMPORT_KEYS excludes the transient outbound queues/tombstones', () => {
+  const c = make();
+  const imp = c.WS_IMPORT_KEYS();
+  ['pp-sync-queue', 'pp-sync-tombstones', 'pp-sync-kv-queue', 'pp-sync-kv-tombstones',
+    'pp-gcal-queue', 'pp-gcal-tombstones'].forEach(k => {
+    assert.ok(!imp.includes(k), k + ' must NOT be importable');
+  });
+  // real data keys ARE importable
+  ['pp-tasks', 'pp-settings', 'pp-habits', 'pp-journal'].forEach(k => {
+    assert.ok(imp.includes(k), k + ' should be importable');
+  });
+});
+
+test('importAnonInto: copies anon DATA keys but never the sync queue nor existing account data', () => {
   const c = make();
   c._workspace = 'anon';
   c.lsSet('pp-tasks', 'ANON_TASKS');
   c.lsSet('pp-settings', 'ANON_SETTINGS');
+  c.lsSet('pp-sync-queue', '[{"op":"insert","id":"t1"}]'); // poisoned queue must NOT ride along
   // the account already has its own settings — import must leave those alone
   c._workspace = 'uidX'; c.lsSet('pp-settings', 'UID_SETTINGS');
   c._workspace = 'anon';                  // import reads the bare (anon) keys
@@ -75,6 +89,7 @@ test('importAnonInto: copies anon keys into a uid namespace but never clobbers e
   c._workspace = 'uidX';
   assert.equal(c.lsGet('pp-tasks'), 'ANON_TASKS');      // copied (account had none)
   assert.equal(c.lsGet('pp-settings'), 'UID_SETTINGS'); // preserved (not overwritten)
+  assert.equal(c.lsGet('pp-sync-queue'), null);         // queue NOT imported (the 2026-07-15 bug)
   // and the anon originals are still intact
   c._workspace = 'anon';
   assert.equal(c.lsGet('pp-tasks'), 'ANON_TASKS');

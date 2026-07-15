@@ -3013,26 +3013,29 @@ class Component extends DCLogic {
     'pp-sync-kv-tombstones','pp-gcal-queue','pp-gcal-tombstones']; }
   /* does the anon (signed-out) workspace hold real task data worth offering to import on first sign-in? */
   anonHasData(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length>0; }catch(e){ return false; } }
-  /* one-time first-sign-in import: copy each anon (bare) key into the uid namespace where that account has
-     nothing yet. Reads bare, writes suffixed directly (this._workspace is still 'anon' at call time). */
-  importAnonInto(uid){ if(!uid) return; this.WS_SCOPED_KEYS().forEach(base=>{ try{ const v=localStorage.getItem(base);
+  /* data-only subset of the scoped keys — the outbound sync/gcal queues + tombstones are transient push
+     state and must NEVER be imported (replaying anon's queued ops under a different account re-triggers
+     the RLS/PK collision — the 2026-07-15 bug). */
+  WS_IMPORT_KEYS(){ return this.WS_SCOPED_KEYS().filter(k => !/queue|tombstones/.test(k)); }
+  /* copy each anon (bare) DATA key into the uid namespace where that account has nothing yet. Reads bare,
+     writes suffixed directly. NOTE: not wired into sign-in (that is a pure clean switch, see
+     syncBeginWorkspaceSwitch); reserved for a future EXPLICIT Settings import that also regenerates task
+     ids so imported rows can't collide with another account's cloud rows under the global tasks.id PK. */
+  importAnonInto(uid){ if(!uid) return; this.WS_IMPORT_KEYS().forEach(base=>{ try{ const v=localStorage.getItem(base);
     if(v==null) return; const tgt=base+'::'+uid; if(localStorage.getItem(tgt)==null) localStorage.setItem(tgt, v); }catch(e){} }); }
   /* persist the active workspace and reload so the constructor re-hydrates every state field from the new
      namespace — simpler and safer than manually re-reading ~15 fields mid-session. */
   switchWorkspace(ws){ ws=ws||'anon'; this._workspace=ws; try{ localStorage.setItem('pp-workspace', ws); }catch(e){}
     try{ location.reload(); }catch(e){} }
-  /* account change seen in syncOnAuth: on a brand-new account that has local anon data, offer a one-time
-     import; then stamp the account and switch (reload) into its namespace. Guarded so the duplicate
-     INITIAL_SESSION callback can't double-fire the prompt/switch. */
+  /* account change seen in syncOnAuth: **pure clean switch** — stamp the account and switch (reload) into
+     its own namespace, NEVER folding anon/other-account local data in. Auto-importing shared-profile data
+     would push another account's task ids and re-trigger the RLS/PK collision (2026-07-15). The anon data
+     is untouched and reappears when signed out; a future explicit id-regenerating Settings import can use
+     importAnonInto. Guarded so the duplicate INITIAL_SESSION callback can't double-fire the switch. */
   syncBeginWorkspaceSwitch(session){
     if(this._wsSwitching || !session || !session.user) return; this._wsSwitching=true;
-    const user=session.user, uid=user.id;
-    let firstSignIn=false; try{ firstSignIn=!(JSON.parse(localStorage.getItem('pp-accounts')||'{}')[uid]); }catch(e){}
-    const finish=(doImport)=>{ if(doImport) this.importAnonInto(uid); this.syncRecordAccount(user); this.switchWorkspace(uid); };
-    if(firstSignIn && this.anonHasData()){
-      let yes=false; try{ yes=window.confirm('Import this device’s local (signed-out) data into this account?\n\nOK = copy it into '+(user.email||'this account')+'.   Cancel = start this account clean.'); }catch(e){}
-      finish(yes);
-    } else finish(false);
+    this.syncRecordAccount(session.user);
+    this.switchWorkspace(session.user.id);
   }
   /* Settings → Account: email a magic link. The link lands on this page URL (must be an allowed Supabase
      redirect); Supabase parses it on next load and fires syncOnAuth. We never see or store a password. */
