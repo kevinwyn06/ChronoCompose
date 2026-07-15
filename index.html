@@ -2832,9 +2832,13 @@ class Component extends DCLogic {
     (before||[]).forEach(t=>{ if(!aById[t.id]) ops.push({op:'delete', id:t.id}); });
     return ops;
   }
-  /* a pulled Postgres row -> a normalized local task (drop owner_id, map updated_at -> updatedAt). */
+  /* a pulled Postgres row -> a normalized local task (drop owner_id, map updated_at -> updatedAt).
+     PP-EXT: spent/predicted are stored server-side as INTEGER SECONDS (the DB columns are int, but the
+     client accumulates fractional minutes — see syncRowForWrite); convert back to minutes on the way in. */
   rowToTask(row){ const o=Object.assign({}, row); delete o.owner_id;
     if('updated_at' in o){ o.updatedAt=o.updated_at; delete o.updated_at; }
+    if(o.spent!=null) o.spent = o.spent/60;         /* PP-EXT: seconds -> minutes */
+    if(o.predicted!=null) o.predicted = o.predicted/60; /* PP-EXT: seconds -> minutes */
     return this.normalizeTask(o); }
   /* merge a pulled snapshot into local tasks. Row-level LWW: newer updatedAt wins; a tie keeps local
      (avoids needless churn/echo). Local-only rows are kept (pending pushes). A remote row whose id was
@@ -3011,8 +3015,15 @@ class Component extends DCLogic {
      enqueued during the in-flight write. */
   syncOpKey(o){ return (o.op==='delete'?'d:':'u:')+o.id+':'+(o.op==='delete'?'':JSON.stringify(o.row||null)); }
   /* the row PostgREST writes: mirrored row minus updatedAt (the DB column is snake updated_at and its
-     default/trigger owns the clock) and minus owner_id (server fills it from auth.uid()). */
-  syncRowForWrite(row){ const r=Object.assign({}, row); delete r.updatedAt; return r; }
+     default/trigger owns the clock) and minus owner_id (server fills it from auth.uid()).
+     PP-EXT: spent/predicted are fractional minutes locally (timer accumulates sub-minute segments; a
+     manual-predict override stores the computed allotment) but their DB columns are `int`. Persist them
+     as INTEGER SECONDS — round(minutes*60) — so the write validates AND keeps second-level precision
+     (migration 0005; rowToTask converts back). Fixes "invalid input syntax for type integer". */
+  syncRowForWrite(row){ const r=Object.assign({}, row); delete r.updatedAt;
+    if(r.spent!=null) r.spent = Math.round(r.spent*60);         /* PP-EXT: minutes -> seconds */
+    if(r.predicted!=null) r.predicted = Math.round(r.predicted*60); /* PP-EXT: minutes -> seconds */
+    return r; }
   /* real flush: coalesced upserts + a single bulk delete. Keeps the queue on failure (retried on the next
      commit / re-auth) and drains anything enqueued mid-send. */
   syncFlushQueue(){

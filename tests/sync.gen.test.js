@@ -265,6 +265,31 @@ test('syncRowForWrite: strips updatedAt (the DB owns updated_at) and never sends
   assert.equal(r.name, 'Task'); // real columns survive
 });
 
+// spent/predicted are int-SECONDS in Postgres but fractional-minutes locally (migration 0005 +
+// syncRowForWrite/rowToTask). The write must round to whole seconds so the int column validates.
+test('syncRowForWrite: spent/predicted (fractional minutes) -> integer seconds', () => {
+  const c = make();
+  // 2009.2121333333334 seconds = the value that threw "invalid input syntax for type integer".
+  const mins = 2009.2121333333334 / 60;
+  const r = c.syncRowForWrite(c.syncRowOf(task(c, { spent: mins, predicted: mins })));
+  assert.equal(r.spent, 2009);            // round(mins*60)
+  assert.equal(r.predicted, 2009);
+  assert.equal(Number.isInteger(r.spent), true);
+  assert.equal(Number.isInteger(r.predicted), true);
+});
+
+test('rowToTask: integer-seconds spent/predicted -> minutes; write/read round-trips to ~1s', () => {
+  const c = make();
+  const mins = 33.4869;
+  const row = c.syncRowForWrite(c.syncRowOf(task(c, { spent: mins, predicted: mins })));
+  row.owner_id = '00000000-0000-0000-0000-00000000000a';
+  row.updated_at = new Date(1_700_000_000_000).toISOString();
+  const t = c.rowToTask(row);
+  assert.equal(t.spent, 2009 / 60);       // seconds -> minutes
+  assert.ok(Math.abs(t.spent - mins) < 1 / 60); // within one second of the original
+  assert.ok(Math.abs(t.predicted - mins) < 1 / 60);
+});
+
 test('syncOpKey: distinct per id/op, stable across a JSON round-trip, changes when the row content changes', () => {
   const c = make();
   const put1 = { op:'update', id:'t1', row:{ id:'t1', name:'A' } };
