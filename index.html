@@ -13,6 +13,10 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
 <!-- PP-EXT: local config (Google Client ID, Supabase URL/anon key). Not overwritten by design re-syncs; safe to commit. -->
 <script src="./config.js"></script>
+<!-- Vendored chrono-node (natural-language date extraction). Built by tools/build-chrono.mjs from the
+     pinned chrono-node devDep; loaded the same no-build <script> way as React/Supabase. Lives OUTSIDE
+     the text/x-dc document, so it is not part of the Claude-Design sync. -->
+<script src="./chrono.min.js"></script>
 <!-- /PP-EXT -->
 <script src="./support.js"></script>
 </head>
@@ -248,8 +252,13 @@ class Component extends DCLogic {
     this._syncKvSending = false;               // PP-EXT B3a: in-flight guard for the habits/journal blob flush
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
-    this.barH = 16;
+    this.barH = 20; /* PP-EXT (C1): a few px taller than the old 16 → a bigger vertical drag target on the Gantt bar */
     this.headH = 48;
+    /* PP-EXT (C1/C2): Gantt-bar draggability + sub-day zoom. */
+    this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
+    this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
+    this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
+    this.GANTT_HOUR_GRID_DAYW = 240; // at/above this px-per-day, draw hour gridlines + ticks (240 ⇒ 10px/hr)
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
     this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
@@ -331,16 +340,20 @@ class Component extends DCLogic {
     const pf = this.loadPrefs();
     this.ROWH = {compact:30, default:40, comfy:52};
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
-    /* PP-EXT: the demo seed is only for the anon (signed-out/first-run) workspace. An ACCOUNT namespace
-       starts empty and is populated by syncInitialSync's cloud pull — otherwise a fresh account would
-       seed stable-id tasks (t1,t2,…) and push them up, re-triggering the cross-account id collision. */
-    let seed = this.loadTasks() || (this._workspace==='anon' ? this.buildSeed() : []);
+    /* PP-EXT V0.2: NO workspace auto-seeds anymore. A fresh (empty) workspace boots empty and shows the
+       empty-state + one-time 3-step first-run (renderFirstRun) instead of silent sample clutter
+       (product-vision §10.2 / ROADMAP V0 — "the first-run should teach, not seed"). The demo tasks
+       (buildSeed) are now an explicit, labeled, dismissible opt-in via loadDemo(). Accounts already booted
+       empty (populated by syncInitialSync's cloud pull); anon now matches — no more stable-id seed push. */
+    let seed = this.loadTasks() || [];
     seed = seed.map(t=>this.normalizeTask(t));
     seed = this.runOnceMigrations(seed); /* PP-EXT: scrub old all-day planned defaults, once */
     if(Array.isArray(pf.rowOrder)) seed = this.applyOrder(seed, pf.rowOrder);
     /* PP-EXT: main-view selector (Gantt · 4-Day · Week · Month · Schedule · Today) + per-view-group split
        widths, both persisted in pp-prefs. Migrate the old 'calendar' toggle value to the new 'month'. */
-    const ppMainView = (pf.mainView==='calendar') ? 'month' : (pf.mainView || 'gantt');
+    /* PP-EXT V0.1: first-run landing = Dashboard (Dash), not raw Gantt — lead with the auto-scheduling moat
+       (product-vision §10.1 / ROADMAP V0). Only when there's no saved pf.mainView; a returning user's choice wins. */
+    const ppMainView = (pf.mainView==='calendar') ? 'month' : (pf.mainView || 'dashboard');
     const ppViewSplit = Object.assign({cal:50, agenda:20}, pf.viewSplit||{});
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
       splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
@@ -367,7 +380,8 @@ class Component extends DCLogic {
       sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[],
       spentScope: pf.spentScope==='life' ? 'life' : 'today', /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */
       dashMode: pf.dashMode||'plan', /* PP-EXT Phase D: Dashboard's fixed full-screen mode — plan | focus | review */
-      planView: pf.planView||null /* PP-EXT Phase D: Plan tab's own scheduling sub-view (independent of state.mainView, which stays 'dashboard') */ };
+      firstRunSeen: !!pf.firstRunSeen, /* PP-EXT V0.2: one-time 3-step first-run coach — dismissed once, never re-shown (persisted per workspace in pp-prefs). */
+      planView: pf.planView||'schedule' /* PP-EXT Phase D: Plan tab's own scheduling sub-view (independent of state.mainView, which stays 'dashboard'). PP-EXT V0.1: first-run default = 'schedule' (auto-scheduling moat), not raw gantt; a saved pf.planView still wins. */ };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -430,6 +444,7 @@ class Component extends DCLogic {
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       pin:null, /* PP-EXT: drag-pin {day, start, dur} — a block dragged in the drawer, fixed for that day only (Phase 5; see dragBlock) */
+      demo:false, /* PP-EXT V0.2: marks a task from the opt-in demo seed (loadDemo) — drives the dismissible "demo tasks" banner + Clear demo. Not in SYNC_FIELDS, so it never mirrors to the backend (signed-in demo becomes real data after a sync round-trip; the banner is a local convenience, chiefly for anon). */
       updatedAt:null, /* PP-EXT B1: row-level last-write-wins clock (epoch ms). Stamped by commit() when sync is on; null until then (see stampUpdated / applyRemoteSnapshot). */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
   }
@@ -603,6 +618,31 @@ class Component extends DCLogic {
     ];
   }
 
+  /* ==== PP-EXT V0.2: empty state + one-time 3-step first-run + opt-in labeled demo ====
+     A fresh workspace no longer auto-seeds (see the constructor). Instead:
+       - renderFirstRun paints a legible empty state (with the 3-step coach on first run) when there are
+         no tasks, and a floating coach once the first task exists — until the user dismisses it.
+       - loadDemo() drops the old sample tasks in as an explicit, LABELED, dismissible demo (Clear demo).
+     The "seen" flag lives in pp-prefs (per-workspace) so the coach never re-shows. Helpers below are
+     pure/State-only so they're unit-testable. */
+  activeTaskCount(){ return this.state.tasks.reduce((n,t)=>n+(t.archivedAt?0:1),0); }
+  hasDemoTasks(){ return this.state.tasks.some(t=>t.demo); }
+  /* current step of the 3-step narration, derived from state: 0 = add your first task; 1 = a task exists
+     (it auto-schedules) → the "drag to adjust" step is now the live one. Kept coarse on purpose — richer
+     gesture hooks (the actual drag) land with the Gantt-native editing in V1. */
+  firstRunStep(){ return this.activeTaskCount()===0 ? 0 : 1; }
+  markFirstRunSeen(){ this.setState({firstRunSeen:true}); this.savePrefs({firstRunSeen:true}); }
+  /* Explicit opt-in: adds the sample tasks as a clearly-labeled demo. Fresh random ids (NOT the stable
+     t1..t7) so a signed-in account loading the demo can't re-trigger the cross-account tasks.id collision
+     the namespacing work fixed (tasks.md → namespacing). All deps in buildSeed are empty, so re-id is safe. */
+  loadDemo(){
+    this.commit(tasks=>{
+      this.buildSeed().forEach(s=>{ tasks.push(Object.assign({}, s, {id:'d'+Math.random().toString(36).slice(2,8), demo:true})); });
+    });
+    if(!this.state.firstRunSeen) this.markFirstRunSeen();
+  }
+  clearDemo(){ this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(tasks[i].demo) tasks.splice(i,1); } }); }
+
   /* ---------- lifecycle ---------- */
   componentDidMount(){
     this._onKey = (e)=>this.onKey(e);
@@ -698,7 +738,8 @@ class Component extends DCLogic {
   }
   onKey(e){
     const k=e.key.toLowerCase();
-    if(e.key==='Escape'){ if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail(); return; }
+    if(e.key==='Escape'){ if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
+      else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail(); return; }
     if(this.isEditingTarget(e)) {
       if((e.ctrlKey||e.metaKey) && (k==='z'||k==='y')) return; // let inputs handle their own undo
     }
@@ -1136,6 +1177,22 @@ class Component extends DCLogic {
        neither            → FLEX: packs anywhere (pre-pin behavior).
      Inference: timed calendar events → fixed; everything else → due-by (the Due column means "due"). */
   occOf(t){ return t.recur ? this.currentOcc(t) : {start:t.start, end:t.end}; }
+  /* PP-EXT (V1.2 ghost blocks): derive a render-time span for a task whose start and/or end are still
+     null, WITHOUT mutating the task — the nulls stay in data (so gcal-outbound keeps skipping dateless
+     tasks, and the task can never go overdue on a date it was never given). `today` = start-of-today ms.
+     Returns {start,end,ghostStart,ghostEnd}: ghostStart/ghostEnd flag which edge is derived (grey/dotted).
+       • solid (both set)      → the real span, no ghosts.
+       • double-ghost (both null) → today→today+DAY, re-derived each day (always actionable, never overdue).
+       • half-ghost (start set)   → a non-overdue derived end = max(start,today)+DAY.
+       • deadline (end set only)  → a ghost start at today (or end-DAY if the deadline is already past),
+                                    so the bar runs from now to the due date without inventing a real start. */
+  ghostSpan(t, today){
+    const DAY=this.DAY, s=t.start, e=t.end;
+    if(s!=null && e!=null) return {start:s, end:e, ghostStart:false, ghostEnd:false};
+    if(s==null && e==null) return {start:today, end:today+DAY, ghostStart:true, ghostEnd:true};
+    if(s!=null && e==null) return {start:s, end:Math.max(s,today)+DAY, ghostStart:false, ghostEnd:true};
+    return {start:Math.min(today, e-DAY), end:e, ghostStart:true, ghostEnd:false};
+  }
   /* PP-EXT: the occurrence relevant to day B (multi-day timelines). For today (or B omitted) this is the exact
      current-occurrence behaviour (occOf); for another day it's the occurrence overlapping [B, B+DAY), so a Week
      column schedules that day's own instance of a repeating task. Non-recurring tasks have a single occurrence. */
@@ -1846,6 +1903,26 @@ class Component extends DCLogic {
   removeDep(toId,fromId){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===toId); if(t) t.deps=(t.deps||[]).filter(d=>this.depId(d)!==fromId); }); }
   isScheduled(t){ return t.start!=null && t.end!=null; }
   clearDate(id,key){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; if(key==='completion'){ t.completion=null; } else { t[key]=null; } }); }
+  /* PP-EXT: set a start/end instant. Counterpart to clearDate — until this existed, dates could only be
+     cleared, never edited (they arrived via quick-add parsing or gcal import only). Keeps the window
+     ordered: dragging one edge past the other carries the other edge with it rather than inverting
+     [start,end], which computeAllotted/dayIntervals assume is non-negative. */
+  setDate(id,key,ms){
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      t[key]=ms;
+      /* An all-day end is the EXCLUSIVE next-day midnight, so the carried edge has to be re-encoded in
+         those terms too — copying the raw instant across would leave end==start, which renders (end-1)
+         as the day BEFORE the start and reads as an inverted window. */
+      if(key==='start' && t.end!=null){
+        const minEnd = t.allDay ? this.atMidnight(new Date(ms)).getTime()+this.DAY : ms;
+        if(t.end<minEnd) t.end=minEnd;
+      }
+      if(key==='end' && t.start!=null){
+        const maxStart = t.allDay ? ms-this.DAY : ms;
+        if(t.start>maxStart) t.start=maxStart;
+      }
+    });
+  }
 
   dependsOn(a,b,byId){ // does a transitively depend on b (predecessor chain)
     const seen={}; const stack=[a];
@@ -2052,6 +2129,12 @@ class Component extends DCLogic {
     return this.timelineFrom(min,max);
   }
   xOf(ms){ return (ms-this._tl.start)/this.DAY*this.state.dayW; }
+  /* PP-EXT (C2): clamp a proposed day-width to the zoom bounds (pure — testable without a DOM). */
+  clampDayW(v){ return Math.max(this.GANTT_DAYW_MIN, Math.min(this.GANTT_DAYW_MAX, v)); }
+  /* PP-EXT (C1): the end a bar should DRAW to — a zero/negative span (start>=end) renders one full day so it's
+     never a zero-length, undraggable point; a real forward span (incl. a ghost's derived end) draws as itself.
+     Pure; the pixel-floor (BAR_MIN_PX) is applied at render on top of this. */
+  effBarEnd(st, en){ return en>st ? en : st+this.DAY; }
 
   /* ---------- drag ---------- */
   startBarDrag(e,task,occIdx,mode){
@@ -2294,11 +2377,77 @@ class Component extends DCLogic {
     if(m){ return {h:parseInt(m[1]), m:parseInt(m[2]), len:m[0].length, idx:m.index}; }
     return null;
   }
+  /* PP-EXT: parse ONE clock token ("5", "17:00", "4pm", "4:30 p.m.") → {h,m,mer} | null.
+     mer is 'am'|'pm'|null; null means no meridiem was written, so it may inherit one from a range partner. */
+  parseClockTok(tok){
+    const m=/^\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*$/i.exec(tok||'');
+    if(!m) return null;
+    const h=parseInt(m[1]), mm=m[2]?parseInt(m[2]):0;
+    if(h>23 || mm>59) return null;
+    return {h, m:mm, mer: m[3] ? (/^p/i.test(m[3]) ? 'pm' : 'am') : null};
+  }
+  /* Resolve a token to a 24h hour, applying its own meridiem or an inherited one. */
+  clockH(tok, inherit){ const M=tok.mer||inherit; let h=tok.h; if(M){ h=h%12; if(M==='pm') h+=12; } return h; }
+  CLOCK_TOK_RE(){ return '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?'; }
+  /* PP-EXT: a clock RANGE — "from 17:00 to 18:00", "5-6pm", "9am to 10:30am". Returns
+     {sh,sm,eh,em,txt} | null. Without this the old parser matched only the first clock and threw the
+     second away ("gym 5-6pm" even scheduled at 18:00, the range's END, and leaked "5-6pm" into the title).
+     A bare left side inherits the right's meridiem ("5-6pm" → 17:00–18:00); if inheriting would invert
+     the range ("11-1pm") the left falls back to am. A bare-vs-bare pair with no ':' or am/pm anywhere
+     ("5 to 6") is rejected as too ambiguous — it more likely means a count than a time. */
+  parseClockRange(s){
+    const T=this.CLOCK_TOK_RE();
+    const re=new RegExp('\\b(?:from\\s+)?('+T+')\\s*(?:-|–|—|to|until|till|thru|through)\\s*('+T+')(?=\\s|$)','i');
+    const m=s.match(re); if(!m) return null;
+    const a=this.parseClockTok(m[1]), b=this.parseClockTok(m[2]); if(!a||!b) return null;
+    if(!a.mer && !b.mer && !/:/.test(m[1]) && !/:/.test(m[2])) return null;
+    const eh=this.clockH(b,null), em=b.m;
+    let sh=this.clockH(a, a.mer?null:b.mer); const sm=a.m;
+    if(!a.mer && b.mer && sh>=12 && (sh*60+sm)>=(eh*60+em)) sh-=12;
+    return {sh, sm, eh, em, txt:m[0]};
+  }
+  /* PP-EXT: an explicit duration phrase — "for 30m", "for 1.5h", "for 90 minutes" → {min,txt} | null.
+     Must be consumed before the relative-offset pass, which would read "for 1 hour" as a +1h date offset. */
+  parseDurPhrase(s){
+    /* PP-EXT V1.1B: "for 30m", "takes 2h", or a standalone "~45m" duration (R1 movable budget). A bare
+       unprefixed number+unit is NOT accepted (too many false positives — "buy 2 apples", "run 5k"). */
+    let m=s.match(/\b(?:for|takes?)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i);
+    if(!m) m=s.match(/(?:^|\s)~\s*(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i);
+    if(!m) return null;
+    const n=parseFloat(m[1]), unit=m[2].toLowerCase();
+    const min=/^h/.test(unit) ? Math.round(n*60) : Math.round(n);
+    return min>0 ? {min, txt:m[0]} : null;
+  }
+  /* PP-EXT: remove `frag` from `s` together with any connector word immediately before it ("submit report
+     by friday" → "submit report"), so prepositions don't survive into the task title. */
+  eatWithPrep(s, frag){
+    const i=s.indexOf(frag); if(i<0) return s.replace(frag,' ');
+    const pm=/\b(?:by|on|in|due(?:\s+on)?|before|deadline|no\s+later\s+than|starting|starts|start|begins|begin|after|from|at)\s+(?:the\s+)?$/i.exec(s.slice(0,i));
+    return s.slice(0, pm?i-pm[0].length:i) + ' ' + s.slice(i+frag.length);
+  }
+  /* PP-EXT: the concrete first date a recurrence rule lands on (spec §5 P1·C). A recurring task whose
+     anchor resolved to null would land on no calendar day at all and vanish from every view, so this
+     never returns null — kinds without a day-of-week component start from the base day itself. */
+  _firstRecurOccurrence(recur, now){
+    const base=this.atMidnight(new Date(now));
+    if(recur && recur.kind==='weekdays' && recur.days && recur.days.length){
+      const WD=this.WD(); let best=null;
+      for(const w of recur.days){ const wi=WD.indexOf(w); if(wi<0) continue;
+        let add=(wi-base.getDay()+7)%7; if(add===0) add=7;
+        const d=new Date(base); d.setDate(d.getDate()+add);
+        if(best==null||d<best) best=d; }
+      return best ? best.getTime() : base.getTime();
+    }
+    return base.getTime(); // day/week/month/year/weekday/monthDay: the base day is the first occurrence
+  }
   parseDateText(text, baseMs){
     const now = baseMs!=null ? new Date(baseMs) : new Date();
     let s = ' '+text.toLowerCase()+' ';
-    const result = {date:null, recur:null, priority:null, labels:[], until:null, rest:text};
-    const MO=this.MONTHS(), WDn=this.WD();
+    /* PP-EXT: `end`/`dur` carry a parsed clock range or "for <dur>"; `clock` records whether an explicit
+       time was written (a bare date defaults to 9am and must NOT be treated as a real clock commitment). */
+    const result = {date:null, end:null, dur:null, clock:false, recur:null, priority:null, labels:[], until:null, rest:text};
+    /* PP-EXT: the MONTHS()/WD() name tables the old hand-rolled date branches indexed are no longer
+       read here — chrono owns month/weekday recognition now. Both accessors survive for other callers. */
     let consumed=[];
     const eat=(re)=>{ const m=s.match(re); if(m){ consumed.push(m[0].trim()); s=s.replace(m[0],' '); } return m; };
 
@@ -2310,6 +2459,13 @@ class Component extends DCLogic {
     let lm; const lre=/@([a-z0-9_-]+)/g; let lx;
     while((lx=lre.exec(s))){ result.labels.push(lx[1]); }
     s=s.replace(/@([a-z0-9_-]+)/g,' ');
+
+    /* ---- clock range / duration ----
+       PP-EXT: must run BEFORE the repeat-until clause and the relative-offset pass — "meeting from 5
+       until 6pm" would otherwise be read as a repeat-until date, and "for 1 hour" as a +1h offset. */
+    const range=this.parseClockRange(s); if(range) s=s.replace(range.txt,' ');
+    const durPh=range?null:this.parseDurPhrase(s); if(durPh) s=s.replace(durPh.txt,' ');
+    if(durPh) result.dur=durPh.min;
 
     // ---- repeat-until ("until/till/through <date>") ----
     let um=s.match(/\b(?:until|till|thru|through|up\s+to)\s+(.+?)\s*$/);
@@ -2324,55 +2480,161 @@ class Component extends DCLogic {
     if((rm=s.match(/\bevery\s+weekday\b/))){ result.recur={kind:'weekday',label:'Every weekday'}; eatAll(/\bevery\s+weekday\b/); }
     else if((rm=s.match(/\bevery\s+(\d+)\s+(day|week|month)s?\b/))){ const n=parseInt(rm[1]); result.recur={kind:rm[2],n,label:'Every '+n+' '+rm[2]+(n>1?'s':'')}; eatAll(/\bevery\s+\d+\s+(?:day|week|month)s?\b/); }
     else if((rm=s.match(/\bevery\s+(\d+)(?:st|nd|rd|th)?\b/))){ result.recur={kind:'monthDay',day:parseInt(rm[1]),label:'Monthly on '+rm[1]}; eatAll(/\bevery\s+\d+(?:st|nd|rd|th)?\b/); }
-    else if((rm=s.match(/\bevery\s+(mon|tue|wed|thu|fri|sat|sun)[a-z]*(?:\s*,?\s*(?:and\s+)?(mon|tue|wed|thu|fri|sat|sun)[a-z]*)*\b/))){ result.recur={kind:'weekdays',days:rm[0].match(/(mon|tue|wed|thu|fri|sat|sun)/g),label:rm[0].trim()}; eatAll(/\bevery\s+(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*(?:\s*,?\s*(?:and\s+)?(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*)*\b/); }
-    else if((rm=s.match(/\b(daily|every\s+day)\b/))){ result.recur={kind:'day',n:1,label:'Daily'}; eatAll(/\b(?:daily|every\s+day)\b/); }
-    else if((rm=s.match(/\b(weekly|every\s+week)\b/))){ result.recur={kind:'week',n:1,label:'Weekly'}; eatAll(/\b(?:weekly|every\s+week)\b/); }
-    else if((rm=s.match(/\b(monthly|every\s+month)\b/))){ result.recur={kind:'month',n:1,label:'Monthly'}; eatAll(/\b(?:monthly|every\s+month)\b/); }
-    else if((rm=s.match(/\b(yearly|annually|every\s+year)\b/))){ result.recur={kind:'year',n:1,label:'Yearly'}; eatAll(/\b(?:yearly|annually|every\s+year)\b/); }
+    /* PP-EXT: `mon(?!th)` — "mon" also prefixes "month(ly)", and `[a-z]*` then ate the "th", so this
+       weekday branch hijacked "every month" into a weekly-on-Monday rule before the monthly branch below
+       could ever see it. The day list needs the same guard or it re-extracts a phantom 'mon'. */
+    else if((rm=s.match(/\bevery\s+(mon(?!th)|tue|wed|thu|fri|sat|sun)[a-z]*(?:\s*,?\s*(?:and\s+)?(mon(?!th)|tue|wed|thu|fri|sat|sun)[a-z]*)*\b/))){ result.recur={kind:'weekdays',days:rm[0].match(/(mon(?!th)|tue|wed|thu|fri|sat|sun)/g),label:rm[0].trim()}; eatAll(/\bevery\s+(?:mon(?!th)|tue|wed|thu|fri|sat|sun)[a-z]*(?:\s*,?\s*(?:and\s+)?(?:mon(?!th)|tue|wed|thu|fri|sat|sun)[a-z]*)*\b/); }
+    /* PP-EXT: tolerate a stray plural ("every months") — it would otherwise fall through to no rule at all. */
+    else if((rm=s.match(/\b(daily|every\s+days?)\b/))){ result.recur={kind:'day',n:1,label:'Daily'}; eatAll(/\b(?:daily|every\s+days?)\b/); }
+    else if((rm=s.match(/\b(weekly|every\s+weeks?)\b/))){ result.recur={kind:'week',n:1,label:'Weekly'}; eatAll(/\b(?:weekly|every\s+weeks?)\b/); }
+    else if((rm=s.match(/\b(monthly|every\s+months?)\b/))){ result.recur={kind:'month',n:1,label:'Monthly'}; eatAll(/\b(?:monthly|every\s+months?)\b/); }
+    else if((rm=s.match(/\b(yearly|annually|every\s+years?)\b/))){ result.recur={kind:'year',n:1,label:'Yearly'}; eatAll(/\b(?:yearly|annually|every\s+years?)\b/); }
 
-    // ---- clock time ----
-    let clock=null; const cm=this.parseClock(s);
-    if(cm){ clock={h:cm.h,m:cm.m}; s=s.replace(/\b(at\s+)?\d{1,2}(:\d{2})?\s*(am|pm)?\b/i, m=>{ return (/\d/.test(m)&&(m.includes(':')||/am|pm/i.test(m)||/at/i.test(m)))?' ':m; }); }
-
-    let date=null;
-    const setHM=(d)=>{ if(clock){ d.setHours(clock.h,clock.m,0,0); } else { d.setHours(now.getHours(),now.getMinutes(),0,0); } return d; };
-
-    // today / tomorrow / yesterday
-    if(/\btoday\b|\btod\b/.test(s)){ date=this.atMidnight(new Date(now)); s=s.replace(/\btoday\b|\btod\b/,' '); }
-    else if(/\btomorrow\b|\btom\b/.test(s)){ date=this.atMidnight(new Date(now)); date.setDate(date.getDate()+1); s=s.replace(/\btomorrow\b|\btom\b/,' '); }
-    else if(/\byesterday\b/.test(s)){ date=this.atMidnight(new Date(now)); date.setDate(date.getDate()-1); s=s.replace(/\byesterday\b/,' '); }
-
-    // next month / end of month / mid <month>
-    if(!date){ let m;
-      if((m=s.match(/\bnext\s+month\b/))){ date=this.atMidnight(new Date(now.getFullYear(),now.getMonth()+1,1)); s=s.replace(m[0],' '); }
-      else if((m=s.match(/\bend\s+of\s+month\b/))){ date=this.atMidnight(new Date(now.getFullYear(),now.getMonth()+1,0)); s=s.replace(m[0],' '); }
-      else if((m=s.match(/\bmid\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/))){ const mi=MO.indexOf(m[1]); date=this.atMidnight(new Date(now.getFullYear(),mi,15)); s=s.replace(m[0],' '); }
-    }
-    // weekday name (next <wd>) / "1 week from tues"
-    if(!date){ let m;
-      if((m=s.match(/\b(\d+)\s+weeks?\s+from\s+(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/))){
-        const wi=WDn.indexOf(m[2]); let d=this.atMidnight(new Date(now)); let add=(wi-d.getDay()+7)%7; if(add===0)add=7; d.setDate(d.getDate()+add+7*parseInt(m[1])); date=d; s=s.replace(m[0],' ');
-      } else if((m=s.match(/\b(?:next\s+)?(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/))){
-        const wi=WDn.indexOf(m[1]); let d=this.atMidnight(new Date(now)); let add=(wi-d.getDay()+7)%7; if(add===0)add=7; d.setDate(d.getDate()+add); date=d; s=s.replace(m[0],' ');
+    /* ---- PP-EXT: date/time extraction via chrono-node (vendored `chrono.min.js`) ----
+       The pre-pass above already stripped priority, labels, the clock range and the explicit duration
+       phrase, and the recurrence rule — all of which poison chrono ("for 30m" reads as a time,
+       "every 2 weeks" collapses to a single +2w offset). chrono now reads the residue for the
+       date/time. `forwardDate` rolls a bare past date to its next future occurrence (spec §6
+       roll-forward). This replaces the hand-rolled today/weekday/numeric-date/relative-offset/
+       bare-clock branches, whose substring matching invented dates out of ordinary words
+       ("call friends" → Friday, "monitor server" → Monday) — the corruption bug class. */
+    let clock=null, date=null, chronoEnd=null, dateSpanText=null, softHour=null;
+    const eng = (typeof window!=='undefined' && window.chrono) ? window.chrono
+              : (typeof chrono!=='undefined' ? chrono : null);
+    if(range){ clock={h:range.sh,m:range.sm}; } /* PP-EXT: a range already carries the start clock */
+    /* PP-EXT: "in N months" — chrono reads a bare "in 2m" as 2 MINUTES. In the relative-offset
+       position an `m` unit means months (spec §3 P2·F), so claim it before chrono ever sees it. Only
+       fires after `in`; a duration elsewhere ("homework ~2m") has no `in` and stays minutes, already
+       claimed by parseDurPhrase above. `minutes`/`mins` are excluded by the word boundary. */
+    let relOffset=false;
+    /* PP-EXT: snapshot the residue as the date matchers see it. The cue test below must measure what
+       sits immediately BEFORE the matched date span, and only this string has the span still in it
+       (and priority/labels/range/recurrence already out). Measuring against `text` would not work —
+       the pre-pass has shifted every offset. */
+    const sBeforeDate = s;
+    const moM = s.match(/\bin\s+(\d+)\s*(?:months?|mo|m)\b/i);
+    if(moM){ const d=new Date(now); d.setMonth(d.getMonth()+parseInt(moM[1]));
+      /* keep the time-of-day, like every other relative offset ("in 3 days" lands at now's clock) —
+         `relOffset` makes that hold for all spellings, not just the ones the 9am guard's regex sees. */
+      date=d; relOffset=true; dateSpanText=moM[0]; s=this.eatWithPrep(s, moM[0]); }
+    if(!date && eng){
+      /* A bare "N to M" / "5-6" with no colon and no meridiem is a COUNT, not a clock ("buy 5 to 6
+         apples"). chrono happily reads it as 05:00–06:00, so drop those spans — the pre-pass
+         parseClockRange already claimed every range that is unambiguously a time. */
+      const bareNum=/^\s*\d{1,2}\s*(?:(?:to|till|until|-|–|—)\s*\d{1,2}\s*)?$/;
+      const rs = (eng.parse(s, now, { forwardDate:true })||[]).filter(r=>!bareNum.test(r.text));
+      /* Prefer a result chrono is CERTAIN names a day over an earlier vaguer one: "night shift
+         tomorrow" yields both "night" (implied today) and "tomorrow" (certain) — rs[0] would pick
+         the wrong day. */
+      const r0 = rs.find(r=>['day','weekday','month','year'].some(u=>r.start.isCertain(u))) || rs[0];
+      if(r0){
+        /* `clock` is a real user-written time only when chrono is CERTAIN about the hour; an implied
+           hour (a bare day) must keep falling through to the 9am default below. NOTE: chrono's date is
+           NOT floored to midnight — for a relative offset ("in 3 days") its implied time-of-day IS the
+           answer, and the 9am-default guard below deliberately skips those. */
+        if(!range && r0.start.isCertain('hour')){ clock={ h:r0.start.get('hour'), m:r0.start.get('minute')||0 }; }
+        /* PP-EXT: a time-of-day WORD ("tonight", "this evening", "tomorrow morning") is a soft window,
+           not a clock commitment — `clock` stays false, but chrono's implied hour is a far better
+           default than 9am. Only these words qualify: for a bare day chrono's implied hour is filler
+           (noon, or the current hour), which must keep falling through to the 9am default. */
+        else if(!range && /\b(?:morning|noon|afternoon|evening|night|tonight|midnight)\b/.test(r0.text)){
+          softHour={ h:r0.start.get('hour'), m:r0.start.get('minute')||0 }; }
+        date = new Date(r0.start.date());
+        if(r0.end) chronoEnd = r0.end.date();
+        dateSpanText = r0.text;
+        s = this.eatWithPrep(s, r0.text);
       }
     }
-    // explicit numeric dates: 01/27/2016, 27/1, jan 27, 27 jan, 27th
-    if(!date){ let m;
-      if((m=s.match(/\b(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?\b/))){ let mo=parseInt(m[1])-1, da=parseInt(m[2]), yr=m[3]?(m[3].length===2?2000+parseInt(m[3]):parseInt(m[3])):now.getFullYear(); date=this.atMidnight(new Date(yr,mo,da)); s=s.replace(m[0],' '); }
-      else if((m=s.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b/))){ const mi=MO.indexOf(m[1]); let da=parseInt(m[2]); let d=this.atMidnight(new Date(now.getFullYear(),mi,da)); if(baseMs==null && d.getTime()<now.getTime()) d.setFullYear(d.getFullYear()+1); date=d; s=s.replace(m[0],' '); }
-      else if((m=s.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/))){ const mi=MO.indexOf(m[2]); let da=parseInt(m[1]); let d=this.atMidnight(new Date(now.getFullYear(),mi,da)); if(baseMs==null && d.getTime()<now.getTime()) d.setFullYear(d.getFullYear()+1); date=d; s=s.replace(m[0],' '); }
-      else if((m=s.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/))){ let da=parseInt(m[1]); date=this.atMidnight(new Date(now.getFullYear(),now.getMonth(),da)); s=s.replace(m[0],' '); }
+    /* PP-EXT: chrono returns nothing for a bare ordinal ("follow up on the 3rd", "by the 20th"), so
+       resolve it to the next future Nth-of-month ourselves (spec §6 roll-forward). Runs only as a
+       fallback, so a real date chrono already found always wins. */
+    if(!date){
+      const om = s.match(/\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/) || s.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
+      if(om){ const day=parseInt(om[1]);
+        const d=this.atMidnight(new Date(now.getFullYear(), now.getMonth(), day));
+        if(d.getTime() < this.atMidnight(new Date(now)).getTime()) d.setMonth(d.getMonth()+1);
+        date=d; dateSpanText=om[0]; s=this.eatWithPrep(s, om[0]); }
     }
-    // relative offsets: "+5", "5 days", "3 weeks", "2 hours", "3 weeks 3 hours"
-    if(!date){ let m, d2=new Date(now), got=false;
-      const off=(re,unit)=>{ let mm=s.match(re); if(mm){ const n=parseInt(mm[1]); if(unit==='day')d2.setDate(d2.getDate()+n); else if(unit==='week')d2.setDate(d2.getDate()+n*7); else if(unit==='month')d2.setMonth(d2.getMonth()+n); else if(unit==='hour')d2.setHours(d2.getHours()+n); s=s.replace(mm[0],' '); got=true; } };
-      off(/\+(\d+)\b/,'day'); off(/\b(\d+)\s*days?\b/,'day'); off(/\b(\d+)\s*weeks?\b/,'week'); off(/\b(\d+)\s*months?\b/,'month'); off(/\b(\d+)\s*hours?\b/,'hour');
-      if(got){ date=d2; clock=clock||{h:d2.getHours(),m:d2.getMinutes()}; }
-    }
-    // bare clock only (6pm) -> today/tomorrow
-    if(!date && clock){ let d=this.atMidnight(new Date(now)); d.setHours(clock.h,clock.m,0,0); if(baseMs==null && d.getTime()<now.getTime()) d.setDate(d.getDate()+1); date=d; }
+    /* PP-EXT: a clock with no day means today — rolling to tomorrow if that instant already passed.
+       The pre-pass strips a clock RANGE before chrono runs, so "call client 2-3pm" reaches here with a
+       clock but no day of its own. (Base-relative, not wall-clock-relative: the repeat-until clause
+       re-enters parseDateText with an explicit base.) */
+    if(!date && clock){ let d=this.atMidnight(new Date(now)); d.setHours(clock.h,clock.m,0,0);
+      if(d.getTime()<now.getTime()) d.setDate(d.getDate()+1); date=d; }
+    result.clock=!!clock;
 
-    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(!/days?|weeks?|months?|hours?/.test(text)) date.setHours(9,0,0,0); result.date=date.getTime(); }
+    /* PP-EXT: the "did the user give a relative offset?" guard needs word boundaries — bare /days?/ also
+       matched the "day" inside "friday"/"monday", so any weekday task silently lost the 9am default. */
+    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else if(!relOffset && !/\b(?:days?|weeks?|months?|hours?)\b/.test(text)) date.setHours(9,0,0,0); result.date=date.getTime(); }
+    /* PP-EXT: resolve the end instant once the start is known. A range that ends at/before its start
+       crosses midnight ("23:00-01:00") and rolls to the next day. */
+    if(result.date!=null){
+      if(range){ const e=new Date(result.date); e.setHours(range.eh,range.em,0,0);
+        if(e.getTime()<=result.date) e.setDate(e.getDate()+1);
+        result.end=e.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
+      else if(durPh){ result.end=result.date+durPh.min*60000; }
+      /* PP-EXT: chrono resolved a clock span itself (e.g. "9-10am", "from 2 to 4pm" forms the
+         pre-pass range matcher does not claim). */
+      else if(chronoEnd){ result.end=chronoEnd.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
+    }
+    /* ---- PP-EXT V1.1B: shape the temporal anchors from the found day + cues + clock ----
+       The raw `date`/`dur`/`clock` above stay untouched (datePick + the quick-add preview read them);
+       these SHAPED fields (start/end/pinStart/pinEnd/mile) are the task-model contract runQuickAdd/setDate
+       consume. Regions R0–R11/RM + the binding rule are enumerated in architecture.md → "Parser task-type
+       cases". A floating/deadline parse emits NULL start (never Date.now()), so an undated task stays a
+       ghost (V1.2) rather than being silently stamped onto today. */
+    result.start=null; result.pinStart=null; result.pinEnd=null;
+    /* PP-EXT: milestone markers are the diamond, a leading `*`, or the explicit word "milestone".
+       The old `\bmile\b|\bms\b` alternatives were part of the corruption class — they turned ordinary
+       titles ("run a mile", "email ms johnson") into zero-length midnight markers. */
+    result.mile = /◇/.test(text) || /^\s*\*/.test(text) || /\bmilestone\b/i.test(text);
+    /* PP-EXT: a cue binds the date's ROLE only when it is the connector immediately before the date
+       span (spec §5 P1·E). The old whole-string test let any title word mis-bind — "prep before
+       meeting friday" read "before" as a deadline cue and turned a start into a due date. */
+    const spanIdx  = dateSpanText ? sBeforeDate.indexOf(dateSpanText) : -1;
+    const cueBefore= spanIdx>=0 ? sBeforeDate.slice(0, spanIdx) : '';
+    const dueCue   = /\b(?:by|due(?:\s+on)?|before|deadline|no\s+later\s+than)\s+(?:the\s+)?$/.test(cueBefore);
+    const startCue = /\b(?:start|starts|starting|from|after|not\s+before|begins?)\s+(?:the\s+)?$/.test(cueBefore);
+    const hasClock = result.clock;               // explicit time typed (set at 2464, before the offset pass)
+    const spanEnd  = result.end;                 // clock-range / clock+"for" end, if any
+    const hasSpan  = hasClock && spanEnd!=null;  // a real clock span → fixed appointment (R3/R9)
+    if(result.mile){                             // RM overrides everything: zero-length midnight marker
+      if(result.date!=null){ const d=this.atMidnight(new Date(result.date)).getTime(); result.start=d; result.end=d; }
+      else { result.end=null; }
+      result.dur=null;
+    } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges pinned
+      result.start=result.date; result.pinStart=true; result.pinEnd=true;
+    } else if(result.date!=null){                // a single day, no span — bind by role (the binding rule)
+      if(dueCue){                                // R5 / R6 / R11 — deadline
+        result.pinEnd=true;
+        if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
+        else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD
+      } else if(hasClock){                        // R2 / R10 — start clock, open end
+        result.start=result.date; result.pinStart=true; result.end=null;
+      } else if(startCue){                        // R4 — not-before (start-cued all-day)
+        result.start=result.date; result.pinStart=true; result.end=null;
+      } else {                                    // R8 — uncued bare day → start, pins left null (effPins default)
+        result.start=result.date; result.end=null;
+      }
+    } // else R0 (floating) / R1 (duration-only): start & end stay null; dur (if any) is the movable budget
+    /* PP-EXT: ambiguity flag (spec §5/§6) — a day/time/recurrence anchor with no adjacent cue and no
+       block signal genuinely could be a start OR a due date, and today we silently guess start. This
+       is ADDITIVE: the shaped fields above are untouched, so Track A's persisted shape is unchanged
+       (interim-default rule) and only Track B's chooser reads it. `candidates` is sized for a future
+       third branch (block-with-default-duration, §5); v1 emits the binary pair. */
+    result.ambiguous = null; result.candidates = [];
+    const anchorDay = result.date!=null ? result.date
+      : (result.recur ? this._firstRecurOccurrence(result.recur, now) : null);
+    const hasBlock = (range && result.end!=null) || (durPh && clock);
+    if(anchorDay!=null && !dueCue && !startCue && !hasBlock && !result.mile){
+      result.candidates = [
+        { kind:'anchor', tuple:{ pinStart:true, pinEnd:false, start:anchorDay, end:null, planned:0 } },
+        { kind:'due',    tuple:{ pinStart:false, pinEnd:true, start:null, end:anchorDay } },
+        /* slot 3 (block-with-default-duration) intentionally empty in v1 — gated behind §7 */
+      ];
+      result.ambiguous = result.clock ? 'time' : (result.date==null ? 'recur' : 'day');
+    }
+    /* /PP-EXT */
     // reconstruct rest from ORIGINAL text (preserve case), keeping only leftover words
     const leftover = s.split(/\s+/).filter(Boolean);
     const used = {};
@@ -2446,7 +2708,15 @@ class Component extends DCLogic {
       }
       this._horizon=horizon;
       this._occById={}; let gmin=bmin,gmax=bmax;
-      tasks.forEach(t=>{ if(!this.isScheduled(t)){ this._occById[t.id]=[]; return; } const occs=this.expandTask(t,horizon); this._occById[t.id]=occs;
+      tasks.forEach(t=>{ if(!this.isScheduled(t)){
+          /* PP-EXT (V1.2): a dateless (or half-dated) NON-recurring task still gets one draggable GHOST
+             occurrence, derived from today — the task's start/end stay null in data. Recurring tasks need
+             real dates to expand, so a rule-less/dateless recur (shouldn't happen) still yields no bar. */
+          if(t.recur){ this._occById[t.id]=[]; return; }
+          const g=this.ghostSpan(t, todayStart);
+          this._occById[t.id]=[{idx:0, start:g.start, end:g.end, ghost:true, ghostStart:g.ghostStart, ghostEnd:g.ghostEnd}];
+          gmin=Math.min(gmin,g.start); gmax=Math.max(gmax,g.end); return;
+        } const occs=this.expandTask(t,horizon); this._occById[t.id]=occs;
         occs.forEach(o=>{ if(t.recur && (o.start<todayStart || this.occPct(t,o.idx)>=100)) return; /* past/completed repeats don't extend the range */ gmin=Math.min(gmin,o.start); gmax=Math.max(gmax,o.end); }); });
       this._tl = this.timelineFrom(gmin,gmax);
       this._seqOf = {}; tasks.forEach((t,i)=>{ this._seqOf[t.id]=String(i+1); });
@@ -2461,7 +2731,7 @@ class Component extends DCLogic {
       viewtoggle: this.renderViewToggle(),                 /* PP-EXT: Gantt|Calendar main-view toggle */
       topcontext: this.renderTopContext(),                 /* PP-EXT: context-aware top-bar slot (Plan/Focus/Review, Journal nav, Archive count) */
       toggleSettings:()=>this.setState(s=>({settingsOpen:!s.settingsOpen})),
-      zoomLabel: this.state.dayW>=64?'Day':(this.state.dayW>=36?'Week':'Month'),
+      zoomLabel: this.state.dayW>=this.GANTT_HOUR_GRID_DAYW?'Hour':(this.state.dayW>=64?'Day':(this.state.dayW>=36?'Week':'Month')),/* PP-EXT (C2): Hour level */
     };
   }
   /* PP-EXT: top-bar context slot — replaces the removed per-page header bands (Dashboard/Journal/Archive
@@ -2484,7 +2754,7 @@ class Component extends DCLogic {
     if(!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
     const dir = e.deltaY<0 ? 1 : -1;
-    this.setState(s=>({dayW:Math.max(3,Math.min(120,s.dayW+dir*Math.max(2,Math.round(s.dayW*0.15))))}));
+    this.setState(s=>({dayW:this.clampDayW(s.dayW+dir*Math.max(2,Math.round(s.dayW*0.15)))})); /* PP-EXT (C2): bounds now GANTT_DAYW_MIN..MAX — zoom in past a day to grab hourly blocks */
   }
 
   /* ---------- quick add ---------- */
@@ -2499,8 +2769,12 @@ class Component extends DCLogic {
     const chip=(txt,col)=>h('span',{style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',background:col,borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap'}},txt);
     const hints=[];
     if(parsed){
-      if(/\bmile(stone)?\b|^\*/i.test(this.state.quickText)) hints.push(chip('◆ Milestone','#8957e5'));
+      if(/\bmilestone\b|^\*/i.test(this.state.quickText)) hints.push(chip('◆ Milestone','#8957e5'));
       if(parsed.date!=null) hints.push(chip(this.fmtDT(parsed.date), this._accent));
+      /* PP-EXT: surface a parsed clock range / "for <dur>" — without this a range looks identical to a
+         bare start time, giving no sign the end was understood or that it becomes a fixed block. */
+      if(parsed.end!=null) hints.push(chip('→ '+this.fmtDT(parsed.end)+' · '+this.fmtDur(parsed.dur), this._accent));
+      else if(parsed.dur) hints.push(chip('⏱ '+this.fmtDur(parsed.dur), this._accent));
       if(parsed.recur) hints.push(chip('↻ '+parsed.recur.label,'var(--success-strong)'));
       if(parsed.priority) hints.push(chip('P'+parsed.priority, this.PCOL[parsed.priority]));
       (parsed.labels||[]).forEach(l=>hints.push(chip('@'+l,'#5a6270')));
@@ -2530,18 +2804,232 @@ class Component extends DCLogic {
       style:{position:'fixed',inset:0,zIndex:2300,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}},
       card);
   }
+
+  /* ---------- PP-EXT V0.2: empty state + one-time 3-step first-run coach + labeled demo banner ----------
+     Rendered as a sibling overlay inside renderBoard's Fragment. The empty-state backdrop is transparent
+     with pointer-events:none so the top bar / sidebar stay usable (only the card itself catches clicks). */
+  FIRST_RUN_STEPS(){ return [
+    {icon:'⌨️', title:'Type a task in plain English', body:'Like “Finish the report by Friday 2pm”. Press q anytime to capture one.'},
+    {icon:'📅', title:'Watch it auto-schedule', body:'It lands on today’s timeline for you — no manual slotting.'},
+    {icon:'↔', title:'Drag to adjust', body:'Nudge a bar on the Gantt or timeline whenever the plan needs to shift.'},
+  ]; }
+  renderStepList(current){
+    const h=React.createElement;
+    return this.FIRST_RUN_STEPS().map((s,i)=>{
+      const done=i<current, active=i===current;
+      const badge=h('div',{style:{flex:'none',width:'24px',height:'24px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+          fontSize:'12px',fontWeight:700,marginTop:'1px',
+          background: done?'var(--success-strong)':(active?this._accent:'var(--btn-bg)'),
+          color:(done||active)?'var(--on-accent)':'var(--text-mut2)',
+          border: active?'0':'1px solid var(--field-border)'}}, done?'✓':String(i+1));
+      return h('div',{key:i,style:{display:'flex',gap:'11px',alignItems:'flex-start',opacity:(done||active)?1:0.55}},
+        badge,
+        h('div',{},
+          h('div',{style:{fontSize:'13px',fontWeight:700,color:'var(--text-strong)'}}, s.icon+'  '+s.title),
+          h('div',{style:{fontSize:'11.5px',color:'var(--text-mut)',marginTop:'2px',lineHeight:1.35}}, s.body)));
+    });
+  }
+  renderEmptyState(coach){
+    const h=React.createElement; const step=this.firstRunStep();
+    const card=h('div',{style:{width:'440px',maxWidth:'92vw',pointerEvents:'auto',background:'var(--menu-bg)',border:'1px solid var(--divider)',
+        borderRadius:'16px',boxShadow:'0 24px 80px rgba(0,0,0,0.5)',padding:'26px 26px 22px'}},
+      h('div',{style:{fontSize:'20px',fontWeight:800,color:'var(--text-strong)',marginBottom:'4px'}}, coach?'Welcome to ChronoCompose':'No tasks yet'),
+      h('div',{style:{fontSize:'12.5px',color:'var(--text-mut)',marginBottom:coach?'18px':'16px',lineHeight:1.4}},
+        coach?'Plan your day in three moves — it schedules the rest for you.':'Add a task to get started, or bring back the sample plan.'),
+      coach?h('div',{style:{display:'flex',flexDirection:'column',gap:'14px',marginBottom:'20px'}}, ...this.renderStepList(step)):null,
+      h('div',{style:{display:'flex',gap:'10px'}},
+        h('button',{onClick:()=>this.setState({quickOpen:true}),
+          style:{flex:1,height:'38px',background:this._accent,border:'none',color:'var(--on-accent)',borderRadius:'9px',fontSize:'13px',fontWeight:700,cursor:'pointer'}},'+ Add your first task'),
+        h('button',{onClick:()=>this.loadDemo(),
+          style:{height:'38px',padding:'0 15px',background:'var(--btn-bg)',border:'1px solid var(--field-border)',color:'var(--text)',borderRadius:'9px',fontSize:'12.5px',fontWeight:600,cursor:'pointer'}},'Load demo tasks')),
+      h('div',{style:{fontSize:'10.5px',color:'var(--text-mut2)',textAlign:'center',marginTop:'12px'}},'Demo tasks are clearly labeled and can be cleared anytime.'));
+    return h('div',{key:'empty',style:{position:'fixed',inset:0,zIndex:1400,display:'flex',alignItems:'center',justifyContent:'center',padding:'20px',pointerEvents:'none'}}, card);
+  }
+  renderFirstRunCoach(){
+    const h=React.createElement; const step=this.firstRunStep();
+    return h('div',{key:'coach',style:{position:'fixed',right:'20px',bottom:'20px',zIndex:1400,width:'300px',maxWidth:'92vw',pointerEvents:'auto',
+        background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'14px',boxShadow:'0 18px 50px rgba(0,0,0,0.45)',padding:'16px 16px 14px'}},
+      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px'}},
+        h('div',{style:{fontSize:'12.5px',fontWeight:800,color:'var(--text-strong)'}},'Getting started'),
+        h('div',{onClick:()=>this.markFirstRunSeen(),style:{cursor:'pointer',fontSize:'11px',fontWeight:600,color:'var(--text-mut2)'}},'Dismiss')),
+      h('div',{style:{display:'flex',flexDirection:'column',gap:'12px',marginBottom:'12px'}}, ...this.renderStepList(step)),
+      h('button',{onClick:()=>this.markFirstRunSeen(),
+        style:{width:'100%',height:'32px',background:this._accent,border:'none',color:'var(--on-accent)',borderRadius:'8px',fontSize:'12px',fontWeight:700,cursor:'pointer'}},'Got it'));
+  }
+  renderDemoBanner(){
+    const h=React.createElement; const n=this.state.tasks.reduce((a,t)=>a+(t.demo?1:0),0);
+    return h('div',{key:'demo',style:{position:'fixed',left:'50%',bottom:'20px',transform:'translateX(-50%)',zIndex:1390,pointerEvents:'auto',
+        display:'flex',alignItems:'center',gap:'12px',padding:'9px 9px 9px 15px',
+        background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'999px',boxShadow:'0 14px 40px rgba(0,0,0,0.4)'}},
+      h('span',{style:{fontSize:'12px',color:'var(--text)'}}, '🧪 Demo tasks — '+n+' sample '+(n===1?'row':'rows')+' to explore'),
+      h('button',{onClick:()=>this.clearDemo(),
+        style:{height:'26px',padding:'0 13px',background:'var(--btn-bg)',border:'1px solid var(--field-border)',color:'var(--text)',borderRadius:'999px',fontSize:'11.5px',fontWeight:600,cursor:'pointer'}},'Clear demo'));
+  }
+  renderFirstRun(){
+    const h=React.createElement;
+    const empty=this.activeTaskCount()===0;
+    const coach=!this.state.firstRunSeen;
+    const hasDemo=this.hasDemoTasks();
+    if(!empty && !coach && !hasDemo) return null;
+    const nodes=[];
+    if(empty) nodes.push(this.renderEmptyState(coach));
+    else if(coach) nodes.push(this.renderFirstRunCoach());
+    if(hasDemo) nodes.push(this.renderDemoBanner());
+    return h(React.Fragment,{}, ...nodes);
+  }
+
+  /* ---------- date picker (state.datePick) ----------
+     PP-EXT: the only way to EDIT a start/end date. Opens from the tasks-table date cells and the detail
+     drawer. Draft lives in state.datePick and is only written through setDate on Done/Enter, so Escape
+     or an outside click cancels cleanly and a fiddled-with time makes ONE undo entry, not one per click.
+     Accepts the same natural-language text as quick-add (parseDateText) alongside the calendar grid. */
+  openDatePick(e, id, key){
+    e.stopPropagation();
+    const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+    const r=e.currentTarget.getBoundingClientRect();
+    /* All-day ends are stored as the EXCLUSIVE next-day midnight (see dueInstant), so show the
+       inclusive day the user thinks of as the end. dpApply converts back. */
+    const cur = (t.allDay && key==='end' && t[key]!=null) ? t[key]-1 : t[key];
+    const base = cur!=null ? cur : this.startOfToday()+9*3600000;
+    this.setState({datePick:{id, key, x:r.left, y:r.bottom+4, ms:base, view:base, text:''}});
+  }
+  closeDatePick(){ this.setState({datePick:null}); }
+  dpSet(patch){ if(this.state.datePick) this.setState({datePick:Object.assign({}, this.state.datePick, patch)}); }
+  /* Live-parse the NL field; a parse failure just leaves the draft alone (the chip shows nothing). */
+  dpText(v){
+    const p=v.trim() ? this.parseDateText(v) : null;
+    const patch={text:v};
+    if(p && p.date!=null){ patch.ms=p.date; patch.view=p.date; }
+    this.dpSet(patch);
+  }
+  dpNudgeMonth(k){ const dp=this.state.datePick; if(!dp) return;
+    const d=new Date(dp.view); d.setDate(1); d.setMonth(d.getMonth()+k); this.dpSet({view:d.getTime()}); }
+  /* Pick a day: keep the draft's clock, move its date. */
+  dpPickDay(dayMs){ const dp=this.state.datePick; if(!dp) return;
+    const cur=new Date(dp.ms), d=new Date(dayMs);
+    d.setHours(cur.getHours(), cur.getMinutes(), 0, 0);
+    this.dpSet({ms:d.getTime(), view:d.getTime()});
+  }
+  /* Accepts "17:00", "5pm", "9" — a bare hour keeps the 24h reading. Junk leaves the draft untouched. */
+  dpSetTime(str){ const dp=this.state.datePick; if(!dp) return;
+    const tok=this.parseClockTok(str); let hh, mm;
+    if(tok){ hh=this.clockH(tok,null); mm=tok.m; }
+    else { const c=this.parseClock(String(str)); if(!c) return; hh=c.h; mm=c.m; }
+    const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime()});
+  }
+  /* Monday-first month grid; null cells pad the leading/trailing week. */
+  dpGrid(viewMs){
+    const d=new Date(viewMs), y=d.getFullYear(), mo=d.getMonth();
+    const lead=(new Date(y,mo,1).getDay()+6)%7, dim=new Date(y,mo+1,0).getDate();
+    const cells=[]; for(let i=0;i<lead;i++) cells.push(null);
+    for(let i=1;i<=dim;i++) cells.push(new Date(y,mo,i).getTime());
+    while(cells.length%7) cells.push(null);
+    return cells;
+  }
+  dpApply(){
+    const dp=this.state.datePick; if(!dp) return;
+    const t=this.state.tasks.find(x=>x.id===dp.id);
+    let ms=dp.ms;
+    /* Re-encode an all-day value: starts sit at midnight, ends at the exclusive next-day midnight. */
+    if(t && t.allDay){ const d=this.atMidnight(new Date(ms));
+      ms = dp.key==='end' ? d.getTime()+this.DAY : d.getTime(); }
+    this.setDate(dp.id, dp.key, ms);
+    this.setState({datePick:null});
+  }
+  renderDatePick(){
+    const h=React.createElement; const dp=this.state.datePick; if(!dp) return null;
+    const t=this.state.tasks.find(x=>x.id===dp.id); if(!t) return null;
+    const allDay=!!t.allDay;
+    const W=268, H=allDay?330:378;
+    /* Clamp into the viewport so a cell near the bottom/right edge still shows the whole card. */
+    const vw=(typeof window!=='undefined'&&window.innerWidth)||1280, vh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    const x=Math.max(8, Math.min(dp.x, vw-W-8)), y=Math.max(8, Math.min(dp.y, vh-H-8));
+    const view=new Date(dp.view), draft=new Date(dp.ms);
+    const p2=n=>String(n).padStart(2,'0');
+    const sameDay=(a,b)=>a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+    const today=new Date(this.startOfToday());
+
+    const navBtn=(label,k)=>h('div',{onClick:()=>this.dpNudgeMonth(k),
+      style:{width:'22px',height:'22px',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
+        borderRadius:'5px',color:'var(--text-mut)',fontSize:'13px',userSelect:'none'},
+      onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
+      onMouseLeave:e=>e.currentTarget.style.background='transparent'}, label);
+    const head=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'6px'}},
+      h('div',{style:{fontSize:'12px',fontWeight:600,color:'var(--text-strong)'}},
+        view.toLocaleString(undefined,{month:'long'})+' '+view.getFullYear()),
+      h('div',{style:{display:'flex',gap:'2px'}}, navBtn('‹',-1), navBtn('›',1)));
+    const dow=h('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:'1px',marginBottom:'2px'}},
+      ['M','T','W','T','F','S','S'].map((d,i)=>h('div',{key:'dw'+i,
+        style:{textAlign:'center',fontSize:'9.5px',fontWeight:600,color:'var(--text-faint2)'}},d)));
+    const grid=h('div',{style:{display:'grid',gridTemplateColumns:'repeat(7,1fr)',gap:'1px'}},
+      this.dpGrid(dp.view).map((ms,i)=>{
+        if(ms==null) return h('div',{key:'e'+i});
+        const d=new Date(ms), sel=sameDay(d,draft), isToday=sameDay(d,today);
+        return h('div',{key:'d'+i, onClick:()=>this.dpPickDay(ms),
+          style:{height:'28px',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
+            borderRadius:'6px',fontSize:'11.5px',fontVariantNumeric:'tabular-nums',
+            background:sel?this._accent:'transparent',
+            color:sel?'#fff':(isToday?this._accent:'var(--text-2)'),
+            fontWeight:(sel||isToday)?600:400,
+            border:isToday&&!sel?('1px solid '+this._accent):'1px solid transparent'},
+          onMouseEnter:e=>{ if(!sel) e.currentTarget.style.background='var(--menu-hover)'; },
+          onMouseLeave:e=>{ if(!sel) e.currentTarget.style.background='transparent'; }}, d.getDate());
+      }));
+    const nlField=h('input',{className:'pp-num', type:'text', value:dp.text, placeholder:'tomorrow 5pm',
+      autoFocus:true,
+      onChange:e=>this.dpText(e.target.value),
+      onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.dpApply(); }
+                     else if(e.key==='Escape'){ e.preventDefault(); this.closeDatePick(); } },
+      style:{width:'100%',textAlign:'left',border:'1px solid var(--field-border)',marginBottom:'5px'}});
+    const preview=h('div',{style:{fontSize:'11px',color:'var(--text-mut)',fontVariantNumeric:'tabular-nums',marginBottom:'8px'}},
+      this.fmtDT(dp.ms, allDay));
+    const timeRow=allDay?null:h('div',{style:{display:'flex',alignItems:'center',gap:'8px',marginTop:'8px'}},
+      h('div',{style:{fontSize:'11px',fontWeight:600,color:'var(--text-mut)'}},'TIME'),
+      h('input',{className:'pp-num', type:'text', key:'tm'+dp.ms,
+        defaultValue:p2(draft.getHours())+':'+p2(draft.getMinutes()),
+        onBlur:e=>this.dpSetTime(e.target.value),
+        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } },
+        style:{width:'70px',textAlign:'left',border:'1px solid var(--field-border)'}}));
+    const btn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
+      style:{color:danger?'var(--danger-strong)':undefined}},label);
+    const actions=h('div',{style:{display:'flex',justifyContent:'space-between',gap:'8px',marginTop:'12px'}},
+      btn('Clear',()=>{ this.clearDate(dp.id, dp.key); this.closeDatePick(); }, true),
+      h('div',{style:{display:'flex',gap:'6px'}},
+        btn('Cancel',()=>this.closeDatePick()),
+        h('button',{className:'pp-tbtn',onClick:()=>this.dpApply(),
+          style:{background:this._accent,color:'#fff',borderColor:this._accent}},'Done')));
+
+    const card=h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
+      style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',
+        border:'1px solid var(--divider)',borderRadius:'12px',boxShadow:'0 18px 60px rgba(0,0,0,0.5)',
+        padding:'12px 13px',zIndex:2401}},
+      /* PP-EXT: setDate writes the task's base start/end, so for a recurring task this moves the whole
+         series anchor, not the occurrence the row happens to show — say so rather than mislead. */
+      h('div',{style:{fontSize:'10.5px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px',marginBottom:'7px'}},
+        (dp.key==='start'?'START':'DUE')+(allDay?' · ALL-DAY':'')+(t.recur?' · WHOLE SERIES':'')),
+      nlField, preview, head, dow, grid, timeRow, actions);
+    return h('div',{onMouseDown:()=>this.closeDatePick(),
+      style:{position:'fixed',inset:0,zIndex:2400}}, card);
+  }
+
   runQuickAdd(where){
     const raw=this.state.quickText.trim(); if(!raw) return;
     const p=this.parseDateText(raw);
-    const isMile = /\bmile(stone)?\b|\bms\b/i.test(raw) || /^\*/.test(raw);
-    let name = p.rest.replace(/\bmile(stone)?\b|\bms\b/ig,'').replace(/^\*/,'').replace(/\s+/g,' ').trim() || 'New task';
-    const end = p.date!=null ? p.date : Date.now();
-    const start = end;
+    /* PP-EXT V1.1B: the parser owns the temporal SHAPE. It emits null start/end for floating (R0) and
+       deadline (R5) parses — we no longer stamp Date.now(), so an undated quick-add stays a ghost (V1.2)
+       instead of being pinned onto "now". pins/type come straight from the shaped result. */
+    /* PP-EXT: strip only the same milestone markers `result.mile` itself recognizes (◇, leading `*`,
+       the word "milestone") — the old `\bmile\b|\bms\b` alternatives here were the other half of the
+       corruption class the Track A comment above `result.mile` describes: they survived the detection
+       fix and kept eating "run a mile" / "email ms johnson" down to "run a" / "email johnson". */
+    let name = p.rest.replace(/◇/g,'').replace(/\bmilestone\b/ig,'').replace(/^\s*\*/,'').replace(/\s+/g,' ').trim() || 'New task';
     const recur = p.recur ? {...p.recur, until:(p.until||null), shifts:[], overrides:{}} : null;
     this.commit(tasks=>{
       const id='t'+Math.random().toString(36).slice(2,8);
-      const t=this.normalizeTask({id,name,type:isMile?'Milestone':'Proportional',start,end,priority:p.priority||4,deps:[],pct:0,
-        planned:0,predicted:0,description:'',labels:p.labels||[],recur,completion:null}); /* PP-EXT */
+      const t=this.normalizeTask({id,name,type:p.mile?'Milestone':'Proportional',
+        start:p.start, end:p.end, priority:p.priority||4, deps:[], pct:0,
+        planned:p.dur||0, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
+        pinStart:p.pinStart, pinEnd:p.pinEnd}); /* PP-EXT */
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
@@ -4473,13 +4961,14 @@ class Component extends DCLogic {
     const SCHED_PX=this.TL_PXPM; /* drag sensitivity in this list (px per minute) */
     const fmtClock=ms=>{ const d=new Date(ms); let hh=d.getHours(), mm=d.getMinutes(); const ap=hh<12?'a':'p'; hh=(hh%12)||12; return hh+':'+String(mm).padStart(2,'0')+ap; };
     const TYP=this.TL_TYP();
+    const glowMap=hoverId!=null ? this.tasksByDayMap(days) : null; /* PP-EXT (V0.3): one expandTask per task for the whole week, not per day */
     const sections=days.map((B,di)=>{
       const data=this.buildDayTimeline(B);
       const lab=this.dayHeaderLabel(B); const isToday=(B===today);
       const timed=data.chunks.filter(c=>c.start).sort((a,b)=>a.start-b.start);
       const unsched=data.chunks.filter(c=>!c.start);
       const isHoverDay=this.state.hoverDay===B;
-      const glow=hoverId!=null && this.tasksOnDay(B).includes(hoverId);
+      const glow=glowMap!=null && glowMap[B].includes(hoverId);
       const divider=h('div',{onMouseEnter:()=>this.setState({hoverDay:B}), onMouseLeave:()=>this.setState({hoverDay:null}),
         style:{display:'flex',alignItems:'center',gap:'8px',padding:'6px 12px',position:'sticky',top:0,zIndex:1,
           borderBottom:'1px solid var(--row-border-gantt)',background:glow?'rgba(245,181,54,0.25)':'var(--sheet-bg)'}},
@@ -4542,6 +5031,25 @@ class Component extends DCLogic {
       if(hit) out.push(t.id); });
     return out;
   }
+  /* PP-EXT (V0.3 perf): bucket occurrences into a set of day-starts with ONE expandTask per task.
+     Callers that need many days at once (the 42-cell month grid, the 7-day schedule glow) previously
+     called tasksOnDay per day, re-expanding EVERY task for EVERY cell — O(cells×tasks) recurrence
+     expansion each render (measured 1176 expandTask calls for 28 tasks in a month render). Expanding
+     once to the range's far end and testing each day against that set is byte-identical (a larger
+     horizon only appends tail occurrences; the per-day overlap test is horizon-independent) but drops
+     the work to O(tasks + occurrences). Returns { [dayStart]: [taskId,…] } in task order, same
+     exclusion/half-open-end/_calTasks-default semantics as tasksOnDay. */
+  tasksByDayMap(dayStarts, tasks){
+    tasks=tasks||this._calTasks||this.state.tasks;
+    const out={}; dayStarts.forEach(d=>{ out[d]=[]; });
+    if(!dayStarts.length) return out;
+    let maxEnd=-Infinity; dayStarts.forEach(d=>{ if(d>maxEnd) maxEnd=d; }); maxEnd+=this.DAY;
+    tasks.forEach(t=>{ if(t.archivedAt || !this.isScheduled(t)) return;
+      const occs=this.expandTask(t, maxEnd);
+      dayStarts.forEach(d=>{ const dayEnd=d+this.DAY;
+        if(occs.some(o=> (o.end>o.start) ? (o.start<dayEnd && o.end>d) : (o.start>=d && o.start<dayEnd))) out[d].push(t.id); }); });
+    return out;
+  }
   /* Symmetric inverse (used by tests): the day-starts in [from,to) a task occupies. */
   daysOfTask(id, from, to, tasks){
     tasks=tasks||this.state.tasks; const t=tasks.find(x=>x.id===id);
@@ -4587,8 +5095,9 @@ class Component extends DCLogic {
         h('span',{style:{width:'6px',height:'6px',borderRadius:'50%',flex:'none',background:(this.PCOL[t.priority]||'var(--pri-default)')}}),
         h('span',{style:{overflow:'hidden',textOverflow:'ellipsis'}},t.name)); };
     const MAXCHIPS=compact?1:4;
+    const dayMap=this.tasksByDayMap(cells.map(c=>c.dayStart)); /* PP-EXT (V0.3): one expandTask per task, not per cell */
     const cellEls=cells.map((c,i)=>{
-      const ids=this.tasksOnDay(c.dayStart); const n=ids.length;
+      const ids=dayMap[c.dayStart]; const n=ids.length;
       const isToday=c.dayStart===todayStart;
       const glow=hoverId!=null && ids.includes(hoverId); /* hovering a task → its whole day cell glows */
       const isHoverDay=this.state.hoverDay===c.dayStart; /* this cell is the one being hovered */
@@ -5282,7 +5791,9 @@ class Component extends DCLogic {
       this.state.settingsOpen ? this.renderSettings() : null,
       this.state.summary ? this.renderSummary() : null, /* PP-EXT Phase 8: morning summary popup */
       this.state.scopePrompt ? this.renderScopePrompt() : null,
+      this.state.datePick ? this.renderDatePick() : null, /* PP-EXT: start/end date picker */
       this.renderQuickAddPopup(), /* PP-EXT: centered quick-add popup ("q" / sheet footer row) */
+      this.renderFirstRun(), /* PP-EXT V0.2: empty state + one-time 3-step first-run coach + labeled demo banner */
       this.state.rowDrag ? this.renderRowDragGhost() : null /* PP-EXT: floating drag-to-nest ghost */
     );
   }
@@ -5303,7 +5814,9 @@ class Component extends DCLogic {
       return h('div',{key:c.k,'data-colk':c.k,
         onMouseDown:c.lock?null:(e=>this.headPointerDown(e,c.k)),
         onContextMenu:e=>this.colCtx(e,c.k),
-        title:c.lock?'':'Click to sort · Ctrl-click to select · drag to reorder · right-click to filter/hide',
+        /* PP-EXT V0.1: prefix the full column label so a narrow (ellipsis-truncated) header — "D…", "PLANN…",
+           lone "S/today" — is always fully readable on hover (product-vision §10.3 / ROADMAP V0). */
+        title:c.lock?'':(c.l?c.l+' — ':'')+'Click to sort · Ctrl-click to select · drag to reorder · right-click to filter/hide',
         style:{flex:'0 0 '+c.w+'px',minWidth:0,padding:'0 9px',display:'flex',alignItems:'center',overflow:'hidden',
           fontSize:'11px',fontWeight:600,color:selected?'var(--text)':'var(--text-mut)',letterSpacing:'0.3px',textTransform:'uppercase',
           borderRight:'1px solid var(--col-border)',height:'100%',position:'relative',
@@ -5604,6 +6117,17 @@ class Component extends DCLogic {
             style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',
               color: on?'var(--success)':'var(--text-faint2)'}}, on?'☑':'☐'); })();
 
+    /* PP-EXT: click-to-edit date cell — the tasks-table entry point to the picker. `ms` is the DISPLAYED
+       instant (the current occurrence for a recurring task); openDatePick reads the task's own base value,
+       which is what setDate writes, and the picker labels a series edit as such. */
+    const dateCell=(key,ms,col)=>h('span',{onClick:e=>{e.stopPropagation(); this.openDatePick(e,t.id,key);},
+      onMouseDown:e=>e.stopPropagation(), title:'Click to edit',
+      style:{fontSize:'11.5px',color:col,fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap',cursor:'pointer',
+        padding:'1px 4px',borderRadius:'4px',display:'inline-block'},
+      onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
+      onMouseLeave:e=>e.currentTarget.style.background='transparent'},
+      this.fmtDT(ms, t.allDay));
+
     const durIn=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
       onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
       onBlur:e=>this.setDur(t.id,key,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
@@ -5673,9 +6197,9 @@ class Component extends DCLogic {
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
       name:nameBlock, incl:inclCell,
       start:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'start'), /* PP-EXT: start pin */
-        h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispStart, t.allDay/* PP-EXT: current instance, date-only if all-day */))),
+        dateCell('start', dispStart, 'var(--text-num)') /* PP-EXT: current instance, date-only if all-day */),
       end:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'end'), /* PP-EXT: due pin */
-        h('span',{style:{fontSize:'11.5px',color:overdue?'var(--danger)':'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(t.allDay?dispEnd-1:dispEnd, t.allDay/* PP-EXT */))),
+        dateCell('end', t.allDay?dispEnd-1:dispEnd, overdue?'var(--danger)':'var(--text-num)') /* PP-EXT */),
       dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
       planned: durIn('planned'), spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
       cdate:h('span',{style:{fontSize:'11.5px',color:dispComp?'var(--success)':'var(--text-faint)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispComp)),
@@ -5723,6 +6247,8 @@ class Component extends DCLogic {
     const h=React.createElement;
     const tl=this._tl; const dayW=this.state.dayW;
     const totalW=tl.days*dayW;
+    const hourZoom=dayW>=this.GANTT_HOUR_GRID_DAYW; /* PP-EXT (C2): zoomed in past a day → show hour gridlines + ticks */
+    const hlbl=x=> x===0?'12a':(x<12?x+'a':(x===12?'12p':(x-12)+'p')); /* compact 12h hour label */
     /* PP-EXT: rows may be taller than rowH when an inline description panel is open in the sheet; precompute
        each row's Y top (yOfRow reads this._yTop) so bars/stripes/arrows stay aligned with the sheet. */
     const yTop=[]; let acc=0; for(let i=0;i<tasks.length;i++){ yTop[i]=acc; acc+=this.rowH+this.descExtra(tasks[i]); }
@@ -5735,13 +6261,18 @@ class Component extends DCLogic {
     // header: week tier + day tier
     /* PP-EXT: cells are absolutely positioned (left = d*dayW) instead of flex-laid-out, so we can render only
        the visible window and still keep every cell aligned to its grid column. */
-    const weekCells=[]; const dayCells=[];
+    const weekCells=[]; const dayCells=[]; const hourTicks=[]; /* PP-EXT (C2): hourTicks populated only when hourZoom */
     for(let d=vd0; d<vd1; d++){
       const ms=tl.start+d*this.DAY; const date=new Date(ms);
       const dow=date.getDay(); const weekend=(dow===0||dow===6);
-      dayCells.push(h('div',{key:d,style:{position:'absolute',left:(d*dayW)+'px',width:dayW+'px',boxSizing:'border-box',height:'24px',display:'flex',alignItems:'center',justifyContent:'center',
+      /* PP-EXT (C2): when zoomed to the hour, pin the date to the top of the cell so the bottom row is free for
+         hour ticks; otherwise keep it centered as before. */
+      dayCells.push(h('div',{key:d,style:{position:'absolute',left:(d*dayW)+'px',width:dayW+'px',boxSizing:'border-box',height:'24px',display:'flex',alignItems:hourZoom?'flex-start':'center',justifyContent:'center',paddingTop:hourZoom?'1px':'0',
         fontSize:'10px',color:weekend?'var(--text-faint)':'var(--text-mut2)',borderRight:'1px solid var(--col-border)',
         background:weekend?'var(--weekend)':'transparent'}}, date.getDate()));
+      if(hourZoom){ for(const hr of [3,6,9,12,15,18,21]){
+        hourTicks.push(h('div',{key:'ht'+d+'_'+hr,style:{position:'absolute',left:(d*dayW+hr/24*dayW)+'px',bottom:'0',
+          fontSize:'8px',color:'var(--text-faint)',transform:'translateX(1px)',pointerEvents:'none',whiteSpace:'nowrap'}}, hlbl(hr))); } }
       if(((date.getDay()+6)%7)===0 || d===vd0){
         const remaining=tl.days-d; const span=Math.min(7-((date.getDay()+6)%7),remaining);
         const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][date.getMonth()];
@@ -5759,7 +6290,7 @@ class Component extends DCLogic {
       style:{position:'sticky',top:0,zIndex:6,background:'var(--top-bg)',minWidth:totalW+'px',cursor:'copy'}},
       /* PP-EXT: relative rows host the absolutely-positioned (windowed) header cells */
       h('div',{style:{position:'relative',height:'24px',minWidth:totalW+'px'}},weekCells),
-      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px'}}/* PP-EXT: header bottom border here (fixed height absorbs it) so total header = headH, aligned with the sheet */,dayCells));
+      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px'}}/* PP-EXT: header bottom border here (fixed height absorbs it) so total header = headH, aligned with the sheet */,dayCells,hourTicks/* PP-EXT (C2) */));
       /* /PP-EXT */
 
     // grid background  /* PP-EXT: windowed to [vd0,vd1] */
@@ -5769,6 +6300,12 @@ class Component extends DCLogic {
       const strong=((new Date(ms).getDay()+6)%7)===0;
       gridLines.push(h('div',{key:'g'+d,style:{position:'absolute',top:0,bottom:0,left:(d*dayW)+'px',width:'1px',
         background:strong?'var(--grid-strong)':'var(--grid-weak)'}}));
+      /* PP-EXT (C2): hour gridlines within each day when zoomed in — 6/12/18 a touch stronger for orientation.
+         Windowed (only visible days) and skipped entirely below the hour-zoom threshold, so no extra render cost
+         at normal zoom. Purely decorative (pointer-events default none via being behind bars at low z). */
+      if(hourZoom && d<tl.days){ for(let hr=1; hr<24; hr++){
+        gridLines.push(h('div',{key:'gh'+d+'_'+hr,style:{position:'absolute',top:0,bottom:0,left:(d*dayW+hr/24*dayW)+'px',width:'1px',
+          background:'var(--grid-weak)',opacity:(hr%6===0)?0.7:0.35/* 6/12/18 a touch stronger */}})); } }
     }
     // weekend shading  /* PP-EXT: windowed to [vd0,vd1] */
     const weekendRects=[];
@@ -5874,10 +6411,16 @@ class Component extends DCLogic {
     const md=(mode)=>e=>this.startBarDrag(e,t,o.idx,mode);
     const ctx=e=>{ if(recurring){ e.preventDefault(); e.stopPropagation(); this.setState({selectedIds:[t.id]}); this.openScope('delete',t.id,o.idx); } };
     const occLbl = recurring?(' · occ '+(o.idx+1)):'';
+    /* PP-EXT (C3): the link-start circle used to sit at right:-7px, ON TOP of the right resize grip, and stayed
+       hit-testable at rest (opacity 0.25) — so a drag near the right edge grabbed startLink instead of resizing/
+       moving the bar ("the click range covers the drag range"). Now it (a) only exists interactively while the
+       bar is hovered/selected (pointerEvents none + opacity 0 at rest) and (b) sits fully OUTSIDE the bar, clear
+       of the grip zone, so it can no longer steal an edge/body drag. */
+    const linkOn=(this.state.hoverId===t.id||sel);
     const linkDot=h('div',{onMouseDown:e=>this.startLink(e,t,o.idx),title:'Drag to a task to link as predecessor'+occLbl,
-      style:{position:'absolute',right:'-7px',top:'50%',transform:'translateY(-50%)',width:'11px',height:'11px',
+      style:{position:'absolute',right:'-16px',top:'50%',transform:'translateY(-50%)',width:'11px',height:'11px',
         borderRadius:'50%',background:'var(--bg)',border:'2px solid '+this._accent,cursor:'crosshair',zIndex:6,
-        opacity:(this.state.hoverId===t.id||sel)?1:0.25}});
+        pointerEvents:linkOn?'auto':'none',opacity:linkOn?1:0}});
 
     if(this.isMilestone(t)){
       const sz=this.barH;
@@ -5898,14 +6441,27 @@ class Component extends DCLogic {
           done?h('span',{style:{color:'var(--on-accent)',fontSize:'10px',fontWeight:700,lineHeight:1}},'✓'):null),
         linkDot);
     }
-    const w=Math.max(8,this.xOf(en)-left);
+    /* PP-EXT (C1): draw to effBarEnd (zero/negative span ⇒ one full day) and never below BAR_MIN_PX, so the
+       edge grips + move body stop stacking on top of each other on a short bar (the old 8px floor was narrower
+       than the two 7px grips). At high zoom the real width dominates, so a true sub-day appointment still reads. */
+    const w=Math.max(this.BAR_MIN_PX,this.xOf(this.effBarEnd(st,en))-left);
     const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),
       style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:'7px',cursor:'ew-resize',zIndex:3}});
+    /* PP-EXT (V1.2 ghost blocks): a derived (dateless) span reads grey with dotted derived edges — a real
+       edge (half-ghost) keeps a solid grey border so you can see which side is committed. Data stays null;
+       dragging an edge writes a real date via the existing bar-drag machinery (de-ghosts that edge). */
+    const ghost=!!o.ghost;
+    const dEdge='2px dotted var(--text-mut2)', sEdge='1.5px solid var(--text-mut2)';
+    const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
     return h('div',{key,style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5}},
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
-        title:t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · double-click for details',
-        style:{position:'absolute',inset:0,background:base,borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
-          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'0 1px 2px rgba(0,0,0,0.4)'}},
+        title:ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · double-click for details'),
+        style:{position:'absolute',inset:0,background:ghost?'rgba(148,163,184,0.16)':base,borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
+          borderLeft: ghost?(o.ghostStart?dEdge:sEdge):undefined,
+          borderRight: ghost?(o.ghostEnd?dEdge:sEdge):undefined,
+          borderTop: ghost?'1.5px dashed var(--text-mut2)':undefined, borderBottom: ghost?'1.5px dashed var(--text-mut2)':undefined,
+          boxSizing:'border-box',
+          boxShadow:sel?'0 0 0 2px var(--bar-ring)':(ghost?'none':'0 1px 2px rgba(0,0,0,0.4)')}},
         h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:pct+'%',background:'rgba(255,255,255,0.28)'}})),
       grip('l'), grip('r'), linkDot,
       h('div',{style:{position:'absolute',left:(w+14)+'px',top:'-1px',height:this.barH+'px',display:'flex',alignItems:'center',
@@ -6162,13 +6718,25 @@ class Component extends DCLogic {
       h('div',{style:{fontSize:'11px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px',marginBottom:'8px'}},lbl),
       content);
     const valTxt=(s,col)=>h('div',{style:{fontSize:'13px',color:col||'var(--text-2)',fontVariantNumeric:'tabular-nums'}},s);
-    const valWithX=(ms,col,key,dateOnly)=>h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px'}},
-      h('div',{style:{fontSize:'13px',color:col||'var(--text-2)',fontVariantNumeric:'tabular-nums'}}, this.fmtDT((dateOnly&&key==='end'&&ms!=null)?ms-1:ms, dateOnly/* PP-EXT */)),
+    const valWithX=(ms,col,key,dateOnly)=>{
+    /* PP-EXT: click-to-edit for the schedule window only. 'completion' shares this renderer but is a
+       record of when the task was marked done (set via pct/archive), not something to pick by hand. */
+    const editable = key==='start' || key==='end';
+    const txt = this.fmtDT((dateOnly&&key==='end'&&ms!=null)?ms-1:ms, dateOnly/* PP-EXT */);
+    return h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'8px'}},
+      editable
+        ? h('div',{onClick:e=>this.openDatePick(e,t.id,key), title:'Click to edit',
+            style:{fontSize:'13px',color:col||'var(--text-2)',fontVariantNumeric:'tabular-nums',cursor:'pointer',
+              flex:1,padding:'2px 5px',margin:'-2px -5px',borderRadius:'5px'},
+            onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
+            onMouseLeave:e=>e.currentTarget.style.background='transparent'}, txt)
+        : h('div',{style:{fontSize:'13px',color:col||'var(--text-2)',fontVariantNumeric:'tabular-nums'}}, txt),
       ms!=null?h('div',{onClick:()=>this.clearDate(t.id,key),title:'Clear date',
         style:{width:'20px',height:'20px',borderRadius:'5px',display:'flex',alignItems:'center',justifyContent:'center',
           cursor:'pointer',color:'var(--text-faint2)',fontSize:'14px',flex:'none'},
         onMouseEnter:e=>{e.currentTarget.style.background='var(--menu-hover)';e.currentTarget.style.color='var(--danger-strong)';},
         onMouseLeave:e=>{e.currentTarget.style.background='transparent';e.currentTarget.style.color='var(--text-faint2)';}},'×'):null);
+    };
 
     /* PP-EXT: include/exclude-today control (replaces the old Mode select). */
     const inclCtl = this.isMilestone(t)

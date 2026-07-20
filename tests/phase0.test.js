@@ -128,6 +128,9 @@ test('timerHeartbeat refreshes the beat of a live run without stopping it', () =
 // ---------------------------------------------------------------------------
 test('collectBackup/applyBackup round-trips tasks, settings and raw stores', () => {
   const c = make();
+  // V0.2: workspaces no longer auto-seed, so give the backup a real task to round-trip.
+  c.setState({ quickText: 'Backup me' });
+  c.runQuickAdd('bottom');
   c.saveTasks(c.state.tasks);
   c.saveSettings({ minChunk: 45 });
   c.setTheme('light'); // pp-theme is a bare string → exercises the __raw wrapper

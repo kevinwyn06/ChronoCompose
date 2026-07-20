@@ -57,10 +57,11 @@ test('anonHasData: true only when the anon pp-tasks holds a non-empty array', ()
   assert.equal(c.anonHasData(), true);
 });
 
-test('anon workspace still gets the first-run demo seed (gating must not disable anon)', () => {
+test('V0.2: a fresh anon workspace boots EMPTY — no silent demo seed', () => {
   const c = make(); // constructs under the default 'anon' workspace with an empty store
   assert.equal(c._workspace, 'anon');
-  assert.ok(Array.isArray(c.state.tasks) && c.state.tasks.length > 0, 'anon should seed demo tasks');
+  assert.ok(Array.isArray(c.state.tasks) && c.state.tasks.length === 0,
+    'no workspace auto-seeds anymore — the empty state + first-run teach, they do not seed');
 });
 
 test('WS_IMPORT_KEYS excludes the transient outbound queues/tombstones', () => {

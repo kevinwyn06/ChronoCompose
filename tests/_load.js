@@ -1,6 +1,7 @@
 // Shared test loader: pulls the DC component class out of index.html and runs it in a Node sandbox
 // with the browser globals it touches mocked. Pure/logic methods can then be called directly.
 const fs = require('fs'), path = require('path'), vm = require('vm');
+const chrono = require('chrono-node'); // PP-EXT: mirrors the vendored window.chrono in the browser
 
 function loadComponent(){
   const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
@@ -16,9 +17,9 @@ function loadComponent(){
   const sandbox = {
     console, Date, Math, JSON, parseInt, parseFloat, isNaN, isFinite,
     String, Number, Object, Array, Set, Map, Boolean, RegExp, encodeURIComponent,
-    localStorage,
+    localStorage, chrono,
     document:{ documentElement:{ setAttribute(){} } },
-    window:{ matchMedia:undefined, PP_CONFIG:{ googleClientId:'' }, localStorage },
+    window:{ matchMedia:undefined, PP_CONFIG:{ googleClientId:'' }, localStorage, chrono },
     // Minimal React shim: enough for logic tests to call render helpers (e.g. renderMoodPicker) and
     // inspect the resulting element tree's shape, without a real React/DOM dependency.
     React: { createElement:(type, props, ...children)=>({ type, props:props||{}, children }) },
@@ -32,6 +33,9 @@ function loadComponent(){
   };
   vm.createContext(sandbox);
   vm.runInContext(js + '\n;this.__C = Component;', sandbox);
+  // PP-EXT: let tests probe the sandbox globals themselves (e.g. that window.chrono is reachable
+  // from inside the component context, the way the vendored chrono.min.js provides it in-browser).
+  loadComponent.lastSandbox = sandbox;
   return sandbox.__C;
 }
 function make(){ return new (loadComponent())({ accent:'#3b82f6', showCriticalPath:true }); }

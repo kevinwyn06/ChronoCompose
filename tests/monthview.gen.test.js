@@ -87,6 +87,36 @@ test('month: tasksOnDay defaults to the filtered _calTasks set when a filter is 
   assert.deepEqual(c.tasksOnDay(B, c.state.tasks).sort(), ['drop', 'keep']);
 });
 
+// Perf (V0.3): tasksByDayMap buckets occurrences into a set of day-starts with ONE expandTask per
+// task — vs tasksOnDay, which re-expands every task for every cell (O(cells×tasks) in the month grid).
+// The bucketed result must be byte-identical to calling tasksOnDay per day (same ids, same order).
+test('month: tasksByDayMap equals per-day tasksOnDay and expands each task once', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.tasks = [
+    activeTask(c, { id: 'p', start: B + DAY, end: B + 4 * DAY }),
+    activeTask(c, { id: 'q', start: B + 9 * H, end: B + 10 * H, recur: { kind: 'day', n: 1, overrides: { 2: { deleted: true } }, shifts: [] } }),
+    activeTask(c, { id: 'm', allDay: true, start: B + 2 * DAY, end: B + 3 * DAY }),
+    activeTask(c, { id: 'r', start: B + 8 * H, end: B + 9 * H, recur: { kind: 'day', n: 1, shifts: [] } }),
+    activeTask(c, { id: 'z', start: B, end: B + DAY, archivedAt: Date.now() }), // excluded everywhere
+  ];
+  const days = []; for (let i = 0; i < 42; i++) days.push(B + i * DAY);
+
+  // Count expandTask calls made by the bucketed helper.
+  const realExpand = c.expandTask.bind(c);
+  let calls = 0; c.expandTask = (t, hz) => { calls++; return realExpand(t, hz); };
+  const map = c.tasksByDayMap(days);
+  c.expandTask = realExpand;
+
+  // One expansion per non-excluded task (4), not one per (task × cell).
+  assert.ok(calls <= c.state.tasks.length, `expanded once per task, got ${calls} calls for ${c.state.tasks.length} tasks`);
+
+  // Equivalence: identical id arrays (order included) to per-day tasksOnDay.
+  for (const d of days) {
+    assert.deepEqual(map[d], c.tasksOnDay(d), `day ${(d - B) / DAY}`);
+  }
+});
+
 // monthGrid: 42 cells, starts on the Sunday on/before the 1st, flags in-month days.
 test('month: monthGrid is a 7×6 grid starting on Sunday with correct in-month flags', () => {
   const c = make();
