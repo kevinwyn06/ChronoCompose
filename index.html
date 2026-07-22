@@ -2520,7 +2520,7 @@ class Component extends DCLogic {
      by friday" → "submit report"), so prepositions don't survive into the task title. */
   eatWithPrep(s, frag){
     const i=s.indexOf(frag); if(i<0) return s.replace(frag,' ');
-    const pm=/\b(?:by|on|in|due(?:\s+on)?|before|deadline|no\s+later\s+than|starting|starts|start|begins|begin|after|from|at)\s+(?:the\s+)?$/i.exec(s.slice(0,i));
+    const pm=/\b(?:by|on|in|due(?:\s+on)?|(?:not\s+)?before|deadline|no\s+later\s+than|starting|starts|start|begins|begin|after|from|at)\s+(?:the\s+)?$/i.exec(s.slice(0,i));
     return s.slice(0, pm?i-pm[0].length:i) + ' ' + s.slice(i+frag.length);
   }
   /* PP-EXT: the concrete first date a recurrence rule lands on (spec §5 P1·C). A recurring task whose
@@ -2703,7 +2703,9 @@ class Component extends DCLogic {
     } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges pinned
       result.start=result.date; result.pinStart=true; result.pinEnd=true;
     } else if(result.date!=null){                // a single day, no span — bind by role (the binding rule)
-      if(dueCue){                                // R5 / R6 / R11 — deadline
+      if(dueCue && !startCue){                   // R5 / R6 / R11 — deadline (a START cue wins the tie: "not
+                                                 // before X" matches BOTH — the bare `before` in dueCue and
+                                                 // `not before` in startCue — and must bind as not-before, R4/R2)
         result.pinEnd=true;
         if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
         else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD

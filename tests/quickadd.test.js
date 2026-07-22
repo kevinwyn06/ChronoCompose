@@ -258,6 +258,28 @@ test('R4: a start cue with a bare ordinal day', () => {
   assert.strictEqual(r3.rest, 'prep');
 });
 
+// Regression: "not before <day>" was mis-bound as a DEADLINE — the bare `before` alternative in the
+// due cue matched the tail of "not before", and dueCue was tested ahead of startCue, inverting the
+// constraint (schedules "finish BY X" for a phrase that means "don't start until X"). It also left
+// the orphaned "not" in the title. "not before" is a startCue → it must land in the R4 not-before
+// family, exactly like "starts"/"begins"/"after".
+test('R4: "not before <day>" is a not-before start, not a deadline (was inverted)', () => {
+  const c = make();
+  const r = c.parseDateText('submit not before friday', BASE);
+  shape(r, { start: d9(17), end: null, pinStart: true, pinEnd: null });
+  assert.strictEqual(r.clock, false);
+  assert.strictEqual(r.rest, 'submit'); // the orphaned "not" is stripped too
+});
+
+// The clocked form routes through R2 (Point tuple): start pinned at the clock, end explicitly open.
+test('R2: "not before <day> <clock>" pins the start clock, not a due deadline', () => {
+  const c = make();
+  const r = c.parseDateText('deploy not before monday 5pm', BASE);
+  shape(r, { start: at(20, 17, 0), end: null, pinStart: true, pinEnd: false });
+  assert.strictEqual(r.clock, true);
+  assert.strictEqual(r.rest, 'deploy');
+});
+
 // ---- R5 Deadline (due-cued day) ----
 test('R5: a deadline cue sets an EOD due, start stays null, pinEnd', () => {
   const c = make();
