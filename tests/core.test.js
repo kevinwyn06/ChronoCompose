@@ -40,7 +40,7 @@ test('isActiveToday: only today in [start,end], excludes milestones and included
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
-test('dateless task (no start/due) joins today only when included + has planned time', () => {
+test('dateless task (no start/due): unified ghost-window auto-in, off/snoozed still exclude', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -48,11 +48,12 @@ test('dateless task (no start/due) joins today only when included + has planned 
   const dateless = (over) => c.normalizeTask(Object.assign({ id:'d'+Math.random().toString(36).slice(2,7),
     name:'dl', type:'Proportional', start:null, end:null, priority:4, deps:[], pct:0, planned:120, spent:0 }, over||{}));
   assert.strictEqual(c.isScheduled(dateless()), false, 'no dates => unscheduled');
-  assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'included + planned>0 => active today');
-  assert.strictEqual(c.isActiveToday(dateless({ included:true, planned:0 })), false, 'no allotted time => not active');
-  assert.strictEqual(c.isActiveToday(dateless({ included:null })), false, 'not explicitly included => not active');
-  assert.strictEqual(c.isActiveToday(dateless({ included:false })), false, 'excluded => not active');
-  // never surfaces on another day
+  assert.strictEqual(c.isActiveToday(dateless({ included:null })), true, 'auto-in via the ghost window (no manual gate needed)');
+  assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'force-in also active');
+  assert.strictEqual(c.isActiveToday(dateless({ included:false })), false, 'Off still excludes');
+  assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today + 2*DAY })), false, 'active snooze still excludes');
+  assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today })), true, 'expired snooze falls back to auto-in');
+  // never surfaces on another day — now for a structural reason (ghostSpan anchored at real-today), not a manual gate
   assert.strictEqual(c.isActiveOn(dateless({ included:true }), today + 3*DAY), false, 'other day => not active');
   // due/notBefore are null-safe (fall back to the scheduled day's bounds) so the timeline can order it
   const dl = dateless({ included:true });
@@ -62,37 +63,93 @@ test('dateless task (no start/due) joins today only when included + has planned 
   c.state.tasks = [dl];
   const map = c.computeAllotted(c.state.tasks, today);
   assert.ok(map[dl.id].active && map[dl.id].allotted > 0, 'dateless task allots time today');
+  // planned:0 no longer needs its own manual gate — it's active (in the pool) but allots nothing,
+  // same as any dated task with planned:0 (the old dateless-only "planned>0" special case is gone)
+  const zeroPlanned = dateless({ included:true, planned:0 });
+  c.state.tasks = [zeroPlanned];
+  const map2 = c.computeAllotted(c.state.tasks, today);
+  assert.strictEqual(map2[zeroPlanned.id].active, true, 'still active (in the pool)');
+  assert.strictEqual(map2[zeroPlanned.id].allotted, 0, 'zero planned => zero share, same as a dated task');
 });
 
-test('inWindowToday is date-only (ignores time of day at the window edges)', () => {
+test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-expired} x {today,other day}', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
-  // a task that ends at 00:30 today (very early) is still "in window today" by date
-  const endEarly = c.startOfDay(B) + 30 * 60000;
-  const startYesterday = c.startOfDay(B) - 12 * 3600000;
-  assert.strictEqual(c.inWindowToday(activeTask(c, { start:startYesterday, end:endEarly })), true);
-  assert.strictEqual(c.inWindowToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), false);
+  const today = c.startOfToday();
+  const otherDay = today + 3*DAY;
+  const dated = (over) => c.normalizeTask(Object.assign({ id:'x'+Math.random().toString(36).slice(2,7),
+    name:'t', type:'Proportional', start:today-DAY, end:today+DAY, priority:4, deps:[], pct:0, planned:60, spent:0 }, over||{}));
+  const dateless = (over) => c.normalizeTask(Object.assign({ id:'d'+Math.random().toString(36).slice(2,7),
+    name:'dl', type:'Proportional', start:null, end:null, priority:4, deps:[], pct:0, planned:60, spent:0 }, over||{}));
+  const cases = [
+    { label:'auto',            over:{},                                   today:true,  other:false },
+    { label:'forced-in',       over:{ included:true },                    today:true,  other:false },
+    { label:'off',             over:{ included:false },                   today:false, other:false },
+    { label:'snoozed-active',  over:{ snoozeUntil: today + 2*DAY },       today:false, other:false },
+    { label:'snoozed-expired', over:{ snoozeUntil: today },               today:true,  other:false },
+  ];
+  for(const kind of [{ name:'dated', make:dated }, { name:'dateless', make:dateless }]){
+    for(const c2 of cases){
+      const t = kind.make(c2.over);
+      assert.strictEqual(c.isActiveOn(t, today), c2.today, `${kind.name}/${c2.label} @ today`);
+      assert.strictEqual(c.isActiveOn(t, otherDay), c2.other, `${kind.name}/${c2.label} @ other day`);
+    }
+  }
 });
 
-test('toggleIncluded flips the effective include state and stores it explicitly', () => {
+test('isOptedOut: included:false, active snoozeUntil, both null/expired', () => {
+  const c = make();
+  const B = Date.now();
+  c.state.nowTick = B;
+  const today = c.startOfToday();
+  const t = () => activeTask(c);
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:false, snoozeUntil:null })), true, 'included:false alone');
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today + DAY })), true, 'active snooze alone');
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), false, 'both null');
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today })), false, 'expired snooze (today>=snoozeUntil)');
+});
+
+test('inclState: off > snoozed > manual-in > window, five buckets', () => {
   const c = make();
   c.state.nowTick = Date.now();
-  const t = activeTask(c); // straddles today -> effectively included (included:null)
-  c.state.tasks = [t];
-  assert.strictEqual(c.isActiveToday(t), true);
-  c.toggleIncluded(t.id);
-  assert.strictEqual(c.state.tasks[0].included, false, 'first toggle excludes');
-  assert.strictEqual(c.isActiveToday(c.state.tasks[0]), false);
-  c.toggleIncluded(t.id);
-  assert.strictEqual(c.state.tasks[0].included, true, 'second toggle re-includes explicitly');
-  assert.strictEqual(c.isActiveToday(c.state.tasks[0]), true);
+  const today = c.startOfToday();
+  const inWin = () => activeTask(c); // straddles today
+  const outWin = () => activeTask(c, { start: today+2*DAY, end: today+4*DAY });
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false })), 'off');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false, snoozeUntil: today+DAY })), 'off', 'off beats snoozed');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { snoozeUntil: today+DAY })), 'snoozed');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:true })), 'manual-in');
+  assert.strictEqual(c.inclState(inWin()), 'auto-in');
+  assert.strictEqual(c.inclState(outWin()), 'auto-out');
 });
 
 test('isMilestone reflects the internal Milestone marker', () => {
   const c = make();
   assert.strictEqual(c.isMilestone(activeTask(c, { type:'Milestone' })), true);
   assert.strictEqual(c.isMilestone(activeTask(c)), false);
+});
+
+test('computeAllotted: snoozed/off subtask weighs zero; turning on restores its share', () => {
+  const c = make();
+  c.state.nowTick = Date.now();
+  cleanDay(c, '01:00'); // pool = 60
+  const today = c.startOfToday();
+  // p's own planned (60) matches the whole pool; a and b are BOTH planned 60 each (oversubscribed vs
+  // p, matching the existing "oversubscribed children split everything" pattern in tests/subtasks.test.js)
+  // so that excluding b's weight is visible in a's share, not masked by denom=max(P,S) pinning to P.
+  const p = activeTask(c, { id:'p', planned:60 });
+  const a = activeTask(c, { id:'a', planned:60, parentId:'p' });
+  const b = activeTask(c, { id:'b', planned:60, parentId:'p', snoozeUntil: today + DAY }); // snoozed
+  c.state.tasks = [p, a, b];
+  let map = c.computeAllotted(c.state.tasks);
+  assert.strictEqual(map['b'].allotted, 0, 'snoozed child weighs zero');
+  assert.strictEqual(map['a'].allotted, 60, 'a gets the whole family pool (b contributes no weight)');
+  // turning b back on (same-day recompute — no snapshot/undo needed, this is a pure read)
+  b.snoozeUntil = null;
+  map = c.computeAllotted(c.state.tasks);
+  assert.strictEqual(map['a'].allotted, 30, 'a and b now split evenly (both oversubscribed against the 60min pool)');
+  assert.strictEqual(map['b'].allotted, 30);
 });
 
 test('computeAllotted: manual-override fixed, excluded/milestone inactive, Proportional split', () => {
