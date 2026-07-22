@@ -580,3 +580,59 @@ test('parseDateText: the ambiguity payload does not disturb the persisted shape'
   assert.strictEqual(r.pinStart, null);
   assert.strictEqual(r.pinEnd, null);
 });
+
+// ---- Track B Group 3: the ambiguity chooser. pickCandidate + ambigChoiceLabels are the pure
+// helpers renderQuickAddPopup/runQuickAdd lean on; unit-test the mapping directly so the DOM path
+// stays thin (design 2026-07-21 §Group 3). ----
+test('pickCandidate: "anchor" choice returns the anchor tuple (== the interim default)', () => {
+  const c = make();
+  const r = c.parseDateText('gym friday', BASE);
+  const t = c.pickCandidate(r, 'anchor');
+  assert.strictEqual(t.pinStart, true);
+  assert.strictEqual(t.pinEnd, false);
+  assert.strictEqual(t.start, at(17, 9, 0));
+  assert.strictEqual(t.end, null);
+});
+test('pickCandidate: "due" choice returns the due tuple (only this changes the outcome)', () => {
+  const c = make();
+  const r = c.parseDateText('gym friday', BASE);
+  const t = c.pickCandidate(r, 'due');
+  assert.strictEqual(t.pinEnd, true);
+  assert.strictEqual(t.pinStart, false);
+  assert.strictEqual(t.end, at(17, 9, 0));
+  assert.strictEqual(t.start, null);
+});
+test('pickCandidate: an unknown/empty choice falls back to the anchor tuple', () => {
+  const c = make();
+  const r = c.parseDateText('gym friday', BASE);
+  assert.strictEqual(c.pickCandidate(r, 'nonsense').kind, undefined); // returns the tuple, not the wrapper
+  assert.strictEqual(c.pickCandidate(r, 'nonsense').pinStart, true);
+  assert.strictEqual(c.pickCandidate(r, null).pinStart, true);
+});
+test('pickCandidate: an unambiguous parse returns null (runQuickAdd keeps the raw shaped fields)', () => {
+  const c = make();
+  assert.strictEqual(c.pickCandidate(c.parseDateText('call client 2-3pm', BASE), 'due'), null);
+  assert.strictEqual(c.pickCandidate(c.parseDateText('call friends', BASE), 'anchor'), null);
+});
+test('ambigChoiceLabels: bare day → On/By weekday', () => {
+  const c = make();
+  const l = c.ambigChoiceLabels(c.parseDateText('gym friday', BASE));
+  assert.strictEqual(l.anchor, 'On Fri');
+  assert.strictEqual(l.due, 'By Fri');
+});
+test('ambigChoiceLabels: recurring day → On/By pluralised weekday', () => {
+  const c = make();
+  const l = c.ambigChoiceLabels(c.parseDateText('gym every friday', BASE));
+  assert.strictEqual(l.anchor, 'On Fridays');
+  assert.strictEqual(l.due, 'By Fridays');
+});
+test('ambigChoiceLabels: bare day + clock → At/By time', () => {
+  const c = make();
+  const l = c.ambigChoiceLabels(c.parseDateText('homework monday 9am', BASE));
+  assert.strictEqual(l.anchor, 'At 9am');
+  assert.strictEqual(l.due, 'By 9am');
+});
+test('ambigChoiceLabels: unambiguous parse → null (no chooser row rendered)', () => {
+  const c = make();
+  assert.strictEqual(c.ambigChoiceLabels(c.parseDateText('call client 2-3pm', BASE)), null);
+});

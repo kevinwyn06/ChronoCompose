@@ -2707,6 +2707,41 @@ class Component extends DCLogic {
     return result;
   }
 
+  /* PP-EXT Track B Group 3 — the ambiguity chooser (design 2026-07-21 §Group 3). Two PURE helpers the
+     quick-add popup leans on so the DOM path stays thin and testable in the Node sandbox.
+     `pickCandidate` maps a chooser selection back to the tuple runQuickAdd applies; returns null when
+     the parse is unambiguous (caller keeps the raw shaped fields — no behaviour change). The 'anchor'
+     tuple is byte-identical to Track A's interim default, so only 'due' alters the outcome. */
+  pickCandidate(parsed, choice){
+    if(!parsed || !parsed.ambiguous || !parsed.candidates || !parsed.candidates.length) return null;
+    const pick = parsed.candidates.find(c=>c.kind===(choice||'anchor'))
+      || parsed.candidates.find(c=>c.kind==='anchor') || parsed.candidates[0];
+    return pick ? pick.tuple : null;
+  }
+  /* PP-EXT: short am/pm clock label for the chooser ("9am", "9:30am", "2pm") — reads the anchor day's
+     own clock, so it always matches what the user typed. */
+  _fmtClockLabel(ms){
+    if(ms==null) return '';
+    const d=new Date(ms); const m=d.getMinutes(); let h=d.getHours()%12; if(h===0) h=12;
+    return h + (m ? (':'+String(m).padStart(2,'0')) : '') + (d.getHours()<12 ? 'am' : 'pm');
+  }
+  /* PP-EXT: the two segment labels for the chooser, keyed off `ambiguous` (day/recur/time → wording,
+     not different mechanics). Copy locked by owner 2026-07-21: On/By for days, plural for recur,
+     At/By for a bare clock. Returns null when the parse is unambiguous (no chooser row). */
+  ambigChoiceLabels(parsed){
+    if(!parsed || !parsed.ambiguous) return null;
+    const anchor = (parsed.candidates||[]).find(c=>c.kind==='anchor');
+    const ms = anchor ? anchor.tuple.start : null;
+    if(parsed.ambiguous==='time'){ const t=this._fmtClockLabel(ms); return {anchor:'At '+t, due:'By '+t}; }
+    // day → short abbrev ("On Fri"); recur → full name pluralised ("On Fridays") per owner copy 2026-07-21
+    const dow = ms!=null ? new Date(ms).getDay() : 0;
+    const word = parsed.ambiguous==='recur'
+      ? ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][dow]+'s'
+      : ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dow];
+    return {anchor:'On '+word, due:'By '+word};
+  }
+  /* /PP-EXT */
+
   /* ---------- scroll sync ---------- */
   syncFromSheet(e){ if(this._sync)return; this._sync=true; if(this.ganttScrollEl) this.ganttScrollEl.scrollTop=e.target.scrollTop; this._sync=false; }
   syncFromGantt(e){ if(this._sync)return; this._sync=true; if(this.sheetScrollEl) this.sheetScrollEl.scrollTop=e.target.scrollTop; this._sync=false;
@@ -2844,6 +2879,21 @@ class Component extends DCLogic {
       if(parsed.priority) hints.push(chip('P'+parsed.priority, this.PCOL[parsed.priority]));
       (parsed.labels||[]).forEach(l=>hints.push(chip('@'+l,'#5a6270')));
     }
+    /* PP-EXT Track B Group 3: the ambiguity chooser. When the parse is genuinely ambiguous (a bare
+       day/recur/time with no cue — `gym friday` could mean do-it-Fri OR due-Fri) show a segmented
+       [ On Fri | By Fri ] toggle under the chips, preselected to the anchor branch (== the interim
+       default already persisted, `shortest-effort-path-no-miss`). Flip with click or ←/→; Enter still
+       commits. Unambiguous entries render no row and ignore quickChoice. */
+    const ambigLabels = parsed ? this.ambigChoiceLabels(parsed) : null;
+    const choice = this.state.quickChoice || 'anchor';
+    const setChoice = k => this.setState({quickChoice:k});
+    const seg = (k,txt)=>{ const on = choice===k; return h('button',{key:k,onClick:()=>setChoice(k),tabIndex:-1,
+      style:{height:'24px',padding:'0 11px',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:700,cursor:'pointer',
+        background:on?this._accent:'transparent',color:on?'var(--on-accent)':'var(--text-mut)'}}, txt); };
+    const chooserRow = ambigLabels ? h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'10px 0 0 28px'}},
+      h('span',{style:{fontSize:'11px',fontWeight:600,color:'var(--text-mut2)'}},'Which?'),
+      h('div',{style:{display:'inline-flex',gap:'2px',padding:'2px',background:'var(--field-bg)',border:'1px solid var(--field-border)',borderRadius:'8px'}},
+        seg('anchor',ambigLabels.anchor), seg('due',ambigLabels.due))) : null;
     const close=()=>this.setState({quickOpen:false});
     const card=h('div',{onMouseDown:e=>e.stopPropagation(),
         style:{width:'520px',maxWidth:'92vw',background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'14px',
@@ -2857,14 +2907,21 @@ class Component extends DCLogic {
            re-render, so typing doesn't fight the caret. */
         h('input',{ref:el=>{ const isNew=el&&!this.quickEl; this.quickEl=el; if(isNew) el.focus(); },
           value:this.state.quickText, placeholder:'Quick add — e.g. "Sim tuning tomorrow at 4pm p1 every week @sim"  (Enter to add)',
-          onChange:e=>this.setState({quickText:e.target.value}),
-          onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.runQuickAdd(e.shiftKey?'top':'bottom'); } },
+          /* PP-EXT (Group 3): reset the chooser to the safe default on every text change — simplest
+             correct version of the re-parse rule; a leftover 'due' from a previous phrase can never
+             silently apply to a different parse. */
+          onChange:e=>this.setState({quickText:e.target.value, quickChoice:'anchor'}),
+          onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.runQuickAdd(e.shiftKey?'top':'bottom'); return; }
+            /* PP-EXT (Group 3): ←/→ flip the ambiguity chooser (owner-approved D4). Only intercepts the
+               caret while an ambiguous parse is showing the toggle; otherwise arrows behave normally. */
+            if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); } },
           style:{flex:1,minWidth:0,background:'transparent',border:'none',outline:'none',color:'var(--text)',fontSize:'13.5px'}}),
         h('button',{onClick:()=>this.runQuickAdd('bottom'),disabled:!this.state.quickText.trim(),
           style:{height:'28px',padding:'0 13px',background:this.state.quickText.trim()?this._accent:'var(--btn-bg)',
             border:'none',color:'var(--on-accent)',borderRadius:'6px',fontSize:'12.5px',fontWeight:600,
             cursor:this.state.quickText.trim()?'pointer':'default',opacity:this.state.quickText.trim()?1:0.5}},'Add')),
-      hints.length?h('div',{style:{display:'flex',gap:'5px',alignItems:'center',flexWrap:'wrap',padding:'10px 0 0 28px'}},hints):null);
+      hints.length?h('div',{style:{display:'flex',gap:'5px',alignItems:'center',flexWrap:'wrap',padding:'10px 0 0 28px'}},hints):null,
+      chooserRow); /* PP-EXT (Group 3): ambiguity chooser row, null unless the parse is ambiguous */
     return h('div',{onMouseDown:close,
       style:{position:'fixed',inset:0,zIndex:2300,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',padding:'20px'}},
       card);
@@ -3141,16 +3198,22 @@ class Component extends DCLogic {
        fix and kept eating "run a mile" / "email ms johnson" down to "run a" / "email johnson". */
     let name = p.rest.replace(/◇/g,'').replace(/\bmilestone\b/ig,'').replace(/^\s*\*/,'').replace(/\s+/g,' ').trim() || 'New task';
     const recur = p.recur ? {...p.recur, until:(p.until||null), shifts:[], overrides:{}} : null;
+    /* PP-EXT Track B Group 3: apply the ambiguity chooser's selection over the shaped fields. Null when
+       the parse is unambiguous → keep p's fields (no behaviour change). The 'anchor' tuple is identical
+       to Track A's interim default, so only a 'due' pick actually changes what gets committed. */
+    const tup = this.pickCandidate(p, this.state.quickChoice);
+    const f = { start:p.start, end:p.end, pinStart:p.pinStart, pinEnd:p.pinEnd, planned:p.dur||0 };
+    if(tup){ f.start=tup.start; f.end=tup.end; f.pinStart=tup.pinStart; f.pinEnd=tup.pinEnd; if(tup.planned!=null) f.planned=tup.planned; }
     this.commit(tasks=>{
       const id='t'+Math.random().toString(36).slice(2,8);
       const t=this.normalizeTask({id,name,type:p.mile?'Milestone':'Proportional',
-        start:p.start, end:p.end, priority:p.priority||4, deps:[], pct:0,
-        planned:p.dur||0, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
-        pinStart:p.pinStart, pinEnd:p.pinEnd}); /* PP-EXT */
+        start:f.start, end:f.end, priority:p.priority||4, deps:[], pct:0,
+        planned:f.planned, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
+        pinStart:f.pinStart, pinEnd:f.pinEnd}); /* PP-EXT */
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
-    this.setState({quickText:'', selectedIds:this._qaId?[this._qaId]:[]});
+    this.setState({quickText:'', quickChoice:'anchor', selectedIds:this._qaId?[this._qaId]:[]}); /* PP-EXT: reset chooser to the safe default for the next entry (Group 3) */
   }
 
   /* ---------- recurrence scope chooser ---------- */
