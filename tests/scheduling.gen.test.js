@@ -492,3 +492,48 @@ test('computeAllotted: adding a Point does not change the pool total', () => {
   const withPt = c.computeAllotted([a, point]);
   assert.equal(withPt['a'].allotted, without['a'].allotted);
 });
+
+/* ================ PART G — Group 2 render-shape emitters (points + top-hover) ================ */
+
+test('pointsToday: a clocked no-duration start-pin surfaces as a render Point {id,ms,title}', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const point = activeTask(c, { id:'p', name:'Meeting', start:B + 14*H, end:null, pinStart:true, pinEnd:false, planned:0 });
+  const block = activeTask(c, { id:'b', name:'Work',    start:B + 14*H, end:null, pinStart:true, pinEnd:false, planned:120 });
+  c.state.tasks = [point, block]; c._allot = c.computeAllotted(c.state.tasks);
+  assert.deepEqual(c.buildDayTimeline(B).points, [{ id:'p', ms:B + 14*H, title:'Meeting' }]);
+});
+
+test('topHover: a dated-but-untimed planned-0 task surfaces; timed/blocked/dateless/milestone excluded', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const hover    = activeTask(c, { id:'h',  name:'Report',  start:B, end:null,  pinStart:true,  pinEnd:false, planned:0 });
+  const hoverDue = activeTask(c, { id:'hd', name:'Essay',   start:null, end:B,  pinStart:false, pinEnd:true,  planned:0 });
+  const point    = activeTask(c, { id:'p',  name:'Call',    start:B + 9*H, end:null, pinStart:true, pinEnd:false, planned:0 });
+  const block    = activeTask(c, { id:'b',  name:'Study',   start:B, end:null,  pinStart:true,  pinEnd:false, planned:120 });
+  const dateless = activeTask(c, { id:'d',  name:'Someday', start:null, end:null, pinStart:false, pinEnd:false, planned:0 });
+  const mile     = activeTask(c, { id:'m',  name:'MS', type:'Milestone', start:B, end:null });
+  c.state.tasks = [hover, hoverDue, point, block, dateless, mile];
+  c._allot = c.computeAllotted(c.state.tasks);
+  assert.deepEqual(c.buildDayTimeline(B).topHover.map(x => x.id).sort(), ['h','hd']);
+});
+
+test('topHover: an excluded (included:false) dated-untimed task does not hover', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const off = activeTask(c, { id:'o', name:'Off', start:B, end:null, pinStart:true, pinEnd:false, planned:0, included:false });
+  c.state.tasks = [off]; c._allot = c.computeAllotted(c.state.tasks);
+  assert.deepEqual(c.buildDayTimeline(B).topHover, []);
+});
+
+test('topHover vs Point guard: a clocked start-pin with an unclocked due is a Point, never a hover line', () => {
+  const c = make();
+  const B = c.startOfToday();
+  // clocked start (=> Point) AND an unclocked end: only the isPointOn guard keeps it out of topHover
+  // (the hasClock fallback checks `end`, which is unclocked here, so it can't be what excludes it).
+  const t = activeTask(c, { id:'pt', name:'Standup', start:B + 10*H, end:B, pinStart:true, pinEnd:false, planned:0 });
+  c.state.tasks = [t]; c._allot = c.computeAllotted(c.state.tasks);
+  const data = c.buildDayTimeline(B);
+  assert.deepEqual(data.points, [{ id:'pt', ms:B + 10*H, title:'Standup' }], 'renders as a Point');
+  assert.deepEqual(data.topHover, [], 'excluded from top-hover by the isPointOn guard');
+});

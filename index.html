@@ -258,6 +258,10 @@ class Component extends DCLogic {
     this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
     this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
     this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
+    /* PP-EXT (Group 2): day-drawer vertical zoom — session-only (not persisted; owner 2026-07-22). */
+    this.DRAWER_ZOOM_MIN = 1;        // 1 = fit-to-height (no zoom)
+    this.DRAWER_ZOOM_MAX = 8;        // up to 8× taller for dense afternoons
+    this.DRAWER_ZOOM_STEP = 1.5;     // ×/÷ per ＋/－ click
     this.GANTT_HOUR_GRID_DAYW = 240; // at/above this px-per-day, draw hour gridlines + ticks (240 ⇒ 10px/hr)
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
@@ -1305,6 +1309,35 @@ class Component extends DCLogic {
     const out=[];
     src.forEach(t=>{ if(this.isPointOn(t, B)) out.push(this.notBeforeMsOf(t, B)); });
     return out.sort((a,b)=>a-b);
+  }
+  /* PP-EXT Track B (Group 2): render-only Point list — same rows as keepClearToday, but richer
+     ({id,ms,title}) for renderDayColumn. Reserves nothing (parallels isPointOn: raw planned, no _allot). */
+  pointsToday(B, tasks){
+    const src=tasks||this.state.tasks; const out=[];
+    src.forEach(t=>{ if(this.isPointOn(t, B)) out.push({id:t.id, ms:this.notBeforeMsOf(t, B), title:t.name}); });
+    return out.sort((a,b)=>a.ms-b.ms);
+  }
+  /* PP-EXT Track B (Group 2): a "top-hover" agenda item — a dated-but-untimed task that reserves NO time
+     (raw planned 0) and isn't otherwise drawn (not a Point, fixed block, drag-pin, or milestone). It
+     belongs to the day its date-instant (due if present, else anchor) falls on. Render-only: reserves
+     nothing, so pool/allotment math is untouched. Uses raw planned (not _allot) to stay order-independent,
+     like isPointOn; uses occForDay so recurring occurrences land on the right day. */
+  isTopHoverOn(t, B){
+    if(this.isMilestone(t) || t.archivedAt) return false;
+    if((t.planned||0) > 0) return false;                         /* packs a block → not a hover line */
+    if(t.included===false) return false;                        /* manual EXCLUDE, any day */
+    if(B===this.startOfToday() && this.isOptedOut(t)) return false; /* today snooze/off */
+    if(this.isFixedOn(t, B)) return false;                      /* has a clock span → drawn as a block */
+    if(this.isPointOn(t, B)) return false;                      /* clocked anchor → drawn as a caret */
+    if(this.hasDragPinToday(t, B)) return false;                /* drawn as a pinned block */
+    const oc=this.occForDay(t, B);
+    const inst = oc.end!=null ? oc.end : oc.start;
+    if(inst==null || this.hasClock(inst)) return false;         /* dateless or timed → not a hover line */
+    return this.startOfDay(inst) === B;                          /* belongs to day B */
+  }
+  topHoverToday(B, tasks){
+    const src=tasks||this.state.tasks;
+    return src.filter(t=>this.isTopHoverOn(t, B)).map(t=>({id:t.id, title:t.name}));
   }
   /* /PP-EXT */
   /* ==== PP-EXT: subtasks (ROADMAP Phase 4) ====
@@ -4734,7 +4767,8 @@ class Component extends DCLogic {
         dragPin:kb.byId[b.taskId]?this.hasDragPinToday(kb.byId[b.taskId], B):false} /* PP-EXT: pinned task block (dragPin ⇒ draggable + unpin) */
       :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
-    return {chunks:merged, dayStart:winStart, dayEnd:winEnd};
+    return {chunks:merged, dayStart:winStart, dayEnd:winEnd,
+      points:this.pointsToday(B, this.state.tasks), topHover:this.topHoverToday(B, this.state.tasks)}; /* PP-EXT (Group 2): render-only shapes */
   }
   /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start and clamp so the whole block stays
      inside today's window. Two-stage snap: if either edge (start or end) lands within PIN_MAGNET minutes of a
@@ -4808,8 +4842,12 @@ class Component extends DCLogic {
     /* PP-EXT: fit the timeline to the measured available height (no scroll until an Unscheduled list overflows).
        Falls back to the fixed TL_PXPM scale before the container is measured. `_curColPx` feeds the block-drag
        px→minutes conversion so dragging stays calibrated to whatever scale we render at. */
-    const px = (opts.availH && opts.availH>40) ? Math.max(0.15, opts.availH/totalMin) : this.TL_PXPM;
-    const H = (opts.availH && opts.availH>40) ? opts.availH : totalMin*px;
+    /* PP-EXT (Group 2): opts.zoom scales the fitted px; H always follows px so zoom-in grows the body and
+       the drawer's overflow:auto wrapper scrolls. zoom omitted / 1 ⇒ identical to fit-to-height. */
+    const zoom = Math.max(this.DRAWER_ZOOM_MIN, Math.min(this.DRAWER_ZOOM_MAX, opts.zoom||1));
+    const basePx = (opts.availH && opts.availH>40) ? Math.max(0.15, opts.availH/totalMin) : this.TL_PXPM;
+    const px = basePx * zoom;
+    const H = (zoom===1 && opts.availH && opts.availH>40) ? opts.availH : totalMin * px; /* PP-EXT (Group 2): preserve exact fit-to-height at zoom=1 (incl. the 0.15 px-floor clamp case) */
     this._curColPx = px;
     const now=this.state.nowTick||Date.now();
     const bd=this._blockDrag; /* PP-EXT: live drag-pin preview (only for the column being dragged) */
@@ -4856,11 +4894,31 @@ class Component extends DCLogic {
         (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, unpin, btn); });
     const nowLine = (isToday && now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:gut+'px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
+    /* PP-EXT (Group 2): render-only Points — a dotted marker + time label at a bare-time task's clock.
+       pointerEvents:none so it never intercepts a drag on the block beneath. First-pass tokens. */
+    const points=(data.points||[]).map((p,i)=>{
+      const y=topOf(p.ms);
+      return h('div',{key:'pt'+i, title:p.title+' · '+this.clockLabel(p.ms),
+        style:{position:'absolute',left:gut+'px',right:'6px',top:y+'px',height:'0',
+          borderTop:'2px dotted #1a73e8',zIndex:4,pointerEvents:'none'}},
+        h('span',{style:{position:'absolute',left:'0',top:'-8px',fontSize:'9px',fontWeight:700,color:'#1a73e8',
+          background:'var(--gantt-bg)',padding:'0 3px',borderRadius:'3px',whiteSpace:'nowrap'}},
+          '◆ '+this.clockLabel(p.ms))); });
+    /* PP-EXT (Group 2): top-hover agenda chips — dated-but-untimed tasks pinned to the column top.
+       pointerEvents:none; first-pass "unscheduled"-blue tokens (matches TL_TYP.unscheduled family). */
+    const hover=(data.topHover||[]);
+    const hoverEl = hover.length ? h('div',{key:'th',
+      style:{position:'absolute',left:blkLeft+'px',right:'6px',top:'2px',display:'flex',flexWrap:'wrap',gap:'4px',
+        zIndex:3,pointerEvents:'none'}},
+      ...hover.map((thv,i)=>h('div',{key:'th'+i,title:thv.title,
+        style:{fontSize:'10px',fontWeight:600,color:'#2a3538',background:'rgba(190,218,227,0.92)',
+          border:'1px solid rgba(0,0,0,0.12)',borderRadius:'10px',padding:'1px 7px',whiteSpace:'nowrap',
+          overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}}, '🕓 '+thv.title))) : null;
     const unsched=data.chunks.filter(c=>!c.start);
     return h('div',{style:{position:'relative'}},
       /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
          scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
-      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, nowLine),
+      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, ...points, hoverEl, nowLine), /* PP-EXT (Group 2): + carets + top-hover */
       unsched.length? h('div',{style:{margin:'8px 4px 4px',padding:'8px',background:'rgba(230,81,0,0.08)',border:'1px solid rgba(230,81,0,0.3)',borderRadius:'8px'}},
         h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'var(--warn)',marginBottom:'5px'}},'⚠ Unscheduled'),
         ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
@@ -4991,8 +5049,19 @@ class Component extends DCLogic {
     const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header, gerr, serr, /* PP-EXT B2 */ note, runbar, this.renderPomodoroBar(), /* PP-EXT Phase 10 */ this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
-      h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
-        this.renderDayColumn(B, {showLabels:true, availH})),
+      /* PP-EXT (Group 2): session-only day-drawer zoom. The ＋/－ overlay is pinned to the pane (not the
+         scrolling body); _drawerZoom is an instance field so a reload resets to fit-to-height. */
+      (()=>{ const zoom=this._drawerZoom||1;
+        const zBtn=(lbl,fn,dis,tip)=>h('div',{onClick:dis?null:fn,title:tip,
+          style:{width:'22px',height:'22px',borderRadius:'6px',display:'flex',alignItems:'center',justifyContent:'center',
+            fontSize:'14px',fontWeight:700,cursor:dis?'default':'pointer',opacity:dis?0.4:1,userSelect:'none',
+            background:'var(--sheet-bg)',border:'1px solid var(--divider)',color:'var(--text-2)'}}, lbl);
+        return h('div',{style:{position:'relative',flex:1,minHeight:0,display:'flex',flexDirection:'column'}},
+          h('div',{style:{position:'absolute',top:'8px',right:'12px',zIndex:8,display:'flex',gap:'4px'}},
+            zBtn('－',()=>{ this._drawerZoom=Math.max(this.DRAWER_ZOOM_MIN,(this._drawerZoom||1)/this.DRAWER_ZOOM_STEP); this.forceUpdate(); }, zoom<=this.DRAWER_ZOOM_MIN+0.001, 'Zoom out'),
+            zBtn('＋',()=>{ this._drawerZoom=Math.min(this.DRAWER_ZOOM_MAX,(this._drawerZoom||1)*this.DRAWER_ZOOM_STEP); this.forceUpdate(); }, zoom>=this.DRAWER_ZOOM_MAX-0.001, 'Zoom in')),
+          h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
+            this.renderDayColumn(B, {showLabels:true, availH, zoom}))); })(),
       this.renderMusicDock()); /* PP-EXT Phase 10: placeholder music dock (engine chosen later) */
   }
   /* PP-EXT Phase 10: pomodoro control bar (Today view). Idle → task picker + Start; active → phase + live
