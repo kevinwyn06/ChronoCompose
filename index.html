@@ -1175,7 +1175,7 @@ class Component extends DCLogic {
   /* PP-EXT: the day's schedulable free intervals (ms). window [dayStart,dayEnd] minus meals minus the reserved
      freeTime block (pinned to the end of the window), optionally clamped to `from` for pack-from-now. Single
      source of truth shared by computeAllotted (pool = Σ length) and buildDayTimeline (the bins to pack into). */
-  dayIntervals(B, from, extraBusy){ /* PP-EXT: extraBusy = additional busy blocks (pinned tasks), same clamping as meals */
+  dayIntervals(B, from, extraBusy, keepClear){ /* PP-EXT: extraBusy = pinned-task blocks; keepClear = zero-width Point dividers */
     const s=this.state.settings;
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
     const lo=from!=null?Math.max(winStart,Math.min(from,winEnd)):winStart;
@@ -1186,9 +1186,15 @@ class Component extends DCLogic {
     const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time');
     (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
-    const free=[]; let cur=lo;
+    let free=[]; let cur=lo;
     arr.forEach(b=>{ if(b.end<=lo) return; const bs=Math.max(b.start,lo); if(bs>cur) free.push({start:cur,end:bs}); cur=Math.max(cur,b.end); });
     if(cur<winEnd) free.push({start:cur,end:winEnd});
+    /* PP-EXT: keep-clear — split (do not consume) free at each Point's clock so no packed block spans it.
+       Zero-width ⇒ Σ free length is unchanged, so computeAllotted's pool is untouched. */
+    (keepClear||[]).forEach(x=>{ const nf=[];
+      free.forEach(iv=>{ if(x>iv.start && x<iv.end){ nf.push({start:iv.start,end:x}); nf.push({start:x,end:iv.end}); } else nf.push(iv); });
+      free=nf; });
+    /* /PP-EXT */
     return {winStart, winEnd, lo, busy, free};
   }
   /* PP-EXT: the "from now" toggle starts the plan (and pool) at the current time — but ONLY for today's column.
@@ -1237,7 +1243,7 @@ class Component extends DCLogic {
     return { ps: t.pinStart!=null ? !!t.pinStart : timedEvent,
              pe: t.pinEnd!=null   ? !!t.pinEnd   : true };
   }
-  isFixedOn(t, B){ const p=this.effPins(t); return p.ps && p.pe && this.isActiveOn(t, B); }
+  isFixedOn(t, B){ const p=this.effPins(t); return p.ps && p.pe && this.occForDay(t, B).end!=null && this.isActiveOn(t, B); } /* PP-EXT: end!=null guard — never "fixed" without a real end */
   isFixedToday(t){ return this.isFixedOn(t, this.startOfToday()); }
   /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
      manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
@@ -1284,6 +1290,23 @@ class Component extends DCLogic {
     });
     return out;
   }
+  /* PP-EXT: keep-clear Point — a timed task that reserves NO duration (pinStart, not pinEnd, no planned).
+     It occupies no time but its clock is a divider the packer won't cross (spec §4 / R1 keep-clear). */
+  isPointOn(t, B){
+    if(this.isMilestone(t)) return false;
+    const p=this.effPins(t);
+    if(!(p.ps && !p.pe)) return false;
+    if((t.planned||0) > 0) return false;               /* raw planned — must not touch _allot (called inside computeAllotted) */
+    const oc=this.occForDay(t, B);
+    return oc.start!=null && this.hasClock(oc.start) && this.isActiveOn(t, B);
+  }
+  keepClearToday(B, tasks){
+    const src=tasks||this.state.tasks;
+    const out=[];
+    src.forEach(t=>{ if(this.isPointOn(t, B)) out.push(this.notBeforeMsOf(t, B)); });
+    return out.sort((a,b)=>a-b);
+  }
+  /* /PP-EXT */
   /* ==== PP-EXT: subtasks (ROADMAP Phase 4) ====
      parentId nests tasks (arbitrary depth in the table, collapsible). Owner's budget model: the parent
      keeps its own Planned; its allotted time is distributed to children proportional to child Planned,
@@ -1758,7 +1781,8 @@ class Component extends DCLogic {
        stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
        allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled. */
     const brk=Math.max(0, this.state.settings.breakMin||0);
-    const rawAvail=this.dayIntervals(B, this.packStart(B), fixed).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
+    const kc=this.keepClearToday(B, tasks); /* PP-EXT: same dividers buildDayTimeline uses; zero-width ⇒ pool unchanged, kept for lockstep */
+    const rawAvail=this.dayIntervals(B, this.packStart(B), fixed, kc).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
     const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
     {
@@ -2651,7 +2675,7 @@ class Component extends DCLogic {
         if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
         else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD
       } else if(hasClock){                        // R2 / R10 — start clock, open end
-        result.start=result.date; result.pinStart=true; result.end=null;
+        result.start=result.date; result.pinStart=true; result.pinEnd=false; result.end=null; /* PP-EXT: Point tuple — no end pinned so it can't collapse to a null-end fixed block */
       } else if(startCue){                        // R4 — not-before (start-cued all-day)
         result.start=result.date; result.pinStart=true; result.end=null;
       } else {                                    // R8 — uncued bare day → start, pins left null (effPins default)
@@ -4564,7 +4588,8 @@ class Component extends DCLogic {
     /* PP-EXT: pins — fixed (both-pinned) tasks are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
     const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
-    const di=this.dayIntervals(B, this.packStart(B), fixedBlocks);
+    const kc=this.keepClearToday(B, this.state.tasks); /* PP-EXT: Point dividers */
+    const di=this.dayIntervals(B, this.packStart(B), fixedBlocks, kc);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;
     let free=di.free.slice();
     const remove=(a,b)=>{ const nf=[]; free.forEach(iv=>{ if(b<=iv.start||a>=iv.end){nf.push(iv);} else { if(a>iv.start)nf.push({start:iv.start,end:a}); if(b<iv.end)nf.push({start:b,end:iv.end}); } }); free=nf; };
@@ -4612,8 +4637,9 @@ class Component extends DCLogic {
     const bySlot=(a,b)=>{ if(!a.start && !b.start) return 0; if(!a.start) return 1; if(!b.start) return -1; return a.start-b.start; };
     segs.sort(bySlot);
     let merged=[];
+    const kcSet=new Set(kc); /* PP-EXT: keep-clear — don't merge across a Point's clock, or the split would be undone and a block would span it */
     segs.forEach(seg=>{ if(!seg.start){merged.push(seg);return;} const last=merged[merged.length-1];
-      if(last&&last.start&&last.id===seg.id&&(seg.start-last.end)<=60000){ last.end=seg.end; } else merged.push(Object.assign({},seg)); });
+      if(last&&last.start&&last.id===seg.id&&(seg.start-last.end)<=60000&&!kcSet.has(seg.start)){ last.end=seg.end; } else merged.push(Object.assign({},seg)); });
     /* PP-EXT: subtasks — split each parent chunk into consecutive child sub-blocks ('Parent › Child',
        child timers work per block); the parent's own remainder keeps its name. Two display levels only:
        a child block spans its whole family share (grandchildren aren't separately drawn). */

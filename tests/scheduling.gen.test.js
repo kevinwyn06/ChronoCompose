@@ -6,6 +6,7 @@ const assert = require('node:assert');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');
 
 const MIN = 60000; // ms per minute
+const H = 3600000; // ms per hour
 
 // Build the allotment map + timeline for the given tasks (order the packer relies on).
 function pack(c, tasks){
@@ -398,4 +399,96 @@ test('multi-day: isActiveOn windows tasks to the right day', () => {
   const t = activeTask(c, { id: 't', name: 'T', planned: 60, start: B + 2 * DAY, end: B + 2 * DAY });
   assert.ok(!c.isActiveOn(t, B), 'not active today (window starts in 2 days)');
   assert.ok(c.isActiveOn(t, B + 2 * DAY), 'active on its own day');
+});
+
+/* ====================== PART F — keep-clear Points ====================== */
+
+test('isPointOn / keepClearToday: a clocked no-duration start-pin is a keep-clear Point', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const point    = activeTask(c, { id: 'p',  start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const notBefore = activeTask(c, { id: 'nb', start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 120 });
+  const mile     = activeTask(c, { id: 'm',  type: 'Milestone', start: B + 14 * H, pinStart: true, pinEnd: false });
+  const dateless = activeTask(c, { id: 'd',  start: null, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  assert.equal(c.isPointOn(point, B), true);
+  assert.equal(c.isPointOn(notBefore, B), false, 'planned>0 NOT-before task is not a Point');
+  assert.equal(c.isPointOn(mile, B), false);
+  assert.equal(c.isPointOn(dateless, B), false);
+  assert.deepEqual(c.keepClearToday(B, [point, notBefore, mile, dateless]), [B + 14 * H]);
+});
+
+test('dayIntervals: a keep-clear instant splits free without changing total minutes', () => {
+  const c = make();
+  cleanDay(c, '23:59');
+  const B = c.startOfToday();
+  const base  = c.dayIntervals(B, null, [], []);
+  const split = c.dayIntervals(B, null, [], [B + 14 * H]);
+  const mins = ivs => ivs.reduce((a, iv) => a + (iv.end - iv.start), 0);
+  assert.equal(mins(split.free), mins(base.free), 'zero-width split preserves total free');
+  assert.equal(split.free.length, base.free.length + 1, 'one interval became two');
+  assert.ok(split.free.some(iv => iv.end === B + 14 * H) && split.free.some(iv => iv.start === B + 14 * H),
+    'the two new intervals touch at the instant');
+});
+
+test('dayIntervals: an instant outside a free interval is a no-op', () => {
+  const c = make();
+  cleanDay(c, '23:59');
+  const B = c.startOfToday();
+  const win  = c.dayIntervals(B, null, [], []);
+  const noop = c.dayIntervals(B, null, [], [win.winEnd + H]);
+  assert.equal(noop.free.length, win.free.length);
+});
+
+test('buildDayTimeline: a Point splits an over-spanning block so no work crosses its clock', () => {
+  // The definitive keep-clear test: ONE task whose allotment (the whole 180min pool) would, without
+  // the clamp, render as a single block 13:00-16:00 straddling the 14:00 Point. The clamp must split
+  // free at 14:00 AND keep the merge step from re-joining across it, so the task renders as two blocks
+  // (13:00-14:00, 14:00-16:00) with the Point's instant clear. Removing either the dayIntervals wiring
+  // or the merge guard regresses this to one spanning block.
+  const c = make();
+  cleanDay(c, '23:59');
+  c.state.settings.dayStart = '13:00'; c.state.settings.dayEnd = '16:00'; // 3h window, one 180min task fills it
+  const B = c.startOfToday();
+  const X = B + 14 * H; // the Point's clock (2pm)
+  const point = activeTask(c, { id: 'pt', start: X, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const a = activeTask(c, { id: 'a', start: B - DAY, end: B + DAY, priority: 1, planned: 120 });
+  c.state.tasks = [point, a];
+  c._allot = c.computeAllotted(c.state.tasks);
+  const { chunks } = c.buildDayTimeline();
+  const scheduled = chunks.filter(x => x.type === 'scheduled');
+  assert.ok(scheduled.every(s => !(s.start < X && s.end > X)), 'no scheduled block spans the Point');
+  assert.ok(scheduled.some(s => s.end <= X), 'work packed before the Point');
+  assert.ok(scheduled.some(s => s.start >= X), 'work packed after the Point');
+  assert.ok(!chunks.some(x => x.id === 'pt'), 'the Point reserves no block');
+});
+
+test('buildDayTimeline: two different tasks pack on either side of a Point, neither crossing it', () => {
+  // Equal weights (60:60 → 90min each of the 180min pool). Without the clamp, task a (90min, packed
+  // first) renders 13:00-14:30, spanning the Point. With it, a is split at 14:00 and b takes the rest.
+  const c = make();
+  cleanDay(c, '23:59');
+  c.state.settings.dayStart = '13:00'; c.state.settings.dayEnd = '16:00';
+  const B = c.startOfToday();
+  const X = B + 14 * H;
+  const point = activeTask(c, { id: 'pt', start: X, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const a = activeTask(c, { id: 'a', start: B - DAY, end: B + DAY, priority: 1, planned: 60 });
+  const b = activeTask(c, { id: 'b', start: B - DAY, end: B + DAY, priority: 2, planned: 60 });
+  c.state.tasks = [point, a, b];
+  c._allot = c.computeAllotted(c.state.tasks);
+  const { chunks } = c.buildDayTimeline();
+  const scheduled = chunks.filter(x => x.type === 'scheduled');
+  assert.ok(scheduled.every(s => !(s.start < X && s.end > X)), 'no scheduled block spans the Point');
+  assert.ok(scheduled.some(s => s.id === 'b' && s.start >= X), 'the second task packs after the Point');
+  assert.ok(!chunks.some(x => x.id === 'pt'), 'the Point reserves no block');
+});
+
+test('computeAllotted: adding a Point does not change the pool total', () => {
+  const c = make();
+  cleanDay(c, '23:59');
+  const B = c.startOfToday();
+  const a = activeTask(c, { id: 'a', planned: 120 });
+  const without = c.computeAllotted([a]);
+  const point = activeTask(c, { id: 'pt', start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const withPt = c.computeAllotted([a, point]);
+  assert.equal(withPt['a'].allotted, without['a'].allotted);
 });

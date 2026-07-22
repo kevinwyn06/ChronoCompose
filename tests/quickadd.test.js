@@ -69,6 +69,35 @@ test('parseDateText: a range crossing midnight rolls the end to the next day', (
   assert.strictEqual(r.dur, 120);
 });
 
+test('parseDateText: a bare start-clock is a Point (pinStart, NOT pinEnd, open end)', () => {
+  const c = make();
+  const r = c.parseDateText('meeting 2pm', BASE);
+  assert.strictEqual(r.pinStart, true,  'start is pinned');
+  assert.strictEqual(r.pinEnd,   false, 'end is explicitly NOT pinned (Point tuple)');
+  assert.strictEqual(r.end,      null,  'no end');
+});
+
+test('parseDateText: "mon 9am" is a Point too', () => {
+  const c = make();
+  const r = c.parseDateText('report mon 9am', BASE);
+  assert.strictEqual(r.pinStart, true);
+  assert.strictEqual(r.pinEnd,   false);
+  assert.strictEqual(r.end,      null);
+});
+
+test('parseDateText: clock RANGE stays a both-pinned span (regression)', () => {
+  const c = make();
+  const r = c.parseDateText('eating tomorrow from 17:00 to 18:00', BASE);
+  assert.strictEqual(r.pinStart, true);
+  assert.strictEqual(r.pinEnd,   true);
+});
+
+test('parseDateText: a due cue stays a deadline (regression)', () => {
+  const c = make();
+  const r = c.parseDateText('submit report by friday', BASE);
+  assert.strictEqual(r.pinEnd, true);
+});
+
 test('parseDateText: "for <dur>" sets an end without being eaten as a relative offset', () => {
   const c = make(); // the +Nh offset pass would otherwise read "for 1 hour" as "in 1 hour"
   const r = c.parseDateText('call bob monday 9am for 30m', BASE);
@@ -192,7 +221,7 @@ test('R1: "for <dur>" / "takes <dur>" / "~<dur>" set a budget but no anchors', (
 test('R2: a lone future start clock pins the start, no end', () => {
   const c = make();
   const r = c.parseDateText('standup at 11am', BASE); // 11:00 today > now 10:00, no roll
-  shape(r, { start: at(15, 11, 0), end: null, pinStart: true, pinEnd: null });
+  shape(r, { start: at(15, 11, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'standup');
 });
@@ -275,11 +304,11 @@ test('R9: a day + clock span is a fixed block on that day (both pins)', () => {
 test('R10: a day + start clock (no end) pins the start only', () => {
   const c = make();
   const r = c.parseDateText('gym tomorrow at 3pm', BASE);
-  shape(r, { start: at(16, 15, 0), end: null, pinStart: true, pinEnd: null });
+  shape(r, { start: at(16, 15, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'gym');
   const r2 = c.parseDateText('kickoff monday 9am', BASE);
-  shape(r2, { start: at(20, 9, 0), end: null, pinStart: true, pinEnd: null });
+  shape(r2, { start: at(20, 9, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
 });
 
 // ---- R11 Deadline at a clock ----

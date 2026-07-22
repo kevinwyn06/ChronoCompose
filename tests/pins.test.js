@@ -156,3 +156,15 @@ test('oversubscribed (manual-override) task reports "day full", not a due reason
   assert.equal(un.durationMin, 180);
   assert.equal(un.reason, 'day full');
 });
+
+// ---------------------------------------------------------------------------
+// isFixedOn: never "fixed" without a real end
+// ---------------------------------------------------------------------------
+test('isFixedOn: a both-pinned task with no end is NOT fixed (no null-end garbage block)', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const endless = activeTask(c, { start: B + 14 * H, end: null, pinStart: true, pinEnd: true, planned: 0 });
+  assert.equal(c.isFixedOn(endless, B), false);
+  const real = activeTask(c, { start: B + 14 * H, end: B + 15 * H, pinStart: true, pinEnd: true });
+  assert.equal(c.isFixedOn(real, B), true);
+});
