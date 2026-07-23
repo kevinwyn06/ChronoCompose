@@ -455,6 +455,20 @@ test('runQuickAdd: "email ms johnson" keeps its title (was: title-cleanup regex 
   c.runQuickAdd('bottom');
   assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].name, 'email ms johnson');
 });
+// PP-EXT (#68): a bare day's 9am is a placeholder, not a user-typed time — the task must record that
+// (startClock:false) so the timeline draws it as a "🕓" agenda chip, not a phantom "◆ 9:00a" Point.
+test('runQuickAdd: a bare-day task records startClock:false (9am is a placeholder)', () => {
+  const c = make();
+  c.setState({ quickText: 'report friday' });
+  c.runQuickAdd('bottom');
+  assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].startClock, false);
+});
+test('runQuickAdd: a user-typed clock records startClock:true (a real Point)', () => {
+  const c = make();
+  c.setState({ quickText: 'standup monday 9am' });
+  c.runQuickAdd('bottom');
+  assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].startClock, true);
+});
 test('parseDateText: "wedding on saturday" resolves Saturday, not Wednesday', () => {
   const c = make();
   const r = c.parseDateText('wedding on saturday', BASE);

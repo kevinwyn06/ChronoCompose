@@ -444,6 +444,7 @@ class Component extends DCLogic {
       goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
       pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
+      startClock:true, /* PP-EXT (#68): does `start` carry a user-typed time? false = the parser's bare-day 9am PLACEHOLDER (see untimedStart) — such a task is an agenda "🕓" hover chip, never a clocked Point. Defaults true so gcal/manual/legacy starts keep their real-clock semantics. */
       included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / isOptedOut) */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
@@ -1241,6 +1242,10 @@ class Component extends DCLogic {
     return occs.find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd)) || this.occOf(t);
   }
   hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
+  /* PP-EXT (#68): the task's `start` clock is a parser PLACEHOLDER (bare-day 9am default), not a
+     user-typed time. hasClock can't tell 9am-real from 9am-default, so the flag carries the intent.
+     Such a task is agenda-only (top-hover chip), never a clocked Point/appointment. */
+  untimedStart(t){ return t.startClock===false; }
   effPins(t){
     if(this.isMilestone(t)) return {ps:false,pe:false};
     const timedEvent = !!(t.eventId && !t.allDay);
@@ -1302,7 +1307,7 @@ class Component extends DCLogic {
     if(!(p.ps && !p.pe)) return false;
     if((t.planned||0) > 0) return false;               /* raw planned — must not touch _allot (called inside computeAllotted) */
     const oc=this.occForDay(t, B);
-    return oc.start!=null && this.hasClock(oc.start) && this.isActiveOn(t, B);
+    return oc.start!=null && this.hasClock(oc.start) && !this.untimedStart(t) && this.isActiveOn(t, B); /* PP-EXT (#68): a placeholder 9am start is not a real anchor → falls through to a hover chip */
   }
   keepClearToday(B, tasks){
     const src=tasks||this.state.tasks;
@@ -1332,7 +1337,11 @@ class Component extends DCLogic {
     if(this.hasDragPinToday(t, B)) return false;                /* drawn as a pinned block */
     const oc=this.occForDay(t, B);
     const inst = oc.end!=null ? oc.end : oc.start;
-    if(inst==null || this.hasClock(inst)) return false;         /* dateless or timed → not a hover line */
+    if(inst==null) return false;                                /* dateless → not a hover line */
+    /* PP-EXT (#68): a real clock disqualifies — but a bare-day start's 9am is a PLACEHOLDER, so an
+       untimed-start task with no due instant still counts as untimed (agenda chip). */
+    const clocked = this.hasClock(inst) && !(oc.end==null && this.untimedStart(t));
+    if(clocked) return false;                                   /* timed → not a hover line */
     return this.startOfDay(inst) === B;                          /* belongs to day B */
   }
   topHoverToday(B, tasks){
@@ -3244,7 +3253,7 @@ class Component extends DCLogic {
       const t=this.normalizeTask({id,name,type:p.mile?'Milestone':'Proportional',
         start:f.start, end:f.end, priority:p.priority||4, deps:[], pct:0,
         planned:f.planned, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
-        pinStart:f.pinStart, pinEnd:f.pinEnd}); /* PP-EXT */
+        pinStart:f.pinStart, pinEnd:f.pinEnd, startClock:!!p.clock}); /* PP-EXT (#68): a bare day carries clock:false → agenda chip, not a phantom 9am Point */
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
@@ -4897,15 +4906,20 @@ class Component extends DCLogic {
     const nowLine = (isToday && now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:gut+'px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     /* PP-EXT (Group 2): render-only Points — a dotted marker + time label at a bare-time task's clock.
-       pointerEvents:none so it never intercepts a drag on the block beneath. First-pass tokens. */
+       The dotted line keeps pointerEvents:none so it never intercepts a drag on the block beneath, but
+       the label chip is pointerEvents:auto so its title (full task name) surfaces on hover — and the
+       name now renders inline (truncated), so a Point reads as a task in every view, not a bare time. */
     const points=(data.points||[]).map((p,i)=>{
       const y=topOf(p.ms);
-      return h('div',{key:'pt'+i, title:p.title+' · '+this.clockLabel(p.ms),
+      return h('div',{key:'pt'+i,
         style:{position:'absolute',left:gut+'px',right:'6px',top:y+'px',height:'0',
           borderTop:'2px dotted #1a73e8',zIndex:4,pointerEvents:'none'}},
-        h('span',{style:{position:'absolute',left:'0',top:'-8px',fontSize:'9px',fontWeight:700,color:'#1a73e8',
-          background:'var(--gantt-bg)',padding:'0 3px',borderRadius:'3px',whiteSpace:'nowrap'}},
-          '◆ '+this.clockLabel(p.ms))); });
+        h('span',{title:this.clockLabel(p.ms)+' · '+p.title,
+          style:{position:'absolute',left:'0',top:'-8px',fontSize:'9px',fontWeight:700,color:'#1a73e8',
+          background:'var(--gantt-bg)',padding:'0 3px',borderRadius:'3px',whiteSpace:'nowrap',
+          display:'inline-block',maxWidth:'100%',overflow:'hidden',textOverflow:'ellipsis',
+          pointerEvents:'auto',cursor:'default'}},
+          '◆ '+this.clockLabel(p.ms)+' · '+p.title)); });
     /* PP-EXT (Group 2): top-hover agenda chips — dated-but-untimed tasks pinned to the column top.
        pointerEvents:none; first-pass "unscheduled"-blue tokens (matches TL_TYP.unscheduled family). */
     const hover=(data.topHover||[]);
@@ -5250,10 +5264,28 @@ class Component extends DCLogic {
           c.type!=='meal'?h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer',
             style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
               fontSize:'9px',background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'var(--on-accent)':'#1a73e8'}}, running?'■':'▶'):null); });
+      /* PP-EXT (#68): Points (clocked anchors that reserve no time) and top-hover agenda items
+         (dated-but-untimed tasks) never packed a block, so the block list above dropped them — the
+         Schedule view silently lost them. Surface both here: untimed "🕓" chips ride at the day's top
+         ("anytime that day"); Points interleave with the timed blocks at their own clock. */
+      const hoverEls=(data.topHover||[]).map((thv,i)=>h('div',{key:'th'+i,title:thv.title,
+        style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
+          background:'rgba(190,218,227,0.55)',color:'var(--text-2)',fontSize:'11.5px',fontWeight:600}},
+        h('span',{style:{flex:'none',opacity:0.85,fontWeight:700}},'🕓 anytime'),
+        h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, thv.title)));
+      const pointEls=(data.points||[]).map((p,i)=>h('div',{key:'pp'+i,title:fmtClock(p.ms)+' · '+p.title,
+        style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
+          background:'transparent',color:'var(--text-2)',fontSize:'11.5px',fontWeight:600,border:'1px dashed rgba(26,115,232,0.5)'}},
+        h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',fontWeight:700,color:'#1a73e8'}}, '◆ '+fmtClock(p.ms)),
+        h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, p.title)));
+      const items=[
+        ...chips.map((el,i)=>({ms:timed[i].start, el})),
+        ...(data.points||[]).map((p,i)=>({ms:p.ms, el:pointEls[i]}))
+      ].sort((a,b)=>a.ms-b.ms).map(x=>x.el);
       const unl = unsched.length? h('div',{style:{margin:'4px 12px',fontSize:'11px',color:'var(--warn)'}},
         '⚠ Unscheduled: '+unsched.map(c=>c.title+' ('+this.fmtDur(c.durationMin)+')').join(', ')) : null;
-      const empty = (!timed.length && !unsched.length)? h('div',{style:{margin:'4px 12px 8px',fontSize:'11px',color:'var(--text-mut2)'}},'Nothing scheduled') : null;
-      return h('div',{key:'sd'+di,style:{flex:'none',paddingBottom:'6px'}}, divider, ...chips, unl, empty); });
+      const empty = (!timed.length && !unsched.length && !hoverEls.length && !pointEls.length)? h('div',{style:{margin:'4px 12px 8px',fontSize:'11px',color:'var(--text-mut2)'}},'Nothing scheduled') : null;
+      return h('div',{key:'sd'+di,style:{flex:'none',paddingBottom:'6px'}}, divider, ...hoverEls, ...items, unl, empty); });
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       h('div',{style:{padding:'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none',fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Schedule · next 7 days'),
       h('div',{style:{flex:1,minHeight:0,overflow:'auto'}}, ...sections));

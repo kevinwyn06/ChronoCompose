@@ -537,3 +537,26 @@ test('topHover vs Point guard: a clocked start-pin with an unclocked due is a Po
   assert.deepEqual(data.points, [{ id:'pt', ms:B + 10*H, title:'Standup' }], 'renders as a Point');
   assert.deepEqual(data.topHover, [], 'excluded from top-hover by the isPointOn guard');
 });
+
+// PP-EXT: regression for the #68 top-hover gap. The REAL runQuickAdd shape for a bare day
+// ("report friday") is the anchor tuple with its start stamped at the parser's 9am PLACEHOLDER
+// (startClock:false), not midnight. The old topHover test used start:B (midnight) — a shape the
+// parser never emits — so it stayed green while the app drew a bogus "◆ 9:00a" Point instead.
+test('topHover: a bare-day anchor at the 9am placeholder (startClock:false) is a hover line, not a Point', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id:'rf', name:'Report', start:B + 9*H, end:null,
+    pinStart:true, pinEnd:false, planned:0, startClock:false });
+  const data = pack(c, [t]);
+  assert.deepEqual(data.topHover.map(x=>x.id), ['rf'], 'surfaces as a top-hover chip');
+  assert.deepEqual(data.points, [], 'the placeholder 9am is not drawn as a clocked Point');
+});
+test('Point guard: a real user-typed clock (startClock:true) stays a Point, not a hover line', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id:'m5', name:'Meeting', start:B + 17*H, end:null,
+    pinStart:true, pinEnd:false, planned:0, startClock:true });
+  const data = pack(c, [t]);
+  assert.deepEqual(data.points, [{ id:'m5', ms:B + 17*H, title:'Meeting' }], 'stays a clocked Point');
+  assert.deepEqual(data.topHover, [], 'a real clock is never a hover line');
+});
