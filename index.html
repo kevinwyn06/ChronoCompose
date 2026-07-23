@@ -2736,9 +2736,14 @@ class Component extends DCLogic {
       : (result.recur ? this._firstRecurOccurrence(result.recur, now) : null);
     const hasBlock = (range && result.end!=null) || (durPh && clock);
     if(anchorDay!=null && !dueCue && !startCue && !hasBlock && !result.mile){
+      /* PP-EXT (#68): the 'due' pick must match an explicit deadline cue ("by friday"): a bare day is an
+         END-OF-DAY deadline, a real clock ("by 9am") stays the exact instant (R11). Reusing the raw
+         anchorDay left a bare-day due at the parser's 9am PLACEHOLDER. */
+      const dueEnd = result.clock ? anchorDay
+        : (()=>{ const e=new Date(anchorDay); e.setHours(23,59,59,999); return e.getTime(); })();
       result.candidates = [
         { kind:'anchor', tuple:{ pinStart:true, pinEnd:false, start:anchorDay, end:null, planned:0 } },
-        { kind:'due',    tuple:{ pinStart:false, pinEnd:true, start:null, end:anchorDay } },
+        { kind:'due',    tuple:{ pinStart:false, pinEnd:true, start:null, end:dueEnd } },
         /* slot 3 (block-with-default-duration) intentionally empty in v1 — gated behind §7 */
       ];
       result.ambiguous = result.clock ? 'time' : (result.date==null ? 'recur' : 'day');

@@ -635,8 +635,18 @@ test('pickCandidate: "due" choice returns the due tuple (only this changes the o
   const t = c.pickCandidate(r, 'due');
   assert.strictEqual(t.pinEnd, true);
   assert.strictEqual(t.pinStart, false);
-  assert.strictEqual(t.end, at(17, 9, 0));
+  // #68: a bare-day "By Fri" is an END-OF-DAY deadline (matching an explicit "by friday" cue),
+  // NOT the parser's 9am placeholder — the ambiguous and cued paths must agree.
+  assert.strictEqual(t.end, new Date(2026, 6, 17, 23, 59, 59, 999).getTime());
   assert.strictEqual(t.start, null);
+});
+test('pickCandidate: a clocked "By <time>" due keeps the exact clock instant (not EOD)', () => {
+  const c = make();
+  const r = c.parseDateText('homework monday 9am', BASE);
+  const t = c.pickCandidate(r, 'due');
+  assert.strictEqual(t.pinEnd, true);
+  assert.strictEqual(t.pinStart, false);
+  assert.strictEqual(t.end, at(20, 9, 0)); // Mon Jul 20 09:00 — an exact-clock deadline (R11), not EOD
 });
 test('pickCandidate: an unknown/empty choice falls back to the anchor tuple', () => {
   const c = make();
