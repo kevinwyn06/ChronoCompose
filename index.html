@@ -2230,6 +2230,19 @@ class Component extends DCLogic {
   effBarEnd(st, en){ return en>st ? en : st+this.DAY; }
 
   /* ---------- drag ---------- */
+  /* PP-EXT (V1.3 bar-as-editor): pure drag math, unit-tested in tests/datepick.test.js.
+     snapDragSteps: horizontal pixels dragged → whole day steps on the Gantt grid (dayW px/day). */
+  snapDragSteps(dx,dayW){ return Math.round(dx/dayW); }
+  /* barDragEdit: resolve a bar-drag gesture into the new {start,end}. GHOST-AWARE — origStart/origEnd are
+     the EFFECTIVE (possibly derived-from-today) edges the bar is drawn at; dataStart/dataEnd are the raw
+     null-able values in the task. Only the DRAGGED edge is committed to a real date; an untouched ghost
+     edge keeps its data value (null stays null), so dragging one edge of a ghost never stamps the other
+     (the V1.2→V1.3 de-ghost rule). A body 'move' places the whole span (both edges become real). */
+  barDragEdit(mode,deltaMs,origStart,origEnd,dataStart,dataEnd){
+    if(mode==='start') return {start:Math.min(origEnd-this.DAY, origStart+deltaMs), end:dataEnd};
+    if(mode==='end')   return {start:dataStart, end:Math.max(origStart+this.DAY, origEnd+deltaMs)};
+    return {start:origStart+deltaMs, end:origEnd+deltaMs}; /* move */
+  }
   startBarDrag(e,task,occIdx,mode){
     e.preventDefault(); e.stopPropagation();
     this.dragMoved=false;
@@ -2240,7 +2253,9 @@ class Component extends DCLogic {
       const kidIds=this.expandSubtrees([task.id]).filter(id=>id!==task.id);
       if(kidIds.length){ subs={}; this.state.tasks.forEach(t=>{ if(kidIds.includes(t.id)) subs[t.id]={s:t.start,e:t.end}; }); }
     }
-    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,startX:e.clientX,deltaSteps:0,origStart:occ.start,origEnd:occ.end,subs};
+    /* PP-EXT (V1.3): keep the raw null-able data edges alongside the effective (occ) ones so barDragEdit
+       can leave an untouched ghost edge null instead of stamping its derived value. */
+    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,startX:e.clientX,deltaSteps:0,origStart:occ.start,origEnd:occ.end,dataStart:task.start,dataEnd:task.end,subs};
     if(!task.recur) this.snapshot();
     this.setState({selectedIds:[task.id]});
   }
@@ -2358,7 +2373,7 @@ class Component extends DCLogic {
     }
     if(this.dragState){
       const d=this.dragState; const dx=e.clientX-d.startX;
-      const steps=Math.round(dx/this.state.dayW);
+      const steps=this.snapDragSteps(dx,this.state.dayW); /* PP-EXT (V1.3): pure px→day-step snap */
       if(steps!==0) this.dragMoved=true;
       d.deltaSteps=steps;
       if(d.recurring){ this.forceUpdate(); return; }
@@ -2368,11 +2383,9 @@ class Component extends DCLogic {
           if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+dm,end:d.subs[t.id].e+dm}; /* PP-EXT: subtree follows */
           return t;
         }
-        let s=d.origStart, en=d.origEnd;
-        if(d.mode==='move'){ s=d.origStart+dm; en=d.origEnd+dm; }
-        else if(d.mode==='start'){ s=Math.min(d.origEnd-this.DAY, d.origStart+dm); }
-        else if(d.mode==='end'){ en=Math.max(d.origStart+this.DAY, d.origEnd+dm); }
-        return {...t,start:s,end:en};
+        /* PP-EXT (V1.3): ghost-aware — an untouched ghost edge stays null; only the dragged edge de-ghosts. */
+        const r=this.barDragEdit(d.mode, dm, d.origStart, d.origEnd, d.dataStart, d.dataEnd);
+        return {...t,start:r.start,end:r.end};
       });
       this.setState({tasks});
     } else if(this.linkState && this.bodyEl){
@@ -2414,6 +2427,10 @@ class Component extends DCLogic {
         if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaSteps||0)*this.DAY});
       } else if(!this.dragMoved){
         if(this.history.length) this.history.pop();
+        /* PP-EXT (V1.3): a click (no drag) on a date EDGE opens the calendar+NL popup for that edge —
+           the precise-entry counterpart to dragging it, and the only way to set a date on a zero-width
+           edge. A body 'move' click still just falls through (double-click opens detail). */
+        if(d.mode==='start'||d.mode==='end') this.openDatePickAt(d.id, d.mode, e.clientX, e.clientY);
       } else {
         /* PP-EXT: drag-start already snapshotted; enforce deps on the dropped dates (clamp if the drop violates
            a predecessor, cascade successors forward), then persist — reusing that snapshot as the undo point. */
@@ -3056,15 +3073,48 @@ class Component extends DCLogic {
      Accepts the same natural-language text as quick-add (parseDateText) alongside the calendar grid. */
   openDatePick(e, id, key){
     e.stopPropagation();
-    const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
     const r=e.currentTarget.getBoundingClientRect();
+    this.openDatePickAt(id, key, r.left, r.bottom+4);
+  }
+  /* PP-EXT (V1.3): coordinate-based opener so a Gantt bar-edge click (no anchor element) can open the same
+     picker as the sheet date cells. openDatePick delegates here after resolving its anchor rect. */
+  openDatePickAt(id, key, x, y){
+    const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
     /* All-day ends are stored as the EXCLUSIVE next-day midnight (see dueInstant), so show the
        inclusive day the user thinks of as the end. dpApply converts back. */
     const cur = (t.allDay && key==='end' && t[key]!=null) ? t[key]-1 : t[key];
     const base = cur!=null ? cur : this.startOfToday()+9*3600000;
-    this.setState({datePick:{id, key, x:r.left, y:r.bottom+4, ms:base, view:base, text:''}});
+    this.setState({datePick:{id, key, x, y, ms:base, view:base, text:''}});
   }
   closeDatePick(){ this.setState({datePick:null}); }
+  /* PP-EXT (V1.3): the Gantt bar owns %-done — a small handle on the bar opens this text-entry popup
+     (setPct funnels through commit, occurrence-aware). Same backdrop/close pattern as datePick. */
+  openPctPop(id, x, y){
+    const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+    const cur = t.recur ? this.occPct(t, this.currentOccIdx(t)) : (t.pct||0);
+    this.setState({pctPop:{id, x, y, text:String(cur)}});
+  }
+  closePctPop(){ this.setState({pctPop:null}); }
+  applyPctPop(){ const p=this.state.pctPop; if(!p) return;
+    const v=parseFloat(p.text); if(!isNaN(v)) this.setPct(p.id, v); this.setState({pctPop:null}); }
+  renderPctPop(){
+    const h=React.createElement; const p=this.state.pctPop; if(!p) return null;
+    const vw=(typeof window!=='undefined'&&window.innerWidth)||1280, vh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    const x=Math.max(8,Math.min(p.x, vw-176)), y=Math.max(8,Math.min(p.y+8, vh-56));
+    const card=h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
+      style:{position:'fixed',left:x+'px',top:y+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
+        borderRadius:'10px',boxShadow:'0 14px 44px rgba(0,0,0,0.45)',padding:'8px 10px',zIndex:2401,
+        display:'flex',alignItems:'center',gap:'7px'}},
+      h('span',{style:{fontSize:'10.5px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px'}},'% DONE'),
+      h('input',{className:'pp-num',type:'number',min:0,max:100,step:this.PCT_STEP,defaultValue:p.text,autoFocus:true,
+        onInput:e=>{ if(this.state.pctPop) this.state.pctPop.text=e.target.value; },
+        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); if(this.state.pctPop) this.state.pctPop.text=e.target.value; this.applyPctPop(); }
+                       else if(e.key==='Escape'){ e.preventDefault(); this.closePctPop(); } },
+        style:{width:'62px',textAlign:'left',border:'1px solid var(--field-border)'}}),
+      h('button',{className:'pp-tbtn',onClick:()=>this.applyPctPop(),
+        style:{background:this._accent,color:'#fff',borderColor:this._accent}},'Set'));
+    return h('div',{onMouseDown:()=>this.closePctPop(), style:{position:'fixed',inset:0,zIndex:2400}}, card);
+  }
   dpSet(patch){ if(this.state.datePick) this.setState({datePick:Object.assign({}, this.state.datePick, patch)}); }
   /* Live-parse the NL field; a parse failure just leaves the draft alone (the chip shows nothing). */
   dpText(v){
@@ -6087,6 +6137,7 @@ class Component extends DCLogic {
       this.state.summary ? this.renderSummary() : null, /* PP-EXT Phase 8: morning summary popup */
       this.state.scopePrompt ? this.renderScopePrompt() : null,
       this.state.datePick ? this.renderDatePick() : null, /* PP-EXT: start/end date picker */
+      this.state.pctPop ? this.renderPctPop() : null, /* PP-EXT V1.3: bar %-done text popup */
       this.state.inclPick ? this.renderInclPick() : null, /* PP-EXT Track B: include/exclude/snooze popover */
       this.renderQuickAddPopup(), /* PP-EXT: centered quick-add popup ("q" / sheet footer row) */
       this.renderFirstRun(), /* PP-EXT V0.2: empty state + one-time 3-step first-run coach + labeled demo banner */
@@ -6782,6 +6833,15 @@ class Component extends DCLogic {
         h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:pct+'%',background:'rgba(255,255,255,0.28)'}}),
         optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
       grip('l'), grip('r'), linkDot,
+      /* PP-EXT (V1.3): %-done handle — a small disc at the progress boundary (clamped clear of the edge
+         grips) that opens the %-done text popup. Shown only on hover/select, like linkDot, so it never
+         steals an edge/body drag at rest. Skipped on very short bars (edit via the popup elsewhere). */
+      (w>28) ? h('div',{onMouseDown:e=>e.stopPropagation(),
+        onClick:e=>{e.stopPropagation(); this.openPctPop(t.id, e.clientX, e.clientY);},
+        title:'% done: '+pct+'% — click to set',
+        style:{position:'absolute',left:(Math.max(10,Math.min(w-10, w*pct/100))-5)+'px',top:'50%',transform:'translateY(-50%)',
+          width:'10px',height:'10px',borderRadius:'50%',background:'var(--bg)',border:'2px solid '+base,cursor:'pointer',zIndex:7,
+          pointerEvents:(this.state.hoverId===t.id||sel)?'auto':'none',opacity:(this.state.hoverId===t.id||sel)?1:0}}) : null,
       h('div',{style:{position:'absolute',left:(w+14)+'px',top:'-1px',height:this.barH+'px',display:'flex',alignItems:'center',
         fontSize:'11px',color:'var(--text-mut)',whiteSpace:'nowrap',pointerEvents:'none'}}, pct>0?pct+'%':'')
     );

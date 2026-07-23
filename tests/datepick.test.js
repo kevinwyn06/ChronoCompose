@@ -175,6 +175,109 @@ test('dpNudgeMonth: steps months without skipping (31st → shorter month)', () 
   assert.equal(new Date(c.state.datePick.view).getMonth(), 1, 'Jan 31 + 1 month lands in February');
 });
 
+// ---------------------------------------------------------------------------
+// V1.3 bar-as-editor — pure drag math
+// snapDragSteps: pixels dragged → whole day steps (rounded to the day grid).
+// barDragEdit: a drag gesture → {start,end}, ghost-aware (an UNtouched ghost edge
+//   stays null — only the dragged edge is committed to a real date).
+// ---------------------------------------------------------------------------
+const DAY = 86400000;
+
+test('snapDragSteps: rounds pixel drag to the nearest day on the grid', () => {
+  const c = make();
+  assert.equal(c.snapDragSteps(0, 64), 0);
+  assert.equal(c.snapDragSteps(31, 64), 0, 'under half a column snaps back to 0');
+  assert.equal(c.snapDragSteps(33, 64), 1, 'over half a column snaps forward one day');
+  assert.equal(c.snapDragSteps(128, 64), 2);
+  assert.equal(c.snapDragSteps(-33, 64), -1, 'symmetric for leftward drags');
+});
+
+test('barDragEdit: solid bar — dragging the start edge moves start, leaves end', () => {
+  const c = make();
+  const s = at(2026, 6, 15, 9, 0), e = at(2026, 6, 20, 9, 0);
+  const r = c.barDragEdit('start', 2 * DAY, s, e, s, e);
+  assert.equal(r.start, at(2026, 6, 17, 9, 0));
+  assert.equal(r.end, e, 'the untouched end is unchanged');
+});
+
+test('barDragEdit: solid bar — the start edge cannot cross the end (clamped to end-1d)', () => {
+  const c = make();
+  const s = at(2026, 6, 15, 9, 0), e = at(2026, 6, 20, 9, 0);
+  const r = c.barDragEdit('start', 100 * DAY, s, e, s, e);
+  assert.equal(r.start, e - DAY, 'start clamps to one day before the end');
+});
+
+test('barDragEdit: solid bar — the end edge cannot cross the start (clamped to start+1d)', () => {
+  const c = make();
+  const s = at(2026, 6, 15, 9, 0), e = at(2026, 6, 20, 9, 0);
+  const r = c.barDragEdit('end', -100 * DAY, s, e, s, e);
+  assert.equal(r.end, s + DAY);
+});
+
+test('barDragEdit: solid bar — body move shifts both edges by the delta', () => {
+  const c = make();
+  const s = at(2026, 6, 15, 9, 0), e = at(2026, 6, 20, 9, 0);
+  const r = c.barDragEdit('move', 3 * DAY, s, e, s, e);
+  assert.equal(r.start, at(2026, 6, 18, 9, 0));
+  assert.equal(r.end, at(2026, 6, 23, 9, 0));
+});
+
+test('barDragEdit: deadline ghost (start=null) — dragging the ghost START commits a real start, keeps the real due', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const due = at(2026, 6, 30, 9, 0);
+  // occ carries the DERIVED span (ghost start = today); data start is null.
+  const r = c.barDragEdit('start', 1 * DAY, today, due, null, due);
+  assert.equal(r.start, today + DAY, 'the ghost start becomes a real date');
+  assert.equal(r.end, due, 'the already-real due is preserved');
+});
+
+test('barDragEdit: deadline ghost — dragging the real END leaves the START null (does not de-ghost it)', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const due = at(2026, 6, 30, 9, 0);
+  const r = c.barDragEdit('end', 2 * DAY, today, due, null, due);
+  assert.equal(r.start, null, 'the untouched ghost start stays null');
+  assert.equal(r.end, due + 2 * DAY);
+});
+
+test('barDragEdit: half-ghost (end=null) — dragging the real START leaves the END null (the V1.2 bug fix)', () => {
+  const c = make();
+  const start = at(2026, 6, 10, 9, 0);
+  const derivedEnd = c.startOfToday() + DAY;
+  const r = c.barDragEdit('start', 1 * DAY, start, derivedEnd, start, null);
+  assert.equal(r.end, null, 'dragging the start must NOT stamp the derived ghost end');
+  assert.equal(r.start, start + DAY);
+});
+
+test('barDragEdit: half-ghost — dragging the ghost END commits a real end, keeps the real start', () => {
+  const c = make();
+  const start = at(2026, 6, 10, 9, 0);
+  const derivedEnd = start + DAY; // clamp floor is start+DAY
+  const r = c.barDragEdit('end', 3 * DAY, start, derivedEnd, start, null);
+  assert.equal(r.start, start, 'the already-real start is preserved');
+  assert.equal(r.end, derivedEnd + 3 * DAY, 'the ghost end becomes a real date');
+});
+
+test('barDragEdit: double-ghost (both null) — dragging one edge commits only that edge', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const rs = c.barDragEdit('start', 0, today, today + DAY, null, null);
+  assert.equal(rs.start, today, 'start is committed');
+  assert.equal(rs.end, null, 'end stays a ghost');
+  const re = c.barDragEdit('end', 0, today, today + DAY, null, null);
+  assert.equal(re.start, null, 'start stays a ghost');
+  assert.equal(re.end, today + DAY, 'end is committed');
+});
+
+test('barDragEdit: double-ghost — a body move places the whole span (both become real)', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const r = c.barDragEdit('move', 0, today, today + DAY, null, null);
+  assert.equal(r.start, today);
+  assert.equal(r.end, today + DAY);
+});
+
 // A click event stands in for the DOM one openDatePick reads for anchor positioning.
 function fakeEvent() {
   return {
