@@ -220,6 +220,7 @@ class Component extends DCLogic {
        later in syncOnAuth. See plans/account-namespacing-plan.md. */
     try{ this._workspace = localStorage.getItem('pp-workspace') || 'anon'; }catch(e){ this._workspace = 'anon'; }
     this.DAY = 86400000;
+    this.HOUR = 3600000; /* PP-EXT (V1.3 fix): sub-day drag snap unit — used once zoomed into the hour grid */
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
     this.RECUR_BACKOFF = 3;     // occurrences to rewind when estimating the start index
@@ -2231,8 +2232,23 @@ class Component extends DCLogic {
 
   /* ---------- drag ---------- */
   /* PP-EXT (V1.3 bar-as-editor): pure drag math, unit-tested in tests/datepick.test.js.
-     snapDragSteps: horizontal pixels dragged → whole day steps on the Gantt grid (dayW px/day). */
-  snapDragSteps(dx,dayW){ return Math.round(dx/dayW); }
+     snapDragMs: horizontal pixels dragged → a snapped time delta in ms. Snaps to whole DAYS at
+     day/week/month zoom; once zoomed into the hour grid (dayW >= GANTT_HOUR_GRID_DAYW) it snaps to
+     whole HOURS instead, so a small drag on a narrow bar (e.g. a 1-day ghost) still registers and
+     the bar tracks the cursor rather than sitting dead until you cross a whole day-column. all-day
+     tasks stay day-snapped at every zoom — they own midnight-based exclusive ends (V1.3 fix). */
+  snapDragMs(dx,dayW,allDay){
+    const unit = (!allDay && dayW >= this.GANTT_HOUR_GRID_DAYW) ? this.HOUR : this.DAY;
+    const pxPerUnit = dayW * unit / this.DAY; /* DAY -> dayW px; HOUR -> dayW/24 px */
+    return Math.round(dx/pxPerUnit) * unit;
+  }
+  /* PP-EXT (V1.3 fix): Ctrl/Cmd-scroll zoom anchored on the cursor. Given the old/new px-per-day, the
+     scroller's current scrollLeft, and the cursor's x offset from the scroller's left edge, return the
+     scrollLeft that keeps the timeline instant under the cursor pinned in place (so the gantt zooms
+     about the pointer instead of the timeline origin flinging content sideways). Pure — testable. */
+  zoomScrollAnchor(oldW,newW,scrollLeft,cursorOff){
+    return (scrollLeft+cursorOff) * (newW/oldW) - cursorOff;
+  }
   /* barDragEdit: resolve a bar-drag gesture into the new {start,end}. GHOST-AWARE — origStart/origEnd are
      the EFFECTIVE (possibly derived-from-today) edges the bar is drawn at; dataStart/dataEnd are the raw
      null-able values in the task. Only the DRAGGED edge is committed to a real date; an untouched ghost
@@ -2255,7 +2271,7 @@ class Component extends DCLogic {
     }
     /* PP-EXT (V1.3): keep the raw null-able data edges alongside the effective (occ) ones so barDragEdit
        can leave an untouched ghost edge null instead of stamping its derived value. */
-    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,startX:e.clientX,deltaSteps:0,origStart:occ.start,origEnd:occ.end,dataStart:task.start,dataEnd:task.end,subs};
+    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:occ.start,origEnd:occ.end,dataStart:task.start,dataEnd:task.end,subs};
     if(!task.recur) this.snapshot();
     this.setState({selectedIds:[task.id]});
   }
@@ -2373,11 +2389,10 @@ class Component extends DCLogic {
     }
     if(this.dragState){
       const d=this.dragState; const dx=e.clientX-d.startX;
-      const steps=this.snapDragSteps(dx,this.state.dayW); /* PP-EXT (V1.3): pure px→day-step snap */
-      if(steps!==0) this.dragMoved=true;
-      d.deltaSteps=steps;
+      const dm=this.snapDragMs(dx,this.state.dayW,d.allDay); /* PP-EXT (V1.3 fix): px→snapped ms (day, or hour when zoomed in) */
+      if(dm!==0) this.dragMoved=true;
+      d.deltaMs=dm;
       if(d.recurring){ this.forceUpdate(); return; }
-      const dm=steps*this.DAY;
       const tasks=this.state.tasks.map(t=>{
         if(t.id!==d.id){
           if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+dm,end:d.subs[t.id].e+dm}; /* PP-EXT: subtree follows */
@@ -2424,7 +2439,7 @@ class Component extends DCLogic {
     if(this.dragState){
       const d=this.dragState;
       if(d.recurring){
-        if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaSteps||0)*this.DAY});
+        if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaMs||0)});
       } else if(!this.dragMoved){
         if(this.history.length) this.history.pop();
         /* PP-EXT (V1.3): a click (no drag) on a date EDGE opens the calendar+NL popup for that edge —
@@ -2920,7 +2935,29 @@ class Component extends DCLogic {
     if(!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
     const dir = e.deltaY<0 ? 1 : -1;
-    this.setState(s=>({dayW:this.clampDayW(s.dayW+dir*Math.max(2,Math.round(s.dayW*0.15)))})); /* PP-EXT (C2): bounds now GANTT_DAYW_MIN..MAX — zoom in past a day to grab hourly blocks */
+    const oldW = this.state.dayW;
+    const newW = this.clampDayW(oldW+dir*Math.max(2,Math.round(oldW*0.15))); /* PP-EXT (C2): bounds GANTT_DAYW_MIN..MAX — zoom in past a day to grab hourly blocks */
+    if(newW===oldW) return;
+    /* PP-EXT (V1.3 fix): zoom about the cursor. Capture the timeline point under the pointer BEFORE the
+       width changes, then restore scrollLeft AFTER the re-render grows the content so that point stays
+       put — otherwise the content grows from the timeline origin and flings sideways. The DC runtime
+       re-renders asynchronously, so a bare rAF can fire before the new width lands and clamp the target
+       away; wait (bounded) for scrollWidth to reflect the new scale, then apply. e.currentTarget is the
+       gantt scroller the wheel listener is bound to. */
+    const el = e.currentTarget || this.ganttScrollEl;
+    if(el){
+      const r=el.getBoundingClientRect();
+      const target=this.zoomScrollAnchor(oldW,newW,el.scrollLeft,e.clientX-r.left);
+      const oldSW=el.scrollWidth; /* content grows on the re-render; wait for that, THEN pin scrollLeft */
+      this.setState({dayW:newW});
+      /* poll (setTimeout, not rAF — rAF is paused in a background tab, which would strand the scroll
+         correction) until the new width lands, then restore the anchored scrollLeft. */
+      let waited=0;
+      const apply=()=>{ if(el.scrollWidth>oldSW+2 || waited>=300){ el.scrollLeft=Math.max(0,target); } else { waited+=25; setTimeout(apply,25); } };
+      setTimeout(apply,0);
+    } else {
+      this.setState({dayW:newW});
+    }
   }
 
   /* ---------- quick add ---------- */

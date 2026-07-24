@@ -177,19 +177,48 @@ test('dpNudgeMonth: steps months without skipping (31st → shorter month)', () 
 
 // ---------------------------------------------------------------------------
 // V1.3 bar-as-editor — pure drag math
-// snapDragSteps: pixels dragged → whole day steps (rounded to the day grid).
+// snapDragMs: pixels dragged → a snapped time delta (ms). Whole DAYS at day/week
+//   zoom; whole HOURS once zoomed into the hour grid (dayW >= GANTT_HOUR_GRID_DAYW),
+//   so a small drag on a narrow bar still moves it and tracks the cursor. all-day
+//   tasks stay day-snapped at every zoom (they own midnight-based exclusive ends).
 // barDragEdit: a drag gesture → {start,end}, ghost-aware (an UNtouched ghost edge
 //   stays null — only the dragged edge is committed to a real date).
 // ---------------------------------------------------------------------------
 const DAY = 86400000;
+const HOUR = 3600000;
 
-test('snapDragSteps: rounds pixel drag to the nearest day on the grid', () => {
+test('snapDragMs: at day zoom, rounds the pixel drag to the nearest whole day', () => {
   const c = make();
-  assert.equal(c.snapDragSteps(0, 64), 0);
-  assert.equal(c.snapDragSteps(31, 64), 0, 'under half a column snaps back to 0');
-  assert.equal(c.snapDragSteps(33, 64), 1, 'over half a column snaps forward one day');
-  assert.equal(c.snapDragSteps(128, 64), 2);
-  assert.equal(c.snapDragSteps(-33, 64), -1, 'symmetric for leftward drags');
+  assert.equal(c.snapDragMs(0, 64, false), 0);
+  assert.equal(c.snapDragMs(31, 64, false), 0, 'under half a column snaps back to 0');
+  assert.equal(c.snapDragMs(33, 64, false), DAY, 'over half a column snaps forward one day');
+  assert.equal(c.snapDragMs(128, 64, false), 2 * DAY);
+  assert.equal(c.snapDragMs(-33, 64, false), -DAY, 'symmetric for leftward drags');
+});
+
+test('snapDragMs: zoomed into the hour grid, snaps to whole hours so small drags register', () => {
+  const c = make();
+  const z = c.GANTT_HOUR_GRID_DAYW; // 240 px/day => 10 px/hr
+  assert.equal(c.snapDragMs(10, z, false), HOUR, 'one hour column of drag = one hour');
+  assert.equal(c.snapDragMs(25, z, false), 3 * HOUR, 'rounds to the nearest hour');
+  assert.equal(c.snapDragMs(4, z, false), 0, 'under half an hour column snaps back to 0');
+  assert.equal(c.snapDragMs(-10, z, false), -HOUR, 'symmetric leftward');
+});
+
+test('snapDragMs: an all-day task stays day-snapped even when zoomed in', () => {
+  const c = make();
+  const z = c.GANTT_HOUR_GRID_DAYW;
+  assert.equal(c.snapDragMs(10, z, true), 0, 'a sub-day drag does not nudge an all-day task');
+  assert.equal(c.snapDragMs(130, z, true), DAY, 'past half a day column it moves a whole day');
+});
+
+test('zoomScrollAnchor: keeps the timeline point under the cursor fixed across a zoom', () => {
+  const c = make();
+  // content point under cursor = scrollLeft(100) + cursorOffset(200) = 300 px at oldW.
+  // doubling the scale puts it at 600 px; to keep it at viewport offset 200, scroll to 400.
+  assert.equal(c.zoomScrollAnchor(40, 80, 100, 200), 400);
+  // zooming out (halving) brings it back symmetrically.
+  assert.equal(c.zoomScrollAnchor(80, 40, 400, 200), 100);
 });
 
 test('barDragEdit: solid bar — dragging the start edge moves start, leaves end', () => {
