@@ -221,6 +221,34 @@ test('zoomScrollAnchor: keeps the timeline point under the cursor fixed across a
   assert.equal(c.zoomScrollAnchor(80, 40, 400, 200), 100);
 });
 
+// zoomStep: one wheel event -> next dayW. Exponential + proportional to scroll delta, so a trackpad's
+// many-tiny-events gesture and a mouse's few-big-events gesture zoom by how far they scrolled, not by
+// event count; per-event step capped so one fast tick can't fly past.
+test('zoomStep: scroll direction + proportionality (small delta = small change)', () => {
+  const c = make();
+  const w0 = 40;
+  const inSmall = c.zoomStep(w0, -10);   // gentle trackpad tick up
+  const inBig = c.zoomStep(w0, -100);    // full mouse notch up
+  assert.ok(inSmall > w0, 'scroll up zooms in');
+  assert.ok(inBig > inSmall, 'a larger delta zooms in more');
+  assert.ok((inSmall - w0) / w0 < 0.05, 'a 10px delta nudges dayW under 5% (no fly-past)');
+  assert.ok(c.zoomStep(w0, 100) < w0, 'scroll down zooms out');
+});
+
+test('zoomStep: a single very fast event is capped', () => {
+  const c = make();
+  const w0 = 40;
+  const huge = c.zoomStep(w0, -100000);
+  assert.ok(huge > w0);
+  assert.ok(huge / w0 <= Math.exp(c.GANTT_ZOOM_STEP_CAP) + 1e-9, 'one event never exceeds the per-event cap');
+});
+
+test('zoomStep: respects the dayW clamp bounds', () => {
+  const c = make();
+  assert.equal(c.zoomStep(c.GANTT_DAYW_MAX, -100), c.GANTT_DAYW_MAX, 'cannot exceed max');
+  assert.equal(c.zoomStep(c.GANTT_DAYW_MIN, 100), c.GANTT_DAYW_MIN, 'cannot go below min');
+});
+
 test('barDragEdit: solid bar — dragging the start edge moves start, leaves end', () => {
   const c = make();
   const s = at(2026, 6, 15, 9, 0), e = at(2026, 6, 20, 9, 0);

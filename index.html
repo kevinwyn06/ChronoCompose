@@ -259,6 +259,13 @@ class Component extends DCLogic {
     this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
     this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
     this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
+    /* PP-EXT (V1.3 fix2): Ctrl/Cmd+scroll zoom is EXPONENTIAL and PROPORTIONAL to wheel deltaY, so total
+       zoom tracks how far you actually scrolled — independent of whether the OS chunks a gesture into a
+       few big wheel events (mouse) or many tiny ones (trackpad). The old flat "15% per event" flew past on
+       a trackpad because it fired dozens of events per flick. SENS sets feel (a ~100px mouse notch ⇒ ~10%);
+       STEP_CAP bounds any single event so one fast tick can't jump. */
+    this.GANTT_ZOOM_SENS = 0.001;    // exp zoom factor per unit (pixel-normalized) wheel deltaY
+    this.GANTT_ZOOM_STEP_CAP = 0.12; // max |ln(newW/oldW)| a single wheel event may apply (~12.7%)
     /* PP-EXT (Group 2): day-drawer vertical zoom — session-only (not persisted; owner 2026-07-22). */
     this.DRAWER_ZOOM_MIN = 1;        // 1 = fit-to-height (no zoom)
     this.DRAWER_ZOOM_MAX = 8;        // up to 8× taller for dense afternoons
@@ -2225,6 +2232,13 @@ class Component extends DCLogic {
   xOf(ms){ return (ms-this._tl.start)/this.DAY*this.state.dayW; }
   /* PP-EXT (C2): clamp a proposed day-width to the zoom bounds (pure — testable without a DOM). */
   clampDayW(v){ return Math.max(this.GANTT_DAYW_MIN, Math.min(this.GANTT_DAYW_MAX, v)); }
+  /* PP-EXT (V1.3 fix2): one wheel event → the next day-width. Exponential and proportional to the
+     (pixel-normalized) scroll delta so a gesture zooms by how far it scrolled, not by how many events the
+     device emitted; per-event step capped so no single tick flies. Pure — testable without a DOM. */
+  zoomStep(oldW, delta){
+    const k = Math.max(-this.GANTT_ZOOM_STEP_CAP, Math.min(this.GANTT_ZOOM_STEP_CAP, -delta*this.GANTT_ZOOM_SENS));
+    return this.clampDayW(oldW*Math.exp(k));
+  }
   /* PP-EXT (C1): the end a bar should DRAW to — a zero/negative span (start>=end) renders one full day so it's
      never a zero-length, undraggable point; a real forward span (incl. a ghost's derived end) draws as itself.
      Pure; the pixel-floor (BAR_MIN_PX) is applied at render on top of this. */
@@ -2934,9 +2948,10 @@ class Component extends DCLogic {
   onWheelZoom(e){
     if(!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
-    const dir = e.deltaY<0 ? 1 : -1;
     const oldW = this.state.dayW;
-    const newW = this.clampDayW(oldW+dir*Math.max(2,Math.round(oldW*0.15))); /* PP-EXT (C2): bounds GANTT_DAYW_MIN..MAX — zoom in past a day to grab hourly blocks */
+    /* normalize deltaMode (0=px, 1=lines, 2=pages) to pixel-equivalent so trackpad/mouse feel consistent */
+    const delta = e.deltaY * (e.deltaMode===1 ? 16 : e.deltaMode===2 ? 400 : 1);
+    const newW = this.zoomStep(oldW, delta); /* PP-EXT (V1.3 fix2): exp zoom proportional to scroll delta, per-event capped */
     if(newW===oldW) return;
     /* PP-EXT (V1.3 fix): zoom about the cursor. Capture the timeline point under the pointer BEFORE the
        width changes, then restore scrollLeft AFTER the re-render grows the content so that point stays
