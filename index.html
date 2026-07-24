@@ -262,9 +262,11 @@ class Component extends DCLogic {
     /* PP-EXT (V1.3 fix2): Ctrl/Cmd+scroll zoom is EXPONENTIAL and PROPORTIONAL to wheel deltaY, so total
        zoom tracks how far you actually scrolled — independent of whether the OS chunks a gesture into a
        few big wheel events (mouse) or many tiny ones (trackpad). The old flat "15% per event" flew past on
-       a trackpad because it fired dozens of events per flick. SENS sets feel (a ~100px mouse notch ⇒ ~10%);
-       STEP_CAP bounds any single event so one fast tick can't jump. */
-    this.GANTT_ZOOM_SENS = 0.001;    // exp zoom factor per unit (pixel-normalized) wheel deltaY
+       a trackpad because it fired dozens of events per flick. SENS sets feel; STEP_CAP bounds any single
+       event so one fast tick can't jump. Because a mouse notch's large delta hits STEP_CAP, raising SENS
+       speeds up only the small-delta (trackpad) events and leaves the mouse notch (~12.7%) unchanged —
+       retuned 0.001 → 0.0025 (owner: 0.001 was too slow on a trackpad, 2026-07-24). */
+    this.GANTT_ZOOM_SENS = 0.0025;   // exp zoom factor per unit (pixel-normalized) wheel deltaY
     this.GANTT_ZOOM_STEP_CAP = 0.12; // max |ln(newW/oldW)| a single wheel event may apply (~12.7%)
     /* PP-EXT (Group 2): day-drawer vertical zoom — session-only (not persisted; owner 2026-07-22). */
     this.DRAWER_ZOOM_MIN = 1;        // 1 = fit-to-height (no zoom)
