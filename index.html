@@ -257,6 +257,15 @@ class Component extends DCLogic {
     this.headH = 48;
     /* PP-EXT (C1/C2): Gantt-bar draggability + sub-day zoom. */
     this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
+    /* PP-EXT (V1.2 round2 — anchored ghosts): a half-ghost dissolves ALONG the bar, from the committed
+       edge toward the derived one. Two mirrored ramps drive it: the fill fades colour OUT, the dotted
+       outline mask fades dots IN, so "solid + no dots" and "no colour + dots" are the same axis read
+       twice. Stops are percentages of bar width. */
+    this.GHOST_FILL_HOLD = 12;       // % of the bar that stays at full task colour next to the committed edge
+    this.GHOST_FILL_FADE = 92;       // % where the colour has fully dissolved to transparent
+    this.GHOST_DOTS_HOLD = 8;        // % nearest the committed edge where the dotted outline is fully hidden
+    this.GHOST_DOTS_FADE = 55;       // % where the dotted outline reaches full opacity
+    this.GHOST_FLAT = 'rgba(148,163,184,0.16)'; // double-ghost fill: nothing is committed, so nothing is anchored
     this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
     this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
     /* PP-EXT (V1.3 fix2): Ctrl/Cmd+scroll zoom is EXPONENTIAL and PROPORTIONAL to wheel deltaY, so total
@@ -1267,6 +1276,28 @@ class Component extends DCLogic {
     if(s==null && e==null) return {start:today, end:today+DAY, ghostStart:true, ghostEnd:true};
     if(s!=null && e==null) return {start:s, end:Math.max(s,today)+DAY, ghostStart:false, ghostEnd:true};
     return {start:Math.min(today, e-DAY), end:e, ghostStart:true, ghostEnd:false};
+  }
+  /* PP-EXT (V1.2 round2): the ghost bar's PAINT, split out of renderBar so it is IO-free and unit-testable.
+     Takes an occurrence's ghost flags + the bar's base colour; returns the style pieces or null for a solid
+     bar. The key insight is that a half-ghost has no committed *region*, only a committed *edge* — ghostSpan
+     derives the whole width — so the paint is an ANCHOR signal, not a real-vs-derived split: the bar is fully
+     the task's colour at the edge you actually set and dissolves toward the edge you didn't.
+       • solid        → null (caller paints the usual rounded, flat-colour bar).
+       • double-ghost → flat grey, dotted outline all round at full opacity, no anchor (nothing is committed).
+       • half-ghost   → anchor 'l' (start set, dissolves right) or 'r' (due set, dissolves left); the fill
+                        ramps colour→transparent while `mask` ramps the dotted outline transparent→opaque,
+                        so dots fade IN exactly as colour fades OUT.
+     `anchor` also tells the caller which side gets the solid base-coloured border (the committed edge reads
+     as the task, not as an absence). */
+  ghostPaint(o, base){
+    if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return null;
+    if(o.ghostStart && o.ghostEnd) return {anchor:null, fill:this.GHOST_FLAT, mask:null};
+    const dir = o.ghostEnd ? 'to right' : 'to left';   /* dissolve AWAY from the committed edge */
+    return {
+      anchor: o.ghostEnd ? 'l' : 'r',
+      fill: 'linear-gradient('+dir+', '+base+' 0%, '+base+' '+this.GHOST_FILL_HOLD+'%, transparent '+this.GHOST_FILL_FADE+'%)',
+      mask: 'linear-gradient('+dir+', transparent '+this.GHOST_DOTS_HOLD+'%, #000 '+this.GHOST_DOTS_FADE+'%)'
+    };
   }
   /* PP-EXT: the occurrence relevant to day B (multi-day timelines). For today (or B omitted) this is the exact
      current-occurrence behaviour (occOf); for another day it's the occurrence overlapping [B, B+DAY), so a Week
@@ -6989,11 +7020,13 @@ class Component extends DCLogic {
     const w=Math.max(this.BAR_MIN_PX,this.xOf(this.effBarEnd(st,en))-left);
     const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),
       style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:'7px',cursor:'ew-resize',zIndex:3}});
-    /* PP-EXT (V1.2 ghost blocks): a derived (dateless) span reads grey with dotted derived edges — a real
-       edge (half-ghost) keeps a solid grey border so you can see which side is committed. Data stays null;
-       dragging an edge writes a real date via the existing bar-drag machinery (de-ghosts that edge). */
+    /* PP-EXT (V1.2 round2 — anchored ghosts): a derived span no longer greys out WHOLESALE. The committed
+       edge keeps the task's real colour and a solid border; the bar dissolves toward the derived edge while
+       a dotted outline fades in over the same ramp (see ghostPaint). A double-ghost has no committed edge,
+       so it stays flat grey, dotted all round. Data stays null either way; dragging an edge writes a real
+       date via the existing bar-drag machinery (de-ghosts that edge). */
     const ghost=!!o.ghost;
-    const dEdge='2px dotted var(--text-mut2)', sEdge='1.5px solid var(--text-mut2)';
+    const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
     const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'off')) : '';
     return h('div',{key,style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
@@ -7001,14 +7034,21 @@ class Component extends DCLogic {
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
         title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · double-click for details'))+optedOutTitle,
         style:{position:'absolute',inset:0,
-          background: optedOut ? (optedOutHatch+', '+(ghost?'rgba(148,163,184,0.16)':base)) : (ghost?'rgba(148,163,184,0.16)':base),
+          background: optedOut ? (optedOutHatch+', '+(gp?gp.fill:base)) : (gp?gp.fill:base),
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
-          borderLeft: ghost?(o.ghostStart?dEdge:sEdge):undefined,
-          borderRight: ghost?(o.ghostEnd?dEdge:sEdge):undefined,
-          borderTop: ghost?'1.5px dashed var(--text-mut2)':undefined, borderBottom: ghost?'1.5px dashed var(--text-mut2)':undefined,
+          /* PP-EXT (V1.2 round2): ONLY the committed edge is bordered here, in the task's own colour — the
+             derived edges are drawn by the masked dotted outline below, so no border runs full-width. */
+          borderLeft: (gp&&gp.anchor==='l')?('1.5px solid '+base):undefined,
+          borderRight: (gp&&gp.anchor==='r')?('1.5px solid '+base):undefined,
           boxSizing:'border-box',
           boxShadow:sel?'0 0 0 2px var(--bar-ring)':(ghost?'none':'0 1px 2px rgba(0,0,0,0.4)')}},
         h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:pct+'%',background:'rgba(255,255,255,0.28)'}}),
+        /* PP-EXT (V1.2 round2): the dotted ghost outline. One overlay on all four sides (a CSS border can't
+           be dashed for only part of its length), masked by the inverse of the fill ramp so the dots fade in
+           exactly as the colour fades out. Unmasked on a double-ghost — dotted all round at full opacity. */
+        gp?h('div',{style:{position:'absolute',inset:0,borderRadius:'var(--r-1)',boxSizing:'border-box',
+          border:'2px dotted var(--text-mut2)',pointerEvents:'none',
+          WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null,
         optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
       grip('l'), grip('r'), linkDot,
       /* PP-EXT (V1.3): %-done handle — a small disc at the progress boundary (clamped clear of the edge

@@ -87,3 +87,65 @@ test('a dateless (ghost) task is skipped by the gcal-outbound diff', () => {
   assert.strictEqual(ops2.length, 1);
   assert.strictEqual(ops2[0].op, 'insert');
 });
+
+// ── V1.2 round2: ghostPaint — the ANCHORED ghost look. A half-ghost has no committed *region* (ghostSpan
+// derives the whole width), only a committed *edge*, so the paint anchors colour at the edge you set and
+// dissolves toward the edge you didn't. Pure: flags + base colour in, style strings out.
+const occ = (gs, ge) => ({ ghost: true, ghostStart: gs, ghostEnd: ge });
+const BASE = '#3f7bd6';
+
+test('ghostPaint: a solid bar gets no ghost paint at all', () => {
+  const c = make();
+  assert.strictEqual(c.ghostPaint({ ghost: false, ghostStart: false, ghostEnd: false }, BASE), null);
+  assert.strictEqual(c.ghostPaint({ ghost: true, ghostStart: false, ghostEnd: false }, BASE), null,
+    'both edges committed ⇒ nothing to dissolve, even if the occurrence is flagged ghost');
+  assert.strictEqual(c.ghostPaint(null, BASE), null);
+});
+
+test('ghostPaint: a double-ghost is flat grey with an unmasked (full-opacity) dotted outline', () => {
+  const c = make();
+  const p = c.ghostPaint(occ(true, true), BASE);
+  assert.strictEqual(p.anchor, null, 'nothing is committed, so no edge is anchored');
+  assert.strictEqual(p.fill, c.GHOST_FLAT);
+  assert.strictEqual(p.mask, null, 'no mask ⇒ dotted all round at full opacity');
+  assert.ok(!/linear-gradient/.test(p.fill), 'a double-ghost must not fake an anchor with a ramp');
+});
+
+test('ghostPaint: a half-ghost (start set) anchors LEFT and dissolves to the right', () => {
+  const c = make();
+  const p = c.ghostPaint(occ(false, true), BASE);
+  assert.strictEqual(p.anchor, 'l', 'the committed start edge is the anchor');
+  assert.ok(p.fill.indexOf('to right') === 'linear-gradient('.length, 'colour fades rightward, away from the anchor');
+  assert.ok(p.fill.indexOf(BASE) > -1, 'the anchored end is the task colour, not grey');
+  assert.ok(/transparent \d+%\)$/.test(p.fill), 'and it ends fully transparent');
+  assert.ok(p.mask.indexOf('to right') > -1, 'the dotted outline fades IN over the same direction');
+});
+
+test('ghostPaint: a deadline ghost (due set) mirrors it — anchors RIGHT, dissolves to the left', () => {
+  const c = make();
+  const p = c.ghostPaint(occ(true, false), BASE);
+  assert.strictEqual(p.anchor, 'r', 'the committed due edge is the anchor');
+  assert.ok(p.fill.indexOf('to left') > -1);
+  assert.ok(p.mask.indexOf('to left') > -1);
+});
+
+test('ghostPaint: fill and outline ramps are inverses — dots fade in as colour fades out', () => {
+  const c = make();
+  const p = c.ghostPaint(occ(false, true), BASE);
+  // Nearest the anchor: colour held at full, dots fully hidden.
+  assert.ok(c.GHOST_FILL_HOLD > 0 && c.GHOST_DOTS_HOLD > 0, 'both ramps hold briefly at the committed edge');
+  assert.ok(c.GHOST_DOTS_FADE < c.GHOST_FILL_FADE,
+    'the outline must reach full opacity BEFORE the colour is gone, so the far end is never blank');
+  assert.ok(p.fill.indexOf(c.GHOST_FILL_HOLD + '%') > -1 && p.fill.indexOf(c.GHOST_FILL_FADE + '%') > -1);
+  assert.ok(p.mask.indexOf(c.GHOST_DOTS_HOLD + '%') > -1 && p.mask.indexOf(c.GHOST_DOTS_FADE + '%') > -1);
+});
+
+test('ghostPaint: the anchor always names the edge that has a real date', () => {
+  const c = make();
+  const t1 = mk(c, { start: TODAY });               // start set, due null
+  const g1 = c.ghostSpan(t1, TODAY);
+  assert.strictEqual(c.ghostPaint(Object.assign({ ghost: true }, g1), BASE).anchor, 'l');
+  const t2 = mk(c, { end: TODAY + 3 * DAY });       // due set, start null
+  const g2 = c.ghostSpan(t2, TODAY);
+  assert.strictEqual(c.ghostPaint(Object.assign({ ghost: true }, g2), BASE).anchor, 'r');
+});
