@@ -703,6 +703,18 @@ class Component extends DCLogic {
     this.gcalPingUnsubscribe(); /* PP-EXT B3b */
   }
 
+  /* PP-EXT (V1.3 fix5): atomic cursor-anchored zoom pin. onWheelZoom applies dayW via async setState and stashes
+     the target scrollLeft (+ the scroller el). React commits the new content width here — synchronously after the
+     DOM mutation, before paint — so pinning scrollLeft now lands against the already-resized scrollWidth (never
+     clamped short) and the new width + new scroll paint together in ONE frame. Replaces the rAF/setTimeout chase
+     loop, which could only retime the scroll-vs-render race, never close it (jitter + burst-end drift). */
+  componentDidUpdate(){
+    if(this._zoomPinEl && this._zoomTarget!=null){
+      const el=this._zoomPinEl; this._zoomPinEl=null;
+      el.scrollLeft=Math.max(0, this._zoomTarget);
+    }
+  }
+
   /* ---------- history ---------- */
   snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[]; } /* PP-EXT: named cap */
   commit(fn){
@@ -2967,24 +2979,25 @@ class Component extends DCLogic {
     const newW=this.zoomStep(oldW, delta);
     if(newW===oldW) return;
     const burstActive = this._zoomAnchor && (now-this._zoomAnchor.t <= this.ZOOM_BURST_MS);
-    if(!burstActive){ this._zoomAnchor={ scrollLeft:el.scrollLeft, off:e.clientX-r.left, w:oldW }; }
+    /* PP-EXT (V1.3 fix6): the app renders inside a `zoom:0.8` wrapper, so getBoundingClientRect (and clientX)
+       report RENDERED px while scrollLeft / dayW / scrollWidth are all in the element's LOCAL px. Convert the
+       cursor offset back into local px by the element's own measured scale (rect.width / offsetWidth) — else the
+       anchor point lands ~0.8× short and the zoom pivots to the LEFT of the cursor. Measured, not hardcoded, so
+       it survives any future zoom value. */
+    const uiScale = (r.width>0 && el.offsetWidth>0) ? (r.width/el.offsetWidth) : 1;
+    if(!burstActive){ this._zoomAnchor={ scrollLeft:el.scrollLeft, off:(e.clientX-r.left)/uiScale, w:oldW }; }
     const za=this._zoomAnchor; za.t=now;
     /* The cursor anchor (scrollLeft + offset + dayW) is captured ONCE per burst so every event's target is the
        ABSOLUTE scrollLeft for the current width — nothing chains off a not-yet-applied scrollLeft (that caused
        trackpad drift). */
     this._zoomTarget=this.zoomScrollAnchor(za.w, newW, za.scrollLeft, za.off);
+    /* Hand the pin to componentDidUpdate: React commits the new dayW (grown/shrunk content width) there,
+       synchronously after the DOM mutation and BEFORE paint, so setting scrollLeft then lands against the
+       already-resized scrollWidth (never clamped short) and the browser paints the new width + new scroll in
+       ONE frame. This removes the scroll-vs-render RACE that a rAF/timeout chase loop could only retime, never
+       close (the old jitter + burst-end drift). Element cached so the hook needs no re-lookup. */
+    this._zoomPinEl=el;
     this.setState({dayW:newW});
-    /* Re-pin scrollLeft AFTER the async re-render grows the content. Pace with requestAnimationFrame when the
-       tab is visible (paint-synced ⇒ the scroll moves in lockstep with the width, no jitter) and setTimeout
-       when hidden (rAF is paused then). One shared loop applies the latest target until the burst goes idle,
-       so a stale frame can't clobber the final position. */
-    if(!this._zoomLooping){
-      this._zoomLooping=true;
-      const pin=()=>{ el.scrollLeft=Math.max(0,this._zoomTarget); };
-      const schedule=(fn)=>{ document.hidden ? setTimeout(fn,16) : requestAnimationFrame(fn); };
-      const step=()=>{ pin(); if(Date.now()-this._zoomAnchor.t < this.ZOOM_BURST_MS){ schedule(step); } else { pin(); this._zoomLooping=false; } };
-      schedule(step);
-    }
   }
 
   /* ---------- quick add ---------- */
