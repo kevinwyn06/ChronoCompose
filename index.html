@@ -2950,43 +2950,40 @@ class Component extends DCLogic {
   onWheelZoom(e){
     if(!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
-    const oldW = this.state.dayW;
     /* normalize deltaMode (0=px, 1=lines, 2=pages) to pixel-equivalent so trackpad/mouse feel consistent */
     const delta = e.deltaY * (e.deltaMode===1 ? 16 : e.deltaMode===2 ? 400 : 1);
-    const newW = this.zoomStep(oldW, delta); /* PP-EXT (V1.3 fix2): exp zoom proportional to scroll delta, per-event capped */
-    if(newW===oldW) return;
-    /* PP-EXT (V1.3 fix3): zoom about the cursor. The content grows on the (async) re-render, so scrollLeft
-       must be re-pinned AFTER the new width lands (setTimeout poll — rAF is paused in a background tab).
-       The anchor (scrollLeft + cursor offset + dayW) is captured ONCE per zoom burst and reused, because a
-       trackpad fires many events per gesture and each event's async scroll-correction hasn't landed before
-       the next fires — reading a stale scrollLeft per event made the anchor chain off a wrong base and
-       drift. With a fixed burst anchor, every event's target is the absolute scrollLeft for the CURRENT
-       width, so nothing compounds. The burst resets after a short idle. e.currentTarget is the scroller the
-       wheel listener is bound to. */
     const el = e.currentTarget || this.ganttScrollEl;
-    if(el){
-      const r=el.getBoundingClientRect();
-      const now=Date.now();
-      if(!this._zoomAnchor || now-this._zoomAnchor.t>this.ZOOM_BURST_MS){
-        this._zoomAnchor={ scrollLeft:el.scrollLeft, off:e.clientX-r.left, w:oldW };
-      }
-      const za=this._zoomAnchor; za.t=now;
-      /* Always pin to the LATEST target. One shared loop (not a timer per event) re-applies every frame
-         until the burst goes idle, so a late timer from an earlier, smaller-zoom event can't clobber the
-         final position, and the pin re-lands each time the async re-render grows the content. */
-      this._zoomTarget=this.zoomScrollAnchor(za.w,newW,za.scrollLeft,za.off);
-      this.setState({dayW:newW});
-      if(!this._zoomApplying){
-        this._zoomApplying=true;
-        const loop=()=>{
-          el.scrollLeft=Math.max(0,this._zoomTarget);
-          if(Date.now()-this._zoomAnchor.t < this.ZOOM_BURST_MS){ setTimeout(loop,20); }
-          else { el.scrollLeft=Math.max(0,this._zoomTarget); this._zoomApplying=false; } /* final settle */
-        };
-        setTimeout(loop,0);
-      }
-    } else {
-      this.setState({dayW:newW});
+    if(!el){ const nw=this.zoomStep(this.state.dayW,delta); if(nw!==this.state.dayW) this.setState({dayW:nw}); return; }
+    /* PP-EXT (V1.3 fix4): smooth cursor-anchored zoom. Two problems the naive version had: (a) each wheel
+       event did its own setState → on a trackpad burst that's ~8 re-renders/gesture, each repositioning every
+       bar → jitter; (b) the content grows on the async re-render, so scrollLeft has to be re-pinned after it
+       lands. Fix: COALESCE — accumulate the target dayW/scrollLeft here, and let ONE requestAnimationFrame
+       loop do a single setState + scroll-pin per frame (paint-synced, so no tearing). The cursor anchor
+       (scrollLeft + offset + dayW) is captured ONCE per burst so nothing chains off a not-yet-applied
+       scrollLeft. A setTimeout backstop guarantees the final landing even in a background tab (rAF paused). */
+    const r=el.getBoundingClientRect();
+    const now=Date.now();
+    const oldW=this.state.dayW;
+    const newW=this.zoomStep(oldW, delta);
+    if(newW===oldW) return;
+    const burstActive = this._zoomAnchor && (now-this._zoomAnchor.t <= this.ZOOM_BURST_MS);
+    if(!burstActive){ this._zoomAnchor={ scrollLeft:el.scrollLeft, off:e.clientX-r.left, w:oldW }; }
+    const za=this._zoomAnchor; za.t=now;
+    /* The cursor anchor (scrollLeft + offset + dayW) is captured ONCE per burst so every event's target is the
+       ABSOLUTE scrollLeft for the current width — nothing chains off a not-yet-applied scrollLeft (that caused
+       trackpad drift). */
+    this._zoomTarget=this.zoomScrollAnchor(za.w, newW, za.scrollLeft, za.off);
+    this.setState({dayW:newW});
+    /* Re-pin scrollLeft AFTER the async re-render grows the content. Pace with requestAnimationFrame when the
+       tab is visible (paint-synced ⇒ the scroll moves in lockstep with the width, no jitter) and setTimeout
+       when hidden (rAF is paused then). One shared loop applies the latest target until the burst goes idle,
+       so a stale frame can't clobber the final position. */
+    if(!this._zoomLooping){
+      this._zoomLooping=true;
+      const pin=()=>{ el.scrollLeft=Math.max(0,this._zoomTarget); };
+      const schedule=(fn)=>{ document.hidden ? setTimeout(fn,16) : requestAnimationFrame(fn); };
+      const step=()=>{ pin(); if(Date.now()-this._zoomAnchor.t < this.ZOOM_BURST_MS){ schedule(step); } else { pin(); this._zoomLooping=false; } };
+      schedule(step);
     }
   }
 
