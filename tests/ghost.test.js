@@ -149,3 +149,73 @@ test('ghostPaint: the anchor always names the edge that has a real date', () => 
   const g2 = c.ghostSpan(t2, TODAY);
   assert.strictEqual(c.ghostPaint(Object.assign({ ghost: true }, g2), BASE).anchor, 'r');
 });
+
+// ── V1.2 round3: ghostDrawSpan — the span a ghost is DRAWN across, which is deliberately not the span it
+// derives. ghostSpan keeps its 1-day extent in DATA (it feeds scheduling, so it must not depend on zoom);
+// the drawing gets a floor of max(1 day, GHOST_VIEW_FRAC × visible width) so a ghost stays legible zoomed out.
+const gocc = (gs, ge, start, end) => ({ ghost: true, ghostStart: gs, ghostEnd: ge, start, end });
+
+test('ghostDrawSpan: a solid occurrence passes straight through at any zoom', () => {
+  const c = make();
+  const o = { ghost: false, start: TODAY, end: TODAY + 3 * DAY };
+  const d = c.ghostDrawSpan(o, 4, 4000); // absurdly coarse zoom
+  assert.strictEqual(d.start, TODAY);
+  assert.strictEqual(d.end, TODAY + 3 * DAY);
+});
+
+test('ghostDrawSpan: zoomed IN past 1/FRAC days on screen, the 1-day derived extent is drawn as-is', () => {
+  const c = make();
+  // dayW 1000px, viewport 1000px ⇒ 1 day fills the screen; the fraction floor (0.2 day) loses to the 1-day floor.
+  const d = c.ghostDrawSpan(gocc(false, true, TODAY, TODAY + DAY), 1000, 1000);
+  assert.strictEqual(d.start, TODAY);
+  assert.strictEqual(d.end, TODAY + DAY, 'no widening when a day is already wide on screen');
+});
+
+test('ghostDrawSpan: zoomed OUT, a half-ghost grows RIGHT — the committed start never moves', () => {
+  const c = make();
+  // dayW 10px, viewport 1000px ⇒ 100 days visible; 0.2 × 1000px = 200px = 20 days.
+  const d = c.ghostDrawSpan(gocc(false, true, TODAY, TODAY + DAY), 10, 1000);
+  assert.strictEqual(d.start, TODAY, 'the anchor is the committed edge and must stay put');
+  assert.strictEqual(d.end, TODAY + 20 * DAY);
+});
+
+test('ghostDrawSpan: a deadline ghost grows LEFT — the due date stays pinned to its column', () => {
+  const c = make();
+  const due = TODAY + DAY;
+  const d = c.ghostDrawSpan(gocc(true, false, TODAY, due), 10, 1000);
+  assert.strictEqual(d.end, due, 'the committed due edge is the anchor and must stay put');
+  assert.strictEqual(d.start, due - 20 * DAY, 'it extends backwards instead');
+});
+
+test('ghostDrawSpan: a double-ghost has no anchor, so it grows right from today', () => {
+  const c = make();
+  const d = c.ghostDrawSpan(gocc(true, true, TODAY, TODAY + DAY), 10, 1000);
+  assert.strictEqual(d.start, TODAY);
+  assert.strictEqual(d.end, TODAY + 20 * DAY);
+});
+
+test('ghostDrawSpan: the floor never SHRINKS a ghost that is already wider than it', () => {
+  const c = make();
+  // A deadline a month out already spans 30 days; the 20-day floor must leave it alone.
+  const due = TODAY + 30 * DAY;
+  const d = c.ghostDrawSpan(gocc(true, false, TODAY, due), 10, 1000);
+  assert.strictEqual(d.start, TODAY);
+  assert.strictEqual(d.end, due);
+});
+
+test('ghostDrawSpan: before the scroller mounts (viewW 0) it falls back to the 1-day derived extent', () => {
+  const c = make();
+  const d = c.ghostDrawSpan(gocc(false, true, TODAY, TODAY + DAY), 10, 0);
+  assert.strictEqual(d.end - d.start, DAY, 'no viewport ⇒ no fraction floor, never a divide-by-zero blowup');
+});
+
+test('ghostDrawSpan widens only the DRAWING — ghostSpan itself stays 1 day, so zoom cannot move scheduling', () => {
+  const c = make();
+  const t = mk(c); // dateless
+  const g = c.ghostSpan(t, TODAY);
+  assert.strictEqual(g.end - g.start, DAY, 'derived span is 1 day at every zoom');
+  const wide = c.ghostDrawSpan(Object.assign({ ghost: true }, g), 10, 1000);
+  assert.ok(wide.end - wide.start > DAY, 'the drawing widens…');
+  assert.strictEqual(c.ghostSpan(t, TODAY).end - c.ghostSpan(t, TODAY).start, DAY, '…and the derivation does not');
+  assert.strictEqual(t.start, null); assert.strictEqual(t.end, null);
+});

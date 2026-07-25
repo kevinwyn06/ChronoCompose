@@ -266,6 +266,12 @@ class Component extends DCLogic {
     this.GHOST_DOTS_HOLD = 8;        // % nearest the committed edge where the dotted outline is fully hidden
     this.GHOST_DOTS_FADE = 55;       // % where the dotted outline reaches full opacity
     this.GHOST_FLAT = 'rgba(148,163,184,0.16)'; // double-ghost fill: nothing is committed, so nothing is anchored
+    /* PP-EXT (V1.2 round3): a ghost's derived extent is ALWAYS 1 day in data (ghostSpan is pure and now feeds
+       scheduling — making it zoom-dependent would mean zooming the chart changes what gets allotted). But 1 day
+       at year zoom is a sliver, so the DRAWING gets a floor of `max(1 day, GHOST_VIEW_FRAC × visible width)`.
+       The 1-day term wins while fewer than 1/FRAC days are on screen; past that the ghost stays a constant
+       share of the view. Render-only — it never reaches `start`/`end`. */
+    this.GHOST_VIEW_FRAC = 0.2;      // ghost draw-width floor as a fraction of the visible chart (owner: "like 1/5")
     this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
     this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
     /* PP-EXT (V1.3 fix2): Ctrl/Cmd+scroll zoom is EXPONENTIAL and PROPORTIONAL to wheel deltaY, so total
@@ -1289,6 +1295,25 @@ class Component extends DCLogic {
                         so dots fade IN exactly as colour fades OUT.
      `anchor` also tells the caller which side gets the solid base-coloured border (the committed edge reads
      as the task, not as an absence). */
+  /* PP-EXT (V1.2 round3): the span a ghost is DRAWN across, which is not the span it derives. `ghostSpan` keeps
+     its 1-day derived extent in data; this widens the drawing so a ghost stays legible when zoomed out, growing
+     AWAY from the committed edge so the anchor never moves:
+       • anchor left  (start real, end ghost) → grows right
+       • anchor right (due real, start ghost) → grows left, so the due date stays pinned to its column
+       • double-ghost (no anchor)             → grows right from today
+     A ghost already wider than the floor (e.g. a deadline with a month of runway) is returned untouched — the
+     floor is a `max`, never a shrink. Solid bars pass straight through. PURE (ms + px in, ms out) → unit-tested.
+     Both the renderer and startBarDrag call this, so a ghost edge is dragged from where it is actually DRAWN
+     rather than from its hidden derived date (which would make the bar jump on the first pixel of the gesture). */
+  ghostDrawSpan(o, dayW, viewW){
+    if(!o || !o.ghost) return {start:o.start, end:o.end};
+    const minMs = Math.max(this.DAY, (viewW||0)*this.GHOST_VIEW_FRAC/(dayW||1)*this.DAY);
+    if(o.end - o.start >= minMs) return {start:o.start, end:o.end};
+    if(o.ghostStart && !o.ghostEnd) return {start:o.end-minMs, end:o.end};   /* anchored on the due date */
+    return {start:o.start, end:o.start+minMs};                               /* anchored on the start, or floating on today */
+  }
+  /* PP-EXT: the Gantt viewport width in px (0 before the scroller mounts — callers fall back to the 1-day floor). */
+  ganttViewW(){ const el=this.ganttScrollEl; return (el && el.clientWidth) || 0; }
   ghostPaint(o, base){
     if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return null;
     if(o.ghostStart && o.ghostEnd) return {anchor:null, fill:this.GHOST_FLAT, mask:null};
@@ -2346,7 +2371,13 @@ class Component extends DCLogic {
     }
     /* PP-EXT (V1.3): keep the raw null-able data edges alongside the effective (occ) ones so barDragEdit
        can leave an untouched ghost edge null instead of stamping its derived value. */
-    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:occ.start,origEnd:occ.end,dataStart:task.start,dataEnd:task.end,subs};
+    /* PP-EXT (V1.2 round3): a ghost is drawn wider than it derives (ghostDrawSpan), so the gesture has to start
+       from the DRAWN edge — anchoring it to the hidden derived date made the bar jump on the first pixel. Only
+       the ghost edges move; a committed edge keeps its real date. */
+    const dw=this.ghostDrawSpan(occ, this.state.dayW, this.ganttViewW());
+    const oStart = (occ.ghost && occ.ghostStart) ? dw.start : occ.start;
+    const oEnd   = (occ.ghost && occ.ghostEnd)   ? dw.end   : occ.end;
+    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:oStart,origEnd:oEnd,dataStart:task.start,dataEnd:task.end,subs};
     if(!task.recur) this.snapshot();
     this.setState({selectedIds:[task.id]});
   }
@@ -6958,7 +6989,11 @@ class Component extends DCLogic {
     const h=React.createElement;
     const dragging = this.dragState && this.dragState.recurring && this.dragState.id===t.id && this.dragState.occIdx===o.idx;
     const dShift = dragging ? (this.dragState.deltaSteps||0)*this.DAY : 0;
-    let st=o.start, en=o.end;
+    /* PP-EXT (V1.2 round3): draw a ghost across its DRAWN span, not its derived one — see ghostDrawSpan. The
+       data span is untouched; only these two render-locals widen. */
+    const ghost=!!o.ghost; /* PP-EXT (V1.2 round3): hoisted — the chore branch below now defers to it */
+    const draw=this.ghostDrawSpan(o, this.state.dayW, this.ganttViewW());
+    let st=draw.start, en=draw.end;
     if(dragging){ const m=this.dragState.mode; if(m==='move'){st+=dShift;en+=dShift;} else if(m==='start'){st=Math.min(en-this.DAY,st+dShift);} else if(m==='end'){en=Math.max(st+this.DAY,en+dShift);} }
     const left=this.xOf(st);
     const top=this.yOfRow(rowI)+(this.rowH-this.barH)/2;
@@ -6999,7 +7034,13 @@ class Component extends DCLogic {
           background:done?base:'var(--gantt-bg)',border:'2px solid '+base,transform:'rotate(45deg)',cursor:'grab',borderRadius:'3px',
           boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',zIndex:5}});
     }
-    if(this.isChore(t)){
+    /* PP-EXT (V1.2 round3, owner 2026-07-25): a GHOST outranks a chore. `isChore` (planned<=0) used to win
+       outright and return a circle before any ghost code ran — so a dateless task drew identically to a fully
+       dated one, and since a quick-added task has planned=0 until you give it a duration, MOST ghosts were
+       invisible circles. Owner's rule: "duration doesn't matter, ghost tasks by definition don't have a
+       duration" — every ghost draws as the same 1-day block. A zero-duration task with BOTH dates set is
+       still a chore and still a circle. */
+    if(this.isChore(t) && !ghost){
       const sz=this.barH+2;
       return h('div',{key,style:{position:'absolute',left:(left-sz/2)+'px',top:(this.yOfRow(rowI)+(this.rowH-sz)/2)+'px',width:sz+'px',height:sz+'px',zIndex:5,
           opacity:optedOut?0.55:1}},
@@ -7025,7 +7066,6 @@ class Component extends DCLogic {
        a dotted outline fades in over the same ramp (see ghostPaint). A double-ghost has no committed edge,
        so it stays flat grey, dotted all round. Data stays null either way; dragging an edge writes a real
        date via the existing bar-drag machinery (de-ghosts that edge). */
-    const ghost=!!o.ghost;
     const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
     const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'off')) : '';
