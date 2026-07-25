@@ -342,3 +342,146 @@ function fakeEvent() {
     currentTarget: { getBoundingClientRect: () => ({ left: 100, bottom: 200 }) },
   };
 }
+
+// ---------------------------------------------------------------------------
+// V1.4 — right-click bar menu: null-back-to-ghost, pins, repeat presets, and the
+// CSS-`zoom` coordinate conversion every cursor-anchored overlay now goes through.
+// ---------------------------------------------------------------------------
+
+// The bar's right-click handler only needs these three members off a DOM event.
+function ctxEvent(x, y) {
+  return { preventDefault() {}, stopPropagation() {}, clientX: x == null ? 400 : x, clientY: y == null ? 300 : y };
+}
+
+test('scaleFixedPt: divides a client point by the wrapper scale (fixed overlays paint at left*zoom)', () => {
+  const c = make();
+  const p = c.scaleFixedPt(1200, 600, 0.8);
+  assert.equal(p.x, 1500, 'left:1500 inside zoom:0.8 paints at 1200 = the cursor');
+  assert.equal(p.y, 750);
+});
+
+test('scaleFixedPt: a missing/zero/unity scale is an identity (unzoomed embed keeps working)', () => {
+  const c = make();
+  for (const k of [1, 0, null, undefined]) {
+    const p = c.scaleFixedPt(120, 40, k);
+    assert.equal(p.x, 120, 'scale ' + k + ' → x unchanged');
+    assert.equal(p.y, 40, 'scale ' + k + ' → y unchanged');
+  }
+});
+
+test('uiScale: 1 when there is no measurable root (Node/vm, or before mount)', () => {
+  const c = make();
+  assert.equal(c.uiScale(), 1);
+  const p = c.uiPt(400, 300);
+  assert.equal(p.x, 400);
+  assert.equal(p.y, 300);
+});
+
+test('openBarMenu: selects the bar and remembers BOTH the overlay point and the raw client point', () => {
+  const { c } = withTask();
+  c.openBarMenu(ctxEvent(640, 480), c.state.tasks[0], 0);
+  const m = c.state.barMenu;
+  assert.equal(m.id, 't1');
+  assert.equal(m.occIdx, 0);
+  assert.equal(m.cx, 640, 'client point kept for the child popups');
+  assert.equal(m.cy, 480);
+  assert.equal(m.x, 640, 'overlay point (unzoomed in tests)');
+  assert.equal(m.y, 480);
+  assert.equal(c.state.selectedIds.join(), 't1');
+  assert.equal(c.state.menu, null, 'the row menu never shows at the same time');
+});
+
+// --- null-back-to-ghost: the de-commit escape hatch a drag cannot express ---
+test('canClearDate: a dated non-recurring edge may go back to a ghost', () => {
+  const { c, t } = withTask();
+  assert.equal(c.canClearDate(t(), 'start').ok, true);
+  assert.equal(c.canClearDate(t(), 'end').ok, true);
+});
+
+test('canClearDate: an already-null edge offers nothing to clear', () => {
+  const { c, t } = withTask({ start: null });
+  const r = c.canClearDate(t(), 'start');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /already a ghost/);
+});
+
+test('canClearDate: a repeating task refuses — an unscheduled recur renders NO bar at all', () => {
+  const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly' } });
+  const r = c.canClearDate(t(), 'end');
+  assert.equal(r.ok, false);
+  assert.match(r.why, /repeat/, 'the reason names the repeat, so the menu tooltip explains itself');
+});
+
+test('clearDate via the menu returns the edge to a DERIVED ghost (no residual date)', () => {
+  const { c, t } = withTask();
+  c.clearDate('t1', 'start');
+  assert.equal(t().start, null, 'the data value is gone, not overwritten with a derived one');
+  assert.equal(c.isScheduled(t()), false);
+  const g = c.ghostSpan(t(), c.startOfToday());
+  assert.equal(g.ghostStart, true, 'the left edge now renders as a ghost');
+  assert.equal(g.ghostEnd, false, 'the untouched due edge stays real');
+});
+
+test('each menu mutation is exactly ONE undo entry', () => {
+  const { c } = withTask();
+  const n = c.history.length;
+  c.clearDate('t1', 'start');
+  assert.equal(c.history.length, n + 1, 'clear → 1');
+  c.togglePin('t1', 'end');
+  assert.equal(c.history.length, n + 2, 'pin → 1');
+  c.setRecur('t1', 'week');
+  assert.equal(c.history.length, n + 3, 'repeat → 1');
+});
+
+// --- repeat presets ---
+test('recurPresetKey: none / a preset rule / a parser-only custom rule', () => {
+  const { c, t } = withTask();
+  assert.equal(c.recurPresetKey(t()), 'none');
+  c.setRecur('t1', 'week');
+  assert.equal(c.recurPresetKey(t()), 'week');
+  c.commit(tasks => { tasks[0].recur = { kind: 'weekdays', days: ['mon', 'wed'], label: 'every mon, wed' }; });
+  assert.equal(c.recurPresetKey(t()), null, 'a weekdays set has no preset row → shown read-only as Custom');
+});
+
+test('setRecur: applies a preset in the shape parseDateText emits (so expandTask needs no new case)', () => {
+  const { c, t } = withTask();
+  c.setRecur('t1', 'week');
+  assert.equal(t().recur.kind, 'week');
+  assert.equal(t().recur.n, 1);
+  assert.equal(t().recur.label, 'Weekly');
+  assert.equal(Object.keys(t().recur.overrides).length, 0);
+  assert.equal(t().recur.shifts.length, 0);
+});
+
+test("setRecur('none') clears the rule outright", () => {
+  const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly', overrides: {}, shifts: [] } });
+  c.setRecur('t1', 'none');
+  assert.equal(t().recur, null);
+});
+
+test('setRecur: changing the rule DROPS occurrence-indexed state (idx 3 is a different date now)', () => {
+  const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly', overrides: { 3: { pct: 50 } }, shifts: [{ idx: 2, ms: 1 }], until: 123 } });
+  c.setRecur('t1', 'month');
+  assert.equal(t().recur.kind, 'month');
+  assert.equal(Object.keys(t().recur.overrides).length, 0, 'per-occurrence progress does not carry across rules');
+  assert.equal(t().recur.shifts.length, 0);
+  assert.equal(t().recur.until, null);
+});
+
+test('setRecur: re-picking the ACTIVE preset keeps overrides/shifts/until intact', () => {
+  const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly', overrides: { 3: { pct: 50 } }, shifts: [{ idx: 2, ms: 1 }], until: 123 } });
+  c.setRecur('t1', 'week');
+  assert.equal(t().recur.overrides[3].pct, 50);
+  assert.equal(t().recur.shifts.length, 1);
+  assert.equal(t().recur.shifts[0].idx, 2);
+  assert.equal(t().recur.until, 123);
+});
+
+test('setRecur on a GHOST commits the derived span first — a repeat needs a real anchor', () => {
+  const { c, t } = withTask({ start: null, end: null });
+  const today = c.startOfToday();
+  c.setRecur('t1', 'day');
+  assert.equal(t().start, today, 'the double-ghost derived start is now real data');
+  assert.equal(t().end, today + 86400000);
+  assert.equal(c.isScheduled(t()), true, 'so expandTask can produce occurrences (and the bar still exists)');
+});

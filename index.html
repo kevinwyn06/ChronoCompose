@@ -274,6 +274,18 @@ class Component extends DCLogic {
     this.DRAWER_ZOOM_STEP = 1.5;     // ×/÷ per ＋/－ click
     this.GANTT_HOUR_GRID_DAYW = 240; // at/above this px-per-day, draw hour gridlines + ticks (240 ⇒ 10px/hr)
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
+    /* PP-EXT (V1.4): the repeat presets the bar's right-click menu offers. `recur` shapes are IDENTICAL to
+       what parseDateText emits (kind/n/label), so a menu-set repeat and a typed "every week" are the same
+       data — expandTask/rruleToRecur need no new cases. Rules the parser can produce but this list can't
+       (weekdays sets, monthDay) stay editable by text; the menu shows them as a read-only "Custom" row. */
+    this.RECUR_PRESETS = [
+      {k:'none',    label:'Does not repeat', recur:null},
+      {k:'day',     label:'Daily',          recur:{kind:'day',n:1,label:'Daily'}},
+      {k:'weekday', label:'Every weekday',  recur:{kind:'weekday',label:'Every weekday'}},
+      {k:'week',    label:'Weekly',         recur:{kind:'week',n:1,label:'Weekly'}},
+      {k:'month',   label:'Monthly',        recur:{kind:'month',n:1,label:'Monthly'}},
+      {k:'year',    label:'Yearly',         recur:{kind:'year',n:1,label:'Yearly'}}
+    ];
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
     this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
@@ -372,7 +384,7 @@ class Component extends DCLogic {
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
       splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
       detailId:null, menu:null,
-      showYears:false, settingsOpen:false, settingsTab:'general' /* PP-EXT C0 */, quickText:'', quickOpen:false, datePick:null, scopePrompt:null,
+      showYears:false, settingsOpen:false, settingsTab:'general' /* PP-EXT C0 */, quickText:'', quickOpen:false, datePick:null, barMenu:null /* PP-EXT V1.4: right-click-a-bar editor menu */, scopePrompt:null,
       theme:this.initialTheme(),
       rowMode: pf.rowMode||'default',
       colW: pf.colW||{}, colOrder: pf.colOrder||null, colHidden: pf.colHidden||{},
@@ -574,7 +586,8 @@ class Component extends DCLogic {
     e.preventDefault(); e.stopPropagation();
     let sel=this.state.selCols;
     if(!sel.includes(k)){ sel=k==='check'?[]:[k]; this.setState({selCols:sel}); }
-    this.setState({colMenu:{x:e.clientX,y:e.clientY,keys:sel.length?sel:(k==='check'?[]:[k])}});
+    const cp=this.uiPt(e.clientX,e.clientY); /* PP-EXT V1.4: overlay space, not rendered px (see scaleFixedPt) */
+    this.setState({colMenu:{x:cp.x,y:cp.y,keys:sel.length?sel:(k==='check'?[]:[k])}});
   }
   moveColumn(fromK, toK){
     if(fromK===toK||fromK==='check') return;
@@ -767,6 +780,8 @@ class Component extends DCLogic {
   onKey(e){
     const k=e.key.toLowerCase();
     if(e.key==='Escape'){ if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
+      else if(this.state.pctPop) this.closePctPop(); else if(this.state.inclPick) this.closeInclPick();
+      else if(this.state.barMenu) this.closeBarMenu(); /* PP-EXT V1.4: bar menu sits under the popups it opens */
       else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail(); return; }
     if(this.isEditingTarget(e)) {
       if((e.ctrlKey||e.metaKey) && (k==='z'||k==='y')) return; // let inputs handle their own undo
@@ -1922,7 +1937,8 @@ class Component extends DCLogic {
     const sel=this.state.selectedIds;
     const ids = (sel.includes(id) && sel.length>1) ? sel : [id];
     if(!(sel.includes(id) && sel.length>1)) this.setState({selectedIds:[id]});
-    this.setState({menu:{x:e.clientX,y:e.clientY,ids}});
+    const mp=this.uiPt(e.clientX,e.clientY); /* PP-EXT V1.4: overlay space, not rendered px (see scaleFixedPt) */
+    this.setState({menu:{x:mp.x,y:mp.y,ids}});
   }
   openDetail(id){ this.setState({detailId:id, menu:null, selectedIds:[id]}); }
   closeDetail(){ this.flushDesc(); this.setState({detailId:null}); }
@@ -3157,6 +3173,7 @@ class Component extends DCLogic {
      picker as the sheet date cells. openDatePick delegates here after resolving its anchor rect. */
   openDatePickAt(id, key, x, y){
     const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+    const ap=this.uiPt(x,y); x=ap.x; y=ap.y; /* PP-EXT V1.4: client/rect px → overlay space (see scaleFixedPt) */
     /* All-day ends are stored as the EXCLUSIVE next-day midnight (see dueInstant), so show the
        inclusive day the user thinks of as the end. dpApply converts back. */
     const cur = (t.allDay && key==='end' && t[key]!=null) ? t[key]-1 : t[key];
@@ -3168,6 +3185,7 @@ class Component extends DCLogic {
      (setPct funnels through commit, occurrence-aware). Same backdrop/close pattern as datePick. */
   openPctPop(id, x, y){
     const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
+    const ap=this.uiPt(x,y); x=ap.x; y=ap.y; /* PP-EXT V1.4: client/rect px → overlay space (see scaleFixedPt) */
     const cur = t.recur ? this.occPct(t, this.currentOccIdx(t)) : (t.pct||0);
     this.setState({pctPop:{id, x, y, text:String(cur)}});
   }
@@ -3176,7 +3194,7 @@ class Component extends DCLogic {
     const v=parseFloat(p.text); if(!isNaN(v)) this.setPct(p.id, v); this.setState({pctPop:null}); }
   renderPctPop(){
     const h=React.createElement; const p=this.state.pctPop; if(!p) return null;
-    const vw=(typeof window!=='undefined'&&window.innerWidth)||1280, vh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    const vpc=this.uiViewport(), vw=vpc.w, vh=vpc.h; /* PP-EXT V1.4: clamp in the overlay's own px */
     const x=Math.max(8,Math.min(p.x, vw-176)), y=Math.max(8,Math.min(p.y+8, vh-56));
     const card=h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
       style:{position:'fixed',left:x+'px',top:y+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
@@ -3240,7 +3258,7 @@ class Component extends DCLogic {
     const allDay=!!t.allDay;
     const W=268, H=allDay?330:378;
     /* Clamp into the viewport so a cell near the bottom/right edge still shows the whole card. */
-    const vw=(typeof window!=='undefined'&&window.innerWidth)||1280, vh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    const vpc=this.uiViewport(), vw=vpc.w, vh=vpc.h; /* PP-EXT V1.4: clamp in the overlay's own px */
     const x=Math.max(8, Math.min(dp.x, vw-W-8)), y=Math.max(8, Math.min(dp.y, vh-H-8));
     const view=new Date(dp.view), draft=new Date(dp.ms);
     const p2=n=>String(n).padStart(2,'0');
@@ -3314,7 +3332,8 @@ class Component extends DCLogic {
   openInclPick(e, id){
     e.stopPropagation();
     const r=e.currentTarget.getBoundingClientRect();
-    this.setState({inclPick:{id, x:r.left, y:r.bottom+4}});
+    const ip=this.uiPt(r.left, r.bottom+4); /* PP-EXT V1.4: rect px → overlay space (see scaleFixedPt) */
+    this.setState({inclPick:{id, x:ip.x, y:ip.y}});
   }
   closeInclPick(){ this.setState({inclPick:null}); }
   /* PP-EXT Track B: the action rows for a task's current inclState — shared verbatim between the table
@@ -3352,7 +3371,7 @@ class Component extends DCLogic {
     const h=React.createElement; const ip=this.state.inclPick; if(!ip) return null;
     const t=this.state.tasks.find(x=>x.id===ip.id); if(!t) return null;
     const W=230;
-    const vw=(typeof window!=='undefined'&&window.innerWidth)||1280, vh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    const vpc=this.uiViewport(), vw=vpc.w, vh=vpc.h; /* PP-EXT V1.4: clamp in the overlay's own px */
     const x=Math.max(8, Math.min(ip.x, vw-W-8)), y=Math.max(8, Math.min(ip.y, vh-160));
     const card=h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
       style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',
@@ -3361,6 +3380,82 @@ class Component extends DCLogic {
       ...this.inclActionRows(t, ()=>this.closeInclPick()));
     return h('div',{onMouseDown:()=>this.closeInclPick(), style:{position:'fixed',inset:0,zIndex:2400}}, card);
   }
+
+  /* ==== PP-EXT (V1.4): cursor-anchored overlay placement under the app's CSS `zoom` ====
+     The whole app renders inside a `zoom:0.8` wrapper (index.html top div). A position:fixed overlay
+     INSIDE a zoomed ancestor is laid out in the ancestor's LOCAL px, so `left:X` paints at `X*zoom`,
+     while mouse events (clientX/Y) and window.innerWidth are RENDERED px. Every cursor-anchored popup
+     (context menu, date picker, %-pop, incl popover) therefore appeared up/left of the pointer by
+     (1−zoom)× its distance from the origin — 240px at x=1200, measured live in Chrome. Convert the
+     client point into the overlay's own space before using it as left/top. Same unit rule as the gantt
+     zoom pin (V1.3 fix6): the scale is MEASURED, never a hardcoded 0.8, so a future wrapper change or a
+     zoom-free embed both keep working. */
+  scaleFixedPt(x,y,k){ const s=(k&&k>0)?k:1; return {x:x/s, y:y/s}; } /* pure — unit-tested */
+  uiScale(){ /* measured render/local ratio of the zoomed subtree the overlays live in (1 when unzoomed) */
+    const el=this._uiRootEl;
+    if(!el || !el.offsetWidth) return 1;
+    const w=el.getBoundingClientRect().width;
+    return w>0 ? w/el.offsetWidth : 1;
+  }
+  uiPt(x,y){ return this.scaleFixedPt(x,y,this.uiScale()); }
+  uiViewport(){ /* viewport size in the overlays' local px, so edge-clamping stays in one unit */
+    const k=this.uiScale()||1;
+    const w=(typeof window!=='undefined'&&window.innerWidth)||1280, hh=(typeof window!=='undefined'&&window.innerHeight)||800;
+    return {w:w/k, h:hh/k};
+  }
+
+  /* ==== PP-EXT (V1.4): right-click a Gantt bar → edit ANY bar-encoded field ====
+     V1.3 made the bar the editor for drag-able things (start/due/%done); this is the precise + discrete
+     half: the fields a drag can't express (pins, repeat) and — the point of it — the DE-COMMIT escape
+     hatch, null-ing a date back to a V1.2 ghost. Drag can only ever write a date; only this menu (or
+     undo) can take one away. Every row funnels through an existing commit()-based mutator, so each
+     action is exactly one undo entry and one gcal diff. */
+  openBarMenu(e, task, occIdx){
+    e.preventDefault(); e.stopPropagation();
+    /* x/y are LOCAL px (what renderBarMenu paints with); cx/cy keep the raw client point so a row that
+       hands off to another cursor-anchored popup (date picker, %-pop) can re-anchor from the same place. */
+    const p=this.uiPt(e.clientX, e.clientY);
+    this.setState({selectedIds:[task.id], menu:null,
+      barMenu:{id:task.id, occIdx, x:p.x, y:p.y, cx:e.clientX, cy:e.clientY}});
+  }
+  closeBarMenu(){ this.setState({barMenu:null}); }
+  /* Whether an edge may be nulled back to a ghost. PURE (reads only the task) → unit-tested.
+     A repeating task is the one hard no: expandTask needs a real anchor span, and an unscheduled recur
+     renders NO bar at all (see the `if(t.recur) return []` branch in renderVals), so de-committing a
+     date would make the task silently vanish from the chart. Drop the repeat first. */
+  canClearDate(t,key){
+    if(!t) return {ok:false, why:''};
+    const what = key==='start' ? 'start' : 'due';
+    if(t[key]==null) return {ok:false, why:'The '+what+' is already a ghost'};
+    if(t.recur) return {ok:false, why:'A repeating task needs a real '+what+' to expand from — remove the repeat first'};
+    return {ok:true, why:'Un-set the '+what+' → the edge goes back to a derived ghost'};
+  }
+  /* Which RECUR_PRESETS row is currently active. PURE. Returns null for a parser-only rule the presets
+     can't express (weekdays set / monthDay), which the menu then shows as a read-only Custom row. */
+  recurPresetKey(t){
+    if(!t) return null;
+    if(!t.recur) return 'none';
+    const p=(this.RECUR_PRESETS||[]).find(x=>x.recur && x.recur.kind===t.recur.kind
+      && ((x.recur.n||1)===(t.recur.n||1)));
+    return p ? p.k : null;
+  }
+  /* Set/clear the repeat rule from a preset key. Occurrence-indexed state (overrides/shifts, and `until`)
+     is meaningful only under the rule that produced it, so a rule CHANGE drops it rather than re-applying
+     "occurrence 3 was moved" to a different calendar. Re-picking the active preset keeps everything. */
+  setRecur(id, k){
+    const p=(this.RECUR_PRESETS||[]).find(x=>x.k===k); if(!p) return;
+    const today=this.startOfToday();
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      if(!p.recur){ t.recur=null; return; }
+      /* A repeat needs a real span to expand from, so committing one onto a ghost also commits the
+         ghost's derived dates (the only place in V1.4 where an action de-ghosts implicitly). */
+      if(t.start==null || t.end==null){ const g=this.ghostSpan(t, today); t.start=g.start; t.end=g.end; }
+      const same = !!t.recur && t.recur.kind===p.recur.kind && (t.recur.n||1)===(p.recur.n||1);
+      t.recur=Object.assign({}, p.recur, {until: same ? (t.recur.until||null) : null,
+        shifts: same ? (t.recur.shifts||[]) : [], overrides: same ? (t.recur.overrides||{}) : {}});
+    });
+  }
+  /* /PP-EXT */
 
   runQuickAdd(where){
     const raw=this.state.quickText.trim(); if(!raw) return;
@@ -6206,8 +6301,11 @@ class Component extends DCLogic {
               this.renderMainPane(tasks)))); /* PP-EXT: main-view selector picks the right pane */
     return h(React.Fragment,{},
       /* PP-EXT: left icon-rail nav + the section body share a flex row; overlays stay siblings above it. */
-      h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0}}, this.renderSidebar(), body),
+      /* PP-EXT (V1.4): this row is the overlays' zoomed ancestor made measurable — uiScale() reads its
+         rendered-vs-local width to convert cursor points into overlay space (see scaleFixedPt). */
+      h('div',{ref:el=>{this._uiRootEl=el;},style:{display:'flex',flex:1,minWidth:0,minHeight:0}}, this.renderSidebar(), body),
       this.state.menu ? this.renderMenu() : null,
+      this.state.barMenu ? this.renderBarMenu() : null, /* PP-EXT V1.4: right-click-a-bar field editor */
       this.state.colMenu ? this.renderColMenu() : null,
       this.state.detailId ? this.renderDetail() : null,
       this.state.settingsOpen ? this.renderSettings() : null,
@@ -6847,7 +6945,10 @@ class Component extends DCLogic {
     const key='bk'+t.id+'_'+o.idx;
     const recurring=!!t.recur;
     const md=(mode)=>e=>this.startBarDrag(e,t,o.idx,mode);
-    const ctx=e=>{ if(recurring){ e.preventDefault(); e.stopPropagation(); this.setState({selectedIds:[t.id]}); this.openScope('delete',t.id,o.idx); } };
+    /* PP-EXT (V1.4): right-click opens the bar's field editor for EVERY bar (it used to jump straight to the
+       recurring delete-scope prompt on repeats only — that prompt is still reached via the row menu's Delete,
+       which routes recurring deletes through openScope). */
+    const ctx=e=>this.openBarMenu(e,t,o.idx);
     const occLbl = recurring?(' · occ '+(o.idx+1)):'';
     /* PP-EXT (C3): the link-start circle used to sit at right:-7px, ON TOP of the right resize grip, and stayed
        hit-testable at rest (opacity 0.25) — so a drag near the right edge grabbed startLink instead of resizing/
@@ -6979,7 +7080,8 @@ class Component extends DCLogic {
     const h=React.createElement; const m=this.state.colMenu; const keys=(m.keys||[]).filter(k=>k!=='check');
     const byK={}; this.colDefs().forEach(c=>byK[c.k]=c);
     const anyHidden=Object.keys(this.state.colHidden).some(k=>this.state.colHidden[k]);
-    const W=236; const x=Math.min(m.x, window.innerWidth-W-8); const y=Math.min(m.y, window.innerHeight-320); /* PP-EXT Phase 7: taller reserve — the filter widget adds height */
+    const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
+    const W=236; const x=Math.min(m.x, vpc.w-W-8); const y=Math.min(m.y, vpc.h-320); /* PP-EXT Phase 7: taller reserve — the filter widget adds height */
     const row=(g,label,onClick,extra)=>h('div',{onClick,
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',onMouseLeave:e=>e.currentTarget.style.background='transparent',
       style:Object.assign({display:'flex',alignItems:'center',gap:'11px',padding:'8px 14px',cursor:'pointer',fontSize:'13px',color:'var(--text-2)'},extra||{})},
@@ -7048,7 +7150,8 @@ class Component extends DCLogic {
     const multi=ids.length>1;
     const tasks=this.state.tasks.filter(t=>ids.includes(t.id));
     const allDone=tasks.every(t=>t.pct>=100);
-    const W=246; const x=Math.min(m.x, window.innerWidth-W-8); const y=Math.min(m.y, window.innerHeight-380);
+    const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
+    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.min(m.y, vpc.h-380);
 
     const row=(content,onClick,extra)=>h('div',{onClick,style:Object.assign({display:'flex',alignItems:'center',gap:'11px',
       padding:'8px 14px',cursor:'pointer',fontSize:'13px',color:'var(--text-2)'},extra||{}),
@@ -7088,6 +7191,86 @@ class Component extends DCLogic {
     return h('div',{onMouseDown:e=>{e.stopPropagation();this.closeMenu();},onContextMenu:e=>{e.preventDefault();this.closeMenu();},
       style:{position:'fixed',inset:0,zIndex:2050}}, menu);
   }
+
+  /* PP-EXT (V1.4): the bar's own context menu — every bar-encoded field in one place, including the
+     null-back-to-ghost rows a drag can't express. Deliberately NOT the row menu (renderMenu): that one
+     is about the task as a list item (priority/duplicate/archive/delete) and is multi-select; this one
+     is about the SPAN under the cursor. Rows that need free-text entry hand off to the popups V1.3
+     already built (renderDatePick / renderPctPop) rather than re-implementing entry here. */
+  renderBarMenu(){
+    const h=React.createElement; const m=this.state.barMenu; if(!m) return null;
+    const t=this.state.tasks.find(x=>x.id===m.id); if(!t) return null;
+    const W=252, MAXH=430;
+    const vp=this.uiViewport();
+    const x=Math.max(8, Math.min(m.x, vp.w-W-8)), y=Math.max(8, Math.min(m.y, vp.h-MAXH-8));
+    const recurring=!!t.recur;
+    const pct = recurring ? this.occPct(t, m.occIdx) : (t.pct||0);
+    const pins=this.effPins(t);
+
+    const row=(content,onClick,extra,title)=>h('div',{onClick,title,style:Object.assign({display:'flex',alignItems:'center',gap:'11px',
+      padding:'7px 14px',cursor:onClick?'pointer':'default',fontSize:'13px',color:'var(--text-2)'},extra||{}),
+      onMouseEnter:e=>{ if(onClick) e.currentTarget.style.background='var(--menu-hover)'; },
+      onMouseLeave:e=>{ if(onClick) e.currentTarget.style.background='transparent'; }},content);
+    const ic=(g)=>h('span',{style:{width:'18px',display:'inline-flex',justifyContent:'center',color:'var(--text-mut2)',fontSize:'13px'}},g);
+    const tail=(s)=>h('span',{style:{marginLeft:'auto',fontSize:'11px',color:'var(--text-faint2)'}},s);
+    const divider=h('div',{style:{height:'1px',background:'var(--menu-hover)',margin:'5px 0'}});
+    const label=(s,title)=>h('div',{title,style:{padding:'7px 14px 3px',fontSize:'11px',fontWeight:600,color:'var(--text-mut)',letterSpacing:'0.3px'}},s);
+    const dis={color:'var(--text-faint2)',cursor:'default'};
+
+    /* --- dates: set (hand off to the picker at the same point) / clear back to a ghost --- */
+    const dateRow=(key)=>{
+      const what = key==='start' ? 'Start' : 'Due';
+      const isGhost = t[key]==null;
+      const cur = isGhost ? 'ghost' : this.fmtDT(t.allDay&&key==='end' ? t[key]-1 : t[key], !!t.allDay);
+      return row([ic(key==='start'?'▸':'◂'), what+'…', tail(cur)],
+        ()=>{ this.closeBarMenu(); this.openDatePickAt(t.id, key, m.cx, m.cy); },
+        null, 'Set the '+what.toLowerCase()+' precisely (calendar + natural language)');
+    };
+    const clearRow=(key)=>{
+      const c=this.canClearDate(t,key);
+      const what = key==='start' ? 'start' : 'due';
+      return row([ic('○'),'Clear '+what+' → ghost'],
+        c.ok ? (()=>{ this.clearDate(t.id,key); this.closeBarMenu(); }) : null,
+        c.ok?null:dis, c.why);
+    };
+    /* --- pins: the "not buttons — pin state shows on the bar" rule means this menu is where they're SET --- */
+    const pinRow=(which)=>{
+      const on = which==='start' ? pins.ps : pins.pe;
+      const explicit = which==='start' ? t.pinStart!=null : t.pinEnd!=null;
+      const what = which==='start' ? 'start' : 'due';
+      return row([ic('📌'), (on?'Unpin ':'Pin ')+what, tail(on?('pinned'+(explicit?'':' (auto)')):('free'+(explicit?'':' (auto)')))],
+        ()=>{ this.togglePin(t.id,which); this.closeBarMenu(); }, null, this.PIN_HELP());
+    };
+    /* --- repeat: presets only; a parser-made custom rule shows read-only so the menu can't silently flatten it --- */
+    const active=this.recurPresetKey(t);
+    const recurRows=(this.RECUR_PRESETS||[]).map(p=>row([ic(active===p.k?'✓':' '), p.label],
+      ()=>{ this.setRecur(t.id,p.k); this.closeBarMenu(); },
+      active===p.k?{color:'var(--text-strong)'}:null));
+    if(active===null && t.recur) recurRows.unshift(row([ic('✓'),'Custom: '+(t.recur.label||'repeat')],null,
+      {color:'var(--text-strong)'},'Set by text (e.g. "every mon, wed") — pick a preset below to replace it'));
+
+    const menu=h('div',{onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onContextMenu:e=>e.preventDefault(),
+      style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',maxHeight:MAXH+'px',overflowY:'auto',
+        background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'10px',
+        boxShadow:'0 12px 40px rgba(0,0,0,0.55)',padding:'6px 0',zIndex:2100,fontFamily:'inherit'}},
+      label(t.name.length>28?(t.name.slice(0,27)+'…'):t.name, t.name),
+      recurring?h('div',{style:{padding:'0 14px 4px',fontSize:'10.5px',color:'var(--text-faint2)'}},'occurrence '+(m.occIdx+1)):null,
+      divider,
+      label('Dates'), dateRow('start'), dateRow('end'), clearRow('start'), clearRow('end'),
+      divider,
+      label('Schedule pins', this.PIN_HELP()), pinRow('start'), pinRow('end'),
+      divider,
+      label('Progress'),
+      row([ic('◍'),'% done…',tail(pct+'%')],()=>{ this.closeBarMenu(); this.openPctPop(t.id, m.cx, m.cy); }),
+      divider,
+      label('Repeat'), ...recurRows,
+      divider,
+      row([ic('⤢'),'Open details'],()=>{ this.closeBarMenu(); this.openDetail(t.id); }));
+
+    return h('div',{onMouseDown:()=>this.closeBarMenu(), onContextMenu:e=>{e.preventDefault(); this.closeBarMenu();},
+      style:{position:'fixed',inset:0,zIndex:2050}}, menu);
+  }
+  /* /PP-EXT */
 
   /* ---------- detail modal ---------- */
   renderDetail(){
