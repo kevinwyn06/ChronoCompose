@@ -263,11 +263,11 @@ class Component extends DCLogic {
        zoom tracks how far you actually scrolled — independent of whether the OS chunks a gesture into a
        few big wheel events (mouse) or many tiny ones (trackpad). The old flat "15% per event" flew past on
        a trackpad because it fired dozens of events per flick. SENS sets feel; STEP_CAP bounds any single
-       event so one fast tick can't jump. Because a mouse notch's large delta hits STEP_CAP, raising SENS
-       speeds up only the small-delta (trackpad) events and leaves the mouse notch (~12.7%) unchanged —
-       retuned 0.001 → 0.0025 (owner: 0.001 was too slow on a trackpad, 2026-07-24). */
-    this.GANTT_ZOOM_SENS = 0.0025;   // exp zoom factor per unit (pixel-normalized) wheel deltaY
-    this.GANTT_ZOOM_STEP_CAP = 0.12; // max |ln(newW/oldW)| a single wheel event may apply (~12.7%)
+       event so one fast tick/notch can't jump. Retuned for feel: 0.001 (too slow) → 0.0025 →
+       SENS 0.004 / cap ln(1.2)≈0.182 (owner: bump to ~20%, 2026-07-24). */
+    this.GANTT_ZOOM_SENS = 0.004;    // exp zoom factor per unit (pixel-normalized) wheel deltaY
+    this.GANTT_ZOOM_STEP_CAP = 0.182;// max |ln(newW/oldW)| a single wheel event/notch may apply (~20%)
+    this.ZOOM_BURST_MS = 200;        // wheel events within this gap share one cursor-anchor (stops drift on trackpad bursts)
     /* PP-EXT (Group 2): day-drawer vertical zoom — session-only (not persisted; owner 2026-07-22). */
     this.DRAWER_ZOOM_MIN = 1;        // 1 = fit-to-height (no zoom)
     this.DRAWER_ZOOM_MAX = 8;        // up to 8× taller for dense afternoons
@@ -2955,23 +2955,36 @@ class Component extends DCLogic {
     const delta = e.deltaY * (e.deltaMode===1 ? 16 : e.deltaMode===2 ? 400 : 1);
     const newW = this.zoomStep(oldW, delta); /* PP-EXT (V1.3 fix2): exp zoom proportional to scroll delta, per-event capped */
     if(newW===oldW) return;
-    /* PP-EXT (V1.3 fix): zoom about the cursor. Capture the timeline point under the pointer BEFORE the
-       width changes, then restore scrollLeft AFTER the re-render grows the content so that point stays
-       put — otherwise the content grows from the timeline origin and flings sideways. The DC runtime
-       re-renders asynchronously, so a bare rAF can fire before the new width lands and clamp the target
-       away; wait (bounded) for scrollWidth to reflect the new scale, then apply. e.currentTarget is the
-       gantt scroller the wheel listener is bound to. */
+    /* PP-EXT (V1.3 fix3): zoom about the cursor. The content grows on the (async) re-render, so scrollLeft
+       must be re-pinned AFTER the new width lands (setTimeout poll — rAF is paused in a background tab).
+       The anchor (scrollLeft + cursor offset + dayW) is captured ONCE per zoom burst and reused, because a
+       trackpad fires many events per gesture and each event's async scroll-correction hasn't landed before
+       the next fires — reading a stale scrollLeft per event made the anchor chain off a wrong base and
+       drift. With a fixed burst anchor, every event's target is the absolute scrollLeft for the CURRENT
+       width, so nothing compounds. The burst resets after a short idle. e.currentTarget is the scroller the
+       wheel listener is bound to. */
     const el = e.currentTarget || this.ganttScrollEl;
     if(el){
       const r=el.getBoundingClientRect();
-      const target=this.zoomScrollAnchor(oldW,newW,el.scrollLeft,e.clientX-r.left);
-      const oldSW=el.scrollWidth; /* content grows on the re-render; wait for that, THEN pin scrollLeft */
+      const now=Date.now();
+      if(!this._zoomAnchor || now-this._zoomAnchor.t>this.ZOOM_BURST_MS){
+        this._zoomAnchor={ scrollLeft:el.scrollLeft, off:e.clientX-r.left, w:oldW };
+      }
+      const za=this._zoomAnchor; za.t=now;
+      /* Always pin to the LATEST target. One shared loop (not a timer per event) re-applies every frame
+         until the burst goes idle, so a late timer from an earlier, smaller-zoom event can't clobber the
+         final position, and the pin re-lands each time the async re-render grows the content. */
+      this._zoomTarget=this.zoomScrollAnchor(za.w,newW,za.scrollLeft,za.off);
       this.setState({dayW:newW});
-      /* poll (setTimeout, not rAF — rAF is paused in a background tab, which would strand the scroll
-         correction) until the new width lands, then restore the anchored scrollLeft. */
-      let waited=0;
-      const apply=()=>{ if(el.scrollWidth>oldSW+2 || waited>=300){ el.scrollLeft=Math.max(0,target); } else { waited+=25; setTimeout(apply,25); } };
-      setTimeout(apply,0);
+      if(!this._zoomApplying){
+        this._zoomApplying=true;
+        const loop=()=>{
+          el.scrollLeft=Math.max(0,this._zoomTarget);
+          if(Date.now()-this._zoomAnchor.t < this.ZOOM_BURST_MS){ setTimeout(loop,20); }
+          else { el.scrollLeft=Math.max(0,this._zoomTarget); this._zoomApplying=false; } /* final settle */
+        };
+        setTimeout(loop,0);
+      }
     } else {
       this.setState({dayW:newW});
     }
