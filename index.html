@@ -257,6 +257,13 @@ class Component extends DCLogic {
     this.headH = 48;
     /* PP-EXT (C1/C2): Gantt-bar draggability + sub-day zoom. */
     this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
+    /* PP-EXT (V1.5, owner tenet 2026-07-26): "all the clickboxes are all too tiny. Humans do not have
+       machine precision. They want as much leeway as possible." Every interactive handle gets a
+       TRANSPARENT hit box of at least this many local px, with the small glyph drawn inside it —
+       target size is decoupled from glyph size. Where the row budget can't afford it in one axis
+       (the %-done caret has only (rowH−barH)/2 px under the bar), the axis that carries the
+       precision — horizontal, along the bar — still gets the full box. See product-vision.md. */
+    this.HIT_MIN_PX = 24;            // minimum interactive target (local px, pre-zoom)
     /* PP-EXT (V1.2 round2 — anchored ghosts): a half-ghost dissolves ALONG the bar, from the committed
        edge toward the derived one. Two mirrored ramps drive it: the fill fades colour OUT, the dotted
        outline mask fades dots IN, so "solid + no dots" and "no colour + dots" are the same axis read
@@ -2384,7 +2391,8 @@ class Component extends DCLogic {
   startLink(e,task,occIdx){
     e.preventDefault(); e.stopPropagation();
     const r=this.bodyEl.getBoundingClientRect();
-    this.linkState={fromId:task.id, fromOcc:(task.recur?occIdx:null), x:e.clientX-r.left, y:e.clientY-r.top};
+    const lp=this.linkPt(e.clientX, e.clientY, r); /* PP-EXT (V1.2 round4 fix): local px — see linkPt */
+    this.linkState={fromId:task.id, fromOcc:(task.recur?occIdx:null), x:lp.x, y:lp.y};
     this.forceUpdate();
   }
   startSplit(e){ e.preventDefault(); this.splitDrag=true; }
@@ -2511,7 +2519,8 @@ class Component extends DCLogic {
       this.setState({tasks});
     } else if(this.linkState && this.bodyEl){
       const r=this.bodyEl.getBoundingClientRect();
-      this.linkState.x=e.clientX-r.left; this.linkState.y=e.clientY-r.top;
+      const lp=this.linkPt(e.clientX, e.clientY, r); /* PP-EXT (V1.2 round4 fix): local px, not rendered px */
+      this.linkState.x=lp.x; this.linkState.y=lp.y;
       this.forceUpdate();
     } else if(this.splitDrag && this.boardEl){
       const r=this.boardEl.getBoundingClientRect();
@@ -2578,11 +2587,36 @@ class Component extends DCLogic {
       this.setState({viewSplit:vs}); this.savePrefs({viewSplit:vs});
     }
   }
+  /* PP-EXT (V1.2 round4 fix): the dependency line's anchor in bodyEl's OWN unit. `clientX − rect.left` is a
+     RENDERED-px offset, but linkState.x/y are consumed as SVG coordinates inside bodyEl, which lays out in
+     LOCAL px (the app sits in a `zoom:0.8` wrapper). The dotted line therefore drew at 0.8× the pointer's
+     distance from bodyEl's origin — it lagged the cursor, and worse the further you dragged. Shared by
+     startLink and the mousemove handler so both anchors can never disagree. Measured scale, never a
+     hardcoded 0.8 (same rule as scaleFixedPt / rowAtY / the V1.3 zoom pin). */
+  linkPt(clientX, clientY, r){
+    const k=this.uiScale()||1;
+    return {x:(clientX-r.left)/k, y:(clientY-r.top)/k};
+  }
+  /* PP-EXT (V1.2 round4): which row a local-space Y lands on. PURE (no DOM) → unit-tested. Walks `yTop` (the
+     per-row tops renderGantt precomputes) instead of dividing by a flat rowH, because a row with an inline
+     description panel open is TALLER than rowH — one expanded row above the pointer shifted every row below it.
+     Falls back to the flat divide when yTop is absent (nothing rendered yet). */
+  rowIndexAt(localY, yTop, rowH, count){
+    if(!(count>0) || localY<0) return null;
+    if(!yTop || yTop.length!==count){ const i=Math.floor(localY/rowH); return (i>=0&&i<count)?i:null; }
+    for(let i=count-1;i>=0;i--){ if(localY>=yTop[i]) return i; }
+    return null;
+  }
+  /* PP-EXT (V1.2 round4 fix): rowAtY mixed coordinate spaces. `clientY − rect.top` is a RENDERED-px delta
+     (both sides are client coords), but `rowH`/`yTop` are LOCAL px — the app lives in a `zoom:0.8` wrapper.
+     Dividing one by the other over-shot by 1/zoom = 1.25×, and the error GREW with distance down the list, so
+     a dependency dropped on row 8 landed on row 10. Convert to the row grid's own unit first (measured, never
+     a hardcoded 0.8 — same rule as scaleFixedPt / the V1.3 zoom pin). */
   rowAtY(clientY){
     if(!this.bodyEl) return null;
     const r=this.bodyEl.getBoundingClientRect();
-    const i=Math.floor((clientY-r.top)/this.rowH);
-    return (i>=0 && i<(this._visTasks||this.state.tasks).length) ? i : null; /* PP-EXT: rows are the visible list */
+    const localY=(clientY-r.top)/(this.uiScale()||1);
+    return this.rowIndexAt(localY, this._yTop, this.rowH, (this._visTasks||this.state.tasks).length);
   }
 
   /* ---------- formatting ---------- */
@@ -6779,8 +6813,12 @@ class Component extends DCLogic {
           fontSize:'10.5px',fontWeight:600,color:dispPct>50?'var(--on-accent)':'var(--text-num)'}}, dispPct+'%')),
       pctBtn('+',1));
 
-    const durStr = this.isChore(t) ? '—' : Math.round(this.durDays(t))+'d';
-    const overdue = !done && !this.isChore(t) && dispEnd!=null && dispEnd < Date.now(); /* PP-EXT: current instance */
+    /* PP-EXT (V1.2 round4): both of these keyed off `isChore` (planned<=0), which let a DURATION suppress
+       date-derived facts — a zero-duration task with a past due date was never flagged overdue, and its span
+       always read "—" even with both dates set. Same rule as the Gantt: dates decide, `planned` doesn't.
+       "—" now means "no span to measure" (an edge is null), which is what `durDays` already returns 0 for. */
+    const durStr = (t.start==null||t.end==null) ? '—' : Math.round(this.durDays(t))+'d';
+    const overdue = !done && dispEnd!=null && dispEnd < Date.now(); /* PP-EXT: current instance */
 
     const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
       style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
@@ -6973,6 +7011,8 @@ class Component extends DCLogic {
     const hatch='repeating-linear-gradient(-45deg,'+base+' 0 2px,transparent 2px 8px)';
     const lbl=(t.recur&&t.recur.label)||'Repeats';
     return h('div',{key:'rs'+t.id,
+      /* PP-EXT (V1.5 fix): own the row hover — see the note on hov in ganttBlock. */
+      onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>{e.stopPropagation(); this.setState({selectedIds:[t.id]});},
       onDoubleClick:e=>{e.stopPropagation(); this.openDetail(t.id);},
       onContextMenu:e=>{e.preventDefault(); e.stopPropagation(); this.setState({selectedIds:[t.id]}); this.openScope('delete',t.id,this.mostRecentOccIdx(t));},
@@ -7021,40 +7061,41 @@ class Component extends DCLogic {
        moving the bar ("the click range covers the drag range"). Now it (a) only exists interactively while the
        bar is hovered/selected (pointerEvents none + opacity 0 at rest) and (b) sits fully OUTSIDE the bar, clear
        of the grip zone, so it can no longer steal an edge/body drag. */
+    /* PP-EXT (V1.5 fix, owner 2026-07-26): the bar owns a hover state of its own. `linkOn` (and the
+       %-done caret) gate on state.hoverId, but hoverId was set ONLY by the row stripe's onMouseEnter —
+       and bars are SIBLINGS of that stripe, not children. So the instant the cursor reached the bar,
+       or the link dot itself, the stripe fired mouseleave → hoverId:null → the dot turned itself off
+       (opacity 0 + pointerEvents none) underneath the pointer and mousedown never landed on it: the
+       dependency drag was unstartable unless the task happened to be selected. The dot IS a child of
+       this wrapper, so entering it keeps the wrapper hovered. Same one-line defect on the milestone
+       diamond and the recurrence strip (they killed the row highlight / day-cell glow). */
+    const hov={onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null})};
     const linkOn=(this.state.hoverId===t.id||sel);
-    const linkDot=h('div',{onMouseDown:e=>this.startLink(e,t,o.idx),title:'Drag to a task to link as predecessor'+occLbl,
-      style:{position:'absolute',right:'-16px',top:'50%',transform:'translateY(-50%)',width:'11px',height:'11px',
-        borderRadius:'50%',background:'var(--bg)',border:'2px solid '+this._accent,cursor:'crosshair',zIndex:6,
-        pointerEvents:linkOn?'auto':'none',opacity:linkOn?1:0}});
+    /* PP-EXT (V1.5, HIT_MIN_PX tenet): the 11px circle is now just the GLYPH, drawn inside a
+       transparent HIT_MIN_PX box. `left:100%` starts the box exactly at the bar's right edge, so it
+       still clears the 7px resize grip (the C3 rule) while being >2× easier to hit. */
+    const linkDot=h('div',Object.assign({onMouseDown:e=>this.startLink(e,t,o.idx),title:'Drag to a task to link as predecessor'+occLbl,
+      style:{position:'absolute',left:'100%',top:'50%',transform:'translateY(-50%)',
+        width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',cursor:'crosshair',zIndex:6,
+        pointerEvents:linkOn?'auto':'none',opacity:linkOn?1:0}},{key:'lnk'}),
+      h('div',{style:{position:'absolute',left:'5px',top:'50%',transform:'translateY(-50%)',width:'11px',height:'11px',
+        borderRadius:'50%',background:'var(--bg)',border:'2px solid '+this._accent,pointerEvents:'none'}}));
 
     if(this.isMilestone(t)){
       const sz=this.barH;
-      return h('div',{key,onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},title:t.name+occLbl,
+      return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},title:t.name+occLbl},hov,{
         style:{position:'absolute',left:(left-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
           background:done?base:'var(--gantt-bg)',border:'2px solid '+base,transform:'rotate(45deg)',cursor:'grab',borderRadius:'3px',
-          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',zIndex:5}});
+          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',zIndex:5}}));
     }
-    /* PP-EXT (V1.2 round3, owner 2026-07-25): a GHOST outranks a chore. `isChore` (planned<=0) used to win
-       outright and return a circle before any ghost code ran — so a dateless task drew identically to a fully
-       dated one, and since a quick-added task has planned=0 until you give it a duration, MOST ghosts were
-       invisible circles. Owner's rule: "duration doesn't matter, ghost tasks by definition don't have a
-       duration" — every ghost draws as the same 1-day block. A zero-duration task with BOTH dates set is
-       still a chore and still a circle. */
-    if(this.isChore(t) && !ghost){
-      const sz=this.barH+2;
-      return h('div',{key,style:{position:'absolute',left:(left-sz/2)+'px',top:(this.yOfRow(rowI)+(this.rowH-sz)/2)+'px',width:sz+'px',height:sz+'px',zIndex:5,
-          opacity:optedOut?0.55:1}},
-        h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
-          title:t.name+' · chore'+occLbl+' · double-click for details',
-          style:{position:'relative',width:'100%',height:'100%',borderRadius:'50%',cursor:'grab',
-            background: optedOut ? (optedOutHatch+', '+(done?base:'transparent')) : (done?base:'transparent'),
-            border:'2.5px solid '+base,
-            boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',
-            display:'flex',alignItems:'center',justifyContent:'center'}},
-          done?h('span',{style:{color:'var(--on-accent)',fontSize:'10px',fontWeight:700,lineHeight:1}},'✓'):null,
-          optedOutGlyph?h('div',{style:{position:'absolute',bottom:'-2px',right:'-2px',fontSize:'8px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
-        linkDot);
-    }
+    /* PP-EXT (V1.2 round4, owner 2026-07-25): the chore CIRCLE is gone from the Gantt entirely. It used to be
+       returned here whenever `planned <= 0`, before any ghost/bar code ran — so a zero-duration task drew as a
+       dot no matter what its dates said, and (round3) a dateless one drew identically to a fully dated one.
+       Owner's rule: **"duration has nothing to do with the gantt behaviour — all that matters is the start and
+       due date."** So every non-milestone task now draws as a block: dates decide the shape, `planned` decides
+       nothing here. A zero-SPAN task still reads as one full day via `effBarEnd`, so nothing collapses to a
+       point. `isChore` survives only where it is genuinely about duration (the day timeline / allotment).
+       Milestones keep their diamond above — that's a `type` (scheduling mode), not a duration. */
     /* PP-EXT (C1): draw to effBarEnd (zero/negative span ⇒ one full day) and never below BAR_MIN_PX, so the
        edge grips + move body stop stacking on top of each other on a short bar (the old 8px floor was narrower
        than the two 7px grips). At high zoom the real width dominates, so a true sub-day appointment still reads. */
@@ -7069,8 +7110,8 @@ class Component extends DCLogic {
     const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
     const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'off')) : '';
-    return h('div',{key,style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
-        opacity:optedOut?0.55:1}},
+    return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
+        opacity:optedOut?0.55:1}}),
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
         title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · double-click for details'))+optedOutTitle,
         style:{position:'absolute',inset:0,
@@ -7091,15 +7132,27 @@ class Component extends DCLogic {
           WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null,
         optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
       grip('l'), grip('r'), linkDot,
-      /* PP-EXT (V1.3): %-done handle — a small disc at the progress boundary (clamped clear of the edge
-         grips) that opens the %-done text popup. Shown only on hover/select, like linkDot, so it never
-         steals an edge/body drag at rest. Skipped on very short bars (edit via the popup elsewhere). */
+      /* PP-EXT (V1.5, owner 2026-07-26): the %-done handle moved OUT of the bar and UNDER it. It used to
+         be a ringed disc sitting ON the fill at the progress boundary — at low % that put it near the
+         bar's left edge, where it read as a second "dependency circle" mirroring the link dot on the
+         right (owner: "the dependency circles should be outside the bar but the left one is currently
+         inside"). It never was one: there is exactly one link handle, and it is the right-hand dot.
+         Now it hangs below the bar as an upward CARET pointing at the boundary — a different shape from
+         the link ring, so the two can't be confused — inside a HIT_MIN_PX-wide transparent hit box.
+         Vertical budget under a centred bar is only (rowH−barH)/2 = 10px, so the box is short but full
+         width: the precision this control needs is horizontal (which % you're pointing at), and a
+         taller row is the only way to buy both (noted in ROADMAP V1.5). Still hover/select-gated so it
+         never steals a bar drag at rest; still skipped on very short bars. */
       (w>28) ? h('div',{onMouseDown:e=>e.stopPropagation(),
         onClick:e=>{e.stopPropagation(); this.openPctPop(t.id, e.clientX, e.clientY);},
         title:'% done: '+pct+'% — click to set',
-        style:{position:'absolute',left:(Math.max(10,Math.min(w-10, w*pct/100))-5)+'px',top:'50%',transform:'translateY(-50%)',
-          width:'10px',height:'10px',borderRadius:'50%',background:'var(--bg)',border:'2px solid '+base,cursor:'pointer',zIndex:7,
-          pointerEvents:(this.state.hoverId===t.id||sel)?'auto':'none',opacity:(this.state.hoverId===t.id||sel)?1:0}}) : null,
+        style:{position:'absolute',left:(Math.max(6,Math.min(w-6, w*pct/100))-this.HIT_MIN_PX/2)+'px',
+          top:this.barH+'px',width:this.HIT_MIN_PX+'px',height:((this.rowH-this.barH)/2+6)+'px',
+          cursor:'pointer',zIndex:7,
+          pointerEvents:linkOn?'auto':'none',opacity:linkOn?1:0}},
+        h('div',{style:{position:'absolute',left:'50%',top:'1px',transform:'translateX(-50%)',width:0,height:0,
+          borderLeft:'5px solid transparent',borderRight:'5px solid transparent',borderBottom:'6px solid '+base,
+          pointerEvents:'none'}})) : null,
       h('div',{style:{position:'absolute',left:(w+14)+'px',top:'-1px',height:this.barH+'px',display:'flex',alignItems:'center',
         fontSize:'11px',color:'var(--text-mut)',whiteSpace:'nowrap',pointerEvents:'none'}}, pct>0?pct+'%':'')
     );

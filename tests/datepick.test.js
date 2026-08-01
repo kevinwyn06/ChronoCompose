@@ -282,7 +282,7 @@ test('barDragEdit: solid bar — body move shifts both edges by the delta', () =
 test('barDragEdit: deadline ghost (start=null) — dragging the ghost START commits a real start, keeps the real due', () => {
   const c = make();
   const today = c.startOfToday();
-  const due = at(2026, 6, 30, 9, 0);
+  const due = today + 30 * DAY;
   // occ carries the DERIVED span (ghost start = today); data start is null.
   const r = c.barDragEdit('start', 1 * DAY, today, due, null, due);
   assert.equal(r.start, today + DAY, 'the ghost start becomes a real date');

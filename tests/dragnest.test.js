@@ -113,3 +113,33 @@ test('reorderRows without a parentId arg keeps the current parent (plain reorder
   const byId = {}; c.state.tasks.forEach(t => byId[t.id] = t);
   assert.equal(byId['c2'].parentId, 'p', 'still a child of p');
 });
+
+// ---------------------------------------------------------------------------
+// rowIndexAt — which row a LOCAL-space Y lands on (dependency-drag drop target).
+// Pure; the DOM-facing rowAtY only converts rendered px → local px before calling it.
+// ---------------------------------------------------------------------------
+test('rowIndexAt: flat rows resolve to the row containing the point', () => {
+  const c = make();
+  const yTop = [0, 40, 80, 120];
+  assert.equal(c.rowIndexAt(0, yTop, 40, 4), 0);
+  assert.equal(c.rowIndexAt(39, yTop, 40, 4), 0);
+  assert.equal(c.rowIndexAt(40, yTop, 40, 4), 1, 'a row top belongs to that row');
+  assert.equal(c.rowIndexAt(125, yTop, 40, 4), 3);
+});
+
+test('rowIndexAt: an expanded row above the pointer does not shift the answer', () => {
+  const c = make();
+  // row 1 has an inline description panel open → 140px tall, not 40
+  const yTop = [0, 40, 180, 220];
+  assert.equal(c.rowIndexAt(100, yTop, 40, 4), 1, 'still inside the tall row');
+  assert.equal(c.rowIndexAt(185, yTop, 40, 4), 2, 'the row below starts where yTop says');
+  // the old flat-divide answer would have been Math.floor(185/40) = 4 → out of range
+});
+
+test('rowIndexAt: out-of-range and missing yTop', () => {
+  const c = make();
+  assert.equal(c.rowIndexAt(-5, [0, 40], 40, 2), null, 'above the first row');
+  assert.equal(c.rowIndexAt(10, null, 40, 0), null, 'no rows');
+  assert.equal(c.rowIndexAt(45, null, 40, 3), 1, 'falls back to the flat divide');
+  assert.equal(c.rowIndexAt(500, null, 40, 3), null, 'past the last row');
+});
