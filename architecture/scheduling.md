@@ -10,6 +10,12 @@ overrides. `orderingSeam(features)` is the default priority, earliest-deadline, 
 Both receive feature records without mutating them, so a later learned implementation can use priority,
 urgency, slack, labels, or other task fields without changing scheduling callers.
 
+V2.1 makes today's participation explicit: `included===true` is pressed/in today regardless of the
+date window, while false or legacy null is unpressed. The most recently started running timer is the
+single stronger active state; it participates even if previously unpressed and packs no earlier than
+the current time. Other-day columns remain date-window-derived. Non-Point pressed work with zero
+`planned` reserves `DEFAULT_TASK_MINUTES` (30 minutes), compressed evenly only when the pool is smaller.
+
 `autoSchedule` and `computeCPM`/`computeSlack` handle dependency-driven scheduling and critical path.
 Scheduling shapes are derived from dates, planned duration, and whether each edge has a user-entered clock.
 The unrelated manual drag-pin `{day,start,dur}` remains. Dates are epoch milliseconds; all durations are
@@ -48,7 +54,8 @@ series semantics and recurrence limit/backoff protections.
 
 Current invariants:
 
-- Archived and opted-out tasks do not allot or render as active work.
+- Archived and unpressed tasks do not allot or render as active work today; user pressing is never gated
+  by the date window.
 - Point tasks reserve no duration but split allocatable runs at their clock.
 - Fixed tasks pass both the same-day and at-most-one-day guards.
 - Ghost draw width may depend on zoom; scheduling span must not.

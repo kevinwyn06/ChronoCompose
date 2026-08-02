@@ -19,6 +19,37 @@ const schedMin = (chunks, id) =>
   chunks.filter(x => x.type === 'scheduled' && x.id === id)
         .reduce((s, x) => s + (x.end - x.start) / MIN, 0);
 
+test('V2.1: pressed is today inclusion; unpressing removes it regardless of date window', () => {
+  const c=make(); cleanDay(c,'02:00');
+  const B=c.startOfToday();
+  const outside=activeTask(c,{start:B+4*DAY,end:B+5*DAY,included:true,planned:60});
+  let map=c.computeAllotted([outside]);
+  assert.strictEqual(map[outside.id].active,true,'pressed out-of-window task joins by discretion');
+  outside.included=null;
+  map=c.computeAllotted([outside]);
+  assert.strictEqual(map[outside.id].active,false,'unpressed task leaves today');
+});
+
+test('V2.1: new and zero-planned tasks receive pressed/default-time defaults', () => {
+  const c=make(); cleanDay(c,'02:00');
+  const t=c.normalizeTask({id:'new',name:'new',start:null,end:null,planned:0});
+  assert.strictEqual(t.included,true,'new task defaults pressed');
+  const map=c.computeAllotted([t]);
+  assert.strictEqual(map[t.id].allotted,c.DEFAULT_TASK_MINUTES);
+});
+
+test('V2.1: latest running task is stronger pressed and pulled to now', () => {
+  const c=make(); cleanDay(c,'23:00');
+  const B=c.startOfToday(), now=B+10*H;
+  c.state.nowTick=now;
+  const t=activeTask(c,{id:'run',included:false,start:B+2*DAY,end:B+3*DAY,planned:60});
+  c.state.running={run:{startedAt:now-5*MIN,beat:now}};
+  const {chunks}=pack(c,[t]);
+  const block=chunks.find(x=>x.type==='scheduled'&&x.id==='run');
+  assert.ok(block&&block.start>=now,'active task is included and starts no earlier than now');
+  assert.strictEqual(c.inclState(t),'active');
+});
+
 /* ============================ PART A — PACKER ============================ */
 
 // 1. Meals appear as 'meal' chunks; scheduled chunks stay in-window and never overlap a meal.
@@ -396,7 +427,7 @@ test('multi-day: a past-day pin is ignored', () => {
 test('multi-day: isActiveOn windows tasks to the right day', () => {
   const c = make();
   const B = c.startOfDay(Date.now());
-  const t = activeTask(c, { id: 't', name: 'T', planned: 60, start: B + 2 * DAY, end: B + 2 * DAY });
+  const t = activeTask(c, { id: 't', name: 'T', included:null, planned: 60, start: B + 2 * DAY, end: B + 2 * DAY });
   assert.ok(!c.isActiveOn(t, B), 'not active today (window starts in 2 days)');
   assert.ok(c.isActiveOn(t, B + 2 * DAY), 'active on its own day');
 });

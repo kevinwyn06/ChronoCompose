@@ -63,8 +63,8 @@ test("inactive tasks are active:false with allotted 0", () => {
   const excluded = activeTask(c, { included:false, planned:120 });
   const milestone = activeTask(c, { type:'Milestone', planned:0 });
   const now = Date.now();
-  const future = activeTask(c, { planned:120, start: now+2*DAY, end: now+3*DAY });
-  const past = activeTask(c, { planned:120, start: now-3*DAY, end: now-2*DAY });
+  const future = activeTask(c, { included:null, planned:120, start: now+2*DAY, end: now+3*DAY });
+  const past = activeTask(c, { included:null, planned:120, start: now-3*DAY, end: now-2*DAY });
   const m = c.computeAllotted([excluded, milestone, future, past]);
   for (const t of [excluded, milestone, future, past]) {
     assert.strictEqual(m[t.id].active, false, t.id + ' should be inactive');

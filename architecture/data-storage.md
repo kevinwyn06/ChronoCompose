@@ -13,6 +13,7 @@ Scheduling-specific fields:
 |---|---|
 | `start` / `end` | Epoch milliseconds or `null`; bare dates sit at local midnight. |
 | `planned` | Planned duration in minutes; participates in derived shape discrimination. |
+| `included` | `true` means pressed into today; `false`/legacy `null` are unpressed. New tasks default pressed. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or `{day, start, dur}` -- a drawer timeline block dragged to a clock time, fixed for that day only. This manual drag-pin is unrelated to derived scheduling shapes. |
 

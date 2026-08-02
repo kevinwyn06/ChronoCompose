@@ -39,7 +39,7 @@ test('journalActuals skips tasks with neither allotment nor recorded time', () =
   const c = make();
   cleanDay(c, '10:00');
   const today = c.startOfToday();
-  const inactive = activeTask(c, { id: 'far', planned: 60, start: today + 30 * DAY, end: today + 31 * DAY });
+  const inactive = activeTask(c, { id: 'far', included:null, planned: 60, start: today + 30 * DAY, end: today + 31 * DAY });
   c.state.tasks = [inactive];
   const d = c.journalActuals(today);
   assert.equal(d.rows.length, 0, 'a task not active today and never worked on is omitted');

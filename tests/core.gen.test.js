@@ -155,7 +155,7 @@ test('task entirely in the past is inactive with 0 allotment', () => {
   const c = make();
   cleanDay(c, '03:00');
   const B = Date.now();
-  const t = activeTask(c, { start: B - 3 * DAY, end: B - 2 * DAY });
+  const t = activeTask(c, { included:null, start: B - 3 * DAY, end: B - 2 * DAY });
   const m = c.computeAllotted([t]);
   assert.equal(m[t.id].active, false);
   assert.equal(m[t.id].allotted, 0);
@@ -165,7 +165,7 @@ test('task entirely in the future is inactive with 0 allotment', () => {
   const c = make();
   cleanDay(c, '03:00');
   const B = Date.now();
-  const t = activeTask(c, { start: B + 2 * DAY, end: B + 3 * DAY });
+  const t = activeTask(c, { included:null, start: B + 2 * DAY, end: B + 3 * DAY });
   const m = c.computeAllotted([t]);
   assert.equal(m[t.id].active, false);
   assert.equal(m[t.id].allotted, 0);

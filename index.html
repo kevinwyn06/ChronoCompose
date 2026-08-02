@@ -227,6 +227,7 @@ class Component extends DCLogic {
        later in syncOnAuth. See plans/account-namespacing-plan.md. */
     try{ this._workspace = localStorage.getItem('pp-workspace') || 'anon'; }catch(e){ this._workspace = 'anon'; }
     this.DAY = 86400000;
+    this.DEFAULT_TASK_MINUTES = 30; /* PP-EXT V2.1: real draggable slice for zero-planned pressed work */
     this.HOUR = 3600000; /* PP-EXT (V1.3 fix): sub-day drag snap unit — used once zoomed into the hour grid */
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
@@ -383,9 +384,9 @@ class Component extends DCLogic {
     this.OPENMETEO_URL = 'https://api.open-meteo.com/v1/forecast';
     this.WEATHER_GEO_TIMEOUT_MS = 10000; // geolocation getCurrentPosition timeout
     this._weatherTried = {};             // session guard: ymd → auto-fetch already attempted (don't re-prompt geolocation every render)
-    /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
-       day's leftover time) by default; clocked dates derive fixed/exact timing; an Include/Exclude
-       toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
+    /* PP-EXT V2.1: scheduling shape is derived, while TODAY inclusion is explicit depth. Every task is
+       proportional by default; clocked dates derive fixed/exact timing; pressed (`included===true`) decides
+       whether a task counts toward today. `type` is retained only as the internal
        'Milestone' marker (see isMilestone; set by addMilestoneAt / quick-add) — 'Exact'/'Excluded' modes are gone. */
     this.PCOL = {1:'#d1453b',2:'#eb8909',3:'#246fe0',4:'var(--pri-default)'};
     this.PNAME = {1:'P1',2:'P2',3:'P3',4:'P4'};
@@ -497,7 +498,7 @@ class Component extends DCLogic {
       /* PP-EXT: clock flags only disambiguate an explicit 00:00 from a bare midnight date.
          null = derive from the timestamp; true/false = an explicit user time choice. */
       startClock:null, endClock:null,
-      included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / isOptedOut) */
+      included:true, /* PP-EXT V2.1: pressed = in today. New tasks start pressed; false/null are unpressed legacy/off states. */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
@@ -1007,52 +1008,53 @@ class Component extends DCLogic {
   setGoal(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.goal=val; }); }
   startOfDay(ms){ const d=new Date(ms); d.setHours(0,0,0,0); return d.getTime(); }
   isMilestone(t){ return t.type==='Milestone'; } /* PP-EXT: internal milestone marker (created via gantt-header click / quick-add; no longer a user-selectable mode) */
-  /* PP-EXT Track B: a task is opted out of TODAY when it's manually Off, or an active snooze covers
-     today. Independent predicate shared by isActiveOn (the scheduling gate) and inclState (every render
-     surface — table icon, detail-panel status, Gantt-bar mute, month-chip mute) so they can never
+  /* PP-EXT V2.1: a non-active task is opted out of TODAY when it is unpressed or an active snooze covers
+     today. This predicate is shared by scheduling and render surfaces — table icon, detail-panel
+     status, Gantt-bar mute, and month-chip mute — so they can never
      disagree about what "opted out" means (design doc §3). Snoozing is a today-only concept — it never
      factors into isActiveOn's "other day" branch. */
-  isOptedOut(t){ return t.included===false || (t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil); }
-  /* PP-EXT Track B: a task allots on day B if it's in its window that day (dated: the [start,end]
+  isOptedOut(t){ return !this.isActiveTask(t) && (t.included!==true || (t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil)); }
+  /* PP-EXT V2.1: the most recently started running timer is the one stronger pressed/active task.
+     V2.4 owns the later single-vs-multitask timer policy; this selector stays deterministic meanwhile. */
+  activeTaskId(){ const run=this.state.running||{}; let id=null, latest=-Infinity;
+    Object.keys(run).forEach(k=>{ const st=run[k]&&run[k].startedAt; if(st!=null && st>=latest){ latest=st; id=k; } });
+    return id; }
+  isActiveTask(t){ return !!t && t.id===this.activeTaskId(); }
+  /* PP-EXT V2.1: other-day allotment follows its window (dated: the [start,end]
      occurrence for B via occForDay, preserving per-day recurrence correctness on non-today days;
      dateless: ghostSpan anchored at the REAL today, never at B — anchoring at B would make a dateless
      task trivially active on any day queried, since a double-ghost span always contains its own pivot
      day; anchoring at real-today keeps the derived window a single day, so a dateless task still never
-     surfaces on another day). Opt-out/force-in (`included`/`snoozeUntil`) layer on top and apply fully
-     on TODAY only; on other days a manual EXCLUDE is still respected everywhere, but a manual
-     "include today" (or an active snooze) does NOT leak onto other days — unchanged semantics from the
-     pre-Track-B code, now unified across dated and dateless tasks instead of special-casing dateless. */
+     surfaces on another day). Today instead follows explicit pressed/active state; on other days an
+     explicit false still excludes, while today's pressed state does not leak into the calendar window. */
   isActiveOn(t, B){
     if(t.archivedAt) return false; /* PP-EXT: archived tasks never allot/schedule, even when shown */
     if(this.isMilestone(t)) return false;
     const win = this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, this.startOfToday());
     const inWindow = this.startOfDay(win.start) <= B && B <= this.startOfDay(win.end);
     if(B===this.startOfToday()){
-      if(this.isOptedOut(t)) return false;
-      if(t.included===true) return true; /* force-in, regardless of window */
-      return inWindow;
+      if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
+      if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
+      return t.included===true; /* pressed is the whole today gate; eligibility never vetoes discretion */
     }
     if(t.included===false) return false;
     return inWindow;
   }
   isActiveToday(t){ return this.isActiveOn(t, this.startOfToday()); }
-  /* PP-EXT Track B: the popover/icon/mute-treatment bucket for TODAY (opt-out and force-in are both
-     today-only concepts, matching isActiveOn) — one place that turns the two independent fields into
-     the five states every render surface distinguishes (design doc §4a). Precedence: Off beats Snoozed
-     beats a manual force-in beats the window. */
+  /* PP-EXT V2.1: one popover/icon/depth bucket for active, pressed, unpressed, snoozed, and off. */
   inclState(t){
+    if(this.isActiveTask(t)) return 'active';
     if(t.included===false) return 'off';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
-    if(t.included===true) return 'manual-in';
-    return this.isActiveToday(t) ? 'auto-in' : 'auto-out';
+    return t.included===true ? 'pressed' : 'unpressed';
   }
   /* PP-EXT Track B: explicit include/exclude/snooze mutators (design doc §2 lifecycle) — the popover UI
      (Task 4) calls these instead of the old binary include toggle. Off supersedes snooze (turning off
-     clears it — no need for both); turning on clears both (back to auto); snoozing never touches
+     clears it — no need for both); turning on presses and clears snooze; snoozing never touches
      `included` (so an expired snooze always falls back to whatever `included` already was). */
   setIncludedTrue(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.included=true; }); }
   setIncludedOff(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=false; t.snoozeUntil=null; } }); }
-  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=null; t.snoozeUntil=null; } }); }
+  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.snoozeUntil=null; } }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
      the draft untouched instead of silently clearing a snooze on a typo. */
@@ -1911,16 +1913,21 @@ class Component extends DCLogic {
      urgency/slack, labels, and other signals without changing computeAllotted or its callers. */
   compressionSeam(features, availableMinutes){
     const rows=features||[], out={};
-    let fixedSum=0, propPlanSum=0;
+    let fixedSum=0, propPlanSum=0, zeroCount=0;
     rows.forEach(f=>{
       if(f.predictManual) fixedSum+=Math.max(0,f.predicted);
-      else propPlanSum+=Math.max(0,f.planned);
+      else if(Math.max(0,f.planned)>0) propPlanSum+=Math.max(0,f.planned);
+      else zeroCount++;
     });
-    const pool=Math.max(0, Math.max(0,availableMinutes||0)-fixedSum);
+    const afterManual=Math.max(0, Math.max(0,availableMinutes||0)-fixedSum);
+    const zeroEach=zeroCount?Math.min(this.DEFAULT_TASK_MINUTES, afterManual/zeroCount):0;
+    const pool=Math.max(0, afterManual-zeroEach*zeroCount);
     rows.forEach(f=>{ const spent=Math.max(0,f.spent||0); let computed;
       if(f.predictManual){
         const pps=propPlanSum+Math.max(0,f.planned), pl=pool+Math.max(0,f.predicted);
         computed=pps>0?Math.max(0,(Math.max(0,f.planned)/pps)*pl-spent):0;
+      }else if(Math.max(0,f.planned)===0){
+        computed=Math.max(0,zeroEach-spent);
       }else{
         const share=propPlanSum>0?(Math.max(0,f.planned)/propPlanSum)*pool:0;
         computed=Math.max(0,share-spent);
@@ -1943,7 +1950,7 @@ class Component extends DCLogic {
       map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
-    const acts=tasks.filter(t=>this.isActiveOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    const acts=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
     /* PP-EXT: break-between-tasks (settings.breakMin) reserves breakMin after each packed family in
        buildDayTimeline; shrink the pool by the same estimate (one break per packable family) so allotment
        stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
@@ -1970,7 +1977,7 @@ class Component extends DCLogic {
         /* PP-EXT: a drag-pinned child already holds a fixed slice (map[cid].fixed) — it's out of the family
            split entirely (weight 0, keeps its pinned allotment, doesn't reduce the parent's remainder). */
         if(map[cid] && map[cid].fixed){ w[cid]=0; return; }
-        w[cid]=(ct.archivedAt||this.isMilestone(ct)||this.isOptedOut(ct))?0:Math.max(0,ct.planned||0); S+=w[cid]; });
+        w[cid]=this.isActiveOn(ct,B)?Math.max(0,ct.planned||0):0; S+=w[cid]; });
       const P=Math.max(0, p.planned||0), denom=Math.max(P,S);
       let given=0;
       kidIds.forEach(cid=>{ if(map[cid] && map[cid].fixed){ distribute(cid); return; } /* keep the pinned slice */
@@ -3574,8 +3581,8 @@ class Component extends DCLogic {
       h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},
         'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
       btn('Turn on', ()=>this.setIncludedOn(t.id)) ];
-    if(st==='auto-out') return [ btn('Include today', ()=>this.setIncludedTrue(t.id)) ];
-    /* auto-in or manual-in */
+    if(st==='unpressed') return [ btn('Press into today', ()=>this.setIncludedTrue(t.id)) ];
+    /* pressed or active */
     return [
       btn('Snooze today', ()=>this.snoozeToday(t.id)),
       h('div',{key:'su',style:{padding:'4px 10px'}},
@@ -5129,7 +5136,7 @@ class Component extends DCLogic {
   /* PP-EXT S1: pure ordering seam. The default remains priority -> earliest due -> longer first and returns
      a new array, leaving both the feature list and its records untouched for deterministic reuse. */
   orderingSeam(features){
-    return (features||[]).slice().sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
+    return (features||[]).slice().sort((a,b)=>(Number(!!b.active)-Number(!!a.active))||(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
   }
   buildDayTimeline(B){
     const s=this.state.settings;
@@ -5144,6 +5151,7 @@ class Component extends DCLogic {
     finally{ this._allot=savedAllot; }
   }
   _buildDayTimelineInner(B, s){
+    const today=this.startOfToday();
     /* PP-EXT: fixed appointments are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
     const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
@@ -5164,8 +5172,10 @@ class Component extends DCLogic {
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{
         const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.allotOf(t.id).allotted;
+        const active=B===today && this.isActiveTask(t);
         return Object.assign({},t,{title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
-          dueMs:this.dueMsOf(t,B), notBefore:this.hasStartTime(t)?this.notBeforeMsOf(t,B):null,
+          active, dueMs:active?null:this.dueMsOf(t,B),
+          notBefore:active?Math.max(this.state.nowTick||Date.now(),winStart):(this.hasStartTime(t)?this.notBeforeMsOf(t,B):null),
           rem:amt,origin:amt}); }));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
@@ -6863,19 +6873,19 @@ class Component extends DCLogic {
     );
 
     /* PP-EXT Track B: include/exclude/snooze — click opens a popover (renderInclPick), replacing the
-       old binary click-to-toggle now that snooze/off/force-in are three independently meaningful
+       old binary click-to-toggle now that snooze/off/pressed are independently meaningful
        states a single click can't safely flip between. */
     const inclCell = this.isMilestone(t)
       ? h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—')
       : (()=>{ const st=this.inclState(t);
-          const glyph = st==='off' ? '⊘' : st==='snoozed' ? '💤' : (st==='auto-in'||st==='manual-in') ? '☑' : '☐';
+          const glyph = st==='off' ? '⊘' : st==='snoozed' ? '💤' : st==='active' ? '▶' : st==='pressed' ? '☑' : '☐';
           const color = st==='off' ? 'var(--text-mut2)' : st==='snoozed' ? 'var(--warn)'
-            : (st==='auto-in'||st==='manual-in') ? 'var(--success)' : 'var(--text-faint2)';
+            : st==='active' ? this._accent : st==='pressed' ? 'var(--success)' : 'var(--text-faint2)';
           const title = st==='off' ? 'Off · click to change'
             : st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString()+' · click to change')
-            : st==='manual-in' ? 'Counted today (manual) · click to change'
-            : st==='auto-in' ? 'Counted today (auto: today ∈ [start,due]) · click to change'
-            : 'Excluded from today (auto) · click to include';
+            : st==='active' ? 'Active now · stronger pressed state'
+            : st==='pressed' ? 'Pressed into today · click to change'
+            : 'Not pressed today · click to include';
           return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
             title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph); })();
 
@@ -6901,7 +6911,7 @@ class Component extends DCLogic {
     const al=this.allotOf(t.id);
     let predictedCell;
     if(!al.active){
-      predictedCell=h('span',{title:'No allotted time — today is outside this task’s [start, due] window',
+      predictedCell=h('span',{title:'No allotted time — task is not pressed into today',
         style:{fontSize:'11.5px',color:'var(--text-faint2)'}},'—');
     } else {
       const toggle=h('div',{onClick:e=>{e.stopPropagation();this.togglePredictManual(t.id);},onMouseDown:e=>e.stopPropagation(),
@@ -6937,7 +6947,10 @@ class Component extends DCLogic {
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
+    const depthState=this.inclState(t); /* PP-EXT V2.1: pressed/active is depth, independent of selection */
     let bsh = crit?'inset 3px 0 0 var(--danger)':(sel?'inset 2px 0 0 '+(this._accent||'#3b82f6'):''); /* PP-EXT (B2): unify sel indicator on this._accent */
+    if(depthState==='active') bsh=(bsh?bsh+',':'')+'inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
+    else if(depthState==='pressed') bsh=(bsh?bsh+',':'')+'inset 0 3px 7px rgba(0,0,0,0.16)';
     /* PP-EXT: calendar day-hover glow — hovering a day (Month/Week/4-Day/Schedule) sets _glowIds via renderVals;
        this is the NORMAL-row wash (the milestone + Gantt rows already had it; the plain rows were the missing case). */
     if(this._glowIds && this._glowIds.has(t.id)) bsh = (bsh?bsh+',':'')+'inset 0 0 0 9999px rgba(245,181,54,0.16)';
@@ -6963,7 +6976,8 @@ class Component extends DCLogic {
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
-        background: sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')),
+        background: sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
+          (depthState==='pressed'?'color-mix(in srgb, '+this._accent+' 6%, '+(i%2?'var(--sheet-alt)':'var(--sheet-bg)')+')':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')))),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
         borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,
@@ -7606,11 +7620,11 @@ class Component extends DCLogic {
       : (()=>{ const st=this.inclState(t);
           const statusTxt = st==='off' ? 'Off'
             : st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))
-            : st==='manual-in' ? 'Counted today · manual'
-            : st==='auto-in' ? 'Counted today · auto'
-            : 'Excluded today · auto';
-          const statusColor = (st==='auto-in'||st==='manual-in') ? 'var(--success)'
-            : (st==='auto-out') ? 'var(--text-faint2)' : 'var(--warn)';
+            : st==='active' ? 'Active now · stronger pressed'
+            : st==='pressed' ? 'Pressed into today'
+            : 'Not pressed today';
+          const statusColor = st==='active' ? this._accent : st==='pressed' ? 'var(--success)'
+            : st==='unpressed' ? 'var(--text-faint2)' : 'var(--warn)';
           return h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
             h('span',{style:{fontSize:'13px',color:statusColor}}, statusTxt),
             h('div',{style:{display:'flex',flexDirection:'column'}}, ...this.inclActionRows(t))); })();

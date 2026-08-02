@@ -14,12 +14,12 @@ test('setIncludedOff: sets included:false and clears snoozeUntil; one commit', (
   assert.strictEqual(c.history.length, histLen + 1, 'exactly one undo entry');
 });
 
-test('setIncludedOn: clears both included and snoozeUntil (back to auto)', () => {
+test('setIncludedOn: presses task and clears snoozeUntil', () => {
   const c = make();
   const t = activeTask(c, { included:false, snoozeUntil: Date.now() + DAY });
   c.state.tasks = [t];
   c.setIncludedOn(t.id);
-  assert.strictEqual(c.state.tasks[0].included, null);
+  assert.strictEqual(c.state.tasks[0].included, true);
   assert.strictEqual(c.state.tasks[0].snoozeUntil, null);
 });
 

@@ -56,20 +56,20 @@ test('normalizeTask fills defaults', () => {
   assert.strictEqual(t.priority, 4);
 });
 
-test('isActiveToday: only today in [start,end], excludes milestones and included:false', () => {
+test('isActiveToday: explicit pressed state replaces date-window inference', () => {
   const c = make();
   c.state.nowTick = Date.now();
   const B = Date.now();
-  assert.strictEqual(c.isActiveToday(activeTask(c)), true);
-  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), false, 'future');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B-4*DAY, end:B-2*DAY })), false, 'past');
+  assert.strictEqual(c.isActiveToday(activeTask(c)), true, 'new/default task is pressed');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { included:null })), false, 'window alone no longer includes');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), true, 'pressed future task is user discretion');
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:false })), false, 'excluded');
   assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
   // included:true forces active even outside the [start,end] window
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
-test('dateless task (no start/due): unified ghost-window auto-in, off/snoozed still exclude', () => {
+test('dateless task: pressed joins today; unpressed/off/snoozed do not', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -77,11 +77,11 @@ test('dateless task (no start/due): unified ghost-window auto-in, off/snoozed st
   const dateless = (over) => c.normalizeTask(Object.assign({ id:'d'+Math.random().toString(36).slice(2,7),
     name:'dl', type:'Proportional', start:null, end:null, priority:4, deps:[], pct:0, planned:120, spent:0 }, over||{}));
   assert.strictEqual(c.isScheduled(dateless()), false, 'no dates => unscheduled');
-  assert.strictEqual(c.isActiveToday(dateless({ included:null })), true, 'auto-in via the ghost window (no manual gate needed)');
-  assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'force-in also active');
+  assert.strictEqual(c.isActiveToday(dateless({ included:null })), false, 'unpressed stays out despite ghost window');
+  assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'pressed is active');
   assert.strictEqual(c.isActiveToday(dateless({ included:false })), false, 'Off still excludes');
   assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today + 2*DAY })), false, 'active snooze still excludes');
-  assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today })), true, 'expired snooze falls back to auto-in');
+  assert.strictEqual(c.isActiveToday(dateless({ included:true, snoozeUntil: today })), true, 'expired snooze falls back to pressed');
   // never surfaces on another day — now for a structural reason (ghostSpan anchored at real-today), not a manual gate
   assert.strictEqual(c.isActiveOn(dateless({ included:true }), today + 3*DAY), false, 'other day => not active');
   // due/notBefore are null-safe (fall back to the scheduled day's bounds) so the timeline can order it
@@ -92,13 +92,12 @@ test('dateless task (no start/due): unified ghost-window auto-in, off/snoozed st
   c.state.tasks = [dl];
   const map = c.computeAllotted(c.state.tasks, today);
   assert.ok(map[dl.id].active && map[dl.id].allotted > 0, 'dateless task allots time today');
-  // planned:0 no longer needs its own manual gate — it's active (in the pool) but allots nothing,
-  // same as any dated task with planned:0 (the old dateless-only "planned>0" special case is gone)
+  // V2.1: planned:0 gets the named default so it is immediately visible and draggable.
   const zeroPlanned = dateless({ included:true, planned:0 });
   c.state.tasks = [zeroPlanned];
   const map2 = c.computeAllotted(c.state.tasks, today);
   assert.strictEqual(map2[zeroPlanned.id].active, true, 'still active (in the pool)');
-  assert.strictEqual(map2[zeroPlanned.id].allotted, 0, 'zero planned => zero share, same as a dated task');
+  assert.strictEqual(map2[zeroPlanned.id].allotted, c.DEFAULT_TASK_MINUTES);
 });
 
 test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-expired} x {today,other day}', () => {
@@ -112,11 +111,11 @@ test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-
   const dateless = (over) => c.normalizeTask(Object.assign({ id:'d'+Math.random().toString(36).slice(2,7),
     name:'dl', type:'Proportional', start:null, end:null, priority:4, deps:[], pct:0, planned:60, spent:0 }, over||{}));
   const cases = [
-    { label:'auto',            over:{},                                   today:true,  other:false },
-    { label:'forced-in',       over:{ included:true },                    today:true,  other:false },
+    { label:'unpressed',       over:{ included:null },                    today:false, other:false },
+    { label:'pressed',         over:{ included:true },                    today:true,  other:false },
     { label:'off',             over:{ included:false },                   today:false, other:false },
-    { label:'snoozed-active',  over:{ snoozeUntil: today + 2*DAY },       today:false, other:false },
-    { label:'snoozed-expired', over:{ snoozeUntil: today },               today:true,  other:false },
+    { label:'snoozed-active',  over:{ included:true, snoozeUntil: today + 2*DAY }, today:false, other:false },
+    { label:'snoozed-expired', over:{ included:true, snoozeUntil: today }, today:true, other:false },
   ];
   for(const kind of [{ name:'dated', make:dated }, { name:'dateless', make:dateless }]){
     for(const c2 of cases){
@@ -127,7 +126,7 @@ test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-
   }
 });
 
-test('isOptedOut: included:false, active snoozeUntil, both null/expired', () => {
+test('isOptedOut: any unpressed or actively snoozed task is out', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -135,11 +134,11 @@ test('isOptedOut: included:false, active snoozeUntil, both null/expired', () => 
   const t = () => activeTask(c);
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:false, snoozeUntil:null })), true, 'included:false alone');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today + DAY })), true, 'active snooze alone');
-  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), false, 'both null');
-  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today })), false, 'expired snooze (today>=snoozeUntil)');
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), true, 'null is unpressed');
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:true, snoozeUntil: today })), false, 'expired snooze returns to pressed');
 });
 
-test('inclState: off > snoozed > manual-in > window, five buckets', () => {
+test('inclState: active is stronger than pressed; no window-inferred bucket remains', () => {
   const c = make();
   c.state.nowTick = Date.now();
   const today = c.startOfToday();
@@ -148,9 +147,12 @@ test('inclState: off > snoozed > manual-in > window, five buckets', () => {
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false })), 'off');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false, snoozeUntil: today+DAY })), 'off', 'off beats snoozed');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { snoozeUntil: today+DAY })), 'snoozed');
-  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:true })), 'manual-in');
-  assert.strictEqual(c.inclState(inWin()), 'auto-in');
-  assert.strictEqual(c.inclState(outWin()), 'auto-out');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:true })), 'pressed');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:null })), 'unpressed');
+  assert.strictEqual(c.inclState(Object.assign(outWin(), { included:null })), 'unpressed');
+  const active=Object.assign(outWin(), { included:false });
+  c.state.running={ [active.id]:{startedAt:Date.now(),beat:Date.now()} };
+  assert.strictEqual(c.inclState(active), 'active');
 });
 
 test('isMilestone reflects the internal Milestone marker', () => {
