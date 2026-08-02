@@ -1,0 +1,28 @@
+# Parser
+
+`parseDateText` is the natural-language extraction and shaping entry point. The bundled
+`chrono.min.js` is generated/minified and must not be opened unless its generation is the task. Parser
+output is consumed by quick-add and can set `start`, `end`, clock intent, milestone/point shape, duration,
+and recurrence.
+
+V1.6 adds `matches:[{kind,start,end}]` to every `parseDateText` result. These are ordered, non-overlapping,
+end-exclusive UTF-16 offsets over the original input. The same consuming passes that shape dates, times,
+ranges, durations, recurrence, and repeat-until clauses claim the spans; priority, labels, milestone
+markers, and ordinary title text never do. Parser preprocessing masks consumed source at the same length,
+and `normalizeQuickMatches` validates and merges claims without a second natural-language pass.
+
+`quickHighlightSegments` converts matches into lossless plain/highlighted text segments.
+`renderQuickAddPopup` paints those segments in an `aria-hidden`, pointer-inert mirror behind the unchanged
+native input. Mirror glyphs are transparent and React receives user text as text children, so the native
+caret, selection, keyboard handlers, and task creation remain authoritative. Untimed parser anchors use
+date-only hint formatting, while explicitly clocked values retain their time. The quick-add card has a
+fixed viewport anchor so hints and ambiguity controls grow below the input without moving its edit row.
+
+Track A introduced chrono-node extraction plus deterministic shaping. Track B added point correctness,
+ambiguity selection, scheduling render shapes, and opt-in/opt-out behavior. Parser-owned task shapes must
+stay consistent with Gantt and timeline rendering.
+
+Known gap: R7 two-day windows (for example `start Mon due Fri`) remain an expected todo because the
+current extraction path returns one date per line. Keep regression fixtures in `tests/quickadd.test.js`;
+do not broaden cue matching without adversarial cases for title-word collisions and deadline/start
+inversion.

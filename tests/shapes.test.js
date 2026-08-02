@@ -1,5 +1,5 @@
-// Phase 1 (ROADMAP.md) — start/end pins: effPins inference, fixed blocks at clock time,
-// due-by deadline clamping (ported GAS Canvas guards), not-before placement, pool agreement.
+// Derived scheduling shapes: fixed blocks at clock time, due-by deadline clamping
+// (ported GAS Canvas guards), not-before placement, Points, and pool agreement.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');
@@ -15,33 +15,54 @@ const sched = chunks => chunks.filter(x => x.type === 'scheduled');
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
 
 // ---------------------------------------------------------------------------
-// effPins inference + explicit overrides
+// Derived shapes (no pin fields) — see plans/2026-07-26-remove-schedule-pins.md
 // ---------------------------------------------------------------------------
-// note: vm-realm objects fail deepStrictEqual on prototype identity — compare fields instead
-const pins = (c, t) => { const p = c.effPins(t); return p.ps + '/' + p.pe; };
-
-test('effPins: timed calendar event infers both pins; plain task infers due-pin only', () => {
+test('hasStartTime: derives from the timestamp, explicit flag wins', () => {
   const c = make();
-  assert.equal(pins(c, activeTask(c, { eventId: 'e1', calendarId: 'cal', allDay: false })), 'true/true');
-  assert.equal(pins(c, activeTask(c, {})), 'false/true');
-  assert.equal(c.effPins(activeTask(c, { eventId: 'e2', allDay: true })).ps, false,
-    'all-day events are not fixed at a clock time');
+  const B = c.startOfDay(Date.now());
+  assert.equal(c.hasStartTime(activeTask(c, { start: B })), false, 'midnight = untimed');
+  assert.equal(c.hasStartTime(activeTask(c, { start: B + 14 * H })), true, '14:00 = timed');
+  assert.equal(c.hasStartTime(activeTask(c, { start: B, startClock: true })), true,
+    'explicit true = the user really typed 12:00am');
+  assert.equal(c.hasStartTime(activeTask(c, { start: null })), false, 'no start = no time');
 });
 
-test('effPins: explicit pins beat inference; Milestone/Excluded never pin', () => {
+test('isFixedOn: clocked start + real end + same day + span <= 1 day', () => {
   const c = make();
-  assert.equal(pins(c, activeTask(c, { eventId: 'e1', pinStart: false, pinEnd: false })), 'false/false');
-  assert.equal(pins(c, activeTask(c, { type: 'Milestone', pinStart: true, pinEnd: true })), 'false/false');
+  const B = c.startOfToday();
+  const appt = activeTask(c, { start: B + 14 * H, end: B + 15 * H });
+  assert.equal(c.isFixedOn(appt, B), true);
+  const untimed = activeTask(c, { start: B, end: B + DAY });
+  assert.equal(c.isFixedOn(untimed, B), false, 'no clock = not an appointment');
+  const endless = activeTask(c, { start: B + 14 * H, end: null });
+  assert.equal(c.isFixedOn(endless, B), false, 'no end = never fixed (no null-end garbage block)');
 });
 
-test('togglePin stores an explicit flipped value', () => {
+test('isFixedOn: a multi-day clocked span stays flexible and does not eat the pool', () => {
   const c = make();
-  const t = activeTask(c, { id: 'tp' });
-  c.state.tasks = [t];
-  c.togglePin('tp', 'end'); // eff default true → explicit false
-  assert.equal(c.state.tasks.find(x => x.id === 'tp').pinEnd, false);
-  c.togglePin('tp', 'start'); // eff default false → explicit true
-  assert.equal(c.state.tasks.find(x => x.id === 'tp').pinStart, true);
+  const B = c.startOfToday();
+  const long = activeTask(c, { start: B + 9 * H, end: B + 4 * DAY + 17 * H });
+  assert.equal(c.isFixedOn(long, B), false, 'span > 1 day → flexible');
+  assert.equal(c.isFixedOn(long, B + DAY), false, 'and not on later days either');
+});
+
+test('isFixedOn: a clocked start only locks its own start day', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const appt = activeTask(c, { start: B + 14 * H, end: B + 15 * H });
+  assert.equal(c.isFixedOn(appt, B + DAY), false, 'tomorrow is not its start day');
+});
+
+test('isPointOn: clocked start + no end + no planned, without any pin field', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const pt = activeTask(c, { start: B + 14 * H, end: null, planned: 0 });
+  assert.equal(c.isPointOn(pt, B), true);
+  const keepClear = c.keepClearToday(B, [pt]);
+  assert.equal(keepClear.length, 1);
+  assert.equal(keepClear[0], B + 14 * H);
+  const withDur = activeTask(c, { start: B + 14 * H, end: null, planned: 60 });
+  assert.equal(c.isPointOn(withDur, B), false, 'a duration makes it a real block, not a divider');
 });
 
 // ---------------------------------------------------------------------------
@@ -56,6 +77,13 @@ test('dueMsOf: timed end is itself; midnight (date-only) end means end of that d
   assert.equal(c.dueMsOf(dateOnly), B + 2 * DAY, 'due that whole day (EOD rule)');
   const allday = activeTask(c, { allDay: true, start: B, end: B + DAY }); // gcal exclusive end
   assert.equal(c.dueMsOf(allday), B + DAY);
+});
+
+test('dueMsOf: explicit midnight is the exact due instant', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  assert.equal(c.dueMsOf(activeTask(c, { end: B + DAY, endClock: true })), B + DAY,
+    'the user typed 12:00am — honour it');
 });
 
 // ---------------------------------------------------------------------------
@@ -128,19 +156,19 @@ test('a task due beyond today is not clamped (deadline outside the window)', () 
 // ---------------------------------------------------------------------------
 // Not-before (start-pin only)
 // ---------------------------------------------------------------------------
-test('start-pinned (only) task is never scheduled before its clock start', () => {
+test('clocked-start flex task is never scheduled before its clock start', () => {
   const c = make();
   cleanDay(c, '10:00');
   const B = c.startOfDay(Date.now());
-  const nb = activeTask(c, { id: 'nb', planned: 120, start: B + 5 * H, end: B + 23 * H,
-    pinStart: true, pinEnd: false, priority: 1 }); // packs FIRST but may not start before 05:00
+  const nb = activeTask(c, { id: 'nb', planned: 120, start: B + 5 * H, end: null,
+    priority: 1 }); // packs FIRST but may not start before 05:00
   const filler = activeTask(c, { id: 'fill', planned: 300, priority: 4 });
   const data = pack(c, [nb, filler]);
   const nbChunks = sched(data.chunks).filter(x => x.id === 'nb');
   assert.ok(nbChunks.length >= 1);
   nbChunks.forEach(sc => assert.ok(sc.start >= B + 5 * H, 'not-before violated'));
   const fillChunks = sched(data.chunks).filter(x => x.id === 'fill');
-  assert.ok(fillChunks.some(sc => sc.start < B + 5 * H), 'filler uses the early slots the pinned task skipped');
+  assert.ok(fillChunks.some(sc => sc.start < B + 5 * H), 'filler uses the early slots the clocked task skipped');
 });
 
 // ---------------------------------------------------------------------------
@@ -149,22 +177,10 @@ test('start-pinned (only) task is never scheduled before its clock start', () =>
 test('oversubscribed (manual-override) task reports "day full", not a due reason', () => {
   const c = make();
   cleanDay(c, '02:00'); // 120 min pool — proportional allot never exceeds it, so force via manual override
-  const t = activeTask(c, { id: 'big', planned: 300, predictManual: true, predicted: 300, pinEnd: false });
+  const t = activeTask(c, { id: 'big', planned: 300, predictManual: true, predicted: 300 });
   const data = pack(c, [t]);
   const un = data.chunks.find(x => x.type === 'unscheduled' && x.id === 'big');
   assert.ok(un, 'excess over the pool is unscheduled');
   assert.equal(un.durationMin, 180);
   assert.equal(un.reason, 'day full');
-});
-
-// ---------------------------------------------------------------------------
-// isFixedOn: never "fixed" without a real end
-// ---------------------------------------------------------------------------
-test('isFixedOn: a both-pinned task with no end is NOT fixed (no null-end garbage block)', () => {
-  const c = make();
-  const B = c.startOfToday();
-  const endless = activeTask(c, { start: B + 14 * H, end: null, pinStart: true, pinEnd: true, planned: 0 });
-  assert.equal(c.isFixedOn(endless, B), false);
-  const real = activeTask(c, { start: B + 14 * H, end: B + 15 * H, pinStart: true, pinEnd: true });
-  assert.equal(c.isFixedOn(real, B), true);
 });

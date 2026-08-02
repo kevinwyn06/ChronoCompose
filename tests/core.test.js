@@ -2,6 +2,35 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');
 
+test('migratePins: 9am placeholder start collapses to midnight and the flag clears', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const t = { id: 'm1', start: B + 9 * 3600000, startClock: false };
+  assert.equal(c.migratePins([t]), 1);
+  assert.equal(t.start, B, 'placeholder 9am becomes a bare midnight date');
+  assert.equal(t.startClock, null, 'flag clears - the timestamp now carries the truth');
+  assert.equal(c.migratePins([t]), 0, 'idempotent');
+});
+
+test('migratePins: drops pinStart/pinEnd, leaves a real clock alone', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const t = { id: 'm2', start: B + 14 * 3600000, pinStart: true, pinEnd: false };
+  assert.equal(c.migratePins([t]), 1);
+  assert.equal('pinStart' in t, false);
+  assert.equal('pinEnd' in t, false);
+  assert.equal(t.start, B + 14 * 3600000, 'a real 14:00 clock is untouched');
+});
+
+test('normalizeTask: no pin fields, clock flags default to null (derive)', () => {
+  const c = make();
+  const t = c.normalizeTask({ id: 'n1' });
+  assert.equal('pinStart' in t, false);
+  assert.equal('pinEnd' in t, false);
+  assert.equal(t.startClock, null);
+  assert.equal(t.endClock, null);
+});
+
 test('parseDur / fmtDur (minutes; bare number = hours)', () => {
   const c = make();
   assert.strictEqual(c.parseDur('1:30'), 90);
@@ -217,37 +246,37 @@ test('timers: multitasking concurrent; stop accumulates spent per task', () => {
   assert.ok(!c.anyRunning());
 });
 
-test('autoTimerPlan: both-pinned auto-starts once & auto-pauses; one-pin tasks never auto-start', () => {
+test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open shapes never auto-start', () => {
   const c = make();
   const now = Date.now();
   c.state.nowTick = now;
-  // start-only pinned, window open now -> must NOT auto-start (a lone pin has no defined end; owner decision)
-  const s = activeTask(c, { pinStart:true, pinEnd:false, start: now - 60000, end: now + 3600000 });
+  // Clocked start with no end must NOT auto-start: it has no defined stop.
+  const s = activeTask(c, { start: now - 60000, end: null });
   c.state.tasks = [s];
   c.state.running = {};
-  assert.ok(!c.autoTimerPlan(now).start.includes(s.id), 'start-pin-only task must not auto-start');
-  // end-only pinned, in window -> also must NOT auto-start
-  const e = activeTask(c, { pinStart:false, pinEnd:true, start: now - 60000, end: now + 3600000 });
+  assert.ok(!c.autoTimerPlan(now).start.includes(s.id), 'clocked start without end must not auto-start');
+  // Deadline without a clocked start also must NOT auto-start.
+  const e = activeTask(c, { start: null, end: now + 3600000 });
   c.state.tasks = [e];
-  assert.ok(!c.autoTimerPlan(now).start.includes(e.id), 'end-pin-only task must not auto-start');
+  assert.ok(!c.autoTimerPlan(now).start.includes(e.id), 'deadline-only task must not auto-start');
 
-  // both-pinned, window open now -> should be planned to start
-  const b = activeTask(c, { pinStart:true, pinEnd:true, start: now - 60000, end: now + 3600000 });
+  // Fixed appointment, window open now -> should be planned to start.
+  const b = activeTask(c, { start: now - 60000, end: now + 3600000 });
   c.state.tasks = [b];
   c.state.running = {};
   let plan = c.autoTimerPlan(now);
-  assert.ok(plan.start.includes(b.id), 'both-pinned in-window task should auto-start');
+  assert.ok(plan.start.includes(b.id), 'fixed in-window task should auto-start');
   // once its occurrence is marked done, it is not re-started
   c._autoDone[b.id + ':' + c.occOf(b).start] = true;
   plan = c.autoTimerPlan(now);
   assert.ok(!plan.start.includes(b.id), 'already-started occurrence is not re-started');
 
-  // both-pinned, currently running, clock now past its end -> should be planned to pause
-  const bp = activeTask(c, { pinStart:true, pinEnd:true, start: now - 3600000, end: now - 1000 });
+  // Fixed appointment currently running past its end -> should be planned to pause.
+  const bp = activeTask(c, { start: now - 3600000, end: now - 1000 });
   c.state.tasks = [bp];
   c.state.running = { [bp.id]: { startedAt: now - 3600000, beat: now } };
   const plan2 = c.autoTimerPlan(now);
-  assert.ok(plan2.pause.includes(bp.id), 'both-pinned running task past its end should auto-pause');
+  assert.ok(plan2.pause.includes(bp.id), 'fixed running task past its end should auto-pause');
 });
 
 test('daily ledger: stopTimerAt credits both lifetime spent and spentByDay[startDay]', () => {

@@ -19,6 +19,10 @@ test('parseDateText strips ALL occurrences of the matched recurrence phrase, not
   assert.strictEqual(r.recur.kind, 'week');
   assert.ok(!/weekly/i.test(r.rest), `title should not retain "Weekly": ${JSON.stringify(r.rest)}`);
   assert.ok(!/every\s+week/i.test(r.rest), `title should not retain "every week": ${JSON.stringify(r.rest)}`);
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(r.matches.map(m => ({ kind:m.kind, text:'Weekly sync every week @test'.slice(m.start,m.end) })))),
+    [{kind:'recur',text:'Weekly'}, {kind:'recur',text:'every week'}]
+  );
 });
 
 test('parseDateText: daily trigger word repeated in title is fully stripped', () => {
@@ -32,6 +36,90 @@ test('parseDateText: daily trigger word repeated in title is fully stripped', ()
 // Base: Wed 2026-07-15 10:00 local, so "tomorrow" = Thu 16 Jul and weekday math is deterministic.
 const BASE = new Date(2026, 6, 15, 10, 0, 0, 0).getTime();
 const at = (day, h, m) => new Date(2026, 6, day, h, m, 0, 0).getTime();
+
+function spansOf(c, text){
+  const parsed = c.parseDateText(text, BASE);
+  return JSON.parse(JSON.stringify((parsed.matches||[]).map(m=>({
+    kind:m.kind, start:m.start, end:m.end, text:text.slice(m.start,m.end)
+  }))));
+}
+
+test('V1.6 matches: deadline and duration use exact original-case spans only', () => {
+  const c = make();
+  const text = 'submit report by Friday for 2h @work p1';
+  assert.deepStrictEqual(spansOf(c,text).map(x=>[x.kind,x.text]), [
+    ['date','by Friday'], ['duration','for 2h']
+  ]);
+});
+
+test('V1.6 matches: compound spans stay ordered', () => {
+  const c = make();
+  const text = 'every weekday 2-3pm starting next Monday until Aug 15 @work p1';
+  assert.deepStrictEqual(spansOf(c,text).map(x=>x.text), [
+    'every weekday', '2-3pm', 'starting next Monday', 'until Aug 15'
+  ]);
+});
+
+test('V1.6 matches: collision words are excluded', () => {
+  const c = make();
+  for(const text of ['call friends','monitor server','run a mile','email ms johnson']){
+    assert.deepStrictEqual(spansOf(c,text), []);
+  }
+});
+
+test('V1.6 matches: temporal vocabulary covers each parser pass', () => {
+  const c=make();
+  const cases=[
+    ['task tomorrow at 4pm', ['tomorrow at 4pm']],
+    ['task takes 30m', ['takes 30m']],
+    ['task ~45m', ['~45m']],
+    ['task daily', ['daily']],
+    ['task not before Tuesday', ['not before Tuesday']],
+    ['task by the 3rd', ['by the 3rd']]
+  ];
+  for(const [text,want] of cases){
+    assert.deepStrictEqual(spansOf(c,text).map(x=>x.text),want,text);
+  }
+});
+
+test('normalizeQuickMatches drops invalid/duplicate spans and merges overlap', () => {
+  const c=make(), text='abcdefghij';
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c.normalizeQuickMatches(text,[
+    {kind:'date',start:2,end:6}, {kind:'date',start:2,end:6},
+    {kind:'time',start:4,end:8}, {kind:'date',start:-1,end:2}
+  ]))), [{kind:'date',start:2,end:8}]);
+});
+
+test('V1.6 matches are additive to the persisted scheduling shape', () => {
+  const c=make(), parsed=c.parseDateText('submit report by Friday for 2h @work p1',BASE);
+  const matches=parsed.matches; delete parsed.matches;
+  assert.ok(matches.length>0);
+  assert.strictEqual(parsed.start,null);
+  assert.ok(parsed.end>BASE);
+  assert.strictEqual(parsed.dur,120);
+  assert.strictEqual(parsed.priority,1);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(parsed.labels)),['work']);
+  assert.strictEqual(parsed.rest,'submit report');
+});
+
+test('bare day parses to midnight with no clock (no 9am placeholder)', () => {
+  const c = make();
+  const p = c.parseDateText('report friday');
+  const d = new Date(p.date);
+  assert.equal(d.getHours(), 0, 'bare day sits at midnight');
+  assert.equal(d.getMinutes(), 0);
+  assert.ok(!p.clock, 'no explicit clock was written');
+  assert.equal('pinStart' in p, false, 'parser no longer emits pins');
+  assert.equal('pinEnd' in p, false);
+});
+
+test('an explicit time still lands as a clocked start', () => {
+  const c = make();
+  const p = c.parseDateText('meeting 2pm');
+  assert.equal(new Date(p.start).getHours(), 14);
+  assert.equal(p.startClock, true);
+  assert.equal(p.end, null, 'a bare time is a Point – no end');
+});
 
 test('parseDateText: "from HH:MM to HH:MM" yields both ends and a clean title', () => {
   // Regression: the old parser matched only the FIRST clock, dropped the end entirely, and left
@@ -69,33 +157,33 @@ test('parseDateText: a range crossing midnight rolls the end to the next day', (
   assert.strictEqual(r.dur, 120);
 });
 
-test('parseDateText: a bare start-clock is a Point (pinStart, NOT pinEnd, open end)', () => {
+test('parseDateText: a bare start-clock is a Point (open end)', () => {
   const c = make();
   const r = c.parseDateText('meeting 2pm', BASE);
-  assert.strictEqual(r.pinStart, true,  'start is pinned');
-  assert.strictEqual(r.pinEnd,   false, 'end is explicitly NOT pinned (Point tuple)');
+  assert.strictEqual(r.startClock, true, 'start has an explicit clock');
+  assert.strictEqual(r.endClock, null,   'a Point has no end clock');
   assert.strictEqual(r.end,      null,  'no end');
 });
 
 test('parseDateText: "mon 9am" is a Point too', () => {
   const c = make();
   const r = c.parseDateText('report mon 9am', BASE);
-  assert.strictEqual(r.pinStart, true);
-  assert.strictEqual(r.pinEnd,   false);
+  assert.strictEqual(r.startClock, true);
+  assert.strictEqual(r.endClock,   null);
   assert.strictEqual(r.end,      null);
 });
 
 test('parseDateText: clock RANGE stays a both-pinned span (regression)', () => {
   const c = make();
   const r = c.parseDateText('eating tomorrow from 17:00 to 18:00', BASE);
-  assert.strictEqual(r.pinStart, true);
-  assert.strictEqual(r.pinEnd,   true);
+  assert.strictEqual(r.startClock, true);
+  assert.strictEqual(r.endClock,   true);
 });
 
 test('parseDateText: a due cue stays a deadline (regression)', () => {
   const c = make();
   const r = c.parseDateText('submit report by friday', BASE);
-  assert.strictEqual(r.pinEnd, true);
+  assert.strictEqual(r.endClock, false);
 });
 
 test('parseDateText: "for <dur>" sets an end without being eaten as a relative offset', () => {
@@ -122,19 +210,17 @@ test('parseDateText: an ambiguous bare "N to M" is not a time range', () => {
   assert.strictEqual(r.rest, 'buy 5 to 6 apples');
 });
 
-test('parseDateText: a weekday keeps the 9am default and drops the preposition', () => {
-  // Regression: /days?/ had no word boundary, so the "day" inside "friday" matched and suppressed
-  // the 9am default, landing the task at midnight. "by" also leaked into the title.
+test('parseDateText: a weekday lands at midnight and drops the preposition', () => {
   const c = make();
   const r = c.parseDateText('submit report by friday', BASE);
-  assert.strictEqual(r.date, at(17, 9, 0)); // raw found day (datePick/preview back-compat)
+  assert.strictEqual(r.date, mid(17));
   assert.strictEqual(r.clock, false);
   assert.strictEqual(r.rest, 'submit report');
-  // V1.1B shaped anchors: "by" is a deadline cue → R5 (start=null, EOD due, pinEnd).
+  // V1.1B shaped anchors: "by" is a deadline cue (start=null, EOD due).
   assert.strictEqual(r.start, null);
   assert.strictEqual(r.end, eod(17));
-  assert.strictEqual(r.pinStart, null);
-  assert.strictEqual(r.pinEnd, true);
+  assert.strictEqual(r.startClock, null);
+  assert.strictEqual(r.endClock, false);
 });
 
 test('parseDateText: relative offset still suppresses the 9am default', () => {
@@ -165,49 +251,48 @@ test('parseDateText: a repeat-until clause is not mistaken for a clock range', (
   const c = make();
   const r = c.parseDateText('pay rent every month until 3 jan', BASE);
   assert.strictEqual(r.recur.kind, 'month');
-  assert.strictEqual(r.until, new Date(2027, 0, 3, 9, 0, 0, 0).getTime());
+  assert.strictEqual(r.until, new Date(2027, 0, 3, 0, 0, 0, 0).getTime());
   assert.strictEqual(r.end, null);
 });
 
 test('parseDateText: an explicit year on a month-name date is honoured', () => {
   const c = make(); // "25 jul 2027" used to ignore the year and land in the current one
   const r = c.parseDateText('ship 25 jul 2027', BASE);
-  assert.strictEqual(r.date, new Date(2027, 6, 25, 9, 0, 0, 0).getTime());
+  assert.strictEqual(r.date, new Date(2027, 6, 25, 0, 0, 0, 0).getTime());
   assert.strictEqual(r.rest, 'ship');
   const r2 = c.parseDateText('ship jul 25, 2027', BASE);
-  assert.strictEqual(r2.date, new Date(2027, 6, 25, 9, 0, 0, 0).getTime());
+  assert.strictEqual(r2.date, new Date(2027, 6, 25, 0, 0, 0, 0).getTime());
 });
 
 // ==== V1.1B: axis-based parser — exhaustive shaped-anchor fixtures per architecture.md ====
 // "Parser task-type cases" surviving regions R0–R11 + RM + modifier layering. parseDateText now
-// emits the SHAPED anchors (start/end/pinStart/pinEnd/mile) the task model consumes, alongside the
+// emits the SHAPED anchors (start/end/startClock/endClock/mile) the task model consumes, alongside the
 // raw date/dur/clock it always exposed. BASE = Wed 2026-07-15 10:00 (see top of file); Fri=17,
 // Mon=20, Sat=18, tomorrow(Thu)=16, next Tue=21.
-const d9 = (day) => new Date(2026, 6, day, 9, 0, 0, 0).getTime();
 const mid = (day) => new Date(2026, 6, day, 0, 0, 0, 0).getTime();
 const eod = (day) => new Date(2026, 6, day, 23, 59, 59, 999).getTime();
 // assert a full shape at once; pass only the fields that matter (undefined = skip)
 const shape = (r, exp) => {
-  for (const k of ['start', 'end', 'pinStart', 'pinEnd', 'mile', 'dur']) {
+  for (const k of ['start', 'end', 'startClock', 'endClock', 'mile', 'dur']) {
     if (k in exp) assert.strictEqual(r[k], exp[k], `${k}: ${JSON.stringify(r[k])} !== ${JSON.stringify(exp[k])}`);
   }
 };
 
 // ---- R0 Floating (no dates, no pins) ----
-test('R0: a bare task floats — null anchors, no pins', () => {
+test('R0: a bare task floats — null anchors and clock flags', () => {
   const c = make();
   const r = c.parseDateText('email sam', BASE);
-  shape(r, { start: null, end: null, pinStart: null, pinEnd: null, mile: false });
+  shape(r, { start: null, end: null, startClock: null, endClock: null, mile: false });
   assert.strictEqual(r.rest, 'email sam');
   const r2 = c.parseDateText('read the paper', BASE);
-  shape(r2, { start: null, end: null, pinStart: null, pinEnd: null });
+  shape(r2, { start: null, end: null, startClock: null, endClock: null });
 });
 
 // ---- R1 Duration-only (movable, no anchors) ----
 test('R1: "for <dur>" / "takes <dur>" / "~<dur>" set a budget but no anchors', () => {
   const c = make();
   const a = c.parseDateText('call plumber for 45m', BASE);
-  shape(a, { start: null, end: null, pinStart: null, pinEnd: null, dur: 45 });
+  shape(a, { start: null, end: null, startClock: null, endClock: null, dur: 45 });
   assert.strictEqual(a.rest, 'call plumber');
   const b = c.parseDateText('write essay takes 2h', BASE);
   shape(b, { start: null, end: null, dur: 120 });
@@ -221,7 +306,7 @@ test('R1: "for <dur>" / "takes <dur>" / "~<dur>" set a budget but no anchors', (
 test('R2: a lone future start clock pins the start, no end', () => {
   const c = make();
   const r = c.parseDateText('standup at 11am', BASE); // 11:00 today > now 10:00, no roll
-  shape(r, { start: at(15, 11, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
+  shape(r, { start: at(15, 11, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'standup');
 });
@@ -230,23 +315,23 @@ test('R2: a lone future start clock pins the start, no end', () => {
 test('R3: a clock span with no day is a fixed block today (both pins)', () => {
   const c = make();
   const r = c.parseDateText('call client 2-3pm', BASE);
-  shape(r, { start: at(15, 14, 0), end: at(15, 15, 0), pinStart: true, pinEnd: true, dur: 60 });
+  shape(r, { start: at(15, 14, 0), end: at(15, 15, 0), startClock: true, endClock: true, dur: 60 });
   assert.strictEqual(r.rest, 'call client');
   const r2 = c.parseDateText('block at 2pm for 1h', BASE);
-  shape(r2, { start: at(15, 14, 0), end: at(15, 15, 0), pinStart: true, pinEnd: true, dur: 60 });
+  shape(r2, { start: at(15, 14, 0), end: at(15, 15, 0), startClock: true, endClock: true, dur: 60 });
   assert.strictEqual(r2.rest, 'block');
 });
 
 // ---- R4 Not-before (start-cued day) ----
-test('R4: a start cue pins the start day at 9am, no end', () => {
+test('R4: an untimed start cue anchors the day without claiming a user clock', () => {
   const c = make();
   // cue adjacent to the date (the canonical R4 form); a detached leading "start …" stays in the title.
   const r = c.parseDateText('project starts monday', BASE);
-  shape(r, { start: d9(20), end: null, pinStart: true, pinEnd: null });
+  shape(r, { start: mid(20), end: null, startClock: null, endClock: null });
   assert.strictEqual(r.clock, false);
   assert.strictEqual(r.rest, 'project');
   const r2 = c.parseDateText('diet begins tomorrow', BASE);
-  shape(r2, { start: d9(16), end: null, pinStart: true, pinEnd: null });
+  shape(r2, { start: mid(16), end: null, startClock: null, endClock: null });
   assert.strictEqual(r2.rest, 'diet');
 });
 
@@ -254,7 +339,7 @@ test('R4: a start cue pins the start day at 9am, no end', () => {
 test('R4: a start cue with a bare ordinal day', () => {
   const c = make();
   const r3 = c.parseDateText('prep after the 20th', BASE);
-  shape(r3, { start: d9(20), pinStart: true });
+  shape(r3, { start: mid(20), startClock: null });
   assert.strictEqual(r3.rest, 'prep');
 });
 
@@ -266,7 +351,7 @@ test('R4: a start cue with a bare ordinal day', () => {
 test('R4: "not before <day>" is a not-before start, not a deadline (was inverted)', () => {
   const c = make();
   const r = c.parseDateText('submit not before friday', BASE);
-  shape(r, { start: d9(17), end: null, pinStart: true, pinEnd: null });
+  shape(r, { start: mid(17), end: null, startClock: null, endClock: null });
   assert.strictEqual(r.clock, false);
   assert.strictEqual(r.rest, 'submit'); // the orphaned "not" is stripped too
 });
@@ -275,23 +360,23 @@ test('R4: "not before <day>" is a not-before start, not a deadline (was inverted
 test('R2: "not before <day> <clock>" pins the start clock, not a due deadline', () => {
   const c = make();
   const r = c.parseDateText('deploy not before monday 5pm', BASE);
-  shape(r, { start: at(20, 17, 0), end: null, pinStart: true, pinEnd: false });
+  shape(r, { start: at(20, 17, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'deploy');
 });
 
 // ---- R5 Deadline (due-cued day) ----
-test('R5: a deadline cue sets an EOD due, start stays null, pinEnd', () => {
+test('R5: a deadline cue sets an EOD due with no explicit clock', () => {
   const c = make();
   const r = c.parseDateText('pay taxes due aug 3', BASE);
-  shape(r, { start: null, end: new Date(2026, 7, 3, 23, 59, 59, 999).getTime(), pinStart: null, pinEnd: true });
+  shape(r, { start: null, end: new Date(2026, 7, 3, 23, 59, 59, 999).getTime(), startClock: null, endClock: false });
 });
 
 // Bare ordinal, deadline side (see R4 above).
 test('R5: a deadline cue with a bare ordinal day', () => {
   const c = make();
   const r2 = c.parseDateText('finish deck by the 20th', BASE);
-  shape(r2, { start: null, end: eod(20), pinEnd: true });
+  shape(r2, { start: null, end: eod(20), endClock: false });
   assert.strictEqual(r2.rest, 'finish deck');
 });
 
@@ -299,18 +384,18 @@ test('R5: a deadline cue with a bare ordinal day', () => {
 test('R6: a budget with a deadline keeps the EOD due and the planned minutes', () => {
   const c = make();
   const r = c.parseDateText('study for 90m due monday', BASE);
-  shape(r, { start: null, end: eod(20), pinStart: null, pinEnd: true, dur: 90 });
+  shape(r, { start: null, end: eod(20), startClock: null, endClock: false, dur: 90 });
 });
 
 // ---- R8 All-day, uncued single day ----
-test('R8: an uncued bare day binds to start at 9am but leaves pins null', () => {
+test('R8: an uncued bare day binds to a midnight start with clock flags null', () => {
   const c = make();
   const r = c.parseDateText('dentist on saturday', BASE);
-  shape(r, { start: d9(18), end: null, pinStart: null, pinEnd: null });
+  shape(r, { start: mid(18), end: null, startClock: null, endClock: null });
   assert.strictEqual(r.clock, false);
   assert.strictEqual(r.rest, 'dentist');
   const r2 = c.parseDateText('meditate tomorrow', BASE);
-  shape(r2, { start: d9(16), end: null, pinStart: null, pinEnd: null });
+  shape(r2, { start: mid(16), end: null, startClock: null, endClock: null });
   assert.strictEqual(r2.rest, 'meditate');
 });
 
@@ -318,7 +403,7 @@ test('R8: an uncued bare day binds to start at 9am but leaves pins null', () => 
 test('R9: a day + clock span is a fixed block on that day (both pins)', () => {
   const c = make();
   const r = c.parseDateText('meeting friday 14:00-15:30', BASE);
-  shape(r, { start: at(17, 14, 0), end: at(17, 15, 30), pinStart: true, pinEnd: true, dur: 90 });
+  shape(r, { start: at(17, 14, 0), end: at(17, 15, 30), startClock: true, endClock: true, dur: 90 });
   assert.strictEqual(r.rest, 'meeting');
 });
 
@@ -326,22 +411,22 @@ test('R9: a day + clock span is a fixed block on that day (both pins)', () => {
 test('R10: a day + start clock (no end) pins the start only', () => {
   const c = make();
   const r = c.parseDateText('gym tomorrow at 3pm', BASE);
-  shape(r, { start: at(16, 15, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
+  shape(r, { start: at(16, 15, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'gym');
   const r2 = c.parseDateText('kickoff monday 9am', BASE);
-  shape(r2, { start: at(20, 9, 0), end: null, pinStart: true, pinEnd: false }); // PP-EXT: Point tuple, pinEnd explicit false
+  shape(r2, { start: at(20, 9, 0), end: null, startClock: true, endClock: null });
 });
 
 // ---- R11 Deadline at a clock ----
 test('R11: a deadline cue with a clock sets an exact-clock due, start null', () => {
   const c = make();
   const r = c.parseDateText('email boss by friday 5pm', BASE);
-  shape(r, { start: null, end: at(17, 17, 0), pinStart: null, pinEnd: true });
+  shape(r, { start: null, end: at(17, 17, 0), startClock: null, endClock: true });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'email boss');
   const r2 = c.parseDateText('report due friday at 4pm', BASE);
-  shape(r2, { start: null, end: at(17, 16, 0), pinEnd: true });
+  shape(r2, { start: null, end: at(17, 16, 0), endClock: true });
 });
 
 // ---- RM Milestone (overrides clock/dur; zero-length at midnight) ----
@@ -360,9 +445,9 @@ test('RM: a milestone is a zero-length marker at day midnight; clocks/durations 
 test('3-axis: "every weekday 2-3pm starting next monday until aug 15 @work p1"', () => {
   const c = make();
   const r = c.parseDateText('every weekday 2-3pm starting next monday until aug 15 @work p1', BASE);
-  shape(r, { start: at(20, 14, 0), end: at(20, 15, 0), pinStart: true, pinEnd: true, dur: 60 });
+  shape(r, { start: at(20, 14, 0), end: at(20, 15, 0), startClock: true, endClock: true, dur: 60 });
   assert.strictEqual(r.recur.kind, 'weekday');
-  assert.strictEqual(r.until, new Date(2026, 7, 15, 9, 0, 0, 0).getTime()); // "aug 15" → Aug 15 9am
+  assert.strictEqual(r.until, new Date(2026, 7, 15, 0, 0, 0, 0).getTime());
   assert.strictEqual(r.priority, 1);
   assert.strictEqual((r.labels || []).join(','), 'work');
 });
@@ -370,7 +455,7 @@ test('3-axis: "every weekday 2-3pm starting next monday until aug 15 @work p1"',
 test('3-axis: "gym every mon,wed,fri 6-7am @health" — weekday set + span + tag', () => {
   const c = make();
   const r = c.parseDateText('gym every mon,wed,fri 6-7am @health', BASE);
-  shape(r, { pinStart: true, pinEnd: true, dur: 60 });
+  shape(r, { startClock: true, endClock: true, dur: 60 });
   assert.strictEqual(r.recur.kind, 'weekdays');
   assert.strictEqual(r.recur.days.join(','), 'mon,wed,fri');
   assert.strictEqual((r.labels || []).join(','), 'health');
@@ -379,7 +464,7 @@ test('3-axis: "gym every mon,wed,fri 6-7am @health" — weekday set + span + tag
 test('3-axis: "standup daily 9:15-9:30 p2" — recur + span + priority', () => {
   const c = make();
   const r = c.parseDateText('standup daily 9:15-9:30 p2', BASE);
-  shape(r, { pinStart: true, pinEnd: true, dur: 15 });
+  shape(r, { startClock: true, endClock: true, dur: 15 });
   assert.strictEqual(r.recur.kind, 'day');
   assert.strictEqual(r.priority, 2);
 });
@@ -387,7 +472,7 @@ test('3-axis: "standup daily 9:15-9:30 p2" — recur + span + priority', () => {
 test('3-axis: "submit report by friday for 2h @work p1" — deadline + budget + tag + priority', () => {
   const c = make();
   const r = c.parseDateText('submit report by friday for 2h @work p1', BASE);
-  shape(r, { start: null, end: eod(17), pinStart: null, pinEnd: true, dur: 120 });
+  shape(r, { start: null, end: eod(17), startClock: null, endClock: false, dur: 120 });
   assert.strictEqual(r.priority, 1);
   assert.strictEqual((r.labels || []).join(','), 'work');
   assert.strictEqual(r.rest, 'submit report');
@@ -398,14 +483,14 @@ test('3-axis: "review notes every week until 3 jan @study" — floating recurrin
   const r = c.parseDateText('review notes every week until 3 jan @study', BASE);
   shape(r, { start: null, end: null });
   assert.strictEqual(r.recur.kind, 'week');
-  assert.strictEqual(r.until, new Date(2027, 0, 3, 9, 0, 0, 0).getTime());
+  assert.strictEqual(r.until, new Date(2027, 0, 3, 0, 0, 0, 0).getTime());
   assert.strictEqual((r.labels || []).join(','), 'study');
 });
 
 test('3-axis: "sync with sam every 2 weeks tue 3pm for 30m" — n-weekly appointment', () => {
   const c = make();
   const r = c.parseDateText('sync with sam every 2 weeks tue 3pm for 30m', BASE);
-  shape(r, { start: at(21, 15, 0), end: at(21, 15, 30), pinStart: true, pinEnd: true, dur: 30 });
+  shape(r, { start: at(21, 15, 0), end: at(21, 15, 30), startClock: true, endClock: true, dur: 30 });
   assert.strictEqual(r.recur.kind, 'week');
   assert.strictEqual(r.recur.n, 2);
 });
@@ -415,7 +500,7 @@ test('3-axis: "sync with sam every 2 weeks tue 3pm for 30m" — n-weekly appoint
 test('R7: "start mon due fri" resolves a two-day window', { todo: true }, () => {
   const c = make();
   const r = c.parseDateText('sprint start monday due friday', BASE);
-  shape(r, { start: d9(20), end: eod(17), pinStart: true, pinEnd: true });
+  shape(r, { start: mid(20), end: eod(17), startClock: true, endClock: null });
 });
 
 // ---- corruption class: chrono must NOT invent a date/milestone from ordinary words ----
@@ -455,13 +540,27 @@ test('runQuickAdd: "email ms johnson" keeps its title (was: title-cleanup regex 
   c.runQuickAdd('bottom');
   assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].name, 'email ms johnson');
 });
-// PP-EXT (#68): a bare day's 9am is a placeholder, not a user-typed time — the task must record that
-// (startClock:false) so the timeline draws it as a "🕓" agenda chip, not a phantom "◆ 9:00a" Point.
-test('runQuickAdd: a bare-day task records startClock:false (9am is a placeholder)', () => {
+// PP-EXT: a bare day stays unclocked; a user-typed clock makes a Point.
+test('runQuickAdd: a bare-day default anchor remains untimed', () => {
   const c = make();
   c.setState({ quickText: 'report friday' });
   c.runQuickAdd('bottom');
-  assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].startClock, false);
+  assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].startClock, null);
+});
+test('runQuickAdd: an untimed start cue remains untimed', () => {
+  const c = make();
+  c.setState({ quickText: 'project starts monday' });
+  c.runQuickAdd('bottom');
+  assert.strictEqual(c.state.tasks[c.state.tasks.length - 1].startClock, null);
+});
+test('runQuickAdd: a bare-day due choice records an unclocked EOD deadline', () => {
+  const c = make();
+  c.setState({ quickText: 'report friday', quickChoice: 'due' });
+  c.runQuickAdd('bottom');
+  const task = c.state.tasks[c.state.tasks.length - 1];
+  assert.strictEqual(task.start, null);
+  assert.strictEqual(task.endClock, false);
+  assert.strictEqual(new Date(task.end).getHours(), 23);
 });
 test('runQuickAdd: a user-typed clock records startClock:true (a real Point)', () => {
   const c = make();
@@ -516,11 +615,11 @@ test('parseDateText: "standup tonight" is an evening time, with no dangling word
   assert.ok(new Date(r.date).getHours() >= 18, 'tonight should land in the evening');
   assert.strictEqual(r.clock, false);
 });
-test('parseDateText: a bare day still gets the 9am default, not chrono filler', () => {
+test('parseDateText: a bare day lands at midnight, not chrono filler', () => {
   const c = make();
   // chrono implies noon for "friday" / the current hour for "tomorrow"; neither is a real signal.
-  assert.strictEqual(new Date(c.parseDateText('gym friday', BASE).date).getHours(), 9);
-  assert.strictEqual(new Date(c.parseDateText('gym tomorrow', BASE).date).getHours(), 9);
+  assert.strictEqual(new Date(c.parseDateText('gym friday', BASE).date).getHours(), 0);
+  assert.strictEqual(new Date(c.parseDateText('gym tomorrow', BASE).date).getHours(), 0);
 });
 test('parseDateText: "tomorrow morning" / "this afternoon" use their implied hour', () => {
   const c = make();
@@ -568,10 +667,10 @@ test('parseDateText: uncued bare day is ambiguous with anchor+due candidates', (
   const kinds = r.candidates.map(x => x.kind);
   assert.ok(kinds.includes('anchor') && kinds.includes('due'));
   const anchor = r.candidates.find(x => x.kind === 'anchor');
-  assert.strictEqual(anchor.tuple.pinStart, true);
-  assert.strictEqual(anchor.tuple.pinEnd, false);
+  assert.strictEqual(anchor.tuple.startClock, null);
+  assert.strictEqual(anchor.tuple.endClock, null);
   const due = r.candidates.find(x => x.kind === 'due');
-  assert.strictEqual(due.tuple.pinEnd, true);
+  assert.strictEqual(due.tuple.endClock, false);
 });
 test('parseDateText: adjacent due-cue is not ambiguous', () => {
   const c = make();
@@ -611,10 +710,10 @@ test('parseDateText: the ambiguity payload does not disturb the persisted shape'
   const c = make();
   // every shaped field keeps the Task-3 value; only ambiguous/candidates are new (interim-default).
   const r = c.parseDateText('gym friday', BASE);
-  assert.strictEqual(r.start, at(17, 9, 0));
+  assert.strictEqual(r.start, mid(17));
   assert.strictEqual(r.end, null);
-  assert.strictEqual(r.pinStart, null);
-  assert.strictEqual(r.pinEnd, null);
+  assert.strictEqual(r.startClock, null);
+  assert.strictEqual(r.endClock, null);
 });
 
 // ---- Track B Group 3: the ambiguity chooser. pickCandidate + ambigChoiceLabels are the pure
@@ -624,17 +723,17 @@ test('pickCandidate: "anchor" choice returns the anchor tuple (== the interim de
   const c = make();
   const r = c.parseDateText('gym friday', BASE);
   const t = c.pickCandidate(r, 'anchor');
-  assert.strictEqual(t.pinStart, true);
-  assert.strictEqual(t.pinEnd, false);
-  assert.strictEqual(t.start, at(17, 9, 0));
+  assert.strictEqual(t.startClock, null);
+  assert.strictEqual(t.endClock, null);
+  assert.strictEqual(t.start, mid(17));
   assert.strictEqual(t.end, null);
 });
 test('pickCandidate: "due" choice returns the due tuple (only this changes the outcome)', () => {
   const c = make();
   const r = c.parseDateText('gym friday', BASE);
   const t = c.pickCandidate(r, 'due');
-  assert.strictEqual(t.pinEnd, true);
-  assert.strictEqual(t.pinStart, false);
+  assert.strictEqual(t.endClock, false);
+  assert.strictEqual(t.startClock, null);
   // #68: a bare-day "By Fri" is an END-OF-DAY deadline (matching an explicit "by friday" cue),
   // NOT the parser's 9am placeholder — the ambiguous and cued paths must agree.
   assert.strictEqual(t.end, new Date(2026, 6, 17, 23, 59, 59, 999).getTime());
@@ -644,16 +743,16 @@ test('pickCandidate: a clocked "By <time>" due keeps the exact clock instant (no
   const c = make();
   const r = c.parseDateText('homework monday 9am', BASE);
   const t = c.pickCandidate(r, 'due');
-  assert.strictEqual(t.pinEnd, true);
-  assert.strictEqual(t.pinStart, false);
+  assert.strictEqual(t.endClock, true);
+  assert.strictEqual(t.startClock, null);
   assert.strictEqual(t.end, at(20, 9, 0)); // Mon Jul 20 09:00 — an exact-clock deadline (R11), not EOD
 });
 test('pickCandidate: an unknown/empty choice falls back to the anchor tuple', () => {
   const c = make();
   const r = c.parseDateText('gym friday', BASE);
   assert.strictEqual(c.pickCandidate(r, 'nonsense').kind, undefined); // returns the tuple, not the wrapper
-  assert.strictEqual(c.pickCandidate(r, 'nonsense').pinStart, true);
-  assert.strictEqual(c.pickCandidate(r, null).pinStart, true);
+  assert.strictEqual(c.pickCandidate(r, 'nonsense').startClock, null);
+  assert.strictEqual(c.pickCandidate(r, null).startClock, null);
 });
 test('pickCandidate: an unambiguous parse returns null (runQuickAdd keeps the raw shaped fields)', () => {
   const c = make();
@@ -681,4 +780,71 @@ test('ambigChoiceLabels: bare day + clock → At/By time', () => {
 test('ambigChoiceLabels: unambiguous parse → null (no chooser row rendered)', () => {
   const c = make();
   assert.strictEqual(c.ambigChoiceLabels(c.parseDateText('call client 2-3pm', BASE)), null);
+});
+
+function walk(node, out=[]){
+  if(node==null) return out;
+  if(Array.isArray(node)){ node.forEach(x=>walk(x,out)); return out; }
+  if(typeof node==='object'){ out.push(node); walk(node.children,out); }
+  return out;
+}
+
+test('quickHighlightSegments reconstructs raw text and marks only parser spans', () => {
+  const c=make(), text='submit report by Friday for 2h @work p1';
+  const p=c.parseDateText(text,BASE);
+  const seg=JSON.parse(JSON.stringify(c.quickHighlightSegments(text,p.matches)));
+  assert.strictEqual(seg.map(x=>x.text).join(''), text);
+  assert.deepStrictEqual(seg.filter(x=>x.highlight).map(x=>x.text), ['by Friday','for 2h']);
+});
+
+test('quickHighlightSegments normalizes overlap without duplicating visible text', () => {
+  const c=make(), text='abcdefghij';
+  const seg=JSON.parse(JSON.stringify(c.quickHighlightSegments(text,[
+    {kind:'date',start:2,end:6}, {kind:'time',start:4,end:8}, {kind:'date',start:2,end:6}
+  ])));
+  assert.strictEqual(seg.map(x=>x.text).join(''), text);
+  assert.deepStrictEqual(seg.filter(x=>x.highlight).map(x=>x.text), ['cdefgh']);
+});
+
+test('quick-add popup keeps a native input and renders an inert match mirror', () => {
+  const c=make();
+  Object.assign(c.state,{quickOpen:true,quickText:'task tomorrow at 4pm',quickChoice:'anchor'});
+  const nodes=walk(c.renderQuickAddPopup());
+  assert.strictEqual(nodes.filter(n=>n.type==='input').length,1);
+  const mirror=nodes.find(n=>n.props && n.props['data-qa']==='quick-highlight-mirror');
+  assert.ok(mirror);
+  assert.strictEqual(mirror.props['aria-hidden'],'true');
+  assert.strictEqual(mirror.props.style.pointerEvents,'none');
+  assert.ok(nodes.some(n=>n.props && n.props['data-qa']==='quick-highlight'));
+});
+
+test('quick-add mirror renders user content as text, never HTML', () => {
+  const c=make();
+  Object.assign(c.state,{quickOpen:true,quickText:'<img onerror=alert(1)> tomorrow'});
+  const nodes=walk(c.renderQuickAddPopup());
+  assert.ok(nodes.every(n=>!n.props || !('dangerouslySetInnerHTML' in n.props)));
+  assert.ok(nodes.some(n=>n.children && n.children.includes('<img onerror=alert(1)> ')));
+});
+
+test('quick-add date-only hint omits midnight while an explicit clock keeps it', () => {
+  const c=make(), midnight=new Date(2026,7,1,0,0,0,0).getTime();
+  Object.assign(c.state,{quickOpen:true,quickText:'test today',quickChoice:'anchor'});
+  c.ambigChoiceLabels=()=>null;
+  c.parseDateText=()=>({date:midnight,clock:false,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
+  let hints=walk(c.renderQuickAddPopup()).filter(n=>n.props && n.props['data-qa']==='quick-hint');
+  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01']);
+
+  c.parseDateText=()=>({date:midnight,clock:true,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
+  hints=walk(c.renderQuickAddPopup()).filter(n=>n.props && n.props['data-qa']==='quick-hint');
+  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01, 00:00']);
+});
+
+test('quick-add card uses a fixed viewport anchor so rows grow downward', () => {
+  const c=make();
+  Object.assign(c.state,{quickOpen:true,quickText:'test today',quickChoice:'anchor'});
+  const nodes=walk(c.renderQuickAddPopup());
+  const card=nodes.find(n=>n.props && n.props['data-qa']==='quick-card');
+  assert.ok(card);
+  assert.strictEqual(card.props.style.position,'absolute');
+  assert.strictEqual(card.props.style.top,'calc(50% - 48px)');
 });

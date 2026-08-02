@@ -55,7 +55,7 @@ test('computeSyncOps: every mirrored field change -> exactly one update op', () 
     name:'Renamed', start: 1, end: 2, priority: 1, deps:['t9'], pct: 50, planned: 120,
     predicted: 30, predictManual: true, spent: 15, spentByDay:{'2026-07-11':10}, completion: 5,
     recur:{kind:'day',n:1}, labels:['@x'], description:'d', goal:'g', wbs:'1.1',
-    type:'Milestone', allDay:true, calendarId:'c', eventId:'e', pinStart:true, pinEnd:true,
+    type:'Milestone', allDay:true, calendarId:'c', eventId:'e', startClock:true, endClock:true,
     included:false, archivedAt: 7, parentId:'p', pin:{day:1,start:2,dur:3},
   };
   for(const [field, val] of Object.entries(mutations)){
@@ -123,6 +123,18 @@ test('syncRowOf: only mirrored fields + updatedAt (no owner_id, no stray keys)',
   const keys = Object.keys(r).sort();
   assert.deepEqual(keys, [...c.SYNC_FIELDS(), 'updatedAt'].sort());
   assert.equal(r.updatedAt, 42);
+});
+
+test('SYNC_FIELDS mirrors the clock flags, not the removed pins', () => {
+  const c = make();
+  const f = c.SYNC_FIELDS();
+  assert.ok(f.includes('startClock'));
+  assert.ok(f.includes('endClock'));
+  assert.equal(f.includes('pinStart'), false);
+  assert.equal(f.includes('pinEnd'), false);
+  const row = c.syncRowOf(c.normalizeTask({ id: 's1' }));
+  assert.equal(row.startClock, null, 'derived flags mirror as null');
+  assert.equal(row.endClock, null, 'both edges preserve derive semantics');
 });
 
 // =======================================================================

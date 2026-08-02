@@ -403,13 +403,13 @@ test('multi-day: isActiveOn windows tasks to the right day', () => {
 
 /* ====================== PART F — keep-clear Points ====================== */
 
-test('isPointOn / keepClearToday: a clocked no-duration start-pin is a keep-clear Point', () => {
+test('isPointOn / keepClearToday: a clocked no-duration start is a keep-clear Point', () => {
   const c = make();
   const B = c.startOfToday();
-  const point    = activeTask(c, { id: 'p',  start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 0 });
-  const notBefore = activeTask(c, { id: 'nb', start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 120 });
-  const mile     = activeTask(c, { id: 'm',  type: 'Milestone', start: B + 14 * H, pinStart: true, pinEnd: false });
-  const dateless = activeTask(c, { id: 'd',  start: null, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const point    = activeTask(c, { id: 'p',  start: B + 14 * H, end: null, planned: 0 });
+  const notBefore = activeTask(c, { id: 'nb', start: B + 14 * H, end: null, planned: 120 });
+  const mile     = activeTask(c, { id: 'm',  type: 'Milestone', start: B + 14 * H });
+  const dateless = activeTask(c, { id: 'd',  start: null, end: null, planned: 0 });
   assert.equal(c.isPointOn(point, B), true);
   assert.equal(c.isPointOn(notBefore, B), false, 'planned>0 NOT-before task is not a Point');
   assert.equal(c.isPointOn(mile, B), false);
@@ -450,7 +450,7 @@ test('buildDayTimeline: a Point splits an over-spanning block so no work crosses
   c.state.settings.dayStart = '13:00'; c.state.settings.dayEnd = '16:00'; // 3h window, one 180min task fills it
   const B = c.startOfToday();
   const X = B + 14 * H; // the Point's clock (2pm)
-  const point = activeTask(c, { id: 'pt', start: X, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const point = activeTask(c, { id: 'pt', start: X, end: null, planned: 0 });
   const a = activeTask(c, { id: 'a', start: B - DAY, end: B + DAY, priority: 1, planned: 120 });
   c.state.tasks = [point, a];
   c._allot = c.computeAllotted(c.state.tasks);
@@ -470,7 +470,7 @@ test('buildDayTimeline: two different tasks pack on either side of a Point, neit
   c.state.settings.dayStart = '13:00'; c.state.settings.dayEnd = '16:00';
   const B = c.startOfToday();
   const X = B + 14 * H;
-  const point = activeTask(c, { id: 'pt', start: X, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const point = activeTask(c, { id: 'pt', start: X, end: null, planned: 0 });
   const a = activeTask(c, { id: 'a', start: B - DAY, end: B + DAY, priority: 1, planned: 60 });
   const b = activeTask(c, { id: 'b', start: B - DAY, end: B + DAY, priority: 2, planned: 60 });
   c.state.tasks = [point, a, b];
@@ -488,18 +488,18 @@ test('computeAllotted: adding a Point does not change the pool total', () => {
   const B = c.startOfToday();
   const a = activeTask(c, { id: 'a', planned: 120 });
   const without = c.computeAllotted([a]);
-  const point = activeTask(c, { id: 'pt', start: B + 14 * H, end: null, pinStart: true, pinEnd: false, planned: 0 });
+  const point = activeTask(c, { id: 'pt', start: B + 14 * H, end: null, planned: 0 });
   const withPt = c.computeAllotted([a, point]);
   assert.equal(withPt['a'].allotted, without['a'].allotted);
 });
 
 /* ================ PART G — Group 2 render-shape emitters (points + top-hover) ================ */
 
-test('pointsToday: a clocked no-duration start-pin surfaces as a render Point {id,ms,title}', () => {
+test('pointsToday: a clocked no-duration start surfaces as a render Point {id,ms,title}', () => {
   const c = make();
   const B = c.startOfToday();
-  const point = activeTask(c, { id:'p', name:'Meeting', start:B + 14*H, end:null, pinStart:true, pinEnd:false, planned:0 });
-  const block = activeTask(c, { id:'b', name:'Work',    start:B + 14*H, end:null, pinStart:true, pinEnd:false, planned:120 });
+  const point = activeTask(c, { id:'p', name:'Meeting', start:B + 14*H, end:null, planned:0 });
+  const block = activeTask(c, { id:'b', name:'Work',    start:B + 14*H, end:null, planned:120 });
   c.state.tasks = [point, block]; c._allot = c.computeAllotted(c.state.tasks);
   assert.deepEqual(c.buildDayTimeline(B).points, [{ id:'p', ms:B + 14*H, title:'Meeting' }]);
 });
@@ -507,11 +507,11 @@ test('pointsToday: a clocked no-duration start-pin surfaces as a render Point {i
 test('topHover: a dated-but-untimed planned-0 task surfaces; timed/blocked/dateless/milestone excluded', () => {
   const c = make();
   const B = c.startOfToday();
-  const hover    = activeTask(c, { id:'h',  name:'Report',  start:B, end:null,  pinStart:true,  pinEnd:false, planned:0 });
-  const hoverDue = activeTask(c, { id:'hd', name:'Essay',   start:null, end:B,  pinStart:false, pinEnd:true,  planned:0 });
-  const point    = activeTask(c, { id:'p',  name:'Call',    start:B + 9*H, end:null, pinStart:true, pinEnd:false, planned:0 });
-  const block    = activeTask(c, { id:'b',  name:'Study',   start:B, end:null,  pinStart:true,  pinEnd:false, planned:120 });
-  const dateless = activeTask(c, { id:'d',  name:'Someday', start:null, end:null, pinStart:false, pinEnd:false, planned:0 });
+  const hover    = activeTask(c, { id:'h',  name:'Report',  start:B, end:null, planned:0 });
+  const hoverDue = activeTask(c, { id:'hd', name:'Essay',   start:null, end:B, planned:0 });
+  const point    = activeTask(c, { id:'p',  name:'Call',    start:B + 9*H, end:null, planned:0 });
+  const block    = activeTask(c, { id:'b',  name:'Study',   start:B, end:null, planned:120 });
+  const dateless = activeTask(c, { id:'d',  name:'Someday', start:null, end:null, planned:0 });
   const mile     = activeTask(c, { id:'m',  name:'MS', type:'Milestone', start:B, end:null });
   c.state.tasks = [hover, hoverDue, point, block, dateless, mile];
   c._allot = c.computeAllotted(c.state.tasks);
@@ -521,41 +521,34 @@ test('topHover: a dated-but-untimed planned-0 task surfaces; timed/blocked/datel
 test('topHover: an excluded (included:false) dated-untimed task does not hover', () => {
   const c = make();
   const B = c.startOfToday();
-  const off = activeTask(c, { id:'o', name:'Off', start:B, end:null, pinStart:true, pinEnd:false, planned:0, included:false });
+  const off = activeTask(c, { id:'o', name:'Off', start:B, end:null, planned:0, included:false });
   c.state.tasks = [off]; c._allot = c.computeAllotted(c.state.tasks);
   assert.deepEqual(c.buildDayTimeline(B).topHover, []);
 });
 
-test('topHover vs Point guard: a clocked start-pin with an unclocked due is a Point, never a hover line', () => {
+test('topHover vs Point guard: a clocked start with no end is a Point, never a hover line', () => {
   const c = make();
   const B = c.startOfToday();
-  // clocked start (=> Point) AND an unclocked end: only the isPointOn guard keeps it out of topHover
-  // (the hasClock fallback checks `end`, which is unclocked here, so it can't be what excludes it).
-  const t = activeTask(c, { id:'pt', name:'Standup', start:B + 10*H, end:B, pinStart:true, pinEnd:false, planned:0 });
+  const t = activeTask(c, { id:'pt', name:'Standup', start:B + 10*H, end:null, planned:0 });
   c.state.tasks = [t]; c._allot = c.computeAllotted(c.state.tasks);
   const data = c.buildDayTimeline(B);
   assert.deepEqual(data.points, [{ id:'pt', ms:B + 10*H, title:'Standup' }], 'renders as a Point');
   assert.deepEqual(data.topHover, [], 'excluded from top-hover by the isPointOn guard');
 });
 
-// PP-EXT: regression for the #68 top-hover gap. The REAL runQuickAdd shape for a bare day
-// ("report friday") is the anchor tuple with its start stamped at the parser's 9am PLACEHOLDER
-// (startClock:false), not midnight. The old topHover test used start:B (midnight) — a shape the
-// parser never emits — so it stayed green while the app drew a bogus "◆ 9:00a" Point instead.
-test('topHover: a bare-day anchor at the 9am placeholder (startClock:false) is a hover line, not a Point', () => {
+test('topHover: a bare-day midnight anchor is a hover line, not a Point', () => {
   const c = make();
   const B = c.startOfToday();
-  const t = activeTask(c, { id:'rf', name:'Report', start:B + 9*H, end:null,
-    pinStart:true, pinEnd:false, planned:0, startClock:false });
+  const t = activeTask(c, { id:'rf', name:'Report', start:B, end:null, planned:0 });
   const data = pack(c, [t]);
   assert.deepEqual(data.topHover.map(x=>x.id), ['rf'], 'surfaces as a top-hover chip');
-  assert.deepEqual(data.points, [], 'the placeholder 9am is not drawn as a clocked Point');
+  assert.deepEqual(data.points, [], 'midnight without an explicit clock is not drawn as a Point');
 });
 test('Point guard: a real user-typed clock (startClock:true) stays a Point, not a hover line', () => {
   const c = make();
   const B = c.startOfToday();
   const t = activeTask(c, { id:'m5', name:'Meeting', start:B + 17*H, end:null,
-    pinStart:true, pinEnd:false, planned:0, startClock:true });
+    planned:0, startClock:true });
   const data = pack(c, [t]);
   assert.deepEqual(data.points, [{ id:'m5', ms:B + 17*H, title:'Meeting' }], 'stays a clocked Point');
   assert.deepEqual(data.topHover, [], 'a real clock is never a hover line');

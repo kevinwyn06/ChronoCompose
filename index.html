@@ -47,7 +47,7 @@
      Dark-theme values keep the original hex (already AA-passing against dark surfaces). */
   --danger:#e5484d;--danger-strong:#e5615d;--success:#79c08e;--success-strong:#2f9e5f;
   --warn:#e5824d;--tag-bg:#262b33;--tag-border:#353d48;--tag-text:#a9b4c2;--on-accent:#fff;--pri-default:#7b8794;
-  --link:#5b9bf0;
+  --link:#5b9bf0;--due-week:#b69af8;--due-tomorrow:#e7c766;--due-later:#9aa0a6;
 }
 :root[data-theme="light"]{
   --bg:#ffffff;--top-bg:#ffffff;--quickbar-bg:#fbfbfa;--top-border:#ececeb;--divider:#e4e4e2;
@@ -70,7 +70,7 @@
      the measured ratios. */
   --danger:#c93843;--danger-strong:#c93843;--success:#1e7a4a;--success-strong:#1e7a4a;
   --warn:#b35900;--tag-bg:#eef1f5;--tag-border:#d7dee6;--tag-text:#5f6b7a;--on-accent:#fff;--pri-default:#7b8794;
-  --link:#1a56c4;
+  --link:#1a56c4;--due-week:#6f42c1;--due-tomorrow:#8a6500;--due-later:#6f6d67;
 }
 /* PP-EXT: design-token scales (B0 — foundation). Type/spacing/radius/shadow/motion. Theme-agnostic
    (values, not colors) except shadows, which need separate light/dark alpha tuning below. No new
@@ -158,6 +158,13 @@ input,select,button{font-family:inherit}
   font-size:var(--fs-1);line-height:var(--lh-tight);color:var(--text-2);
   transition:background var(--dur-fast) var(--ease-standard)}
 .pp-chip:hover{background:var(--btn-hover)}
+/* PP-EXT V1.5: the due/recur signal survives the sheet-column cull as one compact timeline chip. */
+.pp-due-chip{display:inline-flex;align-items:center;max-width:100%;padding:1px var(--sp-0);border:1px solid currentColor;
+  border-radius:var(--r-1);font-size:var(--fs-1);line-height:var(--lh-tight);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  background:color-mix(in srgb,currentColor 10%,transparent)}
+.pp-due-chip--overdue{color:var(--danger)}.pp-due-chip--today{color:var(--success)}
+.pp-due-chip--tomorrow{color:var(--due-tomorrow)}.pp-due-chip--week{color:var(--due-week)}
+.pp-due-chip--later{color:var(--due-later)}.pp-due-chip--recur{color:var(--success)}
 .pp-btn{display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-0);
   height:30px;padding:0 var(--sp-2);border-radius:var(--r-2);font-size:var(--fs-2);font-weight:500;
   cursor:pointer;border:1px solid var(--divider);background:var(--btn-bg);color:var(--btn-text);
@@ -227,10 +234,10 @@ class Component extends DCLogic {
     /* PP-EXT: timers persist across a closed tab / sleep (owner choice) — a running timer keeps counting until
        manually stopped or auto-paused at a pinned end; there is no inactivity auto-stop. See stopTimerAt / snapshot. */
     this.TIMER_BEAT_MS = 5000;    // heartbeat cadence: refresh running.beat so pp-run stays fresh across reloads
-    /* PP-EXT: pin-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
+    /* PP-EXT: shape-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
        occurrence / re-fire an auto-pause. Keyed by `taskId:occurrenceStartMs`. */
     this._autoDone = {}; this._autoPaused = {};
-    /* PP-EXT Phase 8: browser notifications. LEAD = how early the start-pinned heads-up fires; GRACE = a
+    /* PP-EXT Phase 8: browser notifications. LEAD = how early the clocked-start heads-up fires; GRACE = a
        just-missed trigger won't re-fire on reload/tick if its moment passed more than this ago; SUMMARY_TTL =
        morning-popup auto-dismiss. Fired-once ledger + last morning-summary day persist in pp-notify. */
     this.NOTIFY_LEAD_MS = 5*60000;
@@ -377,7 +384,7 @@ class Component extends DCLogic {
     this.WEATHER_GEO_TIMEOUT_MS = 10000; // geolocation getCurrentPosition timeout
     this._weatherTried = {};             // session guard: ymd → auto-fetch already attempted (don't re-prompt geolocation every render)
     /* PP-EXT: scheduling behavior is DERIVED, not a user-picked mode. Every task is proportional (shares the
-       day's leftover time) by default; schedule pins express fixed/exact timing (see effPins); an Include/Exclude
+       day's leftover time) by default; clocked dates derive fixed/exact timing; an Include/Exclude
        toggle (`included`) decides whether a task counts toward today. `type` is retained only as the internal
        'Milestone' marker (see isMilestone; set by addMilestoneAt / quick-add) — 'Exact'/'Excluded' modes are gone. */
     this.PCOL = {1:'#d1453b',2:'#eb8909',3:'#246fe0',4:'var(--pri-default)'};
@@ -487,8 +494,9 @@ class Component extends DCLogic {
       spent:0, spentByDay:{}, /* PP-EXT: per-day timer ledger {ymd:minutes}; spent stays the lifetime total, spentByDay is the daily slice (getSpentOn). Fixes computeAllotted over-subtracting lifetime spent from today's pool. */
       goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
       planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
-      pinStart:null, pinEnd:null, /* PP-EXT: schedule anchors; null = infer (see effPins) */
-      startClock:true, /* PP-EXT (#68): does `start` carry a user-typed time? false = the parser's bare-day 9am PLACEHOLDER (see untimedStart) — such a task is an agenda "🕓" hover chip, never a clocked Point. Defaults true so gcal/manual/legacy starts keep their real-clock semantics. */
+      /* PP-EXT: clock flags only disambiguate an explicit 00:00 from a bare midnight date.
+         null = derive from the timestamp; true/false = an explicit user time choice. */
+      startClock:null, endClock:null,
       included:null, /* PP-EXT: include/exclude toggle; null = infer (today ∈ [start,due] date-only). true/false = manual override (see isActiveToday / isOptedOut) */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
@@ -502,9 +510,21 @@ class Component extends DCLogic {
      New imports already set all-day planned to 0; this only scrubs previously-persisted data, once. Planned
      stays user-editable afterwards (it is NOT re-zeroed on every load). Returns the number of tasks changed. */
   migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned){ t.planned=0; n++; } }); return n; }
+  /* PP-EXT: one-time cleanup for the pin removal. The parser used to stamp a bare day with a 9am
+     placeholder and mark it startClock:false; bare days are now plain midnight, so collapse those
+     starts and drop the flag back to null (derive). pinStart/pinEnd no longer exist because every
+     scheduling shape is derived from the dates. Idempotent: returns the number of rows changed. */
+  migratePins(tasks){ let n=0; tasks.forEach(t=>{ let hit=false;
+    if(t.startClock===false && t.start!=null){ t.start=this.startOfDay(t.start); t.startClock=null; hit=true; }
+    else if(t.startClock===false){ t.startClock=null; hit=true; }
+    if('pinStart' in t){ delete t.pinStart; hit=true; }
+    if('pinEnd' in t){ delete t.pinEnd; hit=true; }
+    if(hit) n++; }); return n; }
   runOnceMigrations(tasks){
     try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
       if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      if(!done['schedule-pins-removed']){ const n=this.migratePins(tasks); done['schedule-pins-removed']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
@@ -568,10 +588,8 @@ class Component extends DCLogic {
     return [
       {k:'check',w:50,lock:true},{k:'name',w:236,l:'Task Name'},
       {k:'incl',w:58,l:'Incl'},
-      {k:'start',w:150,l:'Start'},{k:'end',w:150,l:'Due'},
       {k:'dur',w:52,l:'Dur'},{k:'planned',w:78,l:'Planned'},{k:'spent',w:70,l:'Spent'},
-      {k:'predicted',w:96,l:'Allot'},
-      {k:'pct',w:132,l:'% Done'} /* PP-EXT: Completed (cdate) column removed — completion date still lives in the detail panel */
+      {k:'predicted',w:96,l:'Allot'} /* PP-EXT V1.5: Start, Due and % Done moved wholly onto the Gantt bar. */
     ];
   }
   orderedCols(){
@@ -1092,14 +1110,13 @@ class Component extends DCLogic {
     Object.keys(cur).forEach(id=>{ const r=cur[id]; if(now-(r.beat||r.startedAt)>=this.TIMER_BEAT_MS){ nr[id]=Object.assign({},r,{beat:now}); changed=true; } });
     if(changed){ this.setState({running:nr}); this.saveRun(nr); } }
   toggleTimer(id){ if(this.isRunning(id)) this.stopTimer(id); else this.startTimer(id); }
-  /* PP-EXT: pin-driven auto timers. A *both-pinned* (fixed-block) active task auto-starts its timer when the clock
-     reaches its start (multitasking, doesn't stop others) and auto-pauses silently (no prompt) when the clock
-     reaches its end. A task with only one pin never auto-starts — a lone start pin has no defined end, so it would
-     run forever (owner decision 2026-07-07); the startPin notification reminds the user to start it manually.
+  /* PP-EXT: shape-driven auto timers. A fixed appointment auto-starts its timer when the clock reaches its
+     start (multitasking, doesn't stop others) and auto-pauses silently (no prompt) at its end. A clocked start
+     without an end never auto-starts because it has no defined stop; its notification remains the reminder.
      Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
   autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
       if(this.isMilestone(t)||t.archivedAt) return;
-      const p=this.effPins(t); if(!(p.ps&&p.pe)) return; if(!this.isActiveToday(t)) return;
+      if(!this.isFixedToday(t)) return;
       const oc=this.occOf(t); const startMs=oc.start; const endMs=oc.end; const key=t.id+':'+startMs;
       const running=this.isRunning(t.id);
       if(running&&now>=endMs){ if(!this._autoPaused[key]) pause.push(t.id); return; }
@@ -1186,13 +1203,13 @@ class Component extends DCLogic {
   notifyPlan(now, fired){ const out=[]; fired=fired||{}; const dayKey=this.startOfDay(now);
     (this.state.tasks||[]).forEach(t=>{
       if(this.isMilestone(t)||t.archivedAt) return;
-      const p=this.effPins(t); const active=this.isActiveToday(t); const oc=this.occOf(t);
-      /* Urgent: start-pinned block about to start (T−LEAD .. start) */
-      if(active && p.ps && oc.start!=null){ const k='start:'+t.id+':'+oc.start;
+      const active=this.isActiveToday(t); const oc=this.occOf(t);
+      /* Urgent: clocked task about to start (T−LEAD .. start) */
+      if(active && this.hasStartTime(t) && oc.start!=null){ const k='start:'+t.id+':'+oc.start;
         if(!fired[k] && now>=oc.start-this.NOTIFY_LEAD_MS && now<oc.start)
           out.push({key:k, type:'startPin', urgent:true, title:'Starting soon', body:t.name+' starts at '+this.clockLabel(oc.start)}); }
-      /* Normal: a fixed (both-pinned) scheduled block just ended */
-      if(active && p.ps && p.pe && oc.end!=null){ const k='blockend:'+t.id+':'+oc.end;
+      /* Normal: a fixed appointment just ended */
+      if(active && this.isFixedToday(t) && oc.end!=null){ const k='blockend:'+t.id+':'+oc.end;
         if(!fired[k] && now>=oc.end && now<oc.end+this.NOTIFY_GRACE_MS)
           out.push({key:k, type:'blockEnd', urgent:false, title:'Block ended', body:t.name+' — scheduled block is over'}); }
       /* Urgent: deadline at risk — remaining work exceeds the time left before it's due (throttled once/day) */
@@ -1266,13 +1283,9 @@ class Component extends DCLogic {
   packStart(B){ const today=this.startOfToday();
     return (this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null; }
 
-  /* PP-EXT: schedule anchors — restores the old GAS "starts at" (fixed event) vs "due by" (Canvas deadline)
-     distinction lost in the port. Two independent per-task pins (null = infer):
-       pinStart && pinEnd → FIXED: occupies its literal clock span in the day timeline (like a meeting);
-       pinEnd only        → DUE-BY: packs flexibly but must finish before its due instant (EDF + clamping);
-       pinStart only      → NOT-BEFORE: packs flexibly but never earlier than its clock start;
-       neither            → FLEX: packs anywhere (pre-pin behavior).
-     Inference: timed calendar events → fixed; everything else → due-by (the Due column means "due"). */
+  /* PP-EXT: derived scheduling shapes. A clocked start plus a real, <=1-day end is a fixed appointment;
+     a clocked start with no end and no planned duration is a keep-clear Point; an end with an untimed start
+     is a hard deadline; everything else packs flexibly. Day-level windows remain enforced by isActiveOn. */
   occOf(t){ return t.recur ? this.currentOcc(t) : {start:t.start, end:t.end}; }
   /* PP-EXT (V1.2 ghost blocks): derive a render-time span for a task whose start and/or end are still
      null, WITHOUT mutating the task — the nulls stay in data (so gcal-outbound keeps skipping dateless
@@ -1342,17 +1355,22 @@ class Component extends DCLogic {
     return occs.find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd)) || this.occOf(t);
   }
   hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
-  /* PP-EXT (#68): the task's `start` clock is a parser PLACEHOLDER (bare-day 9am default), not a
-     user-typed time. hasClock can't tell 9am-real from 9am-default, so the flag carries the intent.
-     Such a task is agenda-only (top-hover chip), never a clocked Point/appointment. */
-  untimedStart(t){ return t.startClock===false; }
-  effPins(t){
-    if(this.isMilestone(t)) return {ps:false,pe:false};
-    const timedEvent = !!(t.eventId && !t.allDay);
-    return { ps: t.pinStart!=null ? !!t.pinStart : timedEvent,
-             pe: t.pinEnd!=null   ? !!t.pinEnd   : true };
+  /* Does this edge carry a user-typed time? A null flag derives from the timestamp; an explicit flag
+     disambiguates a deliberate 00:00 from a bare date, which also sits at midnight. */
+  hasStartTime(t){ if(t.start==null) return false;
+    return t.startClock!=null ? !!t.startClock : this.hasClock(t.start); }
+  hasEndTime(t){ if(t.end==null) return false;
+    return t.endClock!=null ? !!t.endClock : this.hasClock(t.end); }
+  /* A fixed appointment has a written start clock and a real span that fits one day, on its start day. */
+  isFixedOn(t, B){
+    if(this.isMilestone(t)) return false;
+    if(!this.hasStartTime(t)) return false;
+    const oc=this.occForDay(t, B);
+    if(oc.start==null || oc.end==null) return false;
+    if(this.startOfDay(oc.start)!==B) return false;
+    if(oc.end-oc.start > this.DAY) return false;
+    return this.isActiveOn(t, B);
   }
-  isFixedOn(t, B){ const p=this.effPins(t); return p.ps && p.pe && this.occForDay(t, B).end!=null && this.isActiveOn(t, B); } /* PP-EXT: end!=null guard — never "fixed" without a real end */
   isFixedToday(t){ return this.isFixedOn(t, this.startOfToday()); }
   /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
      manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
@@ -1361,13 +1379,18 @@ class Component extends DCLogic {
     const oc=this.occForDay(t, B);
     if(oc.end==null) return (B!=null?B:this.startOfToday())+this.DAY; /* PP-EXT: dateless task — due = end of the day it's scheduled into (today) */
     if(t.allDay) return oc.end;
-    return this.hasClock(oc.end) ? oc.end : oc.end + this.DAY;
+    return this.hasEndTime(t) ? oc.end : this.startOfDay(oc.end)+this.DAY;
   }
-  notBeforeMsOf(t, B){ const oc=this.occForDay(t, B); return oc.start!=null?oc.start:(B!=null?B:this.startOfToday()); } /* PP-EXT: dateless → day start */
+  notBeforeMsOf(t, B){
+    const day=(B!=null?B:this.startOfToday());
+    const oc=this.occForDay(t, B);
+    if(oc.start==null || !this.hasStartTime(t)) return day;
+    return this.startOfDay(oc.start)===day ? oc.start : day;
+  }
   /* PP-EXT: drag-pin (Phase 5) — a block dragged in the drawer timeline is fixed at its dropped clock time
      FOR THAT DAY ONLY. Returns the block span {start,end} when the task carries an active pin for today, else
      null. The duration is captured at drop (pin.dur) rather than derived, so it stays stable regardless of
-     later allotment churn (mirrors a both-pinned task's clock span — no circular dependency with the pool).
+     later allotment churn (mirrors a fixed appointment's clock span — no circular dependency with the pool).
      Stale pins (pin.day ≠ today) are ignored; milestones can't be pinned. A drag-pinned subtask (leaf child)
      leaves its parent's family packing and becomes its own fixed block — see famAllot / distribute / queueFor. */
   dragBlock(t, B){
@@ -1380,7 +1403,7 @@ class Component extends DCLogic {
   hasDragPinToday(t, B){ return !!this.dragBlock(t, B); }
   /* Today's FIXED busy blocks — the SINGLE source consumed by both computeAllotted (pool shrinks) and
      buildDayTimeline (blocks render + free slots exclude them), so they always agree. Two kinds:
-     both-pinned tasks occupy their occurrence clock span; drag-pinned tasks occupy their dropped span. */
+     fixed appointments occupy their occurrence clock span; drag-pinned tasks occupy their dropped span. */
   fixedBlocksToday(B, tasks){
     const src=tasks||this.state.tasks;
     const byId={}; src.forEach(t=>byId[t.id]=t); /* PP-EXT: for a pinned subtask's "Parent › Child" label */
@@ -1399,15 +1422,15 @@ class Component extends DCLogic {
     });
     return out;
   }
-  /* PP-EXT: keep-clear Point — a timed task that reserves NO duration (pinStart, not pinEnd, no planned).
-     It occupies no time but its clock is a divider the packer won't cross (spec §4 / R1 keep-clear). */
+  /* PP-EXT: keep-clear Point: a clocked instant with no end and no duration. It reserves no time,
+     but its clock is a divider the packer will not cross. The missing end is the discriminator. */
   isPointOn(t, B){
     if(this.isMilestone(t)) return false;
-    const p=this.effPins(t);
-    if(!(p.ps && !p.pe)) return false;
+    if(!this.hasStartTime(t)) return false;
+    if(t.end!=null) return false;
     if((t.planned||0) > 0) return false;               /* raw planned — must not touch _allot (called inside computeAllotted) */
     const oc=this.occForDay(t, B);
-    return oc.start!=null && this.hasClock(oc.start) && !this.untimedStart(t) && this.isActiveOn(t, B); /* PP-EXT (#68): a placeholder 9am start is not a real anchor → falls through to a hover chip */
+    return oc.start!=null && this.startOfDay(oc.start)===B && this.isActiveOn(t, B);
   }
   keepClearToday(B, tasks){
     const src=tasks||this.state.tasks;
@@ -1438,9 +1461,8 @@ class Component extends DCLogic {
     const oc=this.occForDay(t, B);
     const inst = oc.end!=null ? oc.end : oc.start;
     if(inst==null) return false;                                /* dateless → not a hover line */
-    /* PP-EXT (#68): a real clock disqualifies — but a bare-day start's 9am is a PLACEHOLDER, so an
-       untimed-start task with no due instant still counts as untimed (agenda chip). */
-    const clocked = this.hasClock(inst) && !(oc.end==null && this.untimedStart(t));
+    /* A real clock disqualifies; bare dates sit at midnight and remain agenda chips. */
+    const clocked = oc.end!=null ? this.hasEndTime(t) : this.hasStartTime(t);
     if(clocked) return false;                                   /* timed → not a hover line */
     return this.startOfDay(inst) === B;                          /* belongs to day B */
   }
@@ -1869,12 +1891,6 @@ class Component extends DCLogic {
       {timeout:this.WEATHER_GEO_TIMEOUT_MS, maximumAge:3600000}); }
   /* ==== /PP-EXT Phase 9: Journaling ==== */
 
-  /* Toggling a pin makes it explicit (the effective value is flipped and stored); inference stops for that side. */
-  togglePin(id, which){
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
-      const p=this.effPins(t);
-      if(which==='start') t.pinStart=!p.ps; else t.pinEnd=!p.pe; });
-  }
   /* Small ⓘ hover-help marker for non-intuitive features (native title tooltip). Reused across the UI. */
   infoNote(text){
     const h=React.createElement;
@@ -1882,20 +1898,6 @@ class Component extends DCLogic {
       border:'1px solid var(--divider)',borderRadius:'50%',width:'13px',height:'13px',lineHeight:'11px',
       display:'inline-flex',alignItems:'center',justifyContent:'center',flex:'none',userSelect:'none'}},'i');
   }
-  PIN_HELP(){ return 'Schedule pins: pin the START to fix when it happens; pin the DUE to require finishing before it.\n'
-    +'Both pinned = fixed block at its clock time (meetings). Due only = flexible but done before the deadline (homework).\n'
-    +'Start only = never scheduled earlier than its start. Neither = fully flexible. Timed calendar events default to both.'; }
-  pinBtn(t, which){
-    const h=React.createElement; const p=this.effPins(t);
-    const on = which==='start' ? p.ps : p.pe;
-    const explicit = which==='start' ? t.pinStart!=null : t.pinEnd!=null;
-    const what = which==='start' ? 'start' : 'due';
-    return h('span',{onClick:e=>{e.stopPropagation();this.togglePin(t.id,which);},onMouseDown:e=>e.stopPropagation(),
-      title:(on?('Pinned '+what):('Unpinned '+what))+(explicit?'':' (auto)')+' — click to toggle. '+this.PIN_HELP(),
-      style:{cursor:'pointer',fontSize:'9.5px',flex:'none',marginRight:'3px',userSelect:'none',
-        opacity:on?1:0.45, filter:on?'none':'grayscale(1)'}},'📌');
-  }
-
   /* Allotted-time ("Remaining" column, ported from CalImport.gs col-H + timeline.gs). The day's pool is the
      sum of day B's free intervals (window − meals − freeTime), so allotment can never exceed what the timeline
      can physically hold. Every non-fixed active task is Proportional: it splits the leftover pool weighted by
@@ -1910,8 +1912,8 @@ class Component extends DCLogic {
     if(B==null) B=today;
     /* PP-EXT: spent = that day's work only (getSpentOn reads the per-day ledger) → future days schedule fresh,
        and a task worked on prior days no longer has its lifetime spent wrongly subtracted from today's pool. */
-    /* PP-EXT: fixed (both-pinned) tasks occupy their clock span — they leave the flexible pool entirely and
-       their span is busy time, so the pool shrinks by exactly what the timeline will render as pinned blocks. */
+    /* PP-EXT: fixed appointments occupy their clock span — they leave the flexible pool entirely and
+       their span is busy time, so the pool shrinks by exactly what the timeline renders as fixed blocks. */
     const fixed=this.fixedBlocksToday(B, tasks);
     fixed.forEach(b=>{ const mins=Math.round((b.end-b.start)/60000);
       map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
@@ -2100,10 +2102,18 @@ class Component extends DCLogic {
   /* PP-EXT: set a start/end instant. Counterpart to clearDate — until this existed, dates could only be
      cleared, never edited (they arrived via quick-add parsing or gcal import only). Keeps the window
      ordered: dragging one edge past the other carries the other edge with it rather than inverting
-     [start,end], which computeAllotted/dayIntervals assume is non-negative. */
-  setDate(id,key,ms){
+     [start,end], which computeAllotted/dayIntervals assume is non-negative. `timed` is true when the
+     caller knows a real time was typed (including 00:00), false when it knows there is none, and
+     undefined when the existing derive-or-explicit flag should stay unchanged. */
+  setDate(id,key,ms,timed){
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       t[key]=ms;
+      if(timed!==undefined){
+        const flag=key==='start'?'startClock':'endClock';
+        t[flag]=timed?(this.hasClock(ms)?null:true):null;
+        if(!timed) t[key]=this.startOfDay(ms);
+        ms=t[key];
+      }
       /* An all-day end is the EXCLUSIVE next-day midnight, so the carried edge has to be re-encoded in
          those terms too — copying the raw instant across would leave end==start, which renders (end-1)
          as the day BEFORE the start and reads as an inverted window. */
@@ -2629,6 +2639,19 @@ class Component extends DCLogic {
     const yr = this.state.showYears ? (', '+String(d.getFullYear()).slice(2)) : '';
     return wd+' '+mo+' '+p(d.getDate())+yr + (dateOnly ? '' : (', '+p(d.getHours())+':'+p(d.getMinutes()))); /* PP-EXT */
   }
+  /* PP-EXT V1.5: pure due-chip bucket. All-day ends are exclusive, so classify their visible
+     due day (end-1ms). Specific today/tomorrow buckets outrank the <=1-week bucket. */
+  dueChipClass(task,today){
+    if(!task || task.end==null) return null;
+    const due=this.startOfDay(task.end-(task.allDay?1:0));
+    const base=this.startOfDay(today);
+    const days=Math.round((due-base)/this.DAY);
+    if(days<0 && (task.pct||0)<100) return 'overdue';
+    if(days===0) return 'today';
+    if(days===1) return 'tomorrow';
+    if(days>1 && days<=7) return 'week';
+    return 'later';
+  }
 
   /* ---------- natural-language date parser ----------
      Returns {date:ms|null, recur:rule|null, rest:string, priority:int|null, labels:[]} */
@@ -2719,43 +2742,91 @@ class Component extends DCLogic {
     }
     return base.getTime(); // day/week/month/year/weekday/monthDay: the base day is the first occurrence
   }
+  /* PP-EXT V1.6: parser-owned quick-add highlights. Offsets are validated UTF-16 indices over the
+     original input. Duplicate and overlapping claims collapse so rendering can never repeat text. */
+  normalizeQuickMatches(text, matches){
+    const n=(matches||[]).filter(m=>m && typeof m.kind==='string' &&
+      Number.isInteger(m.start) && Number.isInteger(m.end) &&
+      m.start>=0 && m.end>m.start && m.end<=text.length)
+      .sort((a,b)=>a.start-b.start || a.end-b.end);
+    const out=[];
+    for(const m of n){
+      const prev=out[out.length-1];
+      if(prev && m.start<prev.end){
+        if(m.start===prev.start && m.end===prev.end) continue;
+        prev.end=Math.max(prev.end,m.end);
+        continue;
+      }
+      out.push({kind:m.kind,start:m.start,end:m.end});
+    }
+    return out;
+  }
+  /* PP-EXT V1.6: turn normalized parser spans into lossless display segments for the inert mirror. */
+  quickHighlightSegments(text,matches){
+    const spans=this.normalizeQuickMatches(text,matches), out=[];
+    let at=0;
+    for(const m of spans){
+      if(at<m.start) out.push({text:text.slice(at,m.start),highlight:false,kind:null});
+      out.push({text:text.slice(m.start,m.end),highlight:true,kind:m.kind});
+      at=m.end;
+    }
+    if(at<text.length) out.push({text:text.slice(at),highlight:false,kind:null});
+    return out;
+  }
   parseDateText(text, baseMs){
     const now = baseMs!=null ? new Date(baseMs) : new Date();
     let s = ' '+text.toLowerCase()+' ';
+    const rawMatches=[];
+    const mark=(kind,a,b)=>rawMatches.push({kind,start:a-1,end:b-1});
+    const mask=(a,b)=>{ s=s.slice(0,a)+' '.repeat(b-a)+s.slice(b); };
+    const claim=(m,kind)=>{
+      if(!m) return null;
+      if(kind) mark(kind,m.index,m.index+m[0].length);
+      mask(m.index,m.index+m[0].length);
+      return m;
+    };
     /* PP-EXT: `end`/`dur` carry a parsed clock range or "for <dur>"; `clock` records whether an explicit
        time was written (a bare date defaults to 9am and must NOT be treated as a real clock commitment). */
     const result = {date:null, end:null, dur:null, clock:false, recur:null, priority:null, labels:[], until:null, rest:text};
     /* PP-EXT: the MONTHS()/WD() name tables the old hand-rolled date branches indexed are no longer
        read here — chrono owns month/weekday recognition now. Both accessors survive for other callers. */
-    let consumed=[];
-    const eat=(re)=>{ const m=s.match(re); if(m){ consumed.push(m[0].trim()); s=s.replace(m[0],' '); } return m; };
+    const eat=(re)=>claim(s.match(re),null);
 
     // priority pN / !!N
     let pm=eat(/\b!?p([1-4])\b/);
     if(pm) result.priority=parseInt(pm[1]);
 
     // labels @word
-    let lm; const lre=/@([a-z0-9_-]+)/g; let lx;
-    while((lx=lre.exec(s))){ result.labels.push(lx[1]); }
-    s=s.replace(/@([a-z0-9_-]+)/g,' ');
+    let lm; const lre=/@([a-z0-9_-]+)/g; let lx; const labelMatches=[];
+    while((lx=lre.exec(s))){ result.labels.push(lx[1]); labelMatches.push(lx); }
+    for(const m of labelMatches) mask(m.index,m.index+m[0].length);
 
     /* ---- clock range / duration ----
        PP-EXT: must run BEFORE the repeat-until clause and the relative-offset pass — "meeting from 5
        until 6pm" would otherwise be read as a repeat-until date, and "for 1 hour" as a +1h offset. */
-    const range=this.parseClockRange(s); if(range) s=s.replace(range.txt,' ');
-    const durPh=range?null:this.parseDurPhrase(s); if(durPh) s=s.replace(durPh.txt,' ');
+    const range=this.parseClockRange(s);
+    if(range){ const txt=range.txt.trim(), i=s.indexOf(txt); if(i>=0) claim({0:txt,index:i},'time'); }
+    const durPh=range?null:this.parseDurPhrase(s);
+    if(durPh){ const txt=durPh.txt.trim(), i=s.indexOf(txt); if(i>=0) claim({0:txt,index:i},'duration'); }
     if(durPh) result.dur=durPh.min;
 
     // ---- repeat-until ("until/till/through <date>") ----
     let um=s.match(/\b(?:until|till|thru|through|up\s+to)\s+(.+?)\s*$/);
-    if(um){ const sub=um[1]; const sp=this.parseDateText(sub, (baseMs!=null?baseMs:Date.now())); if(sp.date!=null){ result.until=sp.date; s=s.replace(um[0],' '); } }
+    if(um){ const sub=um[1].trim(); const sp=this.parseDateText(sub, (baseMs!=null?baseMs:Date.now())); if(sp.date!=null){
+      result.until=sp.date;
+      const txt=um[0].trim(), leading=um[0].indexOf(txt);
+      claim({0:txt,index:um.index+leading},'until');
+    } }
 
     // ---- recurrence ----
     /* PP-EXT: strip EVERY occurrence of the matched recurrence phrase (with a global re-run of the same
        pattern), not just the first — a title that happens to contain the trigger word twice (e.g. "Weekly
        sync every week @work") previously only consumed one occurrence, leaving the other stuck in the title. */
     let rm;
-    const eatAll=(re)=>{ s=s.replace(new RegExp(re.source,'g'),' '); };
+    const eatAll=(re)=>{
+      const all=Array.from(s.matchAll(new RegExp(re.source,'g')));
+      for(const m of all){ mark('recur',m.index,m.index+m[0].length); mask(m.index,m.index+m[0].length); }
+    };
     if((rm=s.match(/\bevery\s+weekday\b/))){ result.recur={kind:'weekday',label:'Every weekday'}; eatAll(/\bevery\s+weekday\b/); }
     else if((rm=s.match(/\bevery\s+(\d+)\s+(day|week|month)s?\b/))){ const n=parseInt(rm[1]); result.recur={kind:rm[2],n,label:'Every '+n+' '+rm[2]+(n>1?'s':'')}; eatAll(/\bevery\s+\d+\s+(?:day|week|month)s?\b/); }
     else if((rm=s.match(/\bevery\s+(\d+)(?:st|nd|rd|th)?\b/))){ result.recur={kind:'monthDay',day:parseInt(rm[1]),label:'Monthly on '+rm[1]}; eatAll(/\bevery\s+\d+(?:st|nd|rd|th)?\b/); }
@@ -2777,7 +2848,7 @@ class Component extends DCLogic {
        roll-forward). This replaces the hand-rolled today/weekday/numeric-date/relative-offset/
        bare-clock branches, whose substring matching invented dates out of ordinary words
        ("call friends" → Friday, "monitor server" → Monday) — the corruption bug class. */
-    let clock=null, date=null, chronoEnd=null, dateSpanText=null, softHour=null;
+    let clock=null, date=null, chronoEnd=null, dateSpanText=null, dateSpanIndex=-1, softHour=null;
     const eng = (typeof window!=='undefined' && window.chrono) ? window.chrono
               : (typeof chrono!=='undefined' ? chrono : null);
     if(range){ clock={h:range.sh,m:range.sm}; } /* PP-EXT: a range already carries the start clock */
@@ -2786,16 +2857,22 @@ class Component extends DCLogic {
        fires after `in`; a duration elsewhere ("homework ~2m") has no `in` and stays minutes, already
        claimed by parseDurPhrase above. `minutes`/`mins` are excluded by the word boundary. */
     let relOffset=false;
-    /* PP-EXT: snapshot the residue as the date matchers see it. The cue test below must measure what
-       sits immediately BEFORE the matched date span, and only this string has the span still in it
-       (and priority/labels/range/recurrence already out). Measuring against `text` would not work —
-       the pre-pass has shifted every offset. */
+    /* PP-EXT: snapshot the masked, source-aligned residue as the date matchers see it. The cue test
+       below measures what sits immediately before the matched date after unrelated passes are masked. */
     const sBeforeDate = s;
+    const prepExpr=/\b(?:by|on|in|due(?:\s+on)?|(?:not\s+)?before|deadline|no\s+later\s+than|starting|starts|start|begins|begin|after|from|at)\s+(?:the\s+)?$/i;
+    const claimDate=(m,kind)=>{
+      if(!m) return;
+      const pm=prepExpr.exec(s.slice(0,m.index));
+      const a=pm ? m.index-pm[0].length : m.index;
+      mark(kind,a,m.index+m[0].length);
+      mask(a,m.index+m[0].length);
+    };
     const moM = s.match(/\bin\s+(\d+)\s*(?:months?|mo|m)\b/i);
     if(moM){ const d=new Date(now); d.setMonth(d.getMonth()+parseInt(moM[1]));
       /* keep the time-of-day, like every other relative offset ("in 3 days" lands at now's clock) —
          `relOffset` makes that hold for all spellings, not just the ones the 9am guard's regex sees. */
-      date=d; relOffset=true; dateSpanText=moM[0]; s=this.eatWithPrep(s, moM[0]); }
+      date=d; relOffset=true; dateSpanText=moM[0]; dateSpanIndex=moM.index; claimDate(moM,'date'); }
     if(!date && eng){
       /* A bare "N to M" / "5-6" with no colon and no meridiem is a COUNT, not a clock ("buy 5 to 6
          apples"). chrono happily reads it as 05:00–06:00, so drop those spans — the pre-pass
@@ -2821,7 +2898,12 @@ class Component extends DCLogic {
         date = new Date(r0.start.date());
         if(r0.end) chronoEnd = r0.end.date();
         dateSpanText = r0.text;
-        s = this.eatWithPrep(s, r0.text);
+        dateSpanIndex = Number.isInteger(r0.index) ? r0.index : s.indexOf(r0.text);
+        if(dateSpanIndex>=0){
+          const temporal={0:r0.text,index:dateSpanIndex};
+          const isDay=['day','weekday','month','year'].some(u=>r0.start.isCertain(u));
+          claimDate(temporal,isDay?'date':'time');
+        }
       }
     }
     /* PP-EXT: chrono returns nothing for a bare ordinal ("follow up on the 3rd", "by the 20th"), so
@@ -2832,7 +2914,7 @@ class Component extends DCLogic {
       if(om){ const day=parseInt(om[1]);
         const d=this.atMidnight(new Date(now.getFullYear(), now.getMonth(), day));
         if(d.getTime() < this.atMidnight(new Date(now)).getTime()) d.setMonth(d.getMonth()+1);
-        date=d; dateSpanText=om[0]; s=this.eatWithPrep(s, om[0]); }
+        date=d; dateSpanText=om[0]; dateSpanIndex=om.index; claimDate(om,'date'); }
     }
     /* PP-EXT: a clock with no day means today — rolling to tomorrow if that instant already passed.
        The pre-pass strips a clock RANGE before chrono runs, so "call client 2-3pm" reaches here with a
@@ -2842,9 +2924,10 @@ class Component extends DCLogic {
       if(d.getTime()<now.getTime()) d.setDate(d.getDate()+1); date=d; }
     result.clock=!!clock;
 
-    /* PP-EXT: the "did the user give a relative offset?" guard needs word boundaries — bare /days?/ also
-       matched the "day" inside "friday"/"monday", so any weekday task silently lost the 9am default. */
-    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else if(!relOffset && !/\b(?:days?|weeks?|months?|hours?)\b/.test(text)) date.setHours(9,0,0,0); result.date=date.getTime(); }
+    /* PP-EXT: a bare day is MIDNIGHT, not a 9am placeholder. The placeholder existed only so an
+       untimed task had somewhere to sit on the timeline; shapes are now derived from whether a real
+       clock was written (result.clock), so a fake hour would read as a real appointment. */
+    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else if(!relOffset && !/\b(?:days?|weeks?|months?|hours?)\b/.test(text)) date.setHours(0,0,0,0); result.date=date.getTime(); }
     /* PP-EXT: resolve the end instant once the start is known. A range that ends at/before its start
        crosses midnight ("23:00-01:00") and rolls to the next day. */
     if(result.date!=null){
@@ -2858,11 +2941,11 @@ class Component extends DCLogic {
     }
     /* ---- PP-EXT V1.1B: shape the temporal anchors from the found day + cues + clock ----
        The raw `date`/`dur`/`clock` above stay untouched (datePick + the quick-add preview read them);
-       these SHAPED fields (start/end/pinStart/pinEnd/mile) are the task-model contract runQuickAdd/setDate
+       these SHAPED fields (start/end/startClock/endClock/mile) are the task-model contract runQuickAdd/setDate
        consume. Regions R0–R11/RM + the binding rule are enumerated in architecture.md → "Parser task-type
        cases". A floating/deadline parse emits NULL start (never Date.now()), so an undated task stays a
        ghost (V1.2) rather than being silently stamped onto today. */
-    result.start=null; result.pinStart=null; result.pinEnd=null;
+    result.start=null; result.startClock=null; result.endClock=null;
     /* PP-EXT: milestone markers are the diamond, a leading `*`, or the explicit word "milestone".
        The old `\bmile\b|\bms\b` alternatives were part of the corruption class — they turned ordinary
        titles ("run a mile", "email ms johnson") into zero-length midnight markers. */
@@ -2870,7 +2953,7 @@ class Component extends DCLogic {
     /* PP-EXT: a cue binds the date's ROLE only when it is the connector immediately before the date
        span (spec §5 P1·E). The old whole-string test let any title word mis-bind — "prep before
        meeting friday" read "before" as a deadline cue and turned a start into a due date. */
-    const spanIdx  = dateSpanText ? sBeforeDate.indexOf(dateSpanText) : -1;
+    const spanIdx  = dateSpanText ? dateSpanIndex : -1;
     const cueBefore= spanIdx>=0 ? sBeforeDate.slice(0, spanIdx) : '';
     const dueCue   = /\b(?:by|due(?:\s+on)?|before|deadline|no\s+later\s+than)\s+(?:the\s+)?$/.test(cueBefore);
     const startCue = /\b(?:start|starts|starting|from|after|not\s+before|begins?)\s+(?:the\s+)?$/.test(cueBefore);
@@ -2881,20 +2964,20 @@ class Component extends DCLogic {
       if(result.date!=null){ const d=this.atMidnight(new Date(result.date)).getTime(); result.start=d; result.end=d; }
       else { result.end=null; }
       result.dur=null;
-    } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges pinned
-      result.start=result.date; result.pinStart=true; result.pinEnd=true;
+    } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges clocked
+      result.start=result.date; result.startClock=true; result.endClock=true;
     } else if(result.date!=null){                // a single day, no span — bind by role (the binding rule)
       if(dueCue && !startCue){                   // R5 / R6 / R11 — deadline (a START cue wins the tie: "not
                                                  // before X" matches BOTH — the bare `before` in dueCue and
                                                  // `not before` in startCue — and must bind as not-before, R4/R2)
-        result.pinEnd=true;
+        result.endClock=!!clock;
         if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
         else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD
       } else if(hasClock){                        // R2 / R10 — start clock, open end
-        result.start=result.date; result.pinStart=true; result.pinEnd=false; result.end=null; /* PP-EXT: Point tuple — no end pinned so it can't collapse to a null-end fixed block */
+        result.start=result.date; result.startClock=true; result.end=null;
       } else if(startCue){                        // R4 — not-before (start-cued all-day)
-        result.start=result.date; result.pinStart=true; result.end=null;
-      } else {                                    // R8 — uncued bare day → start, pins left null (effPins default)
+        result.start=result.date; result.startClock=null; result.end=null;
+      } else {                                    // R8 — uncued bare day → start, clock flags left null (derive: midnight ⇒ untimed)
         result.start=result.date; result.end=null;
       }
     } // else R0 (floating) / R1 (duration-only): start & end stay null; dur (if any) is the movable budget
@@ -2914,8 +2997,8 @@ class Component extends DCLogic {
       const dueEnd = result.clock ? anchorDay
         : (()=>{ const e=new Date(anchorDay); e.setHours(23,59,59,999); return e.getTime(); })();
       result.candidates = [
-        { kind:'anchor', tuple:{ pinStart:true, pinEnd:false, start:anchorDay, end:null, planned:0 } },
-        { kind:'due',    tuple:{ pinStart:false, pinEnd:true, start:null, end:dueEnd } },
+        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:null, start:anchorDay, end:null, planned:0 } },
+        { kind:'due',    tuple:{ startClock:null, endClock:!!result.clock, start:null, end:dueEnd } },
         /* slot 3 (block-with-default-duration) intentionally empty in v1 — gated behind §7 */
       ];
       result.ambiguous = result.clock ? 'time' : (result.date==null ? 'recur' : 'day');
@@ -2925,6 +3008,7 @@ class Component extends DCLogic {
     const leftover = s.split(/\s+/).filter(Boolean);
     const used = {};
     result.rest = text.split(/\s+/).filter(w=>{ const lw=w.toLowerCase(); if(leftover.includes(lw) && (used[lw]||0) < leftover.filter(x=>x===lw).length){ used[lw]=(used[lw]||0)+1; return true; } return false; }).join(' ');
+    result.matches=this.normalizeQuickMatches(text, rawMatches);
     return result;
   }
 
@@ -3121,14 +3205,16 @@ class Component extends DCLogic {
     if(!this.state.quickOpen) return null;
     const h=React.createElement;
     const parsed = this.state.quickText.trim() ? this.parseDateText(this.state.quickText) : null;
-    const chip=(txt,col)=>h('span',{style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',background:col,borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap'}},txt);
+    const segments=this.quickHighlightSegments(this.state.quickText,parsed?parsed.matches:[]);
+    const chip=(txt,col)=>h('span',{'data-qa':'quick-hint',style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',background:col,borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap'}},txt);
     const hints=[];
     if(parsed){
       if(/\bmilestone\b|^\*/i.test(this.state.quickText)) hints.push(chip('◆ Milestone','#8957e5'));
-      if(parsed.date!=null) hints.push(chip(this.fmtDT(parsed.date), this._accent));
+      /* PP-EXT V1.6: untimed parser anchors are dates, not midnight appointments. */
+      if(parsed.date!=null) hints.push(chip(this.fmtDT(parsed.date,!parsed.clock), this._accent));
       /* PP-EXT: surface a parsed clock range / "for <dur>" — without this a range looks identical to a
          bare start time, giving no sign the end was understood or that it becomes a fixed block. */
-      if(parsed.end!=null) hints.push(chip('→ '+this.fmtDT(parsed.end)+' · '+this.fmtDur(parsed.dur), this._accent));
+      if(parsed.end!=null) hints.push(chip('→ '+this.fmtDT(parsed.end,!parsed.endClock)+' · '+this.fmtDur(parsed.dur), this._accent));
       else if(parsed.dur) hints.push(chip('⏱ '+this.fmtDur(parsed.dur), this._accent));
       if(parsed.recur) hints.push(chip('↻ '+parsed.recur.label,'var(--success-strong)'));
       if(parsed.priority) hints.push(chip('P'+parsed.priority, this.PCOL[parsed.priority]));
@@ -3150,8 +3236,37 @@ class Component extends DCLogic {
       h('div',{style:{display:'inline-flex',gap:'2px',padding:'2px',background:'var(--field-bg)',border:'1px solid var(--field-border)',borderRadius:'8px'}},
         seg('anchor',ambigLabels.anchor), seg('due',ambigLabels.due))) : null;
     const close=()=>this.setState({quickOpen:false});
-    const card=h('div',{onMouseDown:e=>e.stopPropagation(),
-        style:{width:'520px',maxWidth:'92vw',background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'14px',
+    /* PP-EXT V1.6: the native input remains the sole editor. A source-aligned, aria-hidden mirror
+       paints parser-owned temporal spans behind it without receiving pointer or keyboard input. */
+    const inputMetrics={fontFamily:'inherit',fontSize:'13.5px',lineHeight:'28px',
+      letterSpacing:'inherit',padding:'0',height:'28px'};
+    const mirror=h('div',{'data-qa':'quick-highlight-mirror','aria-hidden':'true',
+      style:Object.assign({},inputMetrics,{position:'absolute',inset:0,color:'transparent',
+        pointerEvents:'none',overflow:'hidden',whiteSpace:'pre'})},
+      ...segments.map((seg,i)=>seg.highlight
+        ? h('span',{key:i,'data-qa':'quick-highlight','data-kind':seg.kind,
+            style:{color:'transparent',background:'color-mix(in srgb, '+this._accent+' 24%, transparent)',
+              borderRadius:'3px'}},seg.text)
+        : seg.text));
+    const input=h('input',{ref:el=>{ const isNew=el&&!this.quickEl; this.quickEl=el; if(isNew) el.focus(); },
+      value:this.state.quickText, placeholder:'Quick add — e.g. "Sim tuning tomorrow at 4pm p1 every week @sim"  (Enter to add)',
+      /* PP-EXT (Group 3): reset the chooser to the safe default on every text change — simplest
+         correct version of the re-parse rule; a leftover 'due' from a previous phrase can never
+         silently apply to a different parse. */
+      onChange:e=>this.setState({quickText:e.target.value, quickChoice:'anchor'}),
+      onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.runQuickAdd(e.shiftKey?'top':'bottom'); return; }
+        /* PP-EXT (Group 3): ←/→ flip the ambiguity chooser (owner-approved D4). Only intercepts the
+           caret while an ambiguous parse is showing the toggle; otherwise arrows behave normally. */
+        if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); } },
+      style:Object.assign({},inputMetrics,{position:'relative',zIndex:1,width:'100%',
+        background:'transparent',border:'none',outline:'none',color:'var(--text)'})});
+    const inputWrap=h('div',{'data-qa':'quick-input-wrap',
+      style:{position:'relative',flex:1,minWidth:0,height:'28px'}},mirror,input);
+    /* PP-EXT V1.6: anchor the input row to a fixed viewport position. Hint/chooser rows grow downward
+       instead of making flex centering lift the text the user is actively editing. */
+    const card=h('div',{'data-qa':'quick-card',onMouseDown:e=>e.stopPropagation(),
+        style:{position:'absolute',top:'calc(50% - 48px)',left:'50%',transform:'translateX(-50%)',
+          width:'520px',maxWidth:'92vw',background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'14px',
           boxShadow:'0 24px 70px rgba(0,0,0,0.55)',padding:'18px 20px'}},
       h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:'12px'}},
         h('div',{style:{fontSize:'15px',fontWeight:800,color:'var(--text-strong)'}},'Quick add'),
@@ -3160,17 +3275,7 @@ class Component extends DCLogic {
         h('div',{style:{width:'18px',height:'18px',borderRadius:'50%',border:'1.6px solid var(--text-faint2)',flex:'none'}}),
         /* PP-EXT: ref focuses once per mount (this.quickEl is null just before a fresh mount) — not on every
            re-render, so typing doesn't fight the caret. */
-        h('input',{ref:el=>{ const isNew=el&&!this.quickEl; this.quickEl=el; if(isNew) el.focus(); },
-          value:this.state.quickText, placeholder:'Quick add — e.g. "Sim tuning tomorrow at 4pm p1 every week @sim"  (Enter to add)',
-          /* PP-EXT (Group 3): reset the chooser to the safe default on every text change — simplest
-             correct version of the re-parse rule; a leftover 'due' from a previous phrase can never
-             silently apply to a different parse. */
-          onChange:e=>this.setState({quickText:e.target.value, quickChoice:'anchor'}),
-          onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.runQuickAdd(e.shiftKey?'top':'bottom'); return; }
-            /* PP-EXT (Group 3): ←/→ flip the ambiguity chooser (owner-approved D4). Only intercepts the
-               caret while an ambiguous parse is showing the toggle; otherwise arrows behave normally. */
-            if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); } },
-          style:{flex:1,minWidth:0,background:'transparent',border:'none',outline:'none',color:'var(--text)',fontSize:'13.5px'}}),
+        inputWrap,
         h('button',{onClick:()=>this.runQuickAdd('bottom'),disabled:!this.state.quickText.trim(),
           style:{height:'28px',padding:'0 13px',background:this.state.quickText.trim()?this._accent:'var(--btn-bg)',
             border:'none',color:'var(--on-accent)',borderRadius:'6px',fontSize:'12.5px',fontWeight:600,
@@ -3322,12 +3427,16 @@ class Component extends DCLogic {
     d.setHours(cur.getHours(), cur.getMinutes(), 0, 0);
     this.dpSet({ms:d.getTime(), view:d.getTime()});
   }
-  /* Accepts "17:00", "5pm", "9" — a bare hour keeps the 24h reading. Junk leaves the draft untouched. */
+  /* Accepts "17:00", "5pm", "9" — a bare hour keeps the 24h reading. Blank clears the clock;
+     junk leaves the draft untouched. */
   dpSetTime(str){ const dp=this.state.datePick; if(!dp) return;
+    if(!String(str).trim()){
+      const ms=this.startOfDay(dp.ms); this.dpSet({ms,view:ms,dpTimed:false}); return;
+    }
     const tok=this.parseClockTok(str); let hh, mm;
     if(tok){ hh=this.clockH(tok,null); mm=tok.m; }
     else { const c=this.parseClock(String(str)); if(!c) return; hh=c.h; mm=c.m; }
-    const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime()});
+    const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime(),dpTimed:true});
   }
   /* Monday-first month grid; null cells pad the leading/trailing week. */
   dpGrid(viewMs){
@@ -3345,7 +3454,7 @@ class Component extends DCLogic {
     /* Re-encode an all-day value: starts sit at midnight, ends at the exclusive next-day midnight. */
     if(t && t.allDay){ const d=this.atMidnight(new Date(ms));
       ms = dp.key==='end' ? d.getTime()+this.DAY : d.getTime(); }
-    this.setDate(dp.id, dp.key, ms);
+    this.setDate(dp.id, dp.key, ms, dp.dpTimed);
     this.setState({datePick:null});
   }
   renderDatePick(){
@@ -3393,12 +3502,16 @@ class Component extends DCLogic {
       onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.dpApply(); }
                      else if(e.key==='Escape'){ e.preventDefault(); this.closeDatePick(); } },
       style:{width:'100%',textAlign:'left',border:'1px solid var(--field-border)',marginBottom:'5px'}});
+    const timed=dp.dpTimed===undefined
+      ? (dp.key==='start'?this.hasStartTime(t):this.hasEndTime(t))
+      : dp.dpTimed;
     const preview=h('div',{style:{fontSize:'11px',color:'var(--text-mut)',fontVariantNumeric:'tabular-nums',marginBottom:'8px'}},
-      this.fmtDT(dp.ms, allDay));
+      this.fmtDT(dp.ms, allDay||!timed));
     const timeRow=allDay?null:h('div',{style:{display:'flex',alignItems:'center',gap:'8px',marginTop:'8px'}},
       h('div',{style:{fontSize:'11px',fontWeight:600,color:'var(--text-mut)'}},'TIME'),
       h('input',{className:'pp-num', type:'text', key:'tm'+dp.ms,
-        defaultValue:p2(draft.getHours())+':'+p2(draft.getMinutes()),
+        defaultValue:timed?(p2(draft.getHours())+':'+p2(draft.getMinutes())):'',
+        placeholder:'—',
         onBlur:e=>this.dpSetTime(e.target.value),
         onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } },
         style:{width:'70px',textAlign:'left',border:'1px solid var(--field-border)'}}));
@@ -3569,14 +3682,14 @@ class Component extends DCLogic {
        the parse is unambiguous → keep p's fields (no behaviour change). The 'anchor' tuple is identical
        to Track A's interim default, so only a 'due' pick actually changes what gets committed. */
     const tup = this.pickCandidate(p, this.state.quickChoice);
-    const f = { start:p.start, end:p.end, pinStart:p.pinStart, pinEnd:p.pinEnd, planned:p.dur||0 };
-    if(tup){ f.start=tup.start; f.end=tup.end; f.pinStart=tup.pinStart; f.pinEnd=tup.pinEnd; if(tup.planned!=null) f.planned=tup.planned; }
+    const f = { start:p.start, end:p.end, startClock:p.startClock, endClock:p.endClock, planned:p.dur||0 };
+    if(tup){ f.start=tup.start; f.end=tup.end; f.startClock=tup.startClock; f.endClock=tup.endClock; if(tup.planned!=null) f.planned=tup.planned; }
     this.commit(tasks=>{
       const id='t'+Math.random().toString(36).slice(2,8);
       const t=this.normalizeTask({id,name,type:p.mile?'Milestone':'Proportional',
         start:f.start, end:f.end, priority:p.priority||4, deps:[], pct:0,
         planned:f.planned, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
-        pinStart:f.pinStart, pinEnd:f.pinEnd, startClock:!!p.clock}); /* PP-EXT (#68): a bare day carries clock:false → agenda chip, not a phantom 9am Point */
+        startClock:f.startClock, endClock:f.endClock});
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
@@ -3863,7 +3976,7 @@ class Component extends DCLogic {
      All IO-free and unit-tested in tests/sync.gen.test.js (CLAUDE.md "keep new logic pure"). */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
-    'type','allDay','calendarId','eventId','pinStart','pinEnd','included','archivedAt','parentId','pin']; }
+    'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -4748,14 +4861,14 @@ class Component extends DCLogic {
         return h('div',{style:{padding:'2px 0 8px'}},
           h('button',{className:'pp-tbtn',onClick:()=>this.requestNotifyPermission()},'Enable browser notifications'),
           h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},'Notifications only fire while this tab is open (no backend). Nothing is sent until you enable them.')); })(),
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Start-pin heads-up (5 min before)',
-          this.infoNote('An urgent notification 5 minutes before a start-pinned task’s scheduled start. Requires a start pin on the task.')),
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Clocked-start heads-up (5 min before)',
+          this.infoNote('An urgent notification 5 minutes before a task’s clocked start.')),
         toggle(this.notifyOn('startPin'),()=>this.saveSettings({notify:Object.assign({},s.notify,{startPin:!this.notifyOn('startPin')})}))),
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Deadline at risk',
           this.infoNote('An urgent notification when a task’s remaining work no longer fits in the time left before it’s due. Fires at most once per task per day.')),
         toggle(this.notifyOn('deadlineRisk'),()=>this.saveSettings({notify:Object.assign({},s.notify,{deadlineRisk:!this.notifyOn('deadlineRisk')})}))),
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Scheduled block ended',
-          this.infoNote('A normal notification when a fixed (both start- and end-pinned) block reaches its end.')),
+          this.infoNote('A normal notification when a fixed appointment reaches its end.')),
         toggle(this.notifyOn('blockEnd'),()=>this.saveSettings({notify:Object.assign({},s.notify,{blockEnd:!this.notifyOn('blockEnd')})}))),
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Morning summary popup',
           this.infoNote('An in-app popup on the first open of each day with today’s counts and the tasks that still need planning. Auto-dismisses; not a browser notification (works without permission).')),
@@ -5015,7 +5128,7 @@ class Component extends DCLogic {
     finally{ this._allot=savedAllot; }
   }
   _buildDayTimelineInner(B, s){
-    /* PP-EXT: pins — fixed (both-pinned) tasks are busy time via fixedBlocksToday (the same source
+    /* PP-EXT: fixed appointments are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
     const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
     const kc=this.keepClearToday(B, this.state.tasks); /* PP-EXT: Point dividers */
@@ -5024,8 +5137,8 @@ class Component extends DCLogic {
     let free=di.free.slice();
     const remove=(a,b)=>{ const nf=[]; free.forEach(iv=>{ if(b<=iv.start||a>=iv.end){nf.push(iv);} else { if(a>iv.start)nf.push({start:iv.start,end:a}); if(b<iv.end)nf.push({start:b,end:iv.end}); } }); free=nf; };
     /* PP-EXT: EDF uses the CURRENT occurrence's due instant (dueMsOf), like isActiveToday — the base end of
-       an old recurring series is long past and would wrongly win every deadline tiebreak. Pin semantics:
-       dueMs (end-pin) clamps placement before the deadline; notBefore (start-pin) forbids earlier slots. */
+       an old recurring series is long past and would wrongly win every deadline tiebreak. Every end is a hard
+       deadline; a clocked start supplies the clock-of-day not-before boundary. */
     /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
     const kb=this.buildKids(this.state.tasks);
@@ -5033,10 +5146,10 @@ class Component extends DCLogic {
         && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
         && !(t.parentId!=null && kb.byId[t.parentId])
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.allotOf(t.id).allotted>0))
-      .map(t=>{ const p=this.effPins(t);
+      .map(t=>{
         const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.allotOf(t.id).allotted;
         return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
-          dueMs:p.pe?this.dueMsOf(t,B):null, notBefore:p.ps?this.notBeforeMsOf(t,B):null,
+          dueMs:this.dueMsOf(t,B), notBefore:this.hasStartTime(t)?this.notBeforeMsOf(t,B):null,
           rem:amt,origin:amt}; });
     flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
     const minChunk=s.minChunk||30; const segs=[];
@@ -5046,8 +5159,8 @@ class Component extends DCLogic {
     const fill=(task, rem, allowFragment)=>{ let guard=0;
       while(rem>0.5 && guard++<free.length+8){ let placed=false;
         for(const slot of free){
-          const st0=Math.max(slot.start, task.notBefore||0);                       /* PP-EXT: start-pin */
-          const en0=Math.min(slot.end, task.dueMs!=null?task.dueMs:Infinity);      /* PP-EXT: end-pin (due-by) */
+          const st0=Math.max(slot.start, task.notBefore||0);                       /* clocked not-before */
+          const en0=Math.min(slot.end, task.dueMs!=null?task.dueMs:Infinity);      /* hard due-by */
           const dur=(en0-st0)/60000; if(dur<=0) continue;
           const take=Math.min(rem,dur); if(!allowFragment && take<rem && take<minChunk) continue;
           const st=st0, en=st+take*60000;
@@ -6628,8 +6741,6 @@ class Component extends DCLogic {
     const curOcc = t.recur ? this.currentOcc(t) : null; /* PP-EXT: dates/progress track the current instance */
     const recIdx = curOcc ? curOcc.idx : 0;
     const dispPct = t.recur ? this.occPct(t,recIdx) : t.pct;
-    const dispComp = t.recur ? this.occCompletion(t,recIdx) : t.completion;
-    const dispStart = curOcc ? curOcc.start : t.start; /* PP-EXT */
     const dispEnd = curOcc ? curOcc.end : t.end;       /* PP-EXT */
     const done=dispPct>=100;
     const pcol=this.PCOL[t.priority]||'var(--pri-default)';
@@ -6637,6 +6748,17 @@ class Component extends DCLogic {
 
     const cell=(c,content,extra)=>h('div',{key:c.k,style:Object.assign({flex:'0 0 '+c.w+'px',padding:'0 9px',
       display:'flex',alignItems:'center',height:'100%',borderRight:'1px solid var(--row-border)',minWidth:0},extra||{})},content);
+
+    /* PP-EXT V1.5: Start/Due/%Done left the sheet, but due + recurrence stay glanceable under the name.
+       Current recurring occurrences supply `dispEnd`; the task shape stays untouched. */
+    const dueRecurChip=(()=>{
+      if(dispEnd==null && !t.recur) return null;
+      const tone=dispEnd==null ? 'recur' : this.dueChipClass(Object.assign({},t,{end:dispEnd,pct:dispPct}),this.startOfToday());
+      const dueText=dispEnd==null ? '' : this.fmtDT(t.allDay?dispEnd-1:dispEnd,true);
+      const recurText=t.recur ? ('↻ '+(t.recur.label||'Repeats')) : '';
+      const label=[dueText,recurText].filter(Boolean).join(' · ');
+      return h('span',{className:'pp-due-chip pp-due-chip--'+tone,title:label},label);
+    })();
 
     // ---- distinct milestone row ----
     // PP-EXT (Phase D bugfix): was a flat flex strip with its own fixed-width grip/diamond/seq offsets that
@@ -6655,16 +6777,17 @@ class Component extends DCLogic {
       if(this._glowIds && this._glowIds.has(t.id)) mbsh+=',inset 0 0 0 9999px rgba(245,181,54,0.18)'; /* PP-EXT: month-view day glow (Phase 6) */
       const mdeco=this.rowDropDeco(t,i); /* PP-EXT: drag-to-nest indented bar + parent-nest ring */
       if(mdeco.glow) mbsh+=mdeco.glow;
-      const mNameBlock=h('div',{style:{display:'flex',alignItems:'center',gap:'8px',minWidth:0,width:'100%'}},
-        mgrip, diamond,
-        h('span',{style:{color:'var(--text-faint)',fontVariantNumeric:'tabular-nums',fontSize:'11.5px',flex:'none'}}, seqOf[t.id]||''),
-        h('span',{style:{fontSize:'9px',fontWeight:700,letterSpacing:'0.6px',color:mcol,textTransform:'uppercase',
-          border:'1px solid '+mcol,borderRadius:'var(--r-1)',padding:'1px 5px',flex:'none'}},'◆ Milestone'),
-        h('span',{style:{fontSize:'var(--fs-3)',fontWeight:600,color:'var(--text)',
-          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',flex:1,minWidth:0}}, t.name));
-      const mEndCell=h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}}, this.fmtDT(dispEnd, t.allDay/* PP-EXT: current instance */));
+      const mNameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',minWidth:0,width:'100%'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:'8px',minWidth:0,width:'100%'}},
+          mgrip, diamond,
+          h('span',{style:{color:'var(--text-faint)',fontVariantNumeric:'tabular-nums',fontSize:'11.5px',flex:'none'}}, seqOf[t.id]||''),
+          h('span',{style:{fontSize:'9px',fontWeight:700,letterSpacing:'0.6px',color:mcol,textTransform:'uppercase',
+            border:'1px solid '+mcol,borderRadius:'var(--r-1)',padding:'1px 5px',flex:'none'}},'◆ Milestone'),
+          h('span',{style:{fontSize:'var(--fs-3)',fontWeight:600,color:'var(--text)',
+            whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',flex:1,minWidth:0}}, t.name)),
+        dueRecurChip);
       const mDash=h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—');
-      const mContent={name:mNameBlock, end:mEndCell};
+      const mContent={name:mNameBlock};
       return h('div',{key:t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
@@ -6717,10 +6840,9 @@ class Component extends DCLogic {
         caret, /* PP-EXT */
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
-        t.recur?h('span',{style:{marginRight:'5px',fontSize:'11px'},title:'Repeats · '+(t.recur.label||'')},'🔁'):null,
         t.name, kidBadge /* PP-EXT */),
-      (depChips.length||(t.labels&&t.labels.length)||t.recur)?h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',alignItems:'center'}},
-        t.recur?h('span',{style:{fontSize:'9.5px',color:'var(--success)',background:'rgba(47,158,95,0.12)',border:'1px solid rgba(47,158,95,0.3)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,whiteSpace:'nowrap'}},'↻ '+t.recur.label):null,
+      (dueRecurChip||depChips.length||(t.labels&&t.labels.length))?h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',alignItems:'center',minWidth:0}},
+        dueRecurChip,
         ...(t.labels||[]).map(l=>h('span',{key:l,style:{fontSize:'9.5px',color:'var(--tag-text)',background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,whiteSpace:'nowrap'}},'@'+l)),
         ...depChips):null
     );
@@ -6741,17 +6863,6 @@ class Component extends DCLogic {
             : 'Excluded from today (auto) · click to include';
           return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
             title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph); })();
-
-    /* PP-EXT: click-to-edit date cell — the tasks-table entry point to the picker. `ms` is the DISPLAYED
-       instant (the current occurrence for a recurring task); openDatePick reads the task's own base value,
-       which is what setDate writes, and the picker labels a series edit as such. */
-    const dateCell=(key,ms,col)=>h('span',{onClick:e=>{e.stopPropagation(); this.openDatePick(e,t.id,key);},
-      onMouseDown:e=>e.stopPropagation(), title:'Click to edit',
-      style:{fontSize:'11.5px',color:col,fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap',cursor:'pointer',
-        padding:'1px 4px',borderRadius:'4px',display:'inline-block'},
-      onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
-      onMouseLeave:e=>e.currentTarget.style.background='transparent'},
-      this.fmtDT(ms, t.allDay));
 
     const durIn=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
       onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
@@ -6796,42 +6907,18 @@ class Component extends DCLogic {
       onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
       style:{textAlign:'left',color:'var(--text-2)'}});
 
-    /* PP-EXT: % Done is now stepped with −/+ buttons (owner request). The bar remains a visual + click-to-set. */
-    const pctBtn=(label,dir)=>h('div',{onMouseDown:e=>e.stopPropagation(),
-      onClick:e=>{e.stopPropagation(); this.stepPct(t.id,dir);},
-      title:(dir>0?'Increase':'Decrease')+' % Done by '+this.PCT_STEP+'%',
-      style:{cursor:'pointer',flex:'none',width:'17px',height:'17px',display:'flex',alignItems:'center',justifyContent:'center',
-        fontSize:'13px',fontWeight:700,lineHeight:1,userSelect:'none',borderRadius:'3px',
-        color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)'}}, label);
-    const pctBar=h('div',{style:{display:'flex',alignItems:'center',gap:'5px',width:'100%'}},
-      pctBtn('−',-1),
-      h('div',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation(); const r=e.currentTarget.getBoundingClientRect(); this.setPct(t.id,(e.clientX-r.left)/r.width*100);},
-        title:t.recur?'Progress of current occurrence · click to set':'Click to set progress',
-        style:{position:'relative',flex:1,minWidth:0,height:'15px',background:'var(--pct-track)',borderRadius:'3px',overflow:'hidden',cursor:'pointer'}},
-        h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:dispPct+'%',background:done?'var(--success-strong)':(this._accent||'#3f7bd6')}}),
-        h('span',{style:{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',
-          fontSize:'10.5px',fontWeight:600,color:dispPct>50?'var(--on-accent)':'var(--text-num)'}}, dispPct+'%')),
-      pctBtn('+',1));
-
     /* PP-EXT (V1.2 round4): both of these keyed off `isChore` (planned<=0), which let a DURATION suppress
        date-derived facts — a zero-duration task with a past due date was never flagged overdue, and its span
        always read "—" even with both dates set. Same rule as the Gantt: dates decide, `planned` doesn't.
        "—" now means "no span to measure" (an edge is null), which is what `durDays` already returns 0 for. */
     const durStr = (t.start==null||t.end==null) ? '—' : Math.round(this.durDays(t))+'d';
-    const overdue = !done && dispEnd!=null && dispEnd < Date.now(); /* PP-EXT: current instance */
-
     const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
       style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
       name:nameBlock, incl:inclCell,
-      start:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'start'), /* PP-EXT: start pin */
-        dateCell('start', dispStart, 'var(--text-num)') /* PP-EXT: current instance, date-only if all-day */),
-      end:h('div',{style:{display:'flex',alignItems:'center',minWidth:0}}, this.pinBtn(t,'end'), /* PP-EXT: due pin */
-        dateCell('end', t.allDay?dispEnd-1:dispEnd, overdue?'var(--danger)':'var(--text-num)') /* PP-EXT */),
       dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
-      planned: durIn('planned'), spent:spentCell, predicted:predictedCell, pct:pctBar, tags:tagsCell, goal:goalCell,
-      cdate:h('span',{style:{fontSize:'11.5px',color:dispComp?'var(--success)':'var(--text-faint)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},this.fmtDT(dispComp)),
+      planned: durIn('planned'), spent:spentCell, predicted:predictedCell, tags:tagsCell, goal:goalCell,
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
@@ -7338,8 +7425,6 @@ class Component extends DCLogic {
     const x=Math.max(8, Math.min(m.x, vp.w-W-8)), y=Math.max(8, Math.min(m.y, vp.h-MAXH-8));
     const recurring=!!t.recur;
     const pct = recurring ? this.occPct(t, m.occIdx) : (t.pct||0);
-    const pins=this.effPins(t);
-
     const row=(content,onClick,extra,title)=>h('div',{onClick,title,style:Object.assign({display:'flex',alignItems:'center',gap:'11px',
       padding:'7px 14px',cursor:onClick?'pointer':'default',fontSize:'13px',color:'var(--text-2)'},extra||{}),
       onMouseEnter:e=>{ if(onClick) e.currentTarget.style.background='var(--menu-hover)'; },
@@ -7366,14 +7451,6 @@ class Component extends DCLogic {
         c.ok ? (()=>{ this.clearDate(t.id,key); this.closeBarMenu(); }) : null,
         c.ok?null:dis, c.why);
     };
-    /* --- pins: the "not buttons — pin state shows on the bar" rule means this menu is where they're SET --- */
-    const pinRow=(which)=>{
-      const on = which==='start' ? pins.ps : pins.pe;
-      const explicit = which==='start' ? t.pinStart!=null : t.pinEnd!=null;
-      const what = which==='start' ? 'start' : 'due';
-      return row([ic('📌'), (on?'Unpin ':'Pin ')+what, tail(on?('pinned'+(explicit?'':' (auto)')):('free'+(explicit?'':' (auto)')))],
-        ()=>{ this.togglePin(t.id,which); this.closeBarMenu(); }, null, this.PIN_HELP());
-    };
     /* --- repeat: presets only; a parser-made custom rule shows read-only so the menu can't silently flatten it --- */
     const active=this.recurPresetKey(t);
     const recurRows=(this.RECUR_PRESETS||[]).map(p=>row([ic(active===p.k?'✓':' '), p.label],
@@ -7390,8 +7467,6 @@ class Component extends DCLogic {
       recurring?h('div',{style:{padding:'0 14px 4px',fontSize:'10.5px',color:'var(--text-faint2)'}},'occurrence '+(m.occIdx+1)):null,
       divider,
       label('Dates'), dateRow('start'), dateRow('end'), clearRow('start'), clearRow('end'),
-      divider,
-      label('Schedule pins', this.PIN_HELP()), pinRow('start'), pinRow('end'),
       divider,
       label('Progress'),
       row([ic('◍'),'% done…',tail(pct+'%')],()=>{ this.closeBarMenu(); this.openPctPop(t.id, m.cx, m.cy); }),
@@ -7575,7 +7650,7 @@ class Component extends DCLogic {
     const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
-      field(h('span',null,'Include today',this.infoNote('Whether this task counts toward today’s schedule and allotment. Auto = included when today falls in [start, due] (or a derived ghost window if it has no dates); click to force it on/off ("manual"), or snooze it a few days without turning it off entirely. Milestones and tasks with no Planned time never allot. When it happens is set by Schedule pins, not here.')),inclCtl),
+      field(h('span',null,'Include today',this.infoNote('Whether this task counts toward today’s schedule and allotment. Auto = included when today falls in [start, due] (or a derived ghost window if it has no dates); click to force it on/off ("manual"), or snooze it a few days without turning it off entirely. Milestones and tasks with no Planned time never allot. Dates and typed times determine when it happens.')),inclCtl),
       /* PP-EXT: subtasks — parent link + one-click unnest */
       (t.parentId&&byId[t.parentId])?field('Subtask of',h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
         h('span',{onClick:()=>this.openDetail(t.parentId),style:{cursor:'pointer',fontSize:'13px',color:this._accent,
@@ -7585,14 +7660,6 @@ class Component extends DCLogic {
       field('Tags',tagsEditor),
       field('Start',valWithX(t.start,null,'start',t.allDay/* PP-EXT */)),
       field('Due',valWithX(t.end, (!done&&t.end!=null&&t.end<Date.now())?'var(--danger)':'var(--text-2)', 'end', t.allDay/* PP-EXT */)),
-      /* PP-EXT: schedule pins — fixed-at-clock-time vs due-by-deadline vs flexible (see PIN_HELP) */
-      field(h('span',null,'Schedule pins',this.infoNote(this.PIN_HELP())),
-        h('div',{style:{display:'flex',gap:'14px',alignItems:'center',fontSize:'12.5px',color:'var(--text-2)'}},
-          h('span',{style:{display:'flex',alignItems:'center',gap:'4px'}}, this.pinBtn(t,'start'), 'Start'),
-          h('span',{style:{display:'flex',alignItems:'center',gap:'4px'}}, this.pinBtn(t,'end'), 'Due'),
-          h('span',{style:{fontSize:'11px',color:'var(--text-faint2)'}},
-            (p=>(p.ps&&p.pe)?'fixed at its clock time':(p.pe?'due-by (finish before due)':(p.ps?'not before start':'fully flexible')))(this.effPins(t)))),
-      ),
       field('Duration',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'var(--danger-strong)':(this._schedWarn?'var(--warn)':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},

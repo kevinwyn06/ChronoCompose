@@ -72,6 +72,18 @@ test('setDate: start/end edits are undoable (they route through commit)', () => 
   assert.equal(t().start, before);
 });
 
+test('setDate: an explicit time sets the clock flag; clearing it returns to derived midnight', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.tasks = [c.normalizeTask({ id: 'd1', start: B })];
+  c.setDate('d1', 'start', B, false);
+  assert.equal(c.state.tasks[0].start, B);
+  assert.equal(c.state.tasks[0].startClock, null, 'derive: midnight reads as untimed');
+  c.setDate('d1', 'start', B, true);
+  assert.equal(c.state.tasks[0].startClock, true, 'explicit midnight is remembered');
+  assert.equal(c.hasStartTime(c.state.tasks[0]), true);
+});
+
 // ---------------------------------------------------------------------------
 // all-day round trip: stored ends are the EXCLUSIVE next-day midnight (dueInstant)
 // ---------------------------------------------------------------------------
@@ -105,6 +117,54 @@ test('dpApply: a timed task keeps its clock', () => {
   c.dpPickDay(at(2026, 6, 24, 0, 0)); // picking a day must not wipe the time
   c.dpApply();
   assert.equal(t().start, at(2026, 6, 24, 17, 30));
+});
+
+test('date picker: untimed dates render a blank TIME field and date-only preview', () => {
+  const B = at(2026, 6, 24);
+  const { c } = withTask({ start: B, startClock: null });
+  c.openDatePick(fakeEvent(), 't1', 'start');
+  const tree = c.renderDatePick();
+  const nodes = [];
+  (function walk(node) {
+    if(!node || typeof node !== 'object') return;
+    nodes.push(node);
+    (node.children || []).forEach(walk);
+  })(tree);
+  const timeInput = nodes.find(node => node.type === 'input' && node.props.defaultValue !== undefined);
+  assert.equal(timeInput.props.defaultValue, '', 'a bare date does not masquerade as 00:00');
+  const preview = nodes.find(node => node.type === 'div' && node.props.style?.fontVariantNumeric === 'tabular-nums'
+    && node.props.style?.marginBottom === '8px');
+  assert.equal(preview.children[0], c.fmtDT(B, true), 'untimed preview omits the clock');
+});
+
+test('date picker: explicit midnight renders 00:00 and applies startClock:true', () => {
+  const B = at(2026, 6, 24);
+  const { c, t } = withTask({ start: B, startClock: true });
+  c.openDatePick(fakeEvent(), 't1', 'start');
+  let tree = c.renderDatePick();
+  let timeInput;
+  (function walk(node) {
+    if(!node || typeof node !== 'object' || timeInput) return;
+    if(node.type === 'input' && node.props.defaultValue !== undefined) timeInput = node;
+    (node.children || []).forEach(walk);
+  })(tree);
+  assert.equal(timeInput.props.defaultValue, '00:00');
+  c.dpSetTime('00:00');
+  c.dpApply();
+  assert.equal(t().start, B);
+  assert.equal(t().startClock, true, 'typed 00:00 survives as an explicit clock');
+});
+
+test('date picker: clearing TIME applies untimed midnight with a null flag', () => {
+  const B = at(2026, 6, 24);
+  const { c, t } = withTask({ start: B + 17 * HOUR, startClock: null });
+  c.openDatePick(fakeEvent(), 't1', 'start');
+  c.dpSetTime('   ');
+  assert.equal(c.state.datePick.ms, B, 'the draft returns to midnight');
+  assert.equal(c.state.datePick.dpTimed, false);
+  c.dpApply();
+  assert.equal(t().start, B);
+  assert.equal(t().startClock, null);
 });
 
 // ---------------------------------------------------------------------------
@@ -292,7 +352,7 @@ test('barDragEdit: deadline ghost (start=null) — dragging the ghost START comm
 test('barDragEdit: deadline ghost — dragging the real END leaves the START null (does not de-ghost it)', () => {
   const c = make();
   const today = c.startOfToday();
-  const due = at(2026, 6, 30, 9, 0);
+  const due = today + 30 * DAY;
   const r = c.barDragEdit('end', 2 * DAY, today, due, null, due);
   assert.equal(r.start, null, 'the untouched ghost start stays null');
   assert.equal(r.end, due + 2 * DAY);
@@ -422,15 +482,13 @@ test('clearDate via the menu returns the edge to a DERIVED ghost (no residual da
   assert.equal(g.ghostEnd, false, 'the untouched due edge stays real');
 });
 
-test('each menu mutation is exactly ONE undo entry', () => {
+test('each remaining menu mutation is exactly ONE undo entry', () => {
   const { c } = withTask();
   const n = c.history.length;
   c.clearDate('t1', 'start');
   assert.equal(c.history.length, n + 1, 'clear → 1');
-  c.togglePin('t1', 'end');
-  assert.equal(c.history.length, n + 2, 'pin → 1');
   c.setRecur('t1', 'week');
-  assert.equal(c.history.length, n + 3, 'repeat → 1');
+  assert.equal(c.history.length, n + 2, 'repeat → 1');
 });
 
 // --- repeat presets ---
