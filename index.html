@@ -1013,13 +1013,60 @@ class Component extends DCLogic {
      status, Gantt-bar mute, and month-chip mute — so they can never
      disagree about what "opted out" means (design doc §3). Snoozing is a today-only concept — it never
      factors into isActiveOn's "other day" branch. */
-  isOptedOut(t){ return !this.isActiveTask(t) && (t.included!==true || (t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil)); }
+  isOptedOut(t){
+    if(this.isActiveTask(t)) return false;
+    if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
+    if(t.included===false) return true;
+    return t.included!==true && !this.isInheritedToday(t);
+  }
   /* PP-EXT V2.1: the most recently started running timer is the one stronger pressed/active task.
      V2.4 owns the later single-vs-multitask timer policy; this selector stays deterministic meanwhile. */
   activeTaskId(){ const run=this.state.running||{}; let id=null, latest=-Infinity;
     Object.keys(run).forEach(k=>{ const st=run[k]&&run[k].startedAt; if(st!=null && st>=latest){ latest=st; id=k; } });
     return id; }
   isActiveTask(t){ return !!t && t.id===this.activeTaskId(); }
+  /* PP-EXT V2.2: eligibility is an ambient fact, never an inclusion gate. A task is eligible when
+     today's day lies inside its real/derived occurrence window and every existing predecessor is done.
+     Missing predecessors remain non-blocking, matching the existing `startable` filter. Duration is
+     deliberately absent: zero-planned work can still be eligible (and V2.1 gives it a visible slice). */
+  isEligibleToday(t, tasks){
+    if(!t || t.archivedAt) return false;
+    const B=this.startOfToday();
+    const win=this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, B);
+    const inWindow=win && win.start!=null && win.end!=null
+      && this.startOfDay(win.start)<=B && B<=this.startOfDay(win.end);
+    if(!inWindow) return false;
+    const byId={}; (tasks||this.state.tasks||[]).forEach(x=>byId[x.id]=x);
+    return (t.deps||[]).every(d=>{
+      const p=byId[this.depId(d)];
+      if(!p) return true;
+      const oi=this.depOcc(d);
+      return +(oi==null?p.pct:this.occPct(p,oi))>=100;
+    });
+  }
+  /* PP-EXT V2.2: unfinished work that participated yesterday carries into today. `included:false`
+     is the user's explicit unpress and wins; null legacy/unpressed state may be auto-included. A day pin
+     records manual scheduling, while the normal other-day window represents auto scheduling. */
+  isInheritedToday(t){
+    if(!t || t.archivedAt || this.isMilestone(t) || t.included===false) return false;
+    const yesterday=this.startOfToday()-this.DAY;
+    const manual=!!(t.pin && t.pin.day===yesterday);
+    const win=this.isScheduled(t) ? this.occForDay(t, yesterday) : this.ghostSpan(t, this.startOfToday());
+    const done=t.recur && win && win.idx!=null ? this.occPct(t,win.idx)>=100 : (+t.pct||0)>=100;
+    if(done) return false;
+    const auto=!!(win && win.start!=null && win.end!=null
+      && this.startOfDay(win.start)<=yesterday && yesterday<=this.startOfDay(win.end));
+    return manual || auto;
+  }
+  /* PP-EXT V2.2: texture (eligibility) and tint (inheritance) are separate background layers.
+     The caller supplies selection/hover/pressed as the base, leaving depth and glow in box-shadow. */
+  ambientRowBackground(t, base){
+    const layers=[];
+    if(!this.isEligibleToday(t)) layers.push('repeating-linear-gradient(135deg, rgba(184,134,11,0.20) 0 3px, transparent 3px 9px)');
+    if(this.isInheritedToday(t)) layers.push('linear-gradient(rgba(77,112,156,0.13), rgba(77,112,156,0.13))');
+    layers.push(base||'transparent');
+    return layers.join(', ');
+  }
   /* PP-EXT V2.1: other-day allotment follows its window (dated: the [start,end]
      occurrence for B via occForDay, preserving per-day recurrence correctness on non-today days;
      dateless: ghostSpan anchored at the REAL today, never at B — anchoring at B would make a dateless
@@ -1035,7 +1082,7 @@ class Component extends DCLogic {
     if(B===this.startOfToday()){
       if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
       if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
-      return t.included===true; /* pressed is the whole today gate; eligibility never vetoes discretion */
+      return t.included===true || this.isInheritedToday(t); /* inherited legacy/unpressed work carries forward; explicit false still wins */
     }
     if(t.included===false) return false;
     return inWindow;
@@ -1046,7 +1093,7 @@ class Component extends DCLogic {
     if(this.isActiveTask(t)) return 'active';
     if(t.included===false) return 'off';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
-    return t.included===true ? 'pressed' : 'unpressed';
+    return (t.included===true || this.isInheritedToday(t)) ? 'pressed' : 'unpressed';
   }
   /* PP-EXT Track B: explicit include/exclude/snooze mutators (design doc §2 lifecycle) — the popover UI
      (Task 4) calls these instead of the old binary include toggle. Off supersedes snooze (turning off
@@ -6976,8 +7023,8 @@ class Component extends DCLogic {
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
-        background: sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
-          (depthState==='pressed'?'color-mix(in srgb, '+this._accent+' 6%, '+(i%2?'var(--sheet-alt)':'var(--sheet-bg)')+')':(i%2?'var(--sheet-alt)':'var(--sheet-bg)')))),
+        background:this.ambientRowBackground(t, sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
+          (depthState==='pressed'?'color-mix(in srgb, '+this._accent+' 6%, '+(i%2?'var(--sheet-alt)':'var(--sheet-bg)')+')':(i%2?'var(--sheet-alt)':'var(--sheet-bg)'))))),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
         borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,
@@ -7092,7 +7139,8 @@ class Component extends DCLogic {
              the expanded task's own Gantt row — hover/selection/border cover the whole thing — instead of the
              blank space reading as the following row. The bar itself stays centered in the top rowH (see ganttBlock). */
           style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:(this.rowH+this.descExtra(t))+'px',
-            background: sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'),
+            background:this.isMilestone(t)?(sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'))
+              :this.ambientRowBackground(t, sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent')),
             borderBottom:'1px solid var(--row-border-gantt)',
             boxShadow: (this._glowIds&&this._glowIds.has(t.id)?'inset 0 0 0 9999px rgba(245,181,54,0.16)':(crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'))}}); }), /* PP-EXT: month-view day glow */
       arrows, ...bars, todayLine);

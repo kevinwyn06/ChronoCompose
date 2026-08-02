@@ -16,6 +16,13 @@ single stronger active state; it participates even if previously unpressed and p
 the current time. Other-day columns remain date-window-derived. Non-Point pressed work with zero
 `planned` reserves `DEFAULT_TASK_MINUTES` (30 minutes), compressed evenly only when the pool is smaller.
 
+V2.2 adds two derived ambient signals without gating discretion. `isEligibleToday` requires today's day
+inside the real/derived occurrence window and all existing predecessors complete; planned duration is not
+part of eligibility. `isInheritedToday` detects unfinished work scheduled automatically or manually on
+yesterday, auto-includes legacy/unpressed state today, and yields to explicit off or snooze. Sheet and Gantt
+rows layer the ineligible hatch texture and inherited tint over their selection/hover base while keeping
+pressed/active depth and calendar glow in box-shadow.
+
 `autoSchedule` and `computeCPM`/`computeSlack` handle dependency-driven scheduling and critical path.
 Scheduling shapes are derived from dates, planned duration, and whether each edge has a user-entered clock.
 The unrelated manual drag-pin `{day,start,dur}` remains. Dates are epoch milliseconds; all durations are

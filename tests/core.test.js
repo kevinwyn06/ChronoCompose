@@ -56,12 +56,13 @@ test('normalizeTask fills defaults', () => {
   assert.strictEqual(t.priority, 4);
 });
 
-test('isActiveToday: explicit pressed state replaces date-window inference', () => {
+test('isActiveToday: explicit pressed state plus V2.2 inheritance replace today-window inference', () => {
   const c = make();
   c.state.nowTick = Date.now();
-  const B = Date.now();
+  const B = Date.now(), today=c.startOfToday();
   assert.strictEqual(c.isActiveToday(activeTask(c)), true, 'new/default task is pressed');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { included:null })), false, 'window alone no longer includes');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { included:null })), true, 'unfinished work scheduled yesterday inherits');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:today, end:today+DAY, included:null })), false, 'today window alone does not include');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), true, 'pressed future task is user discretion');
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:false })), false, 'excluded');
   assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
@@ -120,25 +121,27 @@ test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-
   for(const kind of [{ name:'dated', make:dated }, { name:'dateless', make:dateless }]){
     for(const c2 of cases){
       const t = kind.make(c2.over);
-      assert.strictEqual(c.isActiveOn(t, today), c2.today, `${kind.name}/${c2.label} @ today`);
+      const expectedToday=(kind.name==='dated'&&c2.label==='unpressed')?true:c2.today; /* V2.2: yesterday window carries unfinished work */
+      assert.strictEqual(c.isActiveOn(t, today), expectedToday, `${kind.name}/${c2.label} @ today`);
       assert.strictEqual(c.isActiveOn(t, otherDay), c2.other, `${kind.name}/${c2.label} @ other day`);
     }
   }
 });
 
-test('isOptedOut: any unpressed or actively snoozed task is out', () => {
+test('isOptedOut: unpressed/snoozed work is out unless V2.2 inherited it', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
   const today = c.startOfToday();
-  const t = () => activeTask(c);
+  const t = () => activeTask(c, {start:today,end:today+DAY});
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:false, snoozeUntil:null })), true, 'included:false alone');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today + DAY })), true, 'active snooze alone');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), true, 'null is unpressed');
+  assert.strictEqual(c.isOptedOut(activeTask(c,{included:null})), false, 'yesterday-scheduled null state is inherited');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:true, snoozeUntil: today })), false, 'expired snooze returns to pressed');
 });
 
-test('inclState: active is stronger than pressed; no window-inferred bucket remains', () => {
+test('inclState: active is stronger than pressed; inherited work receives pressed depth', () => {
   const c = make();
   c.state.nowTick = Date.now();
   const today = c.startOfToday();
@@ -148,7 +151,7 @@ test('inclState: active is stronger than pressed; no window-inferred bucket rema
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false, snoozeUntil: today+DAY })), 'off', 'off beats snoozed');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { snoozeUntil: today+DAY })), 'snoozed');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:true })), 'pressed');
-  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:null })), 'unpressed');
+  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:null })), 'pressed', 'inherited task is auto-included');
   assert.strictEqual(c.inclState(Object.assign(outWin(), { included:null })), 'unpressed');
   const active=Object.assign(outWin(), { included:false });
   c.state.running={ [active.id]:{startedAt:Date.now(),beat:Date.now()} };
