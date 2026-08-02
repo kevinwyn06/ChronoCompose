@@ -1906,6 +1906,30 @@ class Component extends DCLogic {
      columns (B ≠ today) allot with spent = 0 ("just simply schedule"). Multi-day timeline views compute a
      per-column map; renderVals caches today's map in _allot for the sheet's Predict column.
      Returns { [id]: {allotted, computed, active} }. `computed` = the auto value (for the override toggle). */
+  /* PP-EXT S1: pure compression seam. The default stays linear/proportional-by-planned; feature records
+     deliberately retain the full normalized task shape so a future learned implementation can use priority,
+     urgency/slack, labels, and other signals without changing computeAllotted or its callers. */
+  compressionSeam(features, availableMinutes){
+    const rows=features||[], out={};
+    let fixedSum=0, propPlanSum=0;
+    rows.forEach(f=>{
+      if(f.predictManual) fixedSum+=Math.max(0,f.predicted);
+      else propPlanSum+=Math.max(0,f.planned);
+    });
+    const pool=Math.max(0, Math.max(0,availableMinutes||0)-fixedSum);
+    rows.forEach(f=>{ const spent=Math.max(0,f.spent||0); let computed;
+      if(f.predictManual){
+        const pps=propPlanSum+Math.max(0,f.planned), pl=pool+Math.max(0,f.predicted);
+        computed=pps>0?Math.max(0,(Math.max(0,f.planned)/pps)*pl-spent):0;
+      }else{
+        const share=propPlanSum>0?(Math.max(0,f.planned)/propPlanSum)*pool:0;
+        computed=Math.max(0,share-spent);
+      }
+      const allotted=f.predictManual?Math.max(0,f.predicted):computed;
+      out[f.id]={allotted:Math.round(allotted),computed:Math.round(computed)};
+    });
+    return out;
+  }
   computeAllotted(tasks, B, opts){
     const map={};
     const today=this.startOfToday();
@@ -1929,22 +1953,9 @@ class Component extends DCLogic {
     const rawAvail=this.dayIntervals(B, this.packStart(B), fixed, kc).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
     const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
-    {
-      /* PP-EXT: no scheduling modes — every non-fixed active task is Proportional; a manual Predict override
-         takes a fixed slice off the top (and its auto value shows what it'd be if it rejoined the pool). */
-      let fixedSum=0, propPlanSum=0;
-      acts.forEach(t=>{ const spent=spentById[t.id];
-        if(t.predictManual) fixedSum+=Math.max(0,t.predicted);
-        else propPlanSum+=Math.max(0,t.planned); });
-      const pool=Math.max(0, avail-fixedSum);
-      acts.forEach(t=>{ const spent=spentById[t.id]; let computed;
-        if(t.predictManual){ /* the auto value = what it'd be if this override were off: rejoin the pool */
-          const pps=propPlanSum+Math.max(0,t.planned), pl=pool+Math.max(0,t.predicted);
-          computed = pps>0 ? Math.max(0,(Math.max(0,t.planned)/pps)*pl-spent) : 0; }
-        else { const share = propPlanSum>0 ? (Math.max(0,t.planned)/propPlanSum)*pool : 0; computed=Math.max(0,share-spent); }
-        const allotted = t.predictManual ? Math.max(0,t.predicted) : computed;
-        map[t.id]={allotted:Math.round(allotted), computed:Math.round(computed), active:true}; });
-    }
+    /* PP-EXT S1: one caller-facing compression seam; the default implementation is linear/proportional. */
+    const compressed=this.compressionSeam(acts.map(t=>Object.assign({},t,{spent:spentById[t.id]})), avail);
+    acts.forEach(t=>{ map[t.id]=Object.assign({},compressed[t.id],{active:true}); });
     tasks.forEach(t=>{ if(!map[t.id]) map[t.id]={allotted:0, computed:0, active:false}; });
     /* PP-EXT: subtasks — distribute each parent's allotted to its children proportional to child Planned
        (owner's model: parent keeps its own budget; if Σchild.planned < parent.planned the unassigned
@@ -5115,6 +5126,11 @@ class Component extends DCLogic {
      free slots (window − meals − freeTime, from dayIntervals); order priority → EDF (due) → longer-first;
      split on `minChunk`; merge adjacent chunks of the same task. `packFromNow` starts the plan at the current
      time. A relaxed second pass fills sub-minChunk fragments so a fragmented day doesn't strand whole tasks. */
+  /* PP-EXT S1: pure ordering seam. The default remains priority -> earliest due -> longer first and returns
+     a new array, leaving both the feature list and its records untouched for deterministic reuse. */
+  orderingSeam(features){
+    return (features||[]).slice().sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
+  }
   buildDayTimeline(B){
     const s=this.state.settings;
     const today=this.startOfToday();
@@ -5142,16 +5158,15 @@ class Component extends DCLogic {
     /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
     const kb=this.buildKids(this.state.tasks);
-    const flex=this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
+    const flex=this.orderingSeam(this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
         && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
         && !(t.parentId!=null && kb.byId[t.parentId])
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.allotOf(t.id).allotted>0))
       .map(t=>{
         const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.allotOf(t.id).allotted;
-        return {id:t.id,title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
+        return Object.assign({},t,{title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
           dueMs:this.dueMsOf(t,B), notBefore:this.hasStartTime(t)?this.notBeforeMsOf(t,B):null,
-          rem:amt,origin:amt}; });
-    flex.sort((a,b)=>(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
+          rem:amt,origin:amt}); }));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
        and placements consume usable span, so iterations are bounded by the (growing) slot count; the guard is

@@ -4,6 +4,12 @@
 fixed blocks, meals, breaks, and point keep-clear boundaries. `buildDayTimeline` packs the daily timeline
 and supplies its day-specific allotment map during synchronous rendering.
 
+S1 keeps both future learning hooks behind pure seams. `compressionSeam(features, availableMinutes)` is
+the default linear/proportional-by-planned allocator, including today's spent time and manual Predict
+overrides. `orderingSeam(features)` is the default priority, earliest-deadline, then longer-first order.
+Both receive feature records without mutating them, so a later learned implementation can use priority,
+urgency, slack, labels, or other task fields without changing scheduling callers.
+
 `autoSchedule` and `computeCPM`/`computeSlack` handle dependency-driven scheduling and critical path.
 Scheduling shapes are derived from dates, planned duration, and whether each edge has a user-entered clock.
 The unrelated manual drag-pin `{day,start,dur}` remains. Dates are epoch milliseconds; all durations are
