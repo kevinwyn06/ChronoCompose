@@ -37,14 +37,20 @@ test('V2.2 inheritance carries yesterday-scheduled unfinished work but respects 
   assert.strictEqual(c.isInheritedToday(recurDone),false,'completed yesterday occurrence does not inherit its series');
 });
 
-test('V2.2 ambient texture and tint compose with the caller background', () => {
+/* PP-EXT V2.9 §2: the V2.2 "texture and tint compose with the caller background" test is RETIRED with its
+   contract — `ambientRowBackground` no longer exists. What replaces it is the invariant that actually
+   matters after the strip: the paint is gone, but the predicates behind it are NOT, because
+   `isInheritedToday` decides what is on today via isActiveOn. Deleting the encoding must not quietly
+   delete the semantics. */
+test('V2.9 the ambient encoding is gone but its predicates still decide what is on today', () => {
   const c=make(); const B=c.startOfToday();
   const pred=activeTask(c,{id:'pred',pct:0});
   const both=activeTask(c,{id:'both',start:B-2*DAY,end:B-DAY,included:true,deps:['pred']});
   c.state.tasks=[pred,both];
-  const bg=c.ambientRowBackground(both,'var(--sel)');
 
-  assert.match(bg,/repeating-linear-gradient/,'ineligible texture is present');
-  assert.match(bg,/linear-gradient\(rgba\(77,112,156/,'inherited tint is present');
-  assert.match(bg,/var\(--sel\)$/,'selection remains the base layer');
+  assert.strictEqual(typeof c.ambientRowBackground,'undefined','the ambient background composer is deleted');
+  /* The two predicates the deleted paint used to read still report the same facts. */
+  assert.strictEqual(c.isEligibleToday(both,c.state.tasks),false,'ineligibility survives as a fact');
+  assert.strictEqual(c.isInheritedToday(both),true,'inheritance survives as a fact');
+  assert.strictEqual(c.isActiveToday(both),true,'and still carries the task onto today');
 });

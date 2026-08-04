@@ -16,18 +16,9 @@ test('V2.3 pure tag mutators normalize @tags, dedupe, remove, and preserve input
   assert.equal(c.normalizeTag('two words'), null, 'invalid multi-word tag is rejected');
 });
 
-test('V2.3 tasksByTagSection groups once by primary @tag and keeps subtrees together', () => {
-  const c = make();
-  const parent = activeTask(c, { id:'p', labels:['work'] });
-  const child = activeTask(c, { id:'c', parentId:'p', labels:['personal'] });
-  const study = activeTask(c, { id:'s', labels:['study'] });
-  const untagged = activeTask(c, { id:'u', labels:[] });
-  const sections = c.tasksByTagSection([parent, child, study, untagged]);
-
-  assert.deepEqual(sections.map(x => x.tag), ['work', 'study', null]);
-  assert.deepEqual(sections.map(x => x.tasks.map(t => t.id)), [['p', 'c'], ['s'], ['u']]);
-  assert.equal(sections.flatMap(x => x.tasks).length, 4, 'no multi-tag duplication');
-});
+/* V2.6 retired `tasksByTagSection`: sections became a first-class entity rather than a projection of
+   the primary @tag, so this test's contract no longer exists. Grouping is now covered by
+   tests/v2-sections.test.js; the pure tag mutators keep their coverage in the test above. */
 
 test('V2.3 add-time credits lifetime and today through the commit funnel', () => {
   const c = make();

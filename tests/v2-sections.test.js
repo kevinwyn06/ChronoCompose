@@ -1,0 +1,397 @@
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { make, activeTask } = require('./_load');
+
+/* V2.6 — sections as a first-class entity.
+   Spec: docs/superpowers/specs/2026-08-03-sections-and-triage-design.md §1-§2. */
+
+const secs = c => [
+  c.normalizeSection({ id:'s1', name:'Research', order:0 }),
+  c.normalizeSection({ id:'s2', name:'Admin',    order:1 }),
+];
+
+test('V2.6 tasksBySection groups by the SUBTREE ROOT section, never tearing parent/child apart', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  const parent = activeTask(c, { id:'p', sectionId:'s1' });
+  /* the child names a DIFFERENT section — the root must still win, verbatim from the V2.3 rule */
+  const child = activeTask(c, { id:'kid', parentId:'p', sectionId:'s2' });
+  const admin = activeTask(c, { id:'a', sectionId:'s2' });
+  const loose = activeTask(c, { id:'u', sectionId:null });
+
+  const out = c.tasksBySection([parent, child, admin, loose]);
+  assert.deepEqual(out.map(x => x.id), ['s1', 's2', null]);
+  assert.deepEqual(out.map(x => x.tasks.map(t => t.id)), [['p', 'kid'], ['a'], ['u']]);
+  assert.equal(out.flatMap(x => x.tasks).length, 4, 'each task appears exactly once');
+});
+
+test('V2.6 the No-section bucket renders LAST even when it is seen first', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  /* untagged task first in the list — V2.3 first-seen ordering would have put it at index 0 */
+  const out = c.tasksBySection([
+    activeTask(c, { id:'u', sectionId:null }),
+    activeTask(c, { id:'r', sectionId:'s1' }),
+  ]);
+  /* s2 is declared-but-empty and still renders; the point is that `null` is last regardless */
+  assert.deepEqual(out.map(x => x.id), ['s1', 's2', null]);
+  assert.equal(out[out.length - 1].id, null, 'No section is always last');
+});
+
+test('V2.6 sections order by `order`, ties broken by id, and empty sections still render', () => {
+  const c = make();
+  c.state.sections = [
+    c.normalizeSection({ id:'b', name:'B', order:5 }),
+    c.normalizeSection({ id:'a', name:'A', order:5 }),
+    c.normalizeSection({ id:'z', name:'Z', order:1 }),
+  ];
+  const out = c.tasksBySection([activeTask(c, { id:'t', sectionId:'a' })]);
+  assert.deepEqual(out.map(x => x.id), ['z', 'a', 'b'], 'order asc, then id');
+  assert.equal(out.find(x => x.id === 'z').tasks.length, 0, 'an empty section you created still renders');
+  assert.equal(out.some(x => x.id === null), false, 'an EMPTY No-section bucket does not render');
+});
+
+test('V2.6 a task pointing at a deleted section falls back to No section rather than vanishing', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  const orphan = activeTask(c, { id:'o', sectionId:'gone' });
+  const out = c.tasksBySection([orphan]);
+  assert.deepEqual(out[out.length - 1].tasks.map(t => t.id), ['o']);
+  assert.equal(out.flatMap(x => x.tasks).length, 1, 'the task is not lost');
+});
+
+test('V2.6 deleting a section dissolves its tasks to No section instead of deleting work', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [activeTask(c, { id:'x', sectionId:'s1' }), activeTask(c, { id:'y', sectionId:'s2' })];
+
+  c.deleteSection('s1');
+
+  assert.deepEqual(c.state.sections.map(s => s.id), ['s2']);
+  assert.equal(c.state.sections[0].order, 0, 'order is renumbered densely after a delete');
+  assert.equal(c.state.tasks.length, 2, 'no task was deleted');
+  assert.equal(c.state.tasks.find(t => t.id === 'x').sectionId, null, 'dissolved to No section');
+  assert.equal(c.state.tasks.find(t => t.id === 'y').sectionId, 's2', 'other sections untouched');
+});
+
+test('V2.6 section CRUD: append lands at the end, reorder renumbers densely, both are pure', () => {
+  const c = make();
+  const base = secs(c);
+  const added = c.addSectionTo(base, 'Later');
+  assert.equal(base.length, 2, 'addSectionTo does not mutate its input');
+  assert.equal(added[2].name, 'Later');
+  assert.equal(added[2].order, 2, 'appended after the current max order');
+
+  const moved = c.reorderSectionsIn(added, added[2].id, 0);
+  assert.deepEqual(moved.map(s => s.name), ['Later', 'Research', 'Admin']);
+  assert.deepEqual(moved.map(s => s.order), [0, 1, 2], 'order is renumbered densely');
+
+  const noop = c.reorderSectionsIn(added, 'missing', 0);
+  assert.equal(noop.length, 3, 'reordering an unknown id is a no-op, not a throw');
+});
+
+test('V2.6 migration promotes a tag only at threshold 2 and never consumes `labels`', () => {
+  const c = make();
+  const tasks = [
+    activeTask(c, { id:'w1', labels:['work', 'deep'] }),
+    activeTask(c, { id:'w2', labels:['work'] }),
+    activeTask(c, { id:'solo', labels:['reading'] }),   // singleton -> No section
+    activeTask(c, { id:'bare', labels:[] }),
+  ];
+  const { sections, changed } = c.migrateSectionsFromTags(tasks);
+
+  assert.deepEqual(sections.map(s => s.name), ['work'], 'only the >=2 tag is promoted');
+  assert.equal(changed, 2, 'only the two work tasks changed');
+  const byId = Object.fromEntries(tasks.map(t => [t.id, t]));
+  assert.equal(byId.w1.sectionId, sections[0].id);
+  assert.equal(byId.w2.sectionId, sections[0].id);
+  assert.equal(byId.solo.sectionId, null, 'a singleton tag lands in No section');
+  assert.equal(byId.bare.sectionId, null);
+  assert.deepEqual(byId.w1.labels, ['work', 'deep'], 'labels are left fully intact');
+  assert.deepEqual(byId.solo.labels, ['reading']);
+});
+
+test('V2.6 migration counts ROOT tasks only, so subtrees cannot inflate a tag past the threshold', () => {
+  const c = make();
+  const tasks = [
+    activeTask(c, { id:'p', labels:['solo'] }),
+    activeTask(c, { id:'k1', parentId:'p', labels:['solo'] }),
+    activeTask(c, { id:'k2', parentId:'p', labels:['solo'] }),
+  ];
+  const { sections } = c.migrateSectionsFromTags(tasks);
+  assert.deepEqual(sections, [], 'three tasks but only one root — below threshold 2');
+});
+
+test('V2.6 migration is idempotent on re-run', () => {
+  const c = make();
+  const tasks = [
+    activeTask(c, { id:'w1', labels:['work'] }),
+    activeTask(c, { id:'w2', labels:['work'] }),
+  ];
+  const first = c.migrateSectionsFromTags(tasks);
+  assert.equal(first.changed, 2);
+  assert.equal(tasks.every(t => t.sectionId != null), true, 'both assigned');
+
+  /* Re-running is STABLE in what it promotes and never orphans a task or eats a label. It is not
+     assignment-stable, because fresh section ids are minted each call — which is exactly why the real
+     guard is the pp-migrations flag in runOnceMigrations (asserted in the next test), not this function. */
+  const second = c.migrateSectionsFromTags(tasks);
+  assert.deepEqual(second.sections.map(s => s.name), first.sections.map(s => s.name),
+    'the same tag set is promoted every time');
+  assert.equal(tasks.every(t => t.sectionId != null), true, 'still assigned, never orphaned');
+  assert.deepEqual(tasks.map(t => t.labels), [['work'], ['work']], 'labels survive repeated runs');
+});
+
+test('V2.6 runOnceMigrations records the sections flag and does not re-run it', () => {
+  const c = make();
+  c.state.tasks = [];
+  const tasks = [
+    activeTask(c, { id:'w1', labels:['work'] }),
+    activeTask(c, { id:'w2', labels:['work'] }),
+  ];
+  /* make() constructs the app, and the constructor already ran runOnceMigrations over its own seed —
+     so clear the flag to observe a genuine first run against THESE tasks. */
+  const flags = JSON.parse(c.lsGet('pp-migrations') || '{}');
+  delete flags['sections-from-primary-tag'];
+  c.lsSet('pp-migrations', JSON.stringify(flags));
+
+  c.runOnceMigrations(tasks);
+  const done = JSON.parse(c.lsGet('pp-migrations') || '{}');
+  assert.equal(done['sections-from-primary-tag'], 1, 'flag is recorded');
+
+  const stored = JSON.parse(c.lsGet('pp-sections') || '[]');
+  assert.deepEqual(stored.map(s => s.name), ['work'], 'promoted section was persisted');
+
+  /* second run: the guard short-circuits, so a hand-edited sectionId survives */
+  tasks[0].sectionId = null;
+  c.runOnceMigrations(tasks);
+  assert.equal(tasks[0].sectionId, null, 'guarded migration did not re-stamp');
+});
+
+test('V2.6 sectionId defaults to null in normalizeTask and stays out of SYNC_FIELDS', () => {
+  const c = make();
+  assert.equal(c.normalizeTask({ id:'n' }).sectionId, null);
+  assert.equal(c.SYNC_FIELDS().includes('sectionId'), false,
+    'sectionId is deferred to the batched sync migration (spec §2.6)');
+  assert.equal(c.BACKUP_KEYS().includes('pp-sections'), true,
+    'local-only means backup is its only portability');
+  assert.equal(c.WS_SCOPED_KEYS().includes('pp-sections'), true,
+    'sections are per-account workspace data');
+});
+
+test('V2.6 assignment resolves to the subtree ROOT, so picking a section on a subtask works', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [
+    activeTask(c, { id:'p', sectionId:null }),
+    activeTask(c, { id:'kid', parentId:'p', sectionId:null }),
+    activeTask(c, { id:'loner', sectionId:null }),
+  ];
+
+  assert.equal(c.sectionRootId(c.state.tasks, 'kid'), 'p', 'walks to the subtree root');
+  assert.equal(c.sectionRootId(c.state.tasks, 'loner'), 'loner', 'a root is its own root');
+
+  /* choosing a section while a SUBTASK is selected must move the whole subtree, not stamp a field
+     that tasksBySection never reads */
+  c.setTaskSectionMulti(['kid'], 's1');
+  assert.equal(c.state.tasks.find(t => t.id === 'p').sectionId, 's1', 'the root moved');
+  assert.equal(c.state.tasks.find(t => t.id === 'kid').sectionId, null, 'the subtask is not stamped');
+
+  const grouped = c.tasksBySection(c.state.tasks);
+  assert.deepEqual(grouped.find(x => x.id === 's1').tasks.map(t => t.id), ['p', 'kid'],
+    'the subtree groups under the chosen section');
+});
+
+test('V2.6 multi-select assignment de-duplicates a parent and its own child to one move', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [
+    activeTask(c, { id:'p', sectionId:null }),
+    activeTask(c, { id:'kid', parentId:'p', sectionId:null }),
+    activeTask(c, { id:'other', sectionId:null }),
+  ];
+  c.setTaskSectionMulti(['p', 'kid', 'other'], 's2');
+  assert.equal(c.state.tasks.find(t => t.id === 'p').sectionId, 's2');
+  assert.equal(c.state.tasks.find(t => t.id === 'other').sectionId, 's2');
+  assert.equal(c.state.tasks.find(t => t.id === 'kid').sectionId, null, 'child rides along via its root');
+});
+
+test('V2.6 collapse removes rows from the FLATTENED list, not just from the paint', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.groupBy = 'section';
+  const tasks = [
+    activeTask(c, { id:'a', sectionId:'s1' }),
+    activeTask(c, { id:'b', sectionId:'s2' }),
+  ];
+
+  let proj = c.sectionProjection(tasks);
+  assert.deepEqual(c.flattenSections(proj).map(t => t.id), ['a', 'b']);
+  assert.equal(proj.every(s => s.collapsed === false), true);
+
+  c.toggleSectionCollapse('s1');
+  proj = c.sectionProjection(tasks);
+  assert.equal(proj.find(s => s.id === 's1').collapsed, true, 'the flag is stamped on the projection');
+  assert.deepEqual(c.flattenSections(proj).map(t => t.id), ['b'],
+    '_yTop is indexed by this list, so a collapsed row must leave it or every bar below shifts');
+  assert.equal(proj.find(s => s.id === 's1').tasks.length, 1, 'the header still knows its count');
+
+  c.toggleSectionCollapse('s1');
+  assert.deepEqual(c.flattenSections(c.sectionProjection(tasks)).map(t => t.id), ['a', 'b'], 'toggles back');
+});
+
+test('V2.6 REGRESSION: a collapsed section keeps its true task count', () => {
+  /* The panes receive _visTasks, which flattenSections has already stripped of collapsed rows. Re-projecting
+     that list showed a collapsed section as "0" in its own header. The projection must be built from the
+     UNFILTERED list and then cached, not rebuilt from the flattened one. */
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.groupBy = 'section';
+  const tasks = [
+    activeTask(c, { id:'a', sectionId:'s1' }),
+    activeTask(c, { id:'b', sectionId:'s1' }),
+    activeTask(c, { id:'z', sectionId:'s2' }),
+  ];
+  c.toggleSectionCollapse('s1');
+
+  const proj = c.sectionProjection(tasks);
+  assert.equal(proj.find(s => s.id === 's1').tasks.length, 2, 'the header still reports 2, not 0');
+
+  const flat = c.flattenSections(proj);
+  assert.deepEqual(flat.map(t => t.id), ['z'], 'but the collapsed rows are gone from the flat list');
+  /* the bug was re-projecting `flat`: */
+  const reprojected = c.sectionProjection(flat);
+  assert.equal(reprojected.find(s => s.id === 's1').tasks.length, 0,
+    'documents WHY the panes must not re-project the flattened list');
+});
+
+test('V2.6 collapse state persists to prefs and keys the null No-section bucket stably', () => {
+  const c = make();
+  c.toggleSectionCollapse(null);
+  assert.equal(c.isSectionCollapsed(null), true, 'No section can collapse despite a null id');
+  assert.equal(JSON.parse(c.lsGet('pp-prefs') || '{}').collapsedSections['__none'], 1, 'persisted under a stable key');
+  c.toggleSectionCollapse(null);
+  assert.equal(c.isSectionCollapsed(null), false);
+});
+
+test('V2.6 inline rename commits a trimmed name and ignores an empty one', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.startSectionEdit('s1');
+  assert.equal(c.state.secEdit, 's1');
+
+  c.commitSectionEdit('s1', '  Deep work  ');
+  assert.equal(c.state.sections.find(s => s.id === 's1').name, 'Deep work', 'trimmed');
+  assert.equal(c.state.secEdit, null, 'edit mode closes');
+
+  c.commitSectionEdit('s1', '   ');
+  assert.equal(c.state.sections.find(s => s.id === 's1').name, 'Deep work', 'blank is refused, old name kept');
+});
+
+test('V2.6 Group by: None yields one flat, header-less band containing every task', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  const tasks = [
+    activeTask(c, { id:'a', sectionId:'s1' }),
+    activeTask(c, { id:'b', sectionId:null }),
+  ];
+
+  c.state.groupBy = 'section';
+  /* s1 (has 'a'), s2 (declared, empty), No section (has 'b') */
+  assert.equal(c.sectionProjection(tasks).length, 3, 'grouped: a band per section plus No section');
+
+  c.state.groupBy = 'none';
+  const flat = c.sectionProjection(tasks);
+  assert.equal(flat.length, 1);
+  assert.equal(flat[0].flat, true, 'the flag both panes read to skip TAG_SECTION_H in lock-step');
+  assert.deepEqual(flat[0].tasks.map(t => t.id), ['a', 'b']);
+});
+
+/* ---- V2.6b: drag. Sections were reorderable only by ▲▼, and a task could only change section through the
+   row menu — so an EMPTY section was a place nothing could be put, which is the one thing a freshly created
+   section always is. Both gaps come down to the same missing fact: _yTop is indexed by TASKS, so it cannot
+   answer "which section owns this Y" and an empty section owns Y-space but no row. _secLayout supplies it. */
+
+/* Mirrors what renderGantt builds: header band + rows, per section, in paint order. */
+const layout = c => {
+  const H = c.TAG_SECTION_H, R = c.rowH;
+  return [
+    { id:'s1', top:0,        headerBottom:H,        bottom:H + 2*R, firstIndex:0, endIndex:2, collapsed:false },
+    { id:'s2', top:H + 2*R,  headerBottom:2*H+2*R,  bottom:2*H+2*R, firstIndex:2, endIndex:2, collapsed:false },
+    { id:null, top:2*H+2*R,  headerBottom:3*H+2*R,  bottom:3*H+3*R, firstIndex:2, endIndex:3, collapsed:false },
+  ];
+};
+
+test('V2.6b sectionAtY resolves a drop inside an EMPTY section, which has no task row to target', () => {
+  const c = make(); const L = layout(c); const H = c.TAG_SECTION_H, R = c.rowH;
+
+  assert.equal(c.sectionAtY(L, 5).id, 's1', 'inside s1 header');
+  assert.equal(c.sectionAtY(L, H + R + 1).id, 's1', 'over s1 second row');
+  /* s2 is declared but empty: its band is exactly its header, and it must still be a valid drop target */
+  assert.equal(c.sectionAtY(L, H + 2*R + 2).id, 's2');
+  assert.equal(c.sectionAtY(L, 2*H + 2*R + 4).id, null, 'No section');
+});
+
+test('V2.6b sectionAtY clamps past both ends rather than returning null', () => {
+  const c = make(); const L = layout(c);
+  assert.equal(c.sectionAtY(L, -50).id, 's1', 'overshooting upward still lands somewhere');
+  assert.equal(c.sectionAtY(L, 99999).id, null, 'overshooting downward lands in the last band');
+  assert.equal(c.sectionAtY([], 10), null, 'Group by: None has no bands, so no section drop');
+});
+
+test('V2.6b secDropIndex never orders a section after No section', () => {
+  const c = make(); const L = layout(c);
+  assert.equal(c.secDropIndex(L, 2), 0, 'in s1 → slot 0');
+  assert.equal(c.secDropIndex(L, c.TAG_SECTION_H + 2*c.rowH + 2), 1, 'in s2 → slot 1');
+  /* dropping over the No-section band clamps to the last DECLARED slot: No section is always last */
+  assert.equal(c.secDropIndex(L, 99999), 1);
+  assert.equal(c.secDropIndex([], 10), 0);
+});
+
+test('V2.6b dragging a section onto another swaps them via reorderSectionsIn', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  /* the band the cursor is in IS the target slot, because reorderSectionsIn removes then inserts */
+  const moved = c.reorderSectionsIn(c.state.sections, 's1', 1);
+  assert.deepEqual(moved.map(s => s.id), ['s2', 's1']);
+  assert.deepEqual(moved.map(s => s.order), [0, 1], 'order renumbered densely');
+});
+
+test('V2.6b a row drag into a section stamps sectionId in the SAME commit as the reorder', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [activeTask(c, { id:'a', sectionId:'s1' }), activeTask(c, { id:'b', sectionId:'s1' })];
+  c._visTasks = c.state.tasks.slice();
+  const before = c.history.length;
+
+  c.reorderRows(['a'], 2, undefined, 's2');
+  assert.equal(c.state.tasks.find(t => t.id === 'a').sectionId, 's2', 'dropped into the empty section');
+  assert.equal(c.state.tasks.find(t => t.id === 'b').sectionId, 's1', 'untouched row keeps its section');
+  assert.equal(c.history.length, before + 1, 'one drag is ONE undo step, not a reorder plus a re-section');
+});
+
+test('V2.6b sectionId undefined leaves sections alone; null really means No section', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [activeTask(c, { id:'a', sectionId:'s1' })];
+  c._visTasks = c.state.tasks.slice();
+
+  c.reorderRows(['a'], 0, undefined, undefined);
+  assert.equal(c.state.tasks.find(t => t.id === 'a').sectionId, 's1', 'a plain reorder is not a re-section');
+
+  c.reorderRows(['a'], 0, undefined, null);
+  assert.equal(c.state.tasks.find(t => t.id === 'a').sectionId, null, 'null is a real value, not "unset"');
+});
+
+test('V2.6b a NESTED drop does not stamp sectionId — the root owns the section', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  c.state.tasks = [activeTask(c, { id:'p', sectionId:'s1' }), activeTask(c, { id:'x', sectionId:'s1' })];
+  c._visTasks = c.state.tasks.slice();
+
+  /* drag x under p: reparent wins, and stamping x would write a field tasksBySection never reads */
+  c.reorderRows(['x'], 1, 'p', 's2');
+  const got = c.state.tasks.find(t => t.id === 'x');
+  assert.equal(got.parentId, 'p');
+  assert.equal(got.sectionId, 's1', 'unchanged: only roots carry a section');
+});

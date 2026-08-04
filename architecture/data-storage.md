@@ -25,8 +25,17 @@ All task mutation, undo snapshotting, persistence, auto-scheduling, and outbound
 The app is local/offline first. `wsKey(base)` returns a bare key for the anonymous workspace and
 `base::<uid>` for an authenticated workspace. Scoped access uses `lsGet`, `lsSet`, and `lsRemove`.
 
-Scoped keys: `pp-tasks`, `pp-settings`, `pp-prefs`, `pp-gcal`, `pp-run`, `pp-pomo`,
+Scoped keys: `pp-tasks`, `pp-sections`, `pp-settings`, `pp-prefs`, `pp-gcal`, `pp-run`, `pp-pomo`,
 `pp-notify`, `pp-migrations`, `pp-habits`, `pp-journal`, sync queues, and tombstones.
+
+`pp-prefs` view state includes `groupBy` (`section` | `inclusion` | `none`), `planView` (the Plan tab's
+sub-view, now including `select` and `matrix`), and `collapsedSections` (band key → truthy when
+collapsed). The inclusion bands use the reserved keys `__incl_in` / `__incl_out`; **absence of a key is
+not "expanded"** for `__incl_out`, which defaults to collapsed, so collapse toggles pass the effective
+painted state rather than reading the stored value alone. `pp-settings` gained `eisenhowerUrgentDays`
+(default 2). The Selection and Matrix views add **no** persisted task fields — they write the existing
+`included`, `snoozeUntil`, and `priority`. `sectionId` and `pp-sections` are still deliberately out of
+`SYNC_FIELDS`, joining the deferred batch with `snoozeUntil`.
 
 Global keys: `pp-theme`, `pp-sync`, `pp-workspace`, `pp-accounts`, and `pp-auth`. `pp-auth` is the
 one approved persisted account-session path. Google refresh tokens live only server-side in

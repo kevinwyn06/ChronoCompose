@@ -143,6 +143,14 @@ input,select,button{font-family:inherit}
 .pp-rsz{position:absolute;top:0;bottom:0;right:-4px;width:8px;cursor:col-resize;z-index:8}
 .pp-rsz::after{content:"";position:absolute;top:9px;bottom:9px;left:3px;width:2px;border-radius:1px;background:transparent}
 .pp-rsz:hover::after{background:var(--focus-ring)}
+/* PP-EXT V2.9 §1: text-selection suppression for the three drags that cannot preventDefault on mousedown
+   (row drag, section-header drag, column reorder) because the same mousedown must also focus an inline
+   editor and place a caret. Applied at DRAG BEGIN (the 4px threshold), never at mousedown.
+   Scoped to the board root, never document.body — Journal and description prose stay copyable.
+   The input/textarea/contenteditable carve-out is required, not defensive: user-select INHERITS, so
+   without it the section rename field and the rich description editor go unselectable mid-drag. */
+.pp-dragging,.pp-dragging *{user-select:none!important;-webkit-user-select:none!important;cursor:grabbing!important}
+.pp-dragging input,.pp-dragging textarea,.pp-dragging [contenteditable]{user-select:text!important;-webkit-user-select:text!important}
 
 /* PP-EXT: shared component classes (B0 — design foundation). Built on the token scales above;
    intended to replace per-instance inline style objects over time (B3 migrates usages). */
@@ -419,14 +427,20 @@ class Component extends DCLogic {
       showYears:false, settingsOpen:false, settingsTab:'general' /* PP-EXT C0 */, quickText:'', quickOpen:false, datePick:null, barMenu:null /* PP-EXT V1.4: right-click-a-bar editor menu */, scopePrompt:null,
       theme:this.initialTheme(),
       rowMode: pf.rowMode||'default',
+      cardDrag:null, /* PP-EXT V2.9 §5/§3: in-flight Selection/Matrix card drag — UI-only, never persisted */
+      selCursor:null, /* PP-EXT V2.9 §5: j/k keyboard cursor in the Selection view — UI-only */
       colW: pf.colW||{}, colOrder: pf.colOrder||null, colHidden: pf.colHidden||{},
-      selCols:[], colMenu:null, rowDrag:null,
+      selCols:[], colMenu:null, rowDrag:null, secDrag:null, /* PP-EXT V2.6b: section header reorder drag */
       /* PP-EXT state */
       drawerOpen:false, mainView:ppMainView, monthAnchor:null, weekAnchor:null, hoverDay:null, /* PP-EXT: main-view selector + calendar hover glow */
       summary:null, /* PP-EXT Phase 8: morning-summary popup payload ({stats, unplanned}) or null */
       running:this.loadRun(), settings:this.loadSettings(), gcal:this.loadGcal(), sync:this.loadSync(), nowTick:Date.now(),
       pomo:this.loadPomo(), /* PP-EXT Phase 10: active pomodoro session {taskId,phase,phaseStart,cycle} or null (pp-pomo) */
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
+      sections:this.loadSections(), /* PP-EXT V2.6: pp-sections container entity (see tasksBySection) */
+      groupBy: (pf.groupBy==='none'||pf.groupBy==='inclusion')?pf.groupBy:'section', /* PP-EXT V2.6 + V2.9 §6: 'section' | 'inclusion' | 'none' — 'none' renders one flat list, no headers; 'inclusion' splits Included/Excluded (persisted in pp-prefs) */
+      collapsedSections: pf.collapsedSections||{}, /* PP-EXT V2.6: section id → 1 when collapsed (view pref, persisted) */
+      secEdit:null, /* PP-EXT V2.6: id of the section header being renamed inline — UI-only, not persisted */
       journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
       journalCollapse:{done:true,actuals:true,planning:false}, /* PP-EXT C2/Phase D: right-rail collapse state for Done Today/Actuals/Needs Planning — UI-only, not persisted. Needs Planning starts expanded per Phase D brief. */
       zoomMoreOpen:false, /* PP-EXT C3: toolbar zoom-presets overflow ("More ▾") open/closed — UI-only, not persisted */
@@ -453,6 +467,7 @@ class Component extends DCLogic {
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     syncEnabled:false, /* PP-EXT B1: offline-first Supabase sync; off until the owner signs in (B2 flips it on). Funnel + updatedAt stamping are inert while false. */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
+    eisenhowerUrgentDays:2, /* PP-EXT V2.9 §3: a task due within this many days counts as URGENT in the Eisenhower matrix (overdue and today-in-window are always urgent). The urgency axis is derived; importance comes from `priority`. */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
     notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true, pomodoro:true } /* PP-EXT Phase 8/10: per-trigger toggles; only fire once OS permission is granted (opt-in) */ }; }
@@ -504,6 +519,10 @@ class Component extends DCLogic {
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
+      sectionId:null, /* PP-EXT V2.6: id into the pp-sections entity; null = the explicit "No section" bucket.
+         A section is a one-per-task, exclusive, ordered CONTAINER — deliberately NOT a @tag, which is a
+         many-per-task, non-exclusive attribute (V2.3 derived sections from tags and produced a singleton
+         explosion). Not in SYNC_FIELDS: it joins the deferred batch with snoozeUntil (spec §2.6). */
       pin:null, /* PP-EXT: drag-pin {day, start, dur} — a block dragged in the drawer, fixed for that day only (Phase 5; see dragBlock) */
       demo:false, /* PP-EXT V0.2: marks a task from the opt-in demo seed (loadDemo) — drives the dismissible "demo tasks" banner + Clear demo. Not in SYNC_FIELDS, so it never mirrors to the backend (signed-in demo becomes real data after a sync round-trip; the banner is a local convenience, chiefly for anon). */
       updatedAt:null, /* PP-EXT B1: row-level last-write-wins clock (epoch ms). Stamped by commit() when sync is on; null until then (see stampUpdated / applyRemoteSnapshot). */
@@ -528,7 +547,13 @@ class Component extends DCLogic {
       if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       if(!done['schedule-pins-removed']){ const n=this.migratePins(tasks); done['schedule-pins-removed']=1;
-        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT V2.6: seed sections from primary @tags, once, at promotion threshold 2. Guarded like the
+         two above; only writes pp-sections when the migration actually promoted something. */
+      if(!done['sections-from-primary-tag']){ const r=this.migrateSectionsFromTags(tasks);
+        done['sections-from-primary-tag']=1; this.lsSet('pp-migrations', JSON.stringify(done));
+        if(r.sections.length){ try{ this.lsSet('pp-sections', JSON.stringify(r.sections)); }catch(e){} }
+        if(r.changed) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
@@ -537,7 +562,7 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal']; /* pp-habits/pp-journal: Phase 9 */ }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6 (local-only until the deferred sync batch, so backup is its ONLY portability) */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=this.lsGet(k); if(v==null) return; /* PP-EXT: active-workspace scoped (pp-theme stays global) */
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
@@ -722,6 +747,10 @@ class Component extends DCLogic {
     window.addEventListener('keydown', this._onKey);
     window.addEventListener('mousemove', this._onMove);
     window.addEventListener('mouseup', this._onUp);
+    /* PP-EXT V2.9 §1: blur guard. A drag that ends outside the window (alt-tab, devtools) never fires
+       mouseup here, which would strand the board unselectable. Cheap insurance for the one bad state. */
+    this._onBlur = ()=>this.dragSelectRelease();
+    window.addEventListener('blur', this._onBlur);
     /* PP-EXT: cross-tab sync for pp-run/pp-pomo — without this, a background tab's stale in-memory
        `running`/`pomo` gets blindly re-persisted by its own heartbeat/tick and can resurrect a timer
        another tab just stopped. Adopt the externally-written value instead of clobbering it. */
@@ -752,6 +781,7 @@ class Component extends DCLogic {
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
+    window.removeEventListener('blur', this._onBlur); /* PP-EXT V2.9 §1 */
     window.removeEventListener('storage', this._onStorage); /* PP-EXT */
     clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
     clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); clearTimeout(this._syncKvFlushT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 + B3a */
@@ -837,6 +867,13 @@ class Component extends DCLogic {
       if(e.key==='a'){ e.preventDefault(); this.addTask('bottom'); return; }
       if(e.key==='A'){ e.preventDefault(); this.addTask('top'); return; }
       if(k==='u'){ e.preventDefault(); this.undo(); return; }
+      /* PP-EXT V2.9 §5: j/k/space only while the Selection view is the active Plan sub-view. Fast passes
+         matter more here than anywhere else — this is the surface you sweep once a morning. Scoped to the
+         view so these letters stay free everywhere else. */
+      if(this.state.mainView==='dashboard' && (this.state.dashMode||'plan')==='plan'
+         && this.state.planView==='select' && (k==='j'||k==='k'||e.key===' ')){
+        e.preventDefault(); this.selectionKey(e.key===' '?' ':k); return;
+      }
     }
     /* PP-EXT: subtasks — Tab indents the selected rows under the row above; Shift+Tab outdents */
     if(e.key==='Tab' && this.state.selectedIds.length && !this.isEditingTarget(e) && !this.isFocusableTarget(e)
@@ -1059,15 +1096,17 @@ class Component extends DCLogic {
       && this.startOfDay(win.start)<=yesterday && yesterday<=this.startOfDay(win.end));
     return manual || auto;
   }
-  /* PP-EXT V2.2: texture (eligibility) and tint (inheritance) are separate background layers.
-     The caller supplies selection/hover/pressed as the base, leaving depth and glow in box-shadow. */
-  ambientRowBackground(t, base){
-    const layers=[];
-    if(!this.isEligibleToday(t)) layers.push('repeating-linear-gradient(135deg, rgba(184,134,11,0.20) 0 3px, transparent 3px 9px)');
-    if(this.isInheritedToday(t)) layers.push('linear-gradient(rgba(77,112,156,0.13), rgba(77,112,156,0.13))');
-    layers.push(base||'transparent');
-    return layers.join(', ');
-  }
+  /* PP-EXT V2.9 §2: `ambientRowBackground` (V2.2 ineligibility crosshatch + carried-over tint) is DELETED.
+     Owner acceptance on 2026-08-03 measured the hatch across ~90% of rows: an overlay meant to mark the
+     exception had become the default background, and an encoding that fires on almost everything carries
+     no information — it is texture, not signal. Both call sites (sheet row, Gantt row) now pass their
+     `base` straight through.
+     The PREDICATES survive deliberately. `isInheritedToday` is load-bearing in `isActiveOn`, so deleting
+     it would change which tasks are on today; `isEligibleToday` still drives the `Startable` filter and
+     the derived urgency axis in §3. Only the paint died. This REPLACES V2.7 (visual-load budget) rather
+     than reinterpreting it — the decision is to not spend the encoding budget at all for the MVP.
+     Scope note: user-assigned identity colour (tags, priority chips, calendar colours) is untouched;
+     only app-inferred ambient STATE encoding was removed. */
   /* PP-EXT V2.1: other-day allotment follows its window (dated: the [start,end]
      occurrence for B via occForDay, preserving per-day recurrence correctness on non-today days;
      dateless: ghostSpan anchored at the REAL today, never at B — anchoring at B would make a dateless
@@ -1095,6 +1134,122 @@ class Component extends DCLogic {
     if(t.included===false) return 'off';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
     return (t.included===true || this.isInheritedToday(t)) ? 'pressed' : 'unpressed';
+  }
+  /* ===== PP-EXT V2.9 §4: shared derivations for the Selection view and the Gantt inclusion division =====
+     Defined ONCE, consumed by both surfaces, for the same reason `sectionProjection` is shared: two call
+     sites that agree today drift tomorrow, whereas one projection cannot disagree with itself. */
+
+  /* PURE-ish (reads only the task + today): did today's calendar bring this task in for the first time?
+     True exactly when the occurrence window STARTS today — which is the same statement as "today is in the
+     window and yesterday was not", without needing a second window query.
+     Dateless tasks are deliberately excluded. `ghostSpan` anchors a dateless task's derived span at today,
+     so every dateless task would trivially "start today" and New would fill up with work the calendar
+     never actually surfaced. They fall to Extra, which is where a discretionary pick belongs. */
+  startsToday(t){
+    if(!t || t.archivedAt || this.isMilestone(t)) return false;
+    if(!this.isScheduled(t)) return false;
+    const B=this.startOfToday();
+    const win=this.occForDay(t, B);
+    if(!win || win.start==null || win.end==null) return false;
+    return this.startOfDay(win.start)===B && B<=this.startOfDay(win.end);
+  }
+  /* PURE-ish: WHY a task is on today's list — the three columns of the Selection view.
+     `extra` is a FALLBACK BUCKET, not a category (the same role `No section` plays, and for the same
+     reason): making the third column exhaustive means nothing can fall out of the view.
+     These columns are DERIVED, never chosen. No user gesture moves a task between them — only the
+     calendar does. That is precisely why the Selection view's drags are vertical-only: offering a
+     horizontal drop would be a lever connected to nothing. */
+  originOf(t){
+    if(this.isInheritedToday(t)) return 'existing'; /* leftover from yesterday */
+    if(this.startsToday(t)) return 'new';           /* today entered the task's range */
+    return 'extra';                                  /* everything else you pulled in */
+  }
+  ORIGIN_KEYS(){ return ['existing','new','extra']; }
+  originLabel(k){ return k==='existing'?'Existing':(k==='new'?'New':'Extra'); }
+  originHint(k){ return k==='existing'?'left from yesterday':(k==='new'?'range starts today':'everything else'); }
+
+  /* PURE-ish: the two ROWS. Five states (`active`,`pressed`,`unpressed`,`off`,`snoozed`) fold into two.
+     `unpressed` folds into Excluded but must NOT be conflated with `off` — see isUndecided. */
+  inclusionRow(t){
+    const st=this.inclState(t);
+    return (st==='pressed'||st==='active') ? 'included' : 'excluded';
+  }
+  /* The one way this design could quietly lose work: `unpressed` means "I have not looked at this yet",
+     `off` means "I decided against this". Both sit in the Excluded row, so if they render identically the
+     view silently converts undecided work into rejected work. Callers MUST paint these differently
+     (muted, dashed edge). This predicate exists so that rule has a single source. */
+  isUndecided(t){ return this.inclState(t)==='unpressed'; }
+
+  /* Position WRITES state — dropping a card/row into a row band calls the existing mutators. Zero new
+     persisted fields; snooze stays a per-row control rather than becoming a third row. */
+  setInclusionRow(id, row){
+    if(row==='included') this.setIncludedOn(id); else this.setIncludedOff(id);
+  }
+  /* PURE: tasks → the 3×2 grid, plus per-cell and per-column counts. IO-free → unit-tested.
+     Both the Selection view and its header counts read this one structure. */
+  selectionProjection(tasks){
+    const keys=this.ORIGIN_KEYS();
+    const cells={}, colCount={}, rowCount={included:0,excluded:0};
+    keys.forEach(k=>{ cells[k]={included:[],excluded:[]}; colCount[k]=0; });
+    (tasks||[]).forEach(t=>{
+      if(!t || t.archivedAt) return;
+      const col=this.originOf(t), row=this.inclusionRow(t);
+      cells[col][row].push(t); colCount[col]++; rowCount[row]++;
+    });
+    return {keys, cells, colCount, rowCount};
+  }
+  /* ===== PP-EXT V2.9 §3: Eisenhower axes =====
+     The two axes are NOT the same kind of fact, and that asymmetry is the design, not a shortcut:
+       • URGENCY is derivable — it is a function of dates the app already holds.
+       • IMPORTANCE is not — no date implies importance. But the user has already declared it via
+         `priority`, so the matrix reflects a statement rather than guessing one.
+     "Partially automated" means exactly this, and the UI says so, because a matrix that silently guesses
+     both axes is a matrix nobody trusts. */
+
+  /* PURE-ish: overdue, OR due within `eisenhowerUrgentDays`, OR today falls inside the occurrence window.
+     UNDATED TASKS ARE NEVER URGENT — they land in the bottom row. They are never DROPPED, per the standing
+     rule that the laziest path must not silently lose a deadline or a task. */
+  isUrgent(t, now){
+    if(!t || t.archivedAt) return false;
+    const B=this.startOfDay(now==null?(this.state.nowTick||Date.now()):now);
+    const days=+((this.state.settings||{}).eisenhowerUrgentDays);
+    const horizon=B+(isFinite(days)?days:2)*this.DAY;
+    const oc=this.occOf(t);
+    if(oc && oc.end!=null){
+      const due=this.startOfDay(oc.end);
+      if(due<B) return true;        /* overdue */
+      if(due<=horizon) return true; /* due within the horizon */
+    }
+    if(oc && oc.start!=null && oc.end!=null
+      && this.startOfDay(oc.start)<=B && B<=this.startOfDay(oc.end)) return true; /* today inside the window */
+    return false;
+  }
+  /* Importance is DECLARED, never inferred. `normalizeTask` defaults priority to 4, so an untouched task
+     reads as not-important — which is honest: you have not said it matters. */
+  isImportant(t){ return (+((t&&t.priority)||4))<=2; }
+  /* PURE: task → one of the four quadrant keys. */
+  quadrantOf(t, now){
+    const u=this.isUrgent(t, now), i=this.isImportant(t);
+    return i ? (u?'do':'schedule') : (u?'delegate':'drop');
+  }
+  EISENHOWER_QUADRANTS(){ return [
+    {k:'do',       label:'Do',            hint:'important · urgent',      important:true,  urgent:true },
+    {k:'schedule', label:'Schedule',      hint:'important · not urgent',  important:true,  urgent:false},
+    {k:'delegate', label:'Delegate/trim', hint:'not important · urgent',  important:false, urgent:true },
+    {k:'drop',     label:'Drop',          hint:'not important · not urgent',important:false,urgent:false} ]; }
+  /* PURE: tasks → {quadrantKey: [tasks]}. IO-free → unit-tested. */
+  eisenhowerProjection(tasks, now){
+    const out={do:[],schedule:[],delegate:[],drop:[]};
+    (tasks||[]).forEach(t=>{ if(!t||t.archivedAt||this.isMilestone(t)) return; out[this.quadrantOf(t, now)].push(t); });
+    return out;
+  }
+  /* PP-EXT V2.9 §3: a quadrant drag writes `priority` ONLY — never dates.
+     The alternative (a horizontal drag rewrites the due date) is more "complete" but lossy in a way the
+     user cannot see at drop time: a careless drop would silently reschedule real work. So vertical
+     movement is a real edit and horizontal movement is read-only; the only way to change urgency is to
+     change the dates, on a surface that shows you the dates. */
+  setQuadrantImportance(id, important){
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.priority=important?2:3; });
   }
   /* PP-EXT Track B: explicit include/exclude/snooze mutators (design doc §2 lifecycle) — the popover UI
      (Task 4) calls these instead of the old binary include toggle. Off supersedes snooze (turning off
@@ -1542,17 +1697,81 @@ class Component extends DCLogic {
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.labels=this.addTaskTag(t.labels,tag); }); return true; }
   removeLabel(id, raw){ const tag=this.normalizeTag(raw); if(!tag) return false;
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.labels=this.removeTaskTag(t.labels,tag); }); return true; }
-  /* Each task appears once. A subtree inherits its root task's primary (first) @tag so grouping never tears
-     parent/child rows apart. Section order follows the first root encountered, preserving the user's manual
-     planning order; untagged work is an explicit final/first-seen section rather than disappearing. */
-  tasksByTagSection(tasks){
+  /* PP-EXT V2.6: Each task appears once. A subtree inherits its ROOT task's section so grouping never tears
+     parent/child rows apart — that rule is kept verbatim from V2.3; only the lookup changed, from
+     `root.labels[0]` (a tag) to `root.sectionId` (a real container). Section order follows the
+     `pp-sections` `order` field, ties broken by id for stability.
+
+     Change from V2.3: the No-section bucket renders LAST, ALWAYS. First-seen placement made the
+     untagged bucket jump around as data changed. */
+  /* The one place section render order is decided: `order` ascending, ties broken by id for stability.
+     Both the grouping projection and the row menu read this, so the list can never disagree with itself. */
+  sectionsInOrder(sections){
+    return (sections||this.state.sections||[]).slice()
+      .sort((a,b)=>((+a.order||0)-(+b.order||0))||String(a.id).localeCompare(String(b.id)));
+  }
+  tasksBySection(tasks, sections){
     const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
+    const defs=this.sectionsInOrder(sections);
+    const defById={}; defs.forEach(s=>defById[s.id]=s);
     const sectionOf=t=>{ let root=t, seen={};
       while(root&&root.parentId!=null&&byId[root.parentId]&&!seen[root.id]){ seen[root.id]=1; root=byId[root.parentId]; }
-      const tag=this.normalizeTag(root&&root.labels&&root.labels[0]); return tag||null; };
-    const out=[], byKey=new Map(); list.forEach(t=>{ const tag=sectionOf(t), key=tag||''; let sec=byKey.get(key);
-      if(!sec){ sec={tag,tasks:[]}; byKey.set(key,sec); out.push(sec); } sec.tasks.push(t); });
+      const sid=root&&root.sectionId; return (sid!=null && defById[sid]) ? sid : null; };
+    const out=[], byKey=new Map();
+    /* Seed in declared order so empty sections still render (a container you made is a container you keep). */
+    defs.forEach(s=>{ const sec={id:s.id,name:s.name,tasks:[]}; byKey.set(s.id,sec); out.push(sec); });
+    const none={id:null,name:null,tasks:[]};
+    list.forEach(t=>{ const sid=sectionOf(t); (sid==null?none:byKey.get(sid)).tasks.push(t); });
+    /* An empty user-made section still renders (you created the container). An empty No-section bucket
+       does not — it is a fallback, not a thing anyone made. */
+    if(none.tasks.length) out.push(none); /* always last */
     return out;
+  }
+  /* PP-EXT V2.6: the single projection BOTH panes consume. `Group by: None` yields one flat, header-less
+     band, so the sheet and the Gantt drop the same TAG_SECTION_H rows in lock-step and row alignment is
+     preserved by construction rather than by two call sites agreeing. */
+  /* PP-EXT V2.9 §6: the inclusion division, as a THIRD `Group by` mode rather than a level ABOVE sections.
+     The owner asked for a divider higher than sections. Nesting it there has a structural cost that is
+     worth naming: sections would live inside each half, so a section holding both included and excluded
+     work renders TWICE — doubling the header count on a busy plan, which is exactly the density problem
+     that killed sections-as-tags. Making it a sibling grouping mode avoids that entirely, and is nearly
+     free: it emits the SAME band shape `sectionProjection` already produces, so both panes keep consuming
+     one projection, the divider reuses TAG_SECTION_H, and `sectionGeometry` needs no change at all.
+     Cost of the choice, stated plainly: you see sections OR the split, never both stacked.
+
+     Subtree roots decide inclusion, exactly as they decide section — a child follows its root, so grouping
+     never tears a parent away from its children. */
+  INCL_BAND_IN(){ return '__incl_in'; }
+  INCL_BAND_OUT(){ return '__incl_out'; }
+  inclusionProjection(tasks){
+    const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
+    const rootOf=t=>{ let r=t, seen={};
+      while(r && r.parentId!=null && byId[r.parentId] && !seen[r.id]){ seen[r.id]=1; r=byId[r.parentId]; }
+      return r||t; };
+    const inc={id:this.INCL_BAND_IN(), name:'Included', tasks:[]};
+    const exc={id:this.INCL_BAND_OUT(), name:'Excluded', tasks:[]};
+    list.forEach(t=>{ (this.inclusionRow(rootOf(t))==='included'?inc:exc).tasks.push(t); });
+    /* Both bands ALWAYS render, empty or not — they are the structure, not a bucket that earned its place.
+       Excluded defaults to COLLAPSED-BUT-COUNTED, never hidden: `EXCLUDED · 9` is a passive reminder that
+       honours the standing rule that the shortest-effort path must not silently drop tasks, and it spends
+       exactly one row to do it. */
+    const col=this.state.collapsedSections||{};
+    const collapsedOf=(id,dflt)=>{ const v=col[this.secKey(id)]; return v==null?dflt:!!v; };
+    return [ Object.assign({},inc,{collapsed:collapsedOf(inc.id,false)}),
+             Object.assign({},exc,{collapsed:collapsedOf(exc.id,true)}) ];
+  }
+  sectionProjection(tasks){
+    if((this.state.groupBy||'section')==='none') return [{id:null,name:null,flat:true,collapsed:false,tasks:(tasks||[]).slice()}];
+    if(this.state.groupBy==='inclusion') return this.inclusionProjection(tasks); /* PP-EXT V2.9 §6 */
+    /* `collapsed` is stamped HERE, once, so the sheet, the Gantt, and the flattened _visTasks list all read
+       the same field. Collapse must remove rows from _visTasks too, not just from the painted output:
+       _yTop is indexed by that list and rowAtY asserts the two lengths match (see rowAtY), so hiding rows
+       in only one place would silently shift every bar below a collapsed section. */
+    return this.tasksBySection(tasks).map(sec=>Object.assign({},sec,{collapsed:this.isSectionCollapsed(sec.id)}));
+  }
+  /* The flattened, render-order task list both panes index by — collapsed sections contribute no rows. */
+  flattenSections(sections){
+    return (sections||[]).reduce((out,sec)=>sec.collapsed?out:out.concat(sec.tasks),[]);
   }
   buildKids(tasks){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
@@ -1839,6 +2058,102 @@ class Component extends DCLogic {
       this.commit(tasks=>this.sweepAutoArchive(tasks, now, days));
   }
   /* ==== /PP-EXT: archive ==== */
+
+  /* ==== PP-EXT V2.6: Sections — a first-class, exclusive, ordered CONTAINER entity (own pp-sections store,
+     like pp-habits: no gcal/undo funnel). Spec: docs/superpowers/specs/2026-08-03-sections-and-triage-design.md.
+     Deliberately NOT derived from @tags — see tasksBySection. Local-only for now: sectionId and this store
+     join the deferred sync batch with snoozeUntil (spec §2.6), so they do NOT enter SYNC_FIELDS. ==== */
+  loadSections(){ try{ const a=JSON.parse(this.lsGet('pp-sections')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeSection(x)):[]; }catch(e){ return []; } }
+  saveSections(sections){ try{ this.lsSet('pp-sections', JSON.stringify(sections)); }catch(e){} this.setState({sections}); }
+  normalizeSection(s){ s=s||{}; return { id: s.id||('sec_'+Math.random().toString(36).slice(2,8)),
+    name: s.name||'New section', order: (+s.order||0) }; }
+  /* Pure: append a section at the end of the current order. Returns the new list. */
+  addSectionTo(sections, name){ const list=(sections||[]).slice();
+    const max=list.reduce((m,s)=>Math.max(m,+s.order||0), -1);
+    list.push(this.normalizeSection({name:name||'New section', order:max+1})); return list; }
+  addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.saveSections(list);
+    return list[list.length-1]; }
+  renameSection(id, name){ const list=(this.state.sections||[]).map(s=>s.id===id?Object.assign({},s,{name:name||s.name}):s);
+    this.saveSections(list); }
+  /* Pure: move a section to a new index, renumbering `order` densely so ties can't accumulate. */
+  reorderSectionsIn(sections, id, toIndex){
+    const list=(sections||[]).slice().sort((a,b)=>((+a.order||0)-(+b.order||0))||String(a.id).localeCompare(String(b.id)));
+    const from=list.findIndex(s=>s.id===id); if(from<0) return list;
+    const [moved]=list.splice(from,1);
+    list.splice(Math.max(0,Math.min(list.length,toIndex)),0,moved);
+    return list.map((s,i)=>Object.assign({},s,{order:i}));
+  }
+  reorderSection(id, toIndex){ this.saveSections(this.reorderSectionsIn(this.state.sections, id, toIndex)); }
+  /* Deleting a section DISSOLVES its tasks to No section — it never deletes work. */
+  deleteSection(id){
+    this.saveSections((this.state.sections||[]).filter(s=>s.id!==id).map((s,i)=>Object.assign({},s,{order:i})));
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(t.sectionId===id) t.sectionId=null; }); });
+  }
+  /* Pure: the subtree ROOT of `id`. Assignment must land on the root because tasksBySection groups by the
+     root's sectionId — stamping a subtask directly would persist a field that nothing ever reads, and the
+     user would watch their menu choice do visibly nothing. */
+  sectionRootId(tasks, id){
+    const byId={}; (tasks||[]).forEach(t=>byId[t.id]=t);
+    let t=byId[id], seen={};
+    while(t && t.parentId!=null && byId[t.parentId] && !seen[t.id]){ seen[t.id]=1; t=byId[t.parentId]; }
+    return t?t.id:id;
+  }
+  setTaskSection(taskId, sectionId){ this.setTaskSectionMulti([taskId], sectionId); }
+  /* Multi-select aware, and root-resolving: selecting a parent and its child moves the subtree once. */
+  setTaskSectionMulti(ids, sectionId){
+    const sid=(sectionId==null)?null:sectionId;
+    this.commit(tasks=>{
+      const roots=new Set((ids||[]).map(id=>this.sectionRootId(tasks,id)));
+      tasks.forEach(t=>{ if(roots.has(t.id)) t.sectionId=sid; });
+    });
+    this.closeMenu();
+  }
+  /* One-time migration `sections-from-primary-tag` (spec §2.5). For each distinct FIRST label across ROOT
+     tasks, in first-seen order, promote it to a section — but only at PROMOTION THRESHOLD 2, i.e. only when
+     that tag is the first label of >=2 root tasks. Singletons land in No section, which fixes the density
+     complaint on first load instead of reproducing it. `labels` is left fully intact; this reads tags, it
+     never consumes them. The threshold is a one-time migration constant, NOT an ongoing rule: sections
+     created later may hold one task forever, which is correct, because the user chose to create them.
+     Idempotent — returns {sections, changed}. */
+  migrateSectionsFromTags(tasks, threshold){
+    const th=(threshold==null?2:threshold), list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
+    const isRoot=t=>!(t.parentId!=null && byId[t.parentId]);
+    const order=[], count={};
+    list.forEach(t=>{ if(!isRoot(t)) return; const tag=this.normalizeTag(t.labels&&t.labels[0]); if(!tag) return;
+      if(count[tag]==null){ count[tag]=0; order.push(tag); } count[tag]++; });
+    const promoted=order.filter(tag=>count[tag]>=th);
+    const sections=promoted.map((tag,i)=>this.normalizeSection({name:tag, order:i}));
+    const idByTag={}; promoted.forEach((tag,i)=>idByTag[tag]=sections[i].id);
+    let changed=0;
+    list.forEach(t=>{ if(!isRoot(t)) return; const tag=this.normalizeTag(t.labels&&t.labels[0]);
+      const sid=(tag&&idByTag[tag])||null; if(t.sectionId!==sid){ t.sectionId=sid; changed++; } });
+    return {sections, changed};
+  }
+  setGroupBy(mode){ const m=(mode==='none'||mode==='inclusion')?mode:'section'; /* PP-EXT V2.9 §6 */
+    this.savePrefs({groupBy:m}); this.setState({groupBy:m}); }
+  /* Create-then-edit: a new section appears immediately with its name field focused, rather than blocking
+     on a modal prompt. Nothing is "pending" — the section exists the moment you ask for it, and renaming is
+     the same gesture as naming, so there is only one thing to learn. */
+  newSectionInline(){ const s=this.addSection('New section'); this.startSectionEdit(s.id); return s; }
+  startSectionEdit(id){ this.setState({secEdit:id}); }
+  commitSectionEdit(id, value){ const n=String(value==null?'':value).trim();
+    if(n) this.renameSection(id,n); this.setState({secEdit:null}); }
+  cancelSectionEdit(){ this.setState({secEdit:null}); }
+  /* Collapse is a view pref (persisted per workspace), keyed by section id — same posture as
+     state.collapsed for subtasks. A collapsed section keeps its header row, so both panes still
+     reserve TAG_SECTION_H and row alignment is unaffected. */
+  secKey(id){ return id==null?'__none':String(id); } /* No section has a null id; give it a stable pref key */
+  /* PP-EXT V2.9 §6: `effective` is the collapse state the caller is actually PAINTING, which is not always
+     the stored one — the Excluded inclusion band defaults to collapsed with no pref written. Toggling off
+     the stored value alone would make the first click on that band a no-op. Callers pass sec.collapsed. */
+  toggleSectionCollapse(id, effective){
+    const k=this.secKey(id), col=Object.assign({},this.state.collapsedSections||{});
+    const isCol=(effective==null)?!!col[k]:!!effective;
+    if(isCol) col[k]=0; else col[k]=1;
+    this.savePrefs({collapsedSections:col}); this.setState({collapsedSections:col});
+  }
+  isSectionCollapsed(id){ return !!(this.state.collapsedSections||{})[this.secKey(id)]; }
+  /* ==== /PP-EXT V2.6: Sections ==== */
 
   /* ==== PP-EXT Phase 9: Habits — a lightweight entity separate from tasks (own pp-habits store, no gcal/undo
      funnel). A habit is scheduled daily or on specific weekdays; a day counts as done via a MANUAL check-off
@@ -2501,10 +2816,28 @@ class Component extends DCLogic {
   }
   startSplit(e){ e.preventDefault(); this.splitDrag=true; }
   startColDrag(e,key,w){ e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w}; }
+  /* PP-EXT V2.9 §1: called at DRAG BEGIN, not at mousedown — suppressing at mousedown would kill caret
+     placement on the very click that also opens an inline editor. Two things happen here, and the second
+     is the one that is easy to forget: `user-select:none` stops a selection GROWING but does not remove
+     what the browser already highlighted between mousedown and the 4px threshold. That leftover highlight
+     is the artifact actually visible on screen, so removeAllRanges() is half the fix, not a nicety. */
+  dragSelectSuppress(){
+    const el=this.boardEl; if(!el||!el.classList) return;
+    this._dragSelEl=el; el.classList.add('pp-dragging');
+    try{ const s=window.getSelection&&window.getSelection(); if(s&&s.removeAllRanges) s.removeAllRanges(); }catch(err){}
+  }
+  /* Release must happen in exactly ONE place (the top of onMouseUp, before any branch returns) plus the
+     window-blur guard. A per-drag release is the failure mode: one drag that returns early without
+     clearing leaves the entire board permanently unselectable — strictly worse than the bug being fixed. */
+  dragSelectRelease(){
+    const el=this._dragSelEl; this._dragSelEl=null;
+    if(el&&el.classList) el.classList.remove('pp-dragging');
+  }
   headPointerDown(e,k){ if(e.button!==0) return; this.headPending={k,x:e.clientX,y:e.clientY,shiftKey:e.shiftKey,ctrlKey:e.ctrlKey,metaKey:e.metaKey}; }
   rowPointerDown(e,id,index){ if(e.button!==0) return; this.rowPending={id,index,x:e.clientX,y:e.clientY}; }
   beginRowDrag(){
     const p=this.rowPending; if(!p) return;
+    this.dragSelectSuppress(); /* PP-EXT V2.9 §1 */
     const sel=this.state.selectedIds;
     const ids=(sel.includes(p.id)&&sel.length>1) ? this.state.tasks.filter(t=>sel.includes(t.id)).map(t=>t.id) : [p.id];
     this.rowDragMoved=false;
@@ -2512,14 +2845,76 @@ class Component extends DCLogic {
        neighbour detection (prevents a row nesting under its own descendant) and dimmed together. */
     const kids=(this.buildKids(this.state.tasks)).kids;
     const moveSet={}; ids.forEach(id=>this.subtreeIds(id,kids).forEach(x=>moveSet[x]=1));
+    /* PP-EXT V2.6b: the section the drag STARTED in — the baseline for "did this drag re-section the row?",
+       so simply picking a row up (cursor still over its own section) is not mistaken for a move. */
+    const byId=this._byId||{}; const root=byId[this.sectionRootId(this.state.tasks,p.id)];
     this._rowDrag={ids,primaryId:p.id,fromIndex:p.index,overIndex:p.index,
-      startX:p.x, x:p.x, y:p.y, depth:(this._depth&&this._depth[p.id])||0, parentId:null, moveSet};
+      startX:p.x, x:p.x, y:p.y, depth:(this._depth&&this._depth[p.id])||0, parentId:null, moveSet,
+      origSectionId:(root&&root.sectionId!=null)?root.sectionId:null, dropSectionId:undefined,
+      /* PP-EXT V2.9 §6: the inclusion band the drag STARTED in — same baseline role as origSectionId, so
+         picking a row up without crossing the divider is not mistaken for an include/exclude decision. */
+      origInclusion:this.inclusionRow(root||{}), dropInclusion:undefined};
     this.setState({rowDrag:this._rowDrag, menu:null});
+  }
+  /* PP-EXT V2.6b: the ONE vertical-geometry pass both panes use. Returns `yTop` (indexed by the flattened
+     task list, exactly as before) plus `secLayout`: each section's full band, header top → after its last
+     row. Two facts force the second array to exist: `yTop` is indexed by TASKS, so it cannot answer "which
+     section owns this Y", and an EMPTY section owns Y-space but no row at all — which is precisely the
+     section a task most needs to be draggable into.
+     Called from BOTH renderSheet and renderGantt, because the sheet is the drag surface but the Gantt is
+     not always the visible right pane (Schedule/Month/Week render instead). Deriving both panes from one
+     pure function means the drop geometry cannot drift from the painted geometry. */
+  sectionGeometry(sections){
+    const yTop=[]; const secLayout=[]; let acc=0, ti=0;
+    (sections||[]).forEach(sec=>{
+      /* `flat` (Group by: None) emits no band and consumes no TAG_SECTION_H, exactly as the sheet skips
+         its header row — the two panes stay aligned because they read the same projection. */
+      const bandTop=acc;
+      if(!sec.flat) acc+=this.TAG_SECTION_H;
+      /* Collapsed sections contribute their header band and NOTHING else — the same rows the sheet skips
+         and flattenSections drops, so `acc` (and every bar's Y) stays in step with _visTasks. */
+      const firstIndex=ti;
+      if(!sec.collapsed) sec.tasks.forEach(t=>{ yTop[ti++]=acc; acc+=this.rowH+this.descExtra(t); });
+      if(!sec.flat) secLayout.push({id:sec.id, name:sec.name, top:bandTop, headerBottom:bandTop+this.TAG_SECTION_H,
+        bottom:acc, firstIndex, endIndex:ti, collapsed:!!sec.collapsed});
+    });
+    return {yTop, secLayout, bodyH:acc};
+  }
+  /* PP-EXT V2.6b: drag a section HEADER to reorder it. ▲▼ still work and stay the keyboard/precision path;
+     dragging is the one people reach for first. `No section` is not draggable — it is a fallback bucket that
+     is always last, not a thing anyone placed. */
+  secPointerDown(e,id,pos){ if(e.button!==0 || id==null) return; this.secPending={id,pos,y:e.clientY}; }
+  beginSecDrag(){ const p=this.secPending; if(!p) return;
+    this.dragSelectSuppress(); /* PP-EXT V2.9 §1 */
+    this._secDrag={id:p.id, fromPos:p.pos, overPos:p.pos, y:p.y};
+    this.setState({secDrag:this._secDrag, menu:null}); }
+  /* PURE: which declared-section slot a section drag lands in. `layout` is _secLayout; the No-section band
+     (id null) is excluded because nothing may be ordered after it. Returns the index reorderSectionsIn wants
+     — remove-then-insert, so "the band the cursor is in" is the target slot. */
+  secDropIndex(layout, y){
+    const bands=(layout||[]).filter(b=>b.id!=null); if(!bands.length) return 0;
+    const hit=this.sectionAtY(bands, y);
+    return hit?hit.pos:0;
+  }
+  /* PP-EXT V2.6b: clientY → the sheet's own body Y (the same coordinate space _yTop and _secLayout use). */
+  sheetLocalY(clientY){
+    if(!this.sheetScrollEl) return null;
+    const r=this.sheetScrollEl.getBoundingClientRect();
+    return (clientY-r.top)/(this.uiScale()||1) - this.headH + this.sheetScrollEl.scrollTop;
+  }
+  /* PP-EXT V2.6b: PURE — which section band contains body-Y `y`. Returns {id,pos} or null when there is no
+     section structure (Group by: None). Clamps rather than returning null outside the bands, so a drag that
+     overshoots the top or bottom still resolves to the nearest section instead of silently doing nothing.
+     Answering this from `_yTop` is impossible: an empty section owns Y-space but no task row, and dropping
+     into an empty section is precisely the gesture this exists to support. IO-free → unit-tested. */
+  sectionAtY(layout, y){
+    const L=layout||[]; if(!L.length) return null;
+    for(let i=0;i<L.length;i++) if(y>=L[i].top && y<L[i].bottom) return {id:L[i].id, pos:i};
+    return y<L[0].top ? {id:L[0].id, pos:0} : {id:L[L.length-1].id, pos:L.length-1};
   }
   rowAtInsert(clientY){
     if(!this.sheetScrollEl) return 0;
-    const r=this.sheetScrollEl.getBoundingClientRect();
-    const y=(clientY-r.top)/(this.uiScale()||1) - this.headH + this.sheetScrollEl.scrollTop;
+    const y=this.sheetLocalY(clientY);
     const vis=this._visTasks||this.state.tasks, tops=this._yTop;
     if(tops&&tops.length===vis.length){ let idx=0; while(idx<vis.length && y>=tops[idx]+this.rowH/2) idx++;
       return idx; } /* PP-EXT V2.3: section headers and expanded descriptions are real Y-space, never task indices */
@@ -2546,7 +2941,7 @@ class Component extends DCLogic {
     if(depth>0 && prev){ let anc=prev; while(anc && (depthOf[anc.id]||0)>=depth){ anc=(anc.parentId!=null)?byId[anc.parentId]:null; } parentId=anc?anc.id:null; }
     return {index:overIndex, depth, parentId};
   }
-  reorderRows(ids,to,parentId){
+  reorderRows(ids,to,parentId,sectionId,inclusion){
     /* PP-EXT: `to` indexes the VISIBLE rows (archived may be hidden) — anchor on the first visible non-moving
        task at/after `to`, then splice against the full array so hidden tasks keep their positions. When called
        from drag-to-nest, `parentId` re-parents the moving roots (their subtrees ride along via
@@ -2554,9 +2949,21 @@ class Component extends DCLogic {
     const vis=this._visTasks||this.state.tasks;
     let anchorId=null; for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
     const reparent = parentId!==undefined; /* PP-EXT */
+    /* PP-EXT V2.6b: `sectionId === undefined` means "leave sections alone" (a nested drop, or Group by: None);
+       `null` is the real value for No section. Applied inside the SAME commit as the reorder, so one drag is
+       one undo step rather than two. */
+    const resection = sectionId!==undefined;
+    /* PP-EXT V2.9 §6: under Group by: Inclusion the drop writes `included` instead of `sectionId`, inside
+       this SAME commit — one drag stays one undo step, matching the V2.6b re-section rule. Turning a row on
+       also clears any snooze, so the two paths cannot disagree with setIncludedOn/Off. */
+    const reinclude = inclusion!==undefined;
     this.commit(tasks=>{
       const moving=tasks.filter(t=>ids.includes(t.id));
       if(reparent) moving.forEach(t=>{ t.parentId = parentId; }); /* PP-EXT: descendants keep pointing here → carried along */
+      if(resection){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
+        tasks.forEach(t=>{ if(roots.has(t.id)) t.sectionId=sectionId; }); }
+      if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
+        tasks.forEach(t=>{ if(roots.has(t.id)){ t.included=(inclusion==='included'); t.snoozeUntil=null; } }); }
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
       let ti = anchorId==null ? tasks.length : tasks.findIndex(t=>t.id===anchorId);
       if(ti<0) ti=tasks.length;
@@ -2582,7 +2989,7 @@ class Component extends DCLogic {
     }
     if(this.headPending){
       const p=this.headPending;
-      if(!this.colReorder && Math.abs(e.clientX-p.x)>4) this.colReorder={fromK:p.k,overK:p.k};
+      if(!this.colReorder && Math.abs(e.clientX-p.x)>4){ this.colReorder={fromK:p.k,overK:p.k}; this.dragSelectSuppress(); /* PP-EXT V2.9 §1 */ }
       if(this.colReorder){
         const el=document.elementFromPoint(e.clientX,e.clientY);
         const cell=el&&el.closest?el.closest('[data-colk]'):null;
@@ -2590,6 +2997,24 @@ class Component extends DCLogic {
         if(ok&&ok!=='check') this.colReorder.overK=ok;
         this.forceUpdate(); return;
       }
+    }
+    /* PP-EXT V2.6b: section-header reorder drag — checked before rows because a header is not a row. */
+    if(this.secPending && !this._secDrag){ if(Math.abs(e.clientY-this.secPending.y)>4) this.beginSecDrag(); }
+    if(this._secDrag){
+      const sd=this._secDrag; sd.y=e.clientY;
+      sd.overPos=this.secDropIndex(this._secLayout, this.sheetLocalY(e.clientY));
+      this.setState({secDrag:Object.assign({},sd)}); return;
+    }
+    /* PP-EXT V2.9 §5/§3: card drags (Selection · Matrix). Checked before rows because a card is not a row —
+       these grids have no sheet geometry at all. Same 4px threshold, same selection suppression. */
+    if(this.cardPending && !this._cardDrag){
+      if(Math.abs(e.clientY-this.cardPending.y)>4 || Math.abs(e.clientX-this.cardPending.x)>4) this.beginCardDrag();
+    }
+    if(this._cardDrag){
+      const c=this._cardDrag; c.x=e.clientX; c.y=e.clientY;
+      const z=this.resolveCardZone(e.clientX, e.clientY);
+      if(z!=null) c.overZone=z;
+      this.setState({cardDrag:Object.assign({},c)}); return;
     }
     if(this.rowPending && !this._rowDrag){
       if(Math.abs(e.clientY-this.rowPending.y)>4 || Math.abs(e.clientX-this.rowPending.x)>4) this.beginRowDrag();
@@ -2603,8 +3028,21 @@ class Component extends DCLogic {
       const steps=(Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
       const vis=this._visTasks||this.state.tasks;
       const drop=this.projectRowDrop(vis, this._depth||{}, this._byId||{}, oi, rd.moveSet, steps);
-      if(oi!==rd.overIndex || drop.depth!==rd.depth || drop.parentId!==rd.parentId) this.rowDragMoved=true;
+      /* PP-EXT V2.6b: a vertical row drag also RE-SECTIONS the row. Only when it lands as a root — a nested
+         row's section is its root's by definition (tasksBySection), so stamping it would write a field
+         nothing reads. `undefined` means "leave sectionId alone", distinct from `null` = No section. */
+      const hit=(drop.parentId==null) ? this.sectionAtY(this._secLayout, this.sheetLocalY(e.clientY)) : null;
+      /* PP-EXT V2.9 §6: under Group by: Inclusion the bands are not sections, so the SAME resolved band
+         writes `included` instead of `sectionId`. Dragging a row across the divider is therefore the same
+         gesture as dragging it into a section, on a surface the user already knows. */
+      const inclMode=(this.state.groupBy==='inclusion');
+      const dropSectionId = (hit && !inclMode) ? hit.id : undefined;
+      const dropInclusion = (hit && inclMode) ? (hit.id===this.INCL_BAND_IN()?'included':'excluded') : undefined;
+      const secChanged = dropSectionId!==undefined && dropSectionId!==rd.origSectionId;
+      const inclChanged = dropInclusion!==undefined && dropInclusion!==rd.origInclusion;
+      if(oi!==rd.overIndex || drop.depth!==rd.depth || drop.parentId!==rd.parentId || secChanged || inclChanged) this.rowDragMoved=true;
       rd.overIndex=oi; rd.depth=drop.depth; rd.parentId=drop.parentId; rd.dropParentId=drop.parentId;
+      rd.dropSectionId=dropSectionId; rd.dropInclusion=dropInclusion;
       this.setState({rowDrag:Object.assign({},rd)}); /* PP-EXT: re-render every move so the ghost follows smoothly */
       return;
     }
@@ -2637,6 +3075,7 @@ class Component extends DCLogic {
     }
   }
   onMouseUp(e){
+    this.dragSelectRelease(); /* PP-EXT V2.9 §1: the ONE release point — above every branch, all of which return */
     if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
       const bd=this._blockDrag; this._blockDrag=null;
       if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day); else this.forceUpdate();
@@ -2652,9 +3091,29 @@ class Component extends DCLogic {
       else this.cycleSort(p.k);
       return;
     }
+    /* PP-EXT V2.9 §5/§3: apply a card drop. The zone string carries its own semantics — `incl:<row>` writes
+       inclusion, `quad:<important>` writes priority — so one drag path serves both grids without either
+       view needing to know about the other. A drop back into the zone it came from writes nothing. */
+    if(this._cardDrag){
+      const c=this._cardDrag; this._cardDrag=null; this.cardPending=null;
+      this._suppressCardClick=true;
+      if(c.overZone && c.overZone!==c.fromZone){
+        const [kind,val]=String(c.overZone).split(':');
+        if(kind==='incl') this.setInclusionRow(c.id, val);
+        else if(kind==='quad') this.setQuadrantImportance(c.id, val==='important');
+      }
+      this.setState({cardDrag:null}); return;
+    }
+    if(this.cardPending) this.cardPending=null;
+    if(this._secDrag){
+      const sd=this._secDrag; this._secDrag=null; this.secPending=null;
+      if(sd.overPos!==sd.fromPos) this.reorderSection(sd.id, sd.overPos);
+      this.setState({secDrag:null}); return;
+    }
+    if(this.secPending) this.secPending=null;
     if(this._rowDrag){
       const rd=this._rowDrag; this._rowDrag=null; this.rowPending=null;
-      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex, rd.dropParentId); }
+      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex, rd.dropParentId, rd.dropSectionId, rd.dropInclusion); }
       this.rowDragMoved=false; this.setState({rowDrag:null}); return;
     }
     if(this.rowPending){ this.rowPending=null; }
@@ -3176,14 +3635,20 @@ class Component extends DCLogic {
     /* PP-EXT: archived tasks are ALWAYS hidden from the board (they live on the Archive page). The filtered
        array is cached so its IDENTITY stays stable across renders — the structural memoization below depends on it. */
     if(this._visSrcRef!==this.state.tasks || this._visCol!==this.state.collapsed
-       || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips){ /* PP-EXT Phase 7: sort/filter changes must re-derive the visible list too */
+       || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips
+       /* PP-EXT V2.6: the projection now depends on the sections themselves, on which are collapsed, and on
+          the group mode. Without these keys a rename/reorder/delete/collapse leaves a stale _visSections and
+          the headers keep painting the old names. All three are replaced by reference in their mutators. */
+       || this._visSecs!==this.state.sections || this._visSecCol!==this.state.collapsedSections
+       || this._visGroupBy!==this.state.groupBy){
       this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
+      this._visSecs=this.state.sections; this._visSecCol=this.state.collapsedSections; this._visGroupBy=this.state.groupBy; /* PP-EXT V2.6 */
       const visible=this.visibleTasks();
       /* PP-EXT V2.3: section grouping is a render projection only. The persisted task array keeps manual/tree
          order; sheet and Gantt consume the same flattened projection so every task row still shares one Y. */
-      this._visSections=this.tasksByTagSection(visible);
-      this._visTasks=this._visSections.reduce((out,sec)=>out.concat(sec.tasks),[]);
+      this._visSections=this.sectionProjection(visible);
+      this._visTasks=this.flattenSections(this._visSections);
       /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
       const kb=this.buildKids(this.state.tasks);
       this._kids=kb.kids; this._byId=kb.byId; this._depth={}; /* PP-EXT: _byId cached for the drag-to-nest ancestor walk */
@@ -4264,7 +4729,7 @@ class Component extends DCLogic {
      per-account user data; the constructor reads them through lsGet/wsKey, so switching = persist the new
      workspace id and reload (the constructor then re-hydrates ALL state from that namespace). */
   WS_SCOPED_KEYS(){ return ['pp-tasks','pp-settings','pp-prefs','pp-gcal','pp-run','pp-pomo','pp-notify',
-    'pp-migrations','pp-habits','pp-journal','pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
+    'pp-migrations','pp-habits','pp-journal','pp-sections'/* PP-EXT V2.6 */,'pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
     'pp-sync-kv-tombstones','pp-gcal-queue','pp-gcal-tombstones']; }
   /* does the anon (signed-out) workspace hold real task data worth offering to import on first sign-in? */
   anonHasData(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length>0; }catch(e){ return false; } }
@@ -5114,6 +5579,8 @@ class Component extends DCLogic {
     this.savePrefs({mainView:v});
   }
   splitDefault(key){ return key==='agenda'?20:50; }
+  /* PP-EXT V2.9: Plan sub-views that occupy the whole board instead of the sheet+Gantt split. */
+  isFullPlanView(v){ return v==='select'||v==='matrix'; }
   /* PP-EXT B1: icon system — small inline-SVG map replacing emoji-as-UI-chrome (view tabs, sidebar nav,
      dashboard module chips, pomodoro bar). Each entry is a path/shape list drawn on a 24x24 grid; pp_icon()
      wraps it in an <svg> sized off the B0 type scale (default matches --fs-4) using stroke=currentColor so it
@@ -5127,6 +5594,10 @@ class Component extends DCLogic {
     month:   'M4 5h16v15H4zM4 10h16M8 3v4M16 3v4M8 15h2M12 15h2M16 15h2',
     schedule:'M5 4h14v17H5zM8 9h8M8 13h8M8 17h5',
     today:   'M12 6a6 6 0 100 12 6 6 0 000-12zM12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4',
+    /* PP-EXT V2.9: `select` = three columns split by one horizontal rule (the 3x2 grid, literally);
+       `matrix` = four quadrants. Both drawn on the same 24x24 grid as the rest. */
+    select:  'M3 4h18v16H3zM3 12h18M9 4v16M15 4v16',
+    matrix:  'M3 4h18v16H3zM3 12h18M12 4v16',
     planner: 'M4 5h16v15H4zM4 10h16M8 3v4M16 3v4M9 14l1.5 1.5L14 12',
     dashboard:'M4 4h7v7H4zM13 4h7v4h-7zM13 11h7v9h-7zM4 14h7v6H4z',
     stats:   'M4 20V10M11 20V4M18 20v-7',
@@ -5163,7 +5634,9 @@ class Component extends DCLogic {
     const h=React.createElement; const usingOverride = viewOverride!=null;
     const cur = usingOverride ? viewOverride : this.state.mainView;
     const setter = setterOverride || (v=>this.setView(v));
-    const VIEWS=[['gantt','gantt','Gantt'],['day4','day4','4-Day'],['week','week','Week'],['month','month','Month'],['schedule','schedule','Schedule'],['today','today','Today']];
+    /* PP-EXT V2.9 §3/§5: Selection and Matrix join the Plan sub-views. Both are FULL-WIDTH panes (no
+       sheet+Gantt split) — see renderDashPlan, which branches on isFullPlanView. */
+    const VIEWS=[['gantt','gantt','Gantt'],['day4','day4','4-Day'],['week','week','Week'],['month','month','Month'],['schedule','schedule','Schedule'],['today','today','Today'],['select','select','Selection'],['matrix','matrix','Matrix']];
     const seg=h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       VIEWS.map(v=>{ const active=cur===v[0];
         /* PP-EXT B4: view tabs were mouse-only — add keyboard reach (tabIndex/role=tab/Enter-Space) so
@@ -6009,6 +6482,15 @@ class Component extends DCLogic {
     const planView=this.state.planView||this._lastPlanner||'gantt';
     /* PP-EXT: the gantt/4-day/week/month/schedule/today selector moved into the filter bar's leading slot
        (its own row above the filter bar was dropped — see renderFilterBar's `leading` param). */
+    /* PP-EXT V2.9 §3/§5: Selection and Matrix replace the split board entirely — neither has a time axis,
+       so a Gantt pane beside them would be a second, contradictory answer to "what am I doing today?".
+       They still sit under the filter bar, so the same chips/sort narrow them as narrow every other view. */
+    if(this.isFullPlanView(planView)){
+      return h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
+        this.renderFilterBar(this.renderViewToggle(planView, v=>this.setPlanView(v))),
+        h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
+          planView==='select'?this.renderSelectionView(tasks):this.renderMatrixView(tasks)));
+    }
     return h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
       this.renderFilterBar(this.renderViewToggle(planView, v=>this.setPlanView(v))),
       h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
@@ -6019,6 +6501,176 @@ class Component extends DCLogic {
         h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
           this.renderMainPane(tasks, planView))));
   }
+  /* ==== PP-EXT V2.9 §5 + §3: the Selection view and the Eisenhower matrix ====
+     Both are card grids over the SAME task list every other view shows, and both write through existing
+     mutators — no new persisted fields on either surface. They share one drag implementation
+     (cardPointerDown → beginCardDrag → onMouseUp) because the two gestures differ only in what the drop
+     writes: inclusion in Selection, priority in Matrix. */
+
+  /* One card. `zone` is the drop target it currently sits in, used only to skip a no-op write on drop. */
+  planCard(t, zone){
+    const h=React.createElement;
+    const cd=this.state.cardDrag;
+    const dragging=cd && cd.id===t.id;
+    const undecided=this.isUndecided(t);
+    const oc=this.occOf(t);
+    const due=(oc&&oc.end!=null)?this.fmtDT(oc.end,true):null;
+    const planned=+((t.planned)||0), allot=+((t._allot!=null?t._allot:t.planned)||0);
+    const snoozed=this.inclState(t)==='snoozed';
+    return h('div',{key:t.id,'data-card-id':t.id,
+      onMouseDown:e=>this.cardPointerDown(e,t.id,zone),
+      onClick:e=>{ if(this._suppressCardClick){ this._suppressCardClick=false; return; } e.stopPropagation(); this.openDetail(t.id); },
+      title:t.name+(undecided?' · not yet decided':''),
+      style:{display:'flex',flexDirection:'column',gap:'3px',padding:'6px 8px',borderRadius:'var(--r-2)',
+        background:'var(--card-bg)',cursor:'grab',opacity:dragging?0.4:(t.archivedAt?0.5:1),
+        /* PP-EXT V2.9 §4.2: undecided ("I haven't looked at this") must NOT look like off ("I decided no").
+           A dashed edge is the whole guard — without it the view silently converts undecided work into
+           rejected work, which is the one way this design could quietly lose something. */
+        border:(undecided?'1px dashed var(--divider)':'1px solid var(--divider)'),
+        color:undecided?'var(--text-mut2)':'var(--text)',
+        boxShadow:dragging?'none':'var(--sh-1)',fontSize:'12px',minWidth:0}},
+      h('div',{key:'n',style:{fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name||'Untitled'),
+      h('div',{key:'m',style:{display:'flex',alignItems:'center',gap:'6px',fontSize:'10px',color:'var(--text-faint2)',flexWrap:'wrap'}},
+        due?h('span',{key:'d'},due):null,
+        h('span',{key:'p'},this.fmtDur(planned)+' → '+this.fmtDur(allot)),
+        undecided?h('span',{key:'u',style:{fontStyle:'italic'}},'undecided'):null,
+        /* Snooze stays a per-card CONTROL, never a third row — two rows is the whole point of the grid. */
+        h('span',{key:'z',title:snoozed?'Snoozed for today':'Snooze until tomorrow',
+          onMouseDown:e=>e.stopPropagation(),
+          onClick:e=>{e.stopPropagation(); snoozed?this.setIncludedOn(t.id):this.snoozeToday(t.id);},
+          style:{cursor:'pointer',marginLeft:'auto',opacity:snoozed?1:0.55}},'💤')));
+  }
+
+  /* --- card drag: shared by both views, vertical-only by construction (see resolveCardZone) --- */
+  cardPointerDown(e,id,zone){ if(e.button!==0) return; e.stopPropagation();
+    this.cardPending={id,zone,x:e.clientX,y:e.clientY}; }
+  beginCardDrag(){
+    const p=this.cardPending; if(!p) return;
+    this.dragSelectSuppress(); /* PP-EXT V2.9 §1: cards are text too */
+    this._cardDrag={id:p.id, fromZone:p.zone, overZone:p.zone, x:p.x, y:p.y};
+    this.setState({cardDrag:this._cardDrag, menu:null});
+  }
+  /* Which drop zone the cursor is over. Reads `data-dropzone` off the DOM rather than recomputing geometry,
+     because these grids are ordinary flow layout — there is no _yTop-style model to consult. */
+  resolveCardZone(clientX, clientY){
+    const el=document.elementFromPoint(clientX, clientY);
+    const z=el&&el.closest?el.closest('[data-dropzone]'):null;
+    return z?z.getAttribute('data-dropzone'):null;
+  }
+  /* PP-EXT V2.9 §5: the Selection view — three DERIVED columns (Existing · New · Extra) by two rows
+     (Included / Excluded).
+
+     This is NOT a gate. No modal, no landing interception, no completion state, no nag: entry is always
+     user-initiated, every drop is written immediately and independently, and leaving half-done is a valid
+     end state. That is what keeps it from being the "swipe every task into a bucket" ritual that
+     product-vision.md §4 rejected as over-prescribing how people use the app. (The §4/§11 amendment is
+     still the owner's to write — see the spec's §7.1.) */
+  renderSelectionView(tasks){
+    const h=React.createElement;
+    const p=this.selectionProjection(tasks);
+    const cd=this.state.cardDrag;
+    /* An empty Extra COLUMN collapses (same rule as the No-section bucket: a fallback earns its space).
+       Empty CELLS still render — an empty New cell is informative, it means today brought you nothing. */
+    const cols=p.keys.filter(k=>k!=='extra'||p.colCount.extra>0);
+
+    const cell=(colKey,row)=>{
+      const zone='incl:'+row;
+      const active=cd && cd.overZone===zone && cd.overZone!==cd.fromZone;
+      return h('div',{key:colKey+'-'+row,'data-dropzone':zone,'data-selcell':colKey+'-'+row,
+        style:{flex:1,minHeight:0,overflowY:'auto',display:'flex',flexDirection:'column',gap:'6px',
+          padding:'8px',background:active?'var(--menu-hover)':'transparent',
+          borderRadius:'var(--r-2)',transition:'background var(--dur-fast) var(--ease-standard)'}},
+        p.cells[colKey][row].map(t=>this.planCard(t, zone)));
+    };
+    const colHead=k=>h('div',{key:'h-'+k,style:{flex:1,minWidth:0,padding:'6px 8px',
+        fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',textTransform:'uppercase',color:'var(--tag-text)'}},
+      this.originLabel(k),
+      h('span',{key:'n',style:{marginLeft:'6px',fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},p.colCount[k]),
+      h('div',{key:'hint',style:{fontSize:'9px',fontWeight:500,letterSpacing:0,textTransform:'none',
+        color:'var(--text-faint)'}},this.originHint(k)));
+
+    const rowBand=(row,label)=>h('div',{key:'row-'+row,
+      style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',
+        borderTop:row==='excluded'?'2px solid '+this._accent:'none'}},
+      h('div',{key:'lbl',style:{padding:'4px 10px',fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
+          textTransform:'uppercase',color:'var(--text)',background:'var(--top-bg)',
+          borderBottom:'1px solid var(--top-border)',display:'flex',alignItems:'center',gap:'6px'}},
+        label,
+        h('span',{key:'n',style:{fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},p.rowCount[row]),
+        row==='excluded'?h('span',{key:'note',style:{fontWeight:500,letterSpacing:0,textTransform:'none',
+          fontSize:'9px',color:'var(--text-faint)'}},'dashed = not yet decided'):null),
+      h('div',{key:'cells',style:{flex:1,minHeight:0,display:'flex'}},
+        cols.map(k=>h('div',{key:k,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',minHeight:0,
+          borderLeft:k===cols[0]?'none':'1px solid var(--divider)'}}, cell(k,row)))));
+
+    return h('div',{style:{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',
+        background:'var(--sheet-bg)'}},
+      h('div',{key:'note',style:{padding:'6px 12px',fontSize:'10.5px',color:'var(--text-faint2)',
+        borderBottom:'1px solid var(--top-border)'}},
+        /* Say what the columns are, because a column you cannot change is confusing until you know why. */
+        'Columns are derived from your calendar — drag a card UP or DOWN to include or exclude it. '
+        +'j/k move · space toggles.'),
+      h('div',{key:'heads',style:{display:'flex',borderBottom:'1px solid var(--top-border)'}}, cols.map(colHead)),
+      rowBand('included','Included'),
+      rowBand('excluded','Excluded'));
+  }
+  /* PP-EXT V2.9 §5: keyboard pass. `j`/`k` walk a flat, render-order cursor over every card; space toggles
+     the row the cursor's card is in. Deliberately the only keyboard verbs — this surface is for sweeping. */
+  selectionFlat(){
+    const p=this.selectionProjection(this._visTasks||this.state.tasks);
+    const out=[];
+    ['included','excluded'].forEach(row=>p.keys.forEach(k=>p.cells[k][row].forEach(t=>out.push(t))));
+    return out;
+  }
+  selectionKey(k){
+    const flat=this.selectionFlat(); if(!flat.length) return;
+    let i=flat.findIndex(t=>t.id===this.state.selCursor);
+    if(k==='j'){ i=(i<0)?0:Math.min(flat.length-1,i+1); this.setState({selCursor:flat[i].id, selectedIds:[flat[i].id]}); return; }
+    if(k==='k'){ i=(i<0)?0:Math.max(0,i-1); this.setState({selCursor:flat[i].id, selectedIds:[flat[i].id]}); return; }
+    if(k===' '){ if(i<0) return; const t=flat[i];
+      this.setInclusionRow(t.id, this.inclusionRow(t)==='included'?'excluded':'included'); }
+  }
+
+  /* PP-EXT V2.9 §3: the Eisenhower matrix. The header states the asymmetry out loud — urgency is computed
+     from your dates, importance is read from the priority you set — because a matrix that appears to guess
+     both axes is a matrix nobody trusts, and the honesty is what makes the automation acceptable. */
+  renderMatrixView(tasks){
+    const h=React.createElement;
+    const now=this.startOfToday();
+    const proj=this.eisenhowerProjection(tasks, now);
+    const cd=this.state.cardDrag;
+    const quads=this.EISENHOWER_QUADRANTS();
+
+    const quadBox=q=>{
+      const zone='quad:'+(q.important?'important':'unimportant');
+      const active=cd && cd.overZone===zone && cd.overZone!==cd.fromZone;
+      return h('div',{key:q.k,'data-dropzone':zone,'data-quad':q.k,
+        style:{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',
+          border:'1px solid var(--divider)',borderRadius:'var(--r-2)',margin:'6px',
+          background:active?'var(--menu-hover)':'var(--card-bg)',
+          transition:'background var(--dur-fast) var(--ease-standard)'}},
+        h('div',{key:'h',style:{padding:'6px 9px',borderBottom:'1px solid var(--divider)',
+            display:'flex',alignItems:'baseline',gap:'6px'}},
+          h('span',{key:'l',style:{fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
+            textTransform:'uppercase',color:'var(--text)'}},q.label),
+          h('span',{key:'n',style:{fontSize:'9px',fontWeight:600,color:'var(--text-faint2)'}},proj[q.k].length),
+          h('span',{key:'hint',style:{fontSize:'9px',color:'var(--text-faint)',marginLeft:'auto'}},q.hint)),
+        h('div',{key:'b',style:{flex:1,minHeight:0,overflowY:'auto',display:'flex',flexDirection:'column',
+          gap:'6px',padding:'8px'}}, proj[q.k].map(t=>this.planCard(t, zone))));
+    };
+
+    return h('div',{style:{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',
+        background:'var(--sheet-bg)'}},
+      h('div',{key:'note',style:{padding:'6px 12px',fontSize:'10.5px',color:'var(--text-faint2)',
+        borderBottom:'1px solid var(--top-border)'}},
+        'Partially automated: URGENCY is computed from your dates (overdue, due within '
+        +(+((this.state.settings||{}).eisenhowerUrgentDays)||2)+' days, or running today). '
+        +'IMPORTANCE is the priority you set — drag a card UP or DOWN to change it. '
+        +'Dragging sideways does nothing: the only way to change urgency is to change the dates.'),
+      h('div',{key:'r1',style:{flex:1,minHeight:0,display:'flex'}}, quads.filter(q=>q.important).map(quadBox)),
+      h('div',{key:'r2',style:{flex:1,minHeight:0,display:'flex'}}, quads.filter(q=>!q.important).map(quadBox)));
+  }
+
   /* Focus tab: full-screen, minimalist, distraction-free. Four columns:
      left = Pomodoro + music dock + rich quick-note (bound to *today's* real journal entry — same pp-journal
      store the Journal page reads/writes, so a note here shows up there and vice-versa); habits = today's habits
@@ -6081,14 +6733,14 @@ class Component extends DCLogic {
           style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
             borderRadius:'var(--r-1)',fontSize:'9.5px',fontWeight:750,color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',flex:'none'}},'+'+this.FOCUS_ADD_MINUTES)); };
     const openN=planTasks.filter(t=>!taskDone(t)).length;
-    const planSections=this.tasksByTagSection(planTasks);
+    const planSections=this.sectionProjection(planTasks);
     const taskCol=h('div',{style:{flex:'25 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'8px',padding:'16px',overflow:'auto'}},
       h('div',{style:{display:'flex',alignItems:'baseline',gap:'8px',flex:'none'}}, label('Tasks'),
         planTasks.length?h('span',{style:{fontSize:'11px',color:'var(--text-faint)',fontWeight:600}}, openN+' open'):null),
-      planTasks.length? planSections.map((sec,si)=>h('div',{key:'focus-sec-'+(sec.tag||'untagged')+'-'+si,style:{display:'flex',flexDirection:'column',gap:'5px'}},
-        h('div',{style:{display:'flex',alignItems:'center',gap:'7px',height:'20px',fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',
-          color:sec.tag?'var(--tag-text)':'var(--text-faint)',textTransform:'uppercase'}},
-          h('span',{},sec.tag?('@'+sec.tag):'No tag'),h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}})),
+      planTasks.length? planSections.map((sec,si)=>h('div',{key:'focus-sec-'+(sec.id||'nosection')+'-'+si,style:{display:'flex',flexDirection:'column',gap:'5px'}},
+        sec.flat?null:h('div',{style:{display:'flex',alignItems:'center',gap:'7px',height:'20px',fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',
+          color:sec.id?'var(--tag-text)':'var(--text-faint)',textTransform:'uppercase'}},
+          h('span',{},sec.id?sec.name:'No section'),h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}})),
         ...sec.tasks.map(taskRow))) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No tasks yet.'));
     const B=this.startOfToday();
     const rightCol=h('div',{style:{flex:'20 1 0',minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',padding:'16px 16px 16px 0'}},
@@ -6704,19 +7356,24 @@ class Component extends DCLogic {
     const header=h('div',{ref:el=>this.headerEl=el, style:{display:'flex',height:this.headH+'px',minWidth:totalW+'px',position:'sticky',top:0,zIndex:5,
       background:'var(--top-bg)',borderBottom:'1px solid var(--top-border)'}}, cols.map(headCell));
 
-    /* PP-EXT V2.3: real @tag section headers. The matching Gantt rails use the same TAG_SECTION_H and
-       tasksByTagSection projection, so introducing structure does not sacrifice row alignment. */
-    const sections=this.tasksByTagSection(tasks); const rows=[]; let rowIndex=0;
+    /* PP-EXT V2.6: real section headers (was @tag-derived in V2.3). The matching Gantt rails use the same
+       TAG_SECTION_H and sectionProjection, so introducing structure does not sacrifice row alignment. */
+    /* Use the CACHED projection, never re-project `tasks`: `tasks` is _visTasks, which flattenSections has
+       already stripped of collapsed rows, so re-projecting would report a collapsed section as empty. */
+    const sections=(tasks===this._visTasks && this._visSections) ? this._visSections : this.sectionProjection(tasks);
+    /* PP-EXT V2.6b: the sheet is the drag surface, and the Gantt is not always the visible right pane, so the
+       drop geometry is computed HERE too — from the same pure function, on the same projection. */
+    /* `_yTop` too: it was previously set only by renderGantt, so with Schedule/Month/Week showing on the right
+       rowAtInsert silently fell back to `y/rowH` — which knows nothing about section headers and therefore
+       resolved every drop to the wrong row. The Gantt recomputes the identical values when it does render. */
+    const geo=this.sectionGeometry(sections);
+    this._secLayout=geo.secLayout; this._yTop=geo.yTop;
+    const rows=[]; let rowIndex=0;
     sections.forEach((sec,si)=>{
-      const label=sec.tag?('@'+sec.tag):'No tag';
-      rows.push(h('div',{key:'section-'+(sec.tag||'untagged')+'-'+si,'data-tag-section':sec.tag||'',
-        style:{display:'flex',alignItems:'center',height:this.TAG_SECTION_H+'px',minWidth:totalW+'px',padding:'0 12px',
-          background:'var(--top-bg)',borderTop:si?'1px solid var(--top-border)':'none',borderBottom:'1px solid var(--top-border)',
-          color:sec.tag?'var(--tag-text)':'var(--text-faint)',fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
-          textTransform:'uppercase',position:'relative'}},
-        h('span',{style:{whiteSpace:'nowrap'}},label),
-        h('span',{style:{marginLeft:'8px',fontSize:'9px',fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},sec.tasks.length),
-        h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.65,flex:1,marginLeft:'10px'}})));
+      if(!sec.flat) rows.push(this.sectionHeaderRow(sec,si,totalW,sections.length));
+      /* A collapsed section keeps its header (both panes still reserve TAG_SECTION_H) and hides only its
+         task rows — matching flattenSections, so rowIndex stays in step with _visTasks and _yTop. */
+      if(sec.collapsed) return;
       sec.tasks.forEach(t=>rows.push(this.sheetRow(t,rowIndex++,cols,totalW,byId)));
     });
 
@@ -6736,6 +7393,98 @@ class Component extends DCLogic {
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}}, inner);
+  }
+  /* PP-EXT V2.6: one section header row. Controls (rename · reorder · delete) are hover-gated but are
+     CHILDREN of the header, per the hit-target tenet — a handle that appears on hover must live inside the
+     element that owns the hover, or it flickers out from under the cursor on the way to it. Every control
+     is at least HIT_MIN_PX wide; the glyph is not the hit box.
+     The header row height stays TAG_SECTION_H no matter what is shown, because the Gantt reserves exactly
+     that and row alignment is load-bearing. */
+  sectionHeaderRow(sec, si, totalW, secCount){
+    const h=React.createElement;
+    /* PP-EXT V2.9 §6: an inclusion band is a DIVISION, not a section — it cannot be renamed, reordered, or
+       deleted, because nobody made it. It behaves like `No section` in every one of those respects, so it
+       reuses the same `isNone` guards rather than growing a parallel set. Its collapse state comes from the
+       PROJECTION (Excluded defaults collapsed), not from the stored pref. */
+    const isIncl=(sec.id===this.INCL_BAND_IN()||sec.id===this.INCL_BAND_OUT());
+    const isNone=(sec.id==null)||isIncl;
+    const collapsed=(sec.collapsed!=null)?!!sec.collapsed:this.isSectionCollapsed(sec.id);
+    const editing=this.state.secEdit===sec.id && !isNone;
+    const hov=this.state.hoverSection===this.secKey(sec.id);
+    const order=this.sectionsInOrder(); const pos=order.findIndex(s=>s.id===sec.id);
+
+    const btn=(key,glyph,title,onClick,extra)=>h('div',{key,title,
+      onMouseDown:e=>{e.stopPropagation();}, onClick:e=>{e.stopPropagation(); onClick();},
+      style:Object.assign({width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',
+        justifyContent:'center',cursor:'pointer',borderRadius:'var(--r-1)',flex:'none',
+        color:'var(--text-mut2)',fontSize:'11px',letterSpacing:0,opacity:hov?0.95:0},extra||{}),
+      onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
+      onMouseLeave:e=>e.currentTarget.style.background='transparent'}, glyph);
+
+    const nameEl = editing
+      ? h('input',{key:'secname',defaultValue:sec.name,autoFocus:true,
+          onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
+          onBlur:e=>this.commitSectionEdit(sec.id,e.target.value),
+          /* Enter commits DIRECTLY rather than via e.target.blur(): routing the commit through a blur
+             side-effect silently does nothing whenever the field isn't the active element, which is exactly
+             when you can least afford to drop the user's typing. Escape abandons; blur still commits so
+             clicking away saves rather than discards. */
+          onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.commitSectionEdit(sec.id,e.target.value); }
+                         else if(e.key==='Escape'){ e.preventDefault(); this.cancelSectionEdit(); } },
+          style:{font:'inherit',fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',textTransform:'uppercase',
+            color:'var(--text)',background:'var(--input-bg)',border:'1px solid '+this._accent,borderRadius:'var(--r-1)',
+            padding:'1px 5px',minWidth:0,width:'170px',outline:'none'}})
+      : h('span',{key:'secname',style:{whiteSpace:'nowrap',cursor:isNone?'default':'text'},
+          onClick:isNone?null:(e=>{e.stopPropagation(); this.startSectionEdit(sec.id);}),
+          title:isIncl?(sec.id===this.INCL_BAND_IN()?'On today’s list — drag a row below the divider to exclude it'
+                                                    :'Not on today’s list — drag a row above the divider to include it')
+                :(isNone?'Tasks not in any section':'Click to rename')},
+          isIncl?sec.name:(sec.id==null?'No section':sec.name));
+
+    /* PP-EXT V2.6b: drag feedback. A section being dragged dims; the slot it would land in gets an accent
+       top rule. A ROW drag over this band tints it, which is the only feedback an EMPTY section can give —
+       it has no rows for an insertion line to sit between. */
+    const sd=this.state.secDrag, rd=this.state.rowDrag;
+    const beingDragged = sd && sd.id===sec.id;
+    const isSecTarget = sd && !beingDragged && sd.overPos===pos && !isNone;
+    const isRowTarget = rd && !sd && this.rowDragMoved && (
+      (rd.dropSectionId!==undefined && rd.dropSectionId===sec.id && rd.dropSectionId!==rd.origSectionId)
+      /* PP-EXT V2.9 §6: the same tint is the only feedback the inclusion bands can give either — an empty
+         or collapsed band has no rows for an insertion line to sit between. */
+      || (isIncl && rd.dropInclusion!==undefined && rd.dropInclusion!==rd.origInclusion
+          && sec.id===(rd.dropInclusion==='included'?this.INCL_BAND_IN():this.INCL_BAND_OUT())));
+
+    return h('div',{key:'section-'+(sec.id||'nosection')+'-'+si,'data-section-id':sec.id||'',
+      onMouseEnter:()=>this.setState({hoverSection:this.secKey(sec.id)}),
+      onMouseLeave:()=>this.setState({hoverSection:null}),
+      onMouseDown:isNone?null:(e=>this.secPointerDown(e,sec.id,pos)),
+      title:isNone?null:'Drag to reorder this section',
+      style:{display:'flex',alignItems:'center',gap:'2px',height:this.TAG_SECTION_H+'px',minWidth:totalW+'px',padding:'0 8px 0 4px',
+        cursor:isNone?'default':(beingDragged?'grabbing':'grab'), opacity:beingDragged?0.45:1,
+        background:isRowTarget?'var(--menu-hover)':'var(--top-bg)',
+        /* PP-EXT V2.9 §6: the inclusion division reads HEAVIER than a section header — it is a higher-order
+           split, and if it looked the same the two structures would be indistinguishable at a glance.
+           Height stays TAG_SECTION_H regardless, because sectionGeometry reserves exactly that and row
+           alignment between the panes is load-bearing. */
+        borderTop:isSecTarget?('3px solid '+this._accent)
+          :(isIncl?('2px solid '+this._accent):(si?'1px solid var(--top-border)':'none')),
+        borderBottom:'1px solid var(--top-border)',
+        color:isIncl?'var(--text)':(isNone?'var(--text-faint)':'var(--tag-text)'),fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
+        textTransform:'uppercase',position:'relative'}},
+      /* collapse caret is always visible — it is the section's primary affordance, not a hover extra */
+      h('div',{key:'car',title:collapsed?'Expand section':'Collapse section',
+        onMouseDown:e=>e.stopPropagation(), onClick:e=>{e.stopPropagation(); this.toggleSectionCollapse(sec.id, collapsed);},
+        style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
+          cursor:'pointer',flex:'none',color:'var(--text-faint)',fontSize:'9px',
+          transform:collapsed?'rotate(-90deg)':'none',transition:'transform 120ms ease'}},'▼'),
+      nameEl,
+      h('span',{key:'n',style:{marginLeft:'6px',fontSize:'9px',fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},sec.tasks.length),
+      h('span',{key:'rule',style:{height:'1px',background:'var(--tag-border)',opacity:0.65,flex:1,margin:'0 8px'}}),
+      /* No section is a fallback bucket, not a thing anyone made: it cannot be renamed, moved, or deleted. */
+      isNone?null:btn('up','▲','Move section up',()=>this.reorderSection(sec.id,pos-1),{opacity:hov&&pos>0?0.95:0,pointerEvents:pos>0?'auto':'none'}),
+      isNone?null:btn('dn','▼','Move section down',()=>this.reorderSection(sec.id,pos+1),{opacity:hov&&pos<order.length-1?0.95:0,pointerEvents:pos<order.length-1?'auto':'none'}),
+      isNone?null:btn('del','✕','Delete section (its tasks move to No section)',()=>this.deleteSection(sec.id),{color:'var(--danger-strong)'})
+    );
   }
   /* PP-EXT Phase 7: always-visible filter bar spanning the FULL board width (above both panes, so sheet rows stay
      aligned with the Gantt bars). Smart chips toggle; active column-filter pills clear on click; Clear-all also
@@ -6778,6 +7527,16 @@ class Component extends DCLogic {
       onChange:e=>this.setSort(e.target.value||null,'asc'),style:selSty},
       h('option',{key:'',value:''},'Sort: Manual'),
       ...this.SORT_KEYS().map(k=>h('option',{key:k,value:k},'Sort: '+keyLabel(k))));
+    /* PP-EXT V2.6: Group by — Section (headers) or None (one flat list). Sits next to Sort because it is
+       the same kind of control: a projection over the same task array, persisted per workspace in pp-prefs. */
+    const groupBy=this.state.groupBy||'section';
+    const groupSel=h('select',{key:'groupsel',value:groupBy,
+      title:'Group by — Section shows headers; Inclusion splits today’s list above/below a divider (drag a row across it to include or exclude); None gives one flat list',
+      onChange:e=>this.setGroupBy(e.target.value),style:selSty},
+      h('option',{key:'section',value:'section'},'Group: Section'),
+      h('option',{key:'inclusion',value:'inclusion'},'Group: Inclusion'), /* PP-EXT V2.9 §6 */
+      h('option',{key:'none',value:'none'},'Group: None'));
+    const addSecBtn=groupBy==='section'?mkChip('addsec','+ Section',false,()=>this.newSectionInline(),'Create a new section (opens named for editing)'):null;
     const sortDir=sortKey?mkChip('sortdir',(this.sortArrow(sortKey)||'▲'),true,
       ()=>this.setSort(sortKey,this.state.sort.dir==='asc'?'desc':'asc'),'Toggle ascending / descending'):null;
     const findField=this.state.findField||'tags';
@@ -6821,7 +7580,7 @@ class Component extends DCLogic {
       h('span',{key:'psep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
       moreBtn,
       h('span',{key:'sfsep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
-      sortSel, sortDir,
+      sortSel, sortDir, groupSel, addSecBtn,
       ...filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear')),
       anyActive
         ? mkChip('clr','Clear all', false, ()=>{ this.clearAllFilters(); this.setSort(null); }, 'Clear all filters and sorting',
@@ -7080,7 +7839,9 @@ class Component extends DCLogic {
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
-        background:this.ambientRowBackground(t, sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
+        /* PP-EXT V2.9 §2: ambient hatch/tint layers stripped; V2.1 pressed/active DEPTH stays — it is not
+           colour, and it is the only visual the inclusion model has. */
+        background:(sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
           (depthState==='pressed'?'color-mix(in srgb, '+this._accent+' 6%, '+(i%2?'var(--sheet-alt)':'var(--sheet-bg)')+')':(i%2?'var(--sheet-alt)':'var(--sheet-bg)'))))),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
@@ -7102,10 +7863,12 @@ class Component extends DCLogic {
        each row's Y top (yOfRow reads this._yTop) so bars/stripes/arrows stay aligned with the sheet. */
     /* PP-EXT V2.3: section rails consume identical vertical space on both panes. `_yTop` remains indexed by
        the flattened task list, so bars/arrows/dependency drops continue to target tasks rather than headers. */
-    const sections=this.tasksByTagSection(tasks), sectionBands=[]; const yTop=[]; let acc=0, ti=0;
-    sections.forEach((sec,si)=>{ sectionBands.push({tag:sec.tag,top:acc,key:'gsec-'+(sec.tag||'untagged')+'-'+si}); acc+=this.TAG_SECTION_H;
-      sec.tasks.forEach(t=>{ yTop[ti++]=acc; acc+=this.rowH+this.descExtra(t); }); });
-    this._yTop=yTop; const bodyH=acc;
+    /* Same caching rule as the sheet — see renderSheet: re-projecting the already-flattened _visTasks
+       would drop collapsed sections' counts and desynchronise the two panes. */
+    const sections=(tasks===this._visTasks && this._visSections) ? this._visSections : this.sectionProjection(tasks);
+    const g=this.sectionGeometry(sections);
+    const sectionBands=g.secLayout.map((b,si)=>({id:b.id,top:b.top,key:'gsec-'+(b.id||'nosection')+'-'+si}));
+    this._yTop=g.yTop; this._secLayout=g.secLayout; const bodyH=g.bodyH;
 
     /* PP-EXT: virtualization window — only render timeline chrome + bars within the visible day range. */
     const win=this.ganttVWin(tl,dayW); this._vwin=win; const vd0=win.d0, vd1=win.d1;
@@ -7192,7 +7955,7 @@ class Component extends DCLogic {
 
     const body=h('div',{ref:el=>this.bodyEl=el, style:{position:'relative',minWidth:totalW+'px',height:bodyH+'px'}},
       ...weekendRects, ...gridLines,
-      ...sectionBands.map((sec,si)=>h('div',{key:sec.key,'data-tag-section':sec.tag||'',
+      ...sectionBands.map((sec,si)=>h('div',{key:sec.key,'data-section-id':sec.id||'',
         style:{position:'absolute',left:0,right:0,top:sec.top+'px',height:this.TAG_SECTION_H+'px',zIndex:2,pointerEvents:'none',
           background:'color-mix(in srgb, var(--top-bg) 88%, transparent)',borderTop:si?'1px solid var(--top-border)':'none',
           borderBottom:'1px solid var(--top-border)',boxShadow:'inset 0 -1px 0 color-mix(in srgb, var(--tag-border) 55%, transparent)'}})),
@@ -7204,8 +7967,8 @@ class Component extends DCLogic {
              the expanded task's own Gantt row — hover/selection/border cover the whole thing — instead of the
              blank space reading as the following row. The bar itself stays centered in the top rowH (see ganttBlock). */
           style:{position:'absolute',left:0,right:0,top:this.yOfRow(i)+'px',height:(this.rowH+this.descExtra(t))+'px',
-            background:this.isMilestone(t)?(sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent'))
-              :this.ambientRowBackground(t, sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent')),
+            /* PP-EXT V2.9 §2: ambient hatch/tint stripped — both branches are now the same expression. */
+            background:(sel?'var(--sel-gantt)':(hov?'var(--hover-gantt)':'transparent')),
             borderBottom:'1px solid var(--row-border-gantt)',
             boxShadow: (this._glowIds&&this._glowIds.has(t.id)?'inset 0 0 0 9999px rgba(245,181,54,0.16)':(crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'))}}); }), /* PP-EXT: month-view day glow */
       arrows, ...bars, todayLine);
@@ -7513,7 +8276,13 @@ class Component extends DCLogic {
     const tasks=this.state.tasks.filter(t=>ids.includes(t.id));
     const allDone=tasks.every(t=>t.pct>=100);
     const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
-    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.min(m.y, vpc.h-380);
+    /* PP-EXT V2.6: the section block adds up to ~210px (label + divider + the 168px scroll cap), so the
+       vertical clamp has to grow with it or the menu runs off the bottom on a short viewport. */
+    const grouped=(this.state.groupBy||'section')==='section';
+    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-(grouped?590:380)));
+    /* ● when every selected task's subtree ROOT already sits in this section, ○ otherwise. */
+    const rootSecOf=id=>{ const r=this.state.tasks.find(x=>x.id===this.sectionRootId(this.state.tasks,id)); return r?(r.sectionId||null):null; };
+    const secMarkOf=sid=>(tasks.length && tasks.every(t=>rootSecOf(t.id)===sid)) ? '●' : '○';
 
     const row=(content,onClick,extra)=>h('div',{onClick,style:Object.assign({display:'flex',alignItems:'center',gap:'11px',
       padding:'8px 14px',cursor:'pointer',fontSize:'13px',color:'var(--text-2)'},extra||{}),
@@ -7538,6 +8307,22 @@ class Component extends DCLogic {
             cursor:'pointer',border:'1px solid var(--divider)',background:'var(--input-bg)'},
           onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',onMouseLeave:e=>e.currentTarget.style.background='var(--input-bg)'},
           this.flagSvg(p,p!==4,17)))),
+      divider,
+      /* PP-EXT V2.6: section assignment. This is the ONLY way to move a task between sections, so it lives
+         in the row menu next to the other whole-task operations. Assignment resolves to the subtree root
+         (setTaskSectionMulti), matching how tasksBySection groups. Hidden under Group by: None, where
+         sections aren't on screen to move things between. */
+      (this.state.groupBy||'section')==='section' ? divider : null,
+      (this.state.groupBy||'section')==='section' ? label('Section') : null,
+      (this.state.groupBy||'section')==='section' ? h('div',{style:{maxHeight:'168px',overflowY:'auto'}},
+        ...this.sectionsInOrder().map(s=>h('div',{key:'sec-'+s.id},
+          row([ic(secMarkOf(s.id)),h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},s.name)],
+            ()=>this.setTaskSectionMulti(ids,s.id)))),
+        h('div',{key:'sec-none'},row([ic(secMarkOf(null)),h('span',{style:{color:'var(--text-mut2)'}},'No section')],
+          ()=>this.setTaskSectionMulti(ids,null))),
+        h('div',{key:'sec-new'},row([ic('+'),'New section…'],
+          ()=>{ const s=this.newSectionInline(); this.setTaskSectionMulti(ids,s.id); }))
+      ) : null,
       divider,
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
       row([ic('⧉'),'Duplicate'],()=>this.duplicateMulti(ids)),
