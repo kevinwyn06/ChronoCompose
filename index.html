@@ -451,9 +451,19 @@ class Component extends DCLogic {
          sort={key,dir}|null (null=manual order); colFilters={[key]:spec}; chips=[] active smart-chip keys. */
       sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[],
       spentScope: pf.spentScope==='life' ? 'life' : 'today', /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */
-      dashMode: pf.dashMode||'plan', /* PP-EXT Phase D: Dashboard's fixed full-screen mode — plan | focus | review */
+      /* PP-EXT Phase D: Dashboard's fixed full-screen mode. PP-EXT V2.10: the enum grew from
+         plan|focus|review to overview|plan|focus|review — what used to be "Plan" (the scheduling board) is
+         now "Overview", and "Plan" is the new selection surface. The stored value is versioned because the
+         string 'plan' means two different tabs across the rename: without `dashModeV`, every returning user
+         would land on a surface they never chose. See migrateDashMode. */
+      dashMode: this.migrateDashMode(pf),
+      planTab: pf.planTab==='matrix'?'matrix':'select', /* PP-EXT V2.10: the Plan tab's own sub-view — select | matrix */
       firstRunSeen: !!pf.firstRunSeen, /* PP-EXT V0.2: one-time 3-step first-run coach — dismissed once, never re-shown (persisted per workspace in pp-prefs). */
-      planView: pf.planView||'schedule' /* PP-EXT Phase D: Plan tab's own scheduling sub-view (independent of state.mainView, which stays 'dashboard'). PP-EXT V0.1: first-run default = 'schedule' (auto-scheduling moat), not raw gantt; a saved pf.planView still wins. */ };
+      /* PP-EXT Phase D: Overview tab's own scheduling sub-view (independent of state.mainView, which stays
+         'dashboard'). PP-EXT V0.1: first-run default = 'schedule' (auto-scheduling moat), not raw gantt; a
+         saved pf.planView still wins. PP-EXT V2.10: 'select'/'matrix' left this enum for their own tab, so a
+         pref saved under the old scheme falls back rather than selecting a view that no longer exists. */
+      planView: this.migratePlanView(pf) };
     this.ZOOMS = [{k:'4d',w:96},{k:'W',w:64},{k:'2W',w:42},{k:'M',w:24},{k:'2M',w:14},{k:'Q',w:8},{k:'Y',w:3}];
   }
 
@@ -871,8 +881,8 @@ class Component extends DCLogic {
       /* PP-EXT V2.9 §5: j/k/space only while the Selection view is the active Plan sub-view. Fast passes
          matter more here than anywhere else — this is the surface you sweep once a morning. Scoped to the
          view so these letters stay free everywhere else. */
-      if(this.state.mainView==='dashboard' && (this.state.dashMode||'plan')==='plan'
-         && this.state.planView==='select' && (k==='j'||k==='k'||e.key===' ')){
+      if(this.state.mainView==='dashboard' && (this.state.dashMode||'overview')==='plan'
+         && (this.state.planTab||'select')==='select' && (k==='j'||k==='k'||e.key===' ')){
         e.preventDefault(); this.selectionKey(e.key===' '?' ':k); return;
       }
     }
@@ -5631,8 +5641,6 @@ class Component extends DCLogic {
     this.savePrefs({mainView:v});
   }
   splitDefault(key){ return key==='agenda'?20:50; }
-  /* PP-EXT V2.9: Plan sub-views that occupy the whole board instead of the sheet+Gantt split. */
-  isFullPlanView(v){ return v==='select'||v==='matrix'; }
   /* PP-EXT B1: icon system — small inline-SVG map replacing emoji-as-UI-chrome (view tabs, sidebar nav,
      dashboard module chips, pomodoro bar). Each entry is a path/shape list drawn on a 24x24 grid; pp_icon()
      wraps it in an <svg> sized off the B0 type scale (default matches --fs-4) using stroke=currentColor so it
@@ -5686,9 +5694,10 @@ class Component extends DCLogic {
     const h=React.createElement; const usingOverride = viewOverride!=null;
     const cur = usingOverride ? viewOverride : this.state.mainView;
     const setter = setterOverride || (v=>this.setView(v));
-    /* PP-EXT V2.9 §3/§5: Selection and Matrix join the Plan sub-views. Both are FULL-WIDTH panes (no
-       sheet+Gantt split) — see renderDashPlan, which branches on isFullPlanView. */
-    const VIEWS=[['gantt','gantt','Gantt'],['day4','day4','4-Day'],['week','week','Week'],['month','month','Month'],['schedule','schedule','Schedule'],['today','today','Today'],['select','select','Selection'],['matrix','matrix','Matrix']];
+    /* PP-EXT V2.10: Selection and Matrix LEFT this toggle for their own Plan tab (see renderDashPlan). These
+       six all place work in time; those two decide what is in today, and listing them together said they were
+       alternatives to each other. */
+    const VIEWS=[['gantt','gantt','Gantt'],['day4','day4','4-Day'],['week','week','Week'],['month','month','Month'],['schedule','schedule','Schedule'],['today','today','Today']];
     const seg=h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
       VIEWS.map(v=>{ const active=cur===v[0];
         /* PP-EXT B4: view tabs were mouse-only — add keyboard reach (tabIndex/role=tab/Enter-Space) so
@@ -5707,6 +5716,29 @@ class Component extends DCLogic {
   setPlanView(v){ const key=this.splitKeyFor(v);
     this.setState({planView:v, splitPct:(this.state.viewSplit&&this.state.viewSplit[key])!=null?this.state.viewSplit[key]:this.splitDefault(key), hoverDay:null});
     this.savePrefs({planView:v});
+  }
+  /* ==== PP-EXT V2.10: prefs migration for the Overview/Plan split ====
+     PURE (reads only the prefs object). Two saved strings changed meaning in the same release, and both
+     failures are silent-but-wrong rather than loud, which is why they get named helpers and tests:
+
+       dashMode  — 'plan' used to mean the scheduling board and now means the selection surface. Legacy
+                   prefs (no `dashModeV`) are remapped 'plan' → 'overview'; from V2 the value is trusted.
+       planView  — 'select'/'matrix' were Overview sub-views and are now their own tab, so a pref still
+                   holding one would select a view that no longer exists in the toggle. Fall back to the
+                   V0.1 first-run default rather than to raw gantt. */
+  DASH_MODES(){ return ['overview','plan','focus','review']; }
+  migrateDashMode(pf){
+    pf=pf||{};
+    const v=pf.dashMode;
+    if(pf.dashModeV===2) return this.DASH_MODES().indexOf(v)>=0 ? v : 'overview';
+    /* Legacy (or absent): plan|focus|review. The old "Plan" is the new "Overview". */
+    return (v==='focus'||v==='review') ? v : 'overview';
+  }
+  migratePlanView(pf){
+    pf=pf||{};
+    const v=pf.planView;
+    if(!v || v==='select' || v==='matrix') return 'schedule';
+    return v;
   }
   /* PP-EXT Phase 9: which main-views are stand-alone "pages" (full-width, no task sheet + Gantt split). */
   isPageView(v){ return v==='archive'||v==='stats'||v==='habits'||v==='journal'||v==='dashboard'; }
@@ -6511,11 +6543,12 @@ class Component extends DCLogic {
      Habits | Calendar sub-tabs, each full-size — the Month calendar in particular gets real room instead of a
      cramped grid cell). No user drag/resize/hide — each mode's layout is fixed by design. */
   renderDashboardView(tasks){
-    const h=React.createElement; const mode=this.state.dashMode||'plan';
+    const h=React.createElement; const mode=this.state.dashMode||'overview';
     let content;
     if(mode==='focus') content=this.renderDashFocus(tasks);
     else if(mode==='review') content=this.renderDashReview();
-    else content=this.renderDashPlan(tasks);
+    else if(mode==='plan') content=this.renderDashPlan(tasks); /* PP-EXT V2.10: selection + matrix */
+    else content=this.renderDashOverview(tasks);
     const body=h('div',{key:mode,style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',minWidth:0,
       animation:'ppDashFade var(--dur-med) var(--ease-standard)'}}, content);
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, body);
@@ -6523,9 +6556,10 @@ class Component extends DCLogic {
   /* PP-EXT: Plan/Focus/Review segmented pill — moved out of the Dashboard's own header band (now removed) and
      into the top bar's context slot (renderTopContext), so it's visible without a redundant "Dashboard" title. */
   renderDashModeTabs(){
-    const h=React.createElement; const mode=this.state.dashMode||'plan';
-    const setMode=(m)=>{ this.setState({dashMode:m}); this.savePrefs({dashMode:m}); };
-    const TABS=[['plan','Plan'],['focus','Focus'],['review','Review']];
+    const h=React.createElement; const mode=this.state.dashMode||'overview';
+    /* PP-EXT V2.10: always stamp dashModeV so the next load trusts the value instead of remapping it. */
+    const setMode=(m)=>{ this.setState({dashMode:m}); this.savePrefs({dashMode:m, dashModeV:2}); };
+    const TABS=[['overview','Overview'],['plan','Plan'],['focus','Focus'],['review','Review']];
     return h('div',{style:{display:'flex',gap:'3px',background:'var(--chip-bg)',borderRadius:'8px',padding:'3px'}},
       TABS.map(t=>{ const active=mode===t[0];
         return h('div',{key:t[0],onClick:()=>setMode(t[0]),tabIndex:0,role:'tab','aria-selected':active,
@@ -6533,22 +6567,14 @@ class Component extends DCLogic {
           style:{padding:'6px 16px',borderRadius:'6px',cursor:'pointer',fontSize:'12.5px',fontWeight:700,
             color:active?'var(--on-accent)':'var(--text-mut2)',background:active?this._accent:'transparent'}}, t[1]); }));
   }
-  /* Plan tab: today's Planner (task sheet + Gantt split, its own view toggle, filter bar) — a straight relocation
-     of the existing full Planner UI, driven by state.planView so mainView can stay 'dashboard'. */
-  renderDashPlan(tasks){
+  /* Overview tab (named "Plan" before V2.10): today's Planner (task sheet + Gantt split, its own view toggle,
+     filter bar) — a straight relocation of the existing full Planner UI, driven by state.planView so mainView
+     can stay 'dashboard'. */
+  renderDashOverview(tasks){
     const h=React.createElement;
     const planView=this.state.planView||this._lastPlanner||'gantt';
     /* PP-EXT: the gantt/4-day/week/month/schedule/today selector moved into the filter bar's leading slot
        (its own row above the filter bar was dropped — see renderFilterBar's `leading` param). */
-    /* PP-EXT V2.9 §3/§5: Selection and Matrix replace the split board entirely — neither has a time axis,
-       so a Gantt pane beside them would be a second, contradictory answer to "what am I doing today?".
-       They still sit under the filter bar, so the same chips/sort narrow them as narrow every other view. */
-    if(this.isFullPlanView(planView)){
-      return h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
-        this.renderFilterBar(this.renderViewToggle(planView, v=>this.setPlanView(v))),
-        h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
-          planView==='select'?this.renderSelectionView(tasks):this.renderMatrixView(tasks)));
-    }
     return h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
       this.renderFilterBar(this.renderViewToggle(planView, v=>this.setPlanView(v))),
       h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
@@ -6558,6 +6584,35 @@ class Component extends DCLogic {
           style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
         h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
           this.renderMainPane(tasks, planView))));
+  }
+  /* ==== PP-EXT V2.10: the Plan tab — Selection + Matrix, promoted out of Overview's view toggle ====
+     Owner call, 2026-08-04: "we're just dumping surfaces." Selection and Matrix were sub-views of the
+     scheduling toggle, sitting beside Gantt / 4-Day / Week / Month / Schedule / Today as if they answered the
+     same question. They do not: those six place work in TIME, these two decide WHAT IS IN TODAY. Making them
+     a peer of the six invited the reading that you pick one *instead of* a calendar, when in fact the flow is
+     Plan (decide) → Overview (place). A tab of their own says that, and it costs nothing structurally —
+     both were already full-width panes with no split geometry (the old isFullPlanView branch).
+
+     Deliberately still under renderFilterBar: the same chips/sort narrow these as narrow every other view. */
+  PLAN_TABS(){ return [['select','Selection'],['matrix','Matrix']]; }
+  setPlanTab(v){ this.setState({planTab:v}); this.savePrefs({planTab:v}); }
+  renderPlanTabToggle(){
+    const h=React.createElement; const cur=this.state.planTab||'select';
+    return h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'7px',padding:'2px'}},
+      this.PLAN_TABS().map(v=>{ const active=cur===v[0];
+        return h('div',{key:v[0],onClick:()=>this.setPlanTab(v[0]),title:v[1],tabIndex:0,role:'tab','aria-selected':active,
+          onKeyDown:e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();this.setPlanTab(v[0]);}},
+          style:{display:'flex',alignItems:'center',gap:'4px',height:'24px',padding:'0 8px',cursor:'pointer',
+            fontSize:'11px',fontWeight:600,borderRadius:'5px',color:active?'var(--on-accent)':'var(--text-mut2)',
+            background:active?this._accent:'transparent'}}, this.pp_icon(v[0],{size:'var(--fs-3)'}), v[1]); }));
+  }
+  renderDashPlan(tasks){
+    const h=React.createElement;
+    const tab=this.state.planTab||'select';
+    return h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
+      this.renderFilterBar(this.renderPlanTabToggle()),
+      h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
+        tab==='matrix'?this.renderMatrixView(tasks):this.renderSelectionView(tasks)));
   }
   /* ==== PP-EXT V2.9 §5 + §3: the Selection view and the Eisenhower matrix ====
      Both are card grids over the SAME task list every other view shows, and both write through existing
@@ -7631,8 +7686,8 @@ class Component extends DCLogic {
     return h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',padding:'6px 12px',flex:'none',position:'relative',
         borderBottom:'1px solid var(--top-border)',background:'var(--top-bg)'}},
       /* PP-EXT: filter/sort controls sit flush left; the optional leading slot (gantt/4-day/week/month/
-         schedule/today view selector, when the caller is the Dashboard's Plan tab) is pushed flush right
-         at the end of the bar — see renderDashPlan. */
+         schedule/today view selector on Overview, the Selection/Matrix selector on Plan) is pushed flush right
+         at the end of the bar — see renderDashOverview / renderDashPlan. */
       h('span',{key:'lbl',style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)',marginRight:'2px'}},'Filter'),
       ...this.SMART_CHIPS().map(c=>mkChip('sc-'+c.k, c.l, chips.includes(c.k), ()=>this.toggleChip(c.k), 'Show only: '+c.l)),
       h('span',{key:'psep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),

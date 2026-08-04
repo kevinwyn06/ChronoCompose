@@ -63,12 +63,28 @@ carried-over tint). The predicates behind them remain and are load-bearing — `
 what carries onto today via `isActiveOn` — so only the paint was deleted. V2.1 pressed/active depth,
 selection, critical-path inset, and day-hover glow all stay.
 
-Two full-width Plan sub-views join the six scheduling views (`isFullPlanView`): **Selection**, a 3×2 grid
-of derived origin columns (`originOf`: existing/new/extra) by inclusion rows, and **Matrix**, an Eisenhower
-grid whose urgency axis is derived from dates while importance is read from `priority`. Both render
-`planCard` and share one card-drag path; the drop zone string encodes only the target row/half, so
-sideways movement is structurally a no-op rather than a suppressed gesture. `unpressed` renders visibly
-distinct from `off` (dashed edge) so undecided work is never displayed as rejected work.
+The Dashboard has four tabs (`dashMode`): **Overview · Plan · Focus · Review**. Overview
+(`renderDashOverview`) is the sheet + Gantt split and owns the six scheduling views via `state.planView`;
+**Plan** (`renderDashPlan`, V2.10) owns Selection and Matrix via `state.planTab`. The split is a statement
+about what each surface answers: the six Overview views place work **in time**, the two Plan views decide
+**what is in today**. Before V2.10 all eight sat in one toggle, which read as "pick one instead of the
+others" rather than "decide, then place".
+
+Both tabs render their sub-view selector through `renderFilterBar`'s leading slot, so the same chips and
+sort narrow every surface. `dashMode` and `planView` both survived a meaning change in V2.10 and are read
+through the pure `migrateDashMode` / `migratePlanView` helpers, never raw: `'plan'` named the scheduling
+board before the rename and the selection surface after it (disambiguated by a `dashModeV: 2` stamp), and
+`planView` may still hold `'select'`/`'matrix'`, which have left that enum. Both failures land a returning
+user on a surface they never chose, without erroring — hence the named helpers and their tests.
+
+**Selection** is a 3×2 grid of derived origin columns (`originOf`: existing/new/extra) by inclusion rows;
+**Matrix** is an Eisenhower grid whose urgency axis is derived from dates while importance is read from
+`priority`. Both render `planCard` and share one card-drag path; the drop zone string encodes only the
+target row/half, so sideways movement is structurally a no-op rather than a suppressed gesture.
+`unpressed` renders visibly distinct from `off` (dashed edge) so undecided work is never displayed as
+rejected work. **Both axes are under owner revision** (three inclusion rows, history-based columns, an
+overdue column, card↔row parity) — see `tasks.md`; the redefinition is self-contradictory as stated and
+nothing here should be extended until it resolves.
 
 Drags that must also place a text caret — sheet row, section header, column reorder — cannot call
 `preventDefault` on mousedown, so text-selection suppression happens at **drag begin** instead: a
