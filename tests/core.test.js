@@ -310,6 +310,23 @@ test('V2.4: activateTask on a running-but-not-active task makes it active', () =
   assert.ok(c.isRunning(b.id), 'and is still running');
 });
 
+test('V2.4: rowDblClick activates a task, and never a milestone or an archived one', () => {
+  const c = make();
+  const ev = () => ({ preventDefault(){}, stopPropagation(){} });
+  const a = activeTask(c, { spent:0 });
+  const mile = activeTask(c, { type:'Milestone' });
+  const arch = activeTask(c, { archivedAt: Date.now() });
+  c.state.tasks = [a, mile, arch];
+  c.rowDblClick(ev(), a.id);
+  assert.equal(c.activeTaskId(), a.id, 'double-click made it active');
+  c.rowDblClick(ev(), mile.id);
+  assert.equal(c.activeTaskId(), a.id, 'a milestone has no timer, so active is unchanged');
+  c.rowDblClick(ev(), arch.id);
+  assert.equal(c.activeTaskId(), a.id, 'an archived task does not activate');
+  c.rowDblClick(ev(), 'nope');
+  assert.equal(c.activeTaskId(), a.id, 'an unknown id is a no-op');
+});
+
 test('V2.4: orderingSeam puts the active task first', () => {
   const c = make();
   const rows = [

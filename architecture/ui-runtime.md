@@ -11,6 +11,16 @@ Overlay coordinates pass through measured UI-scale helpers because the app runs 
 Gantt and sheet rows share explicit height/box-model rules; visible structural changes require a Design
 push after implementation. Timers persist in `pp-run`; Pomodoro state is ephemeral in `pp-pomo`.
 
+Pointer gestures (owner-set 2026-08-04). **Sheet row:** single click selects and opens the detail panel;
+ctrl/cmd-click toggles selection; shift-click selects a range; **double-click makes the task active**;
+right-click opens the row context menu. **Gantt bar, milestone, and collapsed recurrence strip:** a click
+without a drag opens details; dragging the body moves it, dragging an edge sets a date, a no-drag click on
+an edge opens the date picker; right-click opens the bar menu. **Scheduled block (Today timeline and
+Schedule chips):** a click without a drag opens details; dragging pins it to a time. **Double-click never
+opens details anywhere** — bars and blocks route their no-drag click through the existing mouseup branch, so
+one gesture cannot both drag and open. The inclusion popover on the row status glyph is strictly
+inclusion/exclusion and carries no time-tracking action.
+
 Timer concurrency is one policy in one place (V2.4). `settings.multitask` defaults to **false**, and
 `startTimer` calls `stopOtherTimers` before starting, so every surface that starts a timer — sheet row,
 Focus row, timeline block, Pomodoro, shape-driven auto-start — inherits the strict single-timer rule

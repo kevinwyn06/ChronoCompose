@@ -2433,6 +2433,15 @@ class Component extends DCLogic {
     }
     /* /PP-EXT */
     if(e.ctrlKey||e.metaKey){ e.preventDefault(); this.toggleSelect(id); } else { this._selAnchor=id; /* PP-EXT */ this.setState({selectedIds:[id], menu:null, detailId:id}); } }
+  /* PP-EXT V2.4 (owner 2026-08-04): double-click a sheet row = make it the active task. Single click is
+     select + open details and right-click is the context menu, so double-click was the one free gesture on
+     the row. Milestones have no timer, so they fall through rather than starting one. */
+  rowDblClick(e,id){
+    e.preventDefault(); e.stopPropagation();
+    const t=(this.state.tasks||[]).find(x=>x.id===id);
+    if(!t || t.archivedAt || this.isMilestone(t)) return;
+    this.activateTask(id);
+  }
   rowMenu(e,id){
     e.preventDefault(); e.stopPropagation();
     const sel=this.state.selectedIds;
@@ -3105,7 +3114,12 @@ class Component extends DCLogic {
     this.dragSelectRelease(); /* PP-EXT V2.9 §1: the ONE release point — above every branch, all of which return */
     if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
       const bd=this._blockDrag; this._blockDrag=null;
-      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day); else this.forceUpdate();
+      /* PP-EXT (owner 2026-08-04): a click (no drag) on a scheduled block opens details, matching the
+         Gantt rule. Blocks previously had no details path at all — only drag-to-pin, ▶, and unpin. Meals
+         and any block without a real task fall through. */
+      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day);
+      else if((this.state.tasks||[]).some(t=>t.id===bd.id)) this.openDetail(bd.id);
+      else this.forceUpdate();
       return;
     }
     if(this.colDrag){ this.savePrefs({colW:this.state.colW}); this.colDrag=null; return; }
@@ -3152,8 +3166,12 @@ class Component extends DCLogic {
         if(this.history.length) this.history.pop();
         /* PP-EXT (V1.3): a click (no drag) on a date EDGE opens the calendar+NL popup for that edge —
            the precise-entry counterpart to dragging it, and the only way to set a date on a zero-width
-           edge. A body 'move' click still just falls through (double-click opens detail). */
+           edge. */
         if(d.mode==='start'||d.mode==='end') this.openDatePickAt(d.id, d.mode, e.clientX, e.clientY);
+        /* PP-EXT (owner 2026-08-04): a click (no drag) on the bar BODY opens details. Bars, milestones,
+           and collapsed recurrence strips all drag through mode 'move', so this one branch is the whole
+           Gantt rule; double-click no longer opens details anywhere. */
+        else if(d.mode==='move') this.openDetail(d.id);
       } else {
         /* PP-EXT: drag-start already snapshotted; enforce deps on the dropped dates (clamp if the drop violates
            a predecessor, cascade successors forward), then persist — reusing that snapshot as the undo point. */
@@ -4159,10 +4177,9 @@ class Component extends DCLogic {
     if(st==='unpressed') return [ btn('Press into today', ()=>this.setIncludedTrue(t.id)) ];
     /* pressed or active */
     return [
-      /* PP-EXT V2.4: the explicit activate gesture. Row click is selection and row double-click opens the
-         detail panel, so activation lives here rather than stealing either; the ▶ timer control on each row
-         reaches the same policy through startTimer. */
-      st==='active' ? null : btn('Make active now', ()=>this.activateTask(t.id)),
+      /* PP-EXT (owner 2026-08-04): this popover is STRICTLY inclusion/exclusion. Time tracking does not
+         belong here — activation is double-click on the row (rowDblClick). A "Make active now" entry lived
+         here briefly in V2.4 and was removed on that rule. */
       btn('Snooze today', ()=>this.snoozeToday(t.id)),
       h('div',{key:'su',style:{padding:'4px 10px'}},
         h('input',{className:'pp-num',type:'text',placeholder:'Snooze until… (e.g. "3 days")',
@@ -5948,6 +5965,10 @@ class Component extends DCLogic {
                    : (c.goal?('Goal: '+c.goal):c.title));
       return h('div',{key:'b'+i,title:tip,
         onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B)):null, /* PP-EXT: drag to pin (this day) */
+        /* PP-EXT (owner 2026-08-04): a non-draggable block (a fixed appointment with no drag-pin, or a
+           parent with children) still opens details on click; draggable ones go through the no-move
+           branch in the block mouseup instead, so they don't open twice. */
+        onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
         style:{position:'absolute',left:blkLeft+'px',right:'6px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
           borderRadius:'6px',padding:'3px 22px 3px '+(c.dragPin?'20px':'7px'),fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
           textOverflow:'ellipsis',boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)',
@@ -6305,6 +6326,8 @@ class Component extends DCLogic {
         return h('div',{key:'sc'+i,
           title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
           onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
+          /* PP-EXT (owner 2026-08-04): same details-on-click rule as the Today timeline block above. */
+          onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
           style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
             background:ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,
             boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 2px rgba(0,0,0,0.12)',
@@ -7731,7 +7754,7 @@ class Component extends DCLogic {
       return h('div',{key:t.id,'data-task-id':t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
-        onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
+        onClick:e=>this.rowClick(e,t.id), onDoubleClick:e=>this.rowDblClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
         style:{display:'flex',alignItems:'center',height:this.rowH+'px',minWidth:totalW+'px',cursor:'pointer',position:'relative'/* PP-EXT: anchors the drop bar */,
           opacity:(mrd&&mrd.moveSet&&mrd.moveSet[t.id])?0.4:1,
           background: sel?'var(--sel)':(hov?'var(--hover)':'rgba(137,87,229,0.06)'),
@@ -7868,7 +7891,7 @@ class Component extends DCLogic {
     return h('div',{key:t.id,'data-task-id':t.id,
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>this.rowPointerDown(e,t.id,i),
-      onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
+      onClick:e=>this.rowClick(e,t.id), onDoubleClick:e=>this.rowDblClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
       /* PP-EXT: NO borderBottom here — this outer div is auto-height, so a 1px border would add outside the
          content and drift the sheet down 1px/row vs the Gantt (which lays rows out at exactly rowH). The
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
@@ -7997,7 +8020,7 @@ class Component extends DCLogic {
       // row hover stripes
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
         return h('div',{key:'r'+t.id,'data-gantt-task-id':t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
-          onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
+          onClick:e=>this.rowClick(e,t.id), onDoubleClick:e=>this.rowDblClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
           /* PP-EXT: stripe spans the FULL expanded row (rowH + its desc panel), so opening a description grows
              the expanded task's own Gantt row — hover/selection/border cover the whole thing — instead of the
              blank space reading as the following row. The bar itself stays centered in the top rowH (see ganttBlock). */
@@ -8041,9 +8064,12 @@ class Component extends DCLogic {
       /* PP-EXT (V1.5 fix): own the row hover — see the note on hov in ganttBlock. */
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>{e.stopPropagation(); this.setState({selectedIds:[t.id]});},
-      onDoubleClick:e=>{e.stopPropagation(); this.openDetail(t.id);},
+      /* PP-EXT (owner 2026-08-04): single click opens details on the Gantt; double-click no longer does.
+         This strip has no drag machinery of its own, so it takes onClick directly rather than the
+         no-drag branch in the bar mouseup. */
+      onClick:e=>{e.stopPropagation(); this.openDetail(t.id);},
       onContextMenu:e=>{e.preventDefault(); e.stopPropagation(); this.setState({selectedIds:[t.id]}); this.openScope('delete',t.id,this.mostRecentOccIdx(t));},
-      title:t.name+' · '+lbl+' · '+occs.length+' occurrences · zoom in to edit individually · double-click for details',
+      title:t.name+' · '+lbl+' · '+occs.length+' occurrences · zoom in to edit individually · click for details',
       style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',
         background:hatch,border:'1px solid '+base,borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'pointer',zIndex:5,overflow:'hidden',
         boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',display:'flex',alignItems:'center'}},
@@ -8110,7 +8136,7 @@ class Component extends DCLogic {
 
     if(this.isMilestone(t)){
       const sz=this.barH;
-      return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},title:t.name+occLbl},hov,{
+      return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,title:t.name+occLbl},hov,{
         style:{position:'absolute',left:(left-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
           background:done?base:'var(--gantt-bg)',border:'2px solid '+base,transform:'rotate(45deg)',cursor:'grab',borderRadius:'3px',
           boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',zIndex:5}}));
@@ -8139,8 +8165,8 @@ class Component extends DCLogic {
     const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'off')) : '';
     return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
         opacity:optedOut?0.55:1}}),
-      h('div',{onMouseDown:md('move'),onContextMenu:ctx,onDoubleClick:e=>{e.stopPropagation();this.openDetail(t.id);},
-        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · double-click for details'))+optedOutTitle,
+      h('div',{onMouseDown:md('move'),onContextMenu:ctx,
+        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+optedOutTitle,
         style:{position:'absolute',inset:0,
           background: optedOut ? (optedOutHatch+', '+(gp?gp.fill:base)) : (gp?gp.fill:base),
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
