@@ -10,8 +10,9 @@ test('V1.5 sheet schema drops the fields edited on the Gantt bar', () => {
   assert.equal(keys.includes('end'), false, 'Due is edited from the bar');
   assert.equal(keys.includes('pct'), false, '% Done is edited from the bar');
   assert.ok(keys.includes('name'), 'task name remains');
-  assert.ok(keys.includes('planned'), 'planned time remains');
-  assert.ok(keys.includes('predicted'), 'allotted time remains');
+  assert.ok(keys.includes('planned'), 'planned → allotted remains as one composite readout');
+  assert.equal(keys.includes('predicted'), false, 'allotted is no longer a spreadsheet column');
+  assert.ok(keys.includes('actions'), 'row actions remain reachable');
 });
 
 test('dueChipClass assigns the five owner-defined date buckets', () => {

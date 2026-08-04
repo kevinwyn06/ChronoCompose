@@ -11,10 +11,18 @@ Overlay coordinates pass through measured UI-scale helpers because the app runs 
 Gantt and sheet rows share explicit height/box-model rules; visible structural changes require a Design
 push after implementation. Timers persist in `pp-run`; Pomodoro state is ephemeral in `pp-pomo`.
 
-The V1.5 sheet omits the Start, Due, and % Done columns because those values are edited on the Gantt bar.
-The task-name cell keeps a single due/recur chip: overdue, today, tomorrow, within-one-week, and later are
-separate semantic color buckets, and recurrence follows the date behind a `↻` glyph. Normal and milestone
-rows use the same fixed row height; expanded description height is still measured into the Gantt Y offsets.
+The V2.3 sheet is a uniform task list rather than a field grid. Each normal row contains priority/done,
+task name, removable `@tag` chips plus an inline `@` input, the due/recur chip, a `planned → allotted`
+readout, and inclusion/timer/add-time actions. Start, Due, and % Done remain Gantt-owned. The due/recur chip
+uses separate overdue, today, tomorrow, within-one-week, and later buckets; recurrence follows the date
+behind a `↻` glyph.
+
+`tasksByTagSection` groups each task exactly once by its primary (first) tag. Subtasks inherit their root
+task's section so a subtree is never torn apart. Section order follows first appearance in manual/tree order;
+untagged work renders under `No tag`. `TAG_SECTION_H` is consumed by matching sheet headers and Gantt rails,
+and Gantt `_yTop` continues to index tasks only. Normal and milestone task rows retain the same fixed row
+height; expanded description height is still measured into the Gantt Y offsets. Focus uses the same sections
+and uniform 52px task rows with `spent / allotted`, a progress fill, done, timer, and `+15` tracked-time actions.
 
 Every Gantt element layered above a row stripe owns its own `state.hoverId` enter/leave lifecycle. The bar
 wrapper contains the right-side dependency handle, so moving onto the handle cannot clear hover. Collapsed

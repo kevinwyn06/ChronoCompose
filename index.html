@@ -318,6 +318,8 @@ class Component extends DCLogic {
     ];
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
     this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
+    this.TAG_SECTION_H = 24;     // PP-EXT V2.3: shared sheet/Gantt height for @tag section rails
+    this.FOCUS_ADD_MINUTES = 15; // PP-EXT V2.3: one-tap manual time increment in Focus rows
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
@@ -583,14 +585,13 @@ class Component extends DCLogic {
 
   /* ---------- columns ---------- */
   colDefs(){
-    /* PP-EXT: Mode column removed (scheduling is derived) → replaced by an Incl (include/exclude today) toggle;
-       added spent; predicted→"Allot" (computed remaining/allotted time).
-       Tags column dropped (tags already render under the task name); Goal column dropped (replaced by the description). */
+    /* PP-EXT V2.3: Todoist-style uniform rows replace the spreadsheet field grid. Task metadata lives
+       with the name; the only numeric readout is planned → allotted, flush right. Actions retain today's
+       inclusion, timer, and add-time controls without reintroducing data columns. */
     return [
-      {k:'check',w:50,lock:true},{k:'name',w:236,l:'Task Name'},
-      {k:'incl',w:58,l:'Incl'},
-      {k:'dur',w:52,l:'Dur'},{k:'planned',w:78,l:'Planned'},{k:'spent',w:70,l:'Spent'},
-      {k:'predicted',w:96,l:'Allot'} /* PP-EXT V1.5: Start, Due and % Done moved wholly onto the Gantt bar. */
+      {k:'check',w:50,lock:true},{k:'name',w:354,l:'Task'},
+      {k:'planned',w:126,l:'Planned → Allotted'},
+      {k:'actions',w:104,l:'Actions',lock:true}
     ];
   }
   orderedCols(){
@@ -1130,6 +1131,11 @@ class Component extends DCLogic {
   /* PP-EXT: the value the Spent column shows, honoring the today/life scope toggle (see toggleSpentScope). */
   spentDisplay(t){ return this.state.spentScope==='life' ? this.getSpent(t) : this.getSpentOn(t, this.startOfToday()); }
   toggleSpentScope(){ const s=this.state.spentScope==='life'?'today':'life'; this.setState({spentScope:s}); this.savePrefs({spentScope:s}); }
+  /* PP-EXT V2.3: Focus-row add-time is real tracked work, not a visual counter. Credit lifetime + today's
+     ledger through commit() so undo, persistence, sync, and allotment recomputation all observe one mutation. */
+  addSpentTime(id, minutes){ const add=Math.max(0,+minutes||0); if(!add) return false; const dk=this.ymdOf(this.startOfToday());
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; t.spent=(t.spent||0)+add;
+      const by=Object.assign({},t.spentByDay); by[dk]=(by[dk]||0)+add; t.spentByDay=by; }); return true; }
   isRunning(id){ const key=(id&&id.id!==undefined?id.id:id); return !!(this.state.running && this.state.running[key]); }
   anyRunning(){ const r=this.state.running; return !!(r && Object.keys(r).length); } /* PP-EXT: running is a map (multitasking) */
   /* PP-EXT: multitasking — starting a timer does NOT stop the others. */
@@ -1525,6 +1531,29 @@ class Component extends DCLogic {
      keeps its own Planned; its allotted time is distributed to children proportional to child Planned,
      any unassigned remainder stays with the parent (recursive, so grandchildren partition their parent's
      share). Children never sync to gcal and never compete in the allotment pool themselves. */
+  /* PP-EXT V2.3: tag mutations are pure so inline row editing and the detail sheet share exactly the same
+     normalization/deduplication rules. Stored labels never include the display-only @ prefix. */
+  normalizeTag(raw){ const m=String(raw==null?'':raw).trim().match(/^@?([a-z0-9_-]+)$/i); return m?m[1].toLowerCase():null; }
+  addTaskTag(labels, raw){ const tag=this.normalizeTag(raw); const out=(labels||[]).slice();
+    if(tag && !out.some(x=>this.normalizeTag(x)===tag)) out.push(tag); return out; }
+  removeTaskTag(labels, raw){ const tag=this.normalizeTag(raw); if(!tag) return (labels||[]).slice();
+    return (labels||[]).filter(x=>this.normalizeTag(x)!==tag); }
+  addLabel(id, raw){ const tag=this.normalizeTag(raw); if(!tag) return false;
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.labels=this.addTaskTag(t.labels,tag); }); return true; }
+  removeLabel(id, raw){ const tag=this.normalizeTag(raw); if(!tag) return false;
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.labels=this.removeTaskTag(t.labels,tag); }); return true; }
+  /* Each task appears once. A subtree inherits its root task's primary (first) @tag so grouping never tears
+     parent/child rows apart. Section order follows the first root encountered, preserving the user's manual
+     planning order; untagged work is an explicit final/first-seen section rather than disappearing. */
+  tasksByTagSection(tasks){
+    const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
+    const sectionOf=t=>{ let root=t, seen={};
+      while(root&&root.parentId!=null&&byId[root.parentId]&&!seen[root.id]){ seen[root.id]=1; root=byId[root.parentId]; }
+      const tag=this.normalizeTag(root&&root.labels&&root.labels[0]); return tag||null; };
+    const out=[], byKey=new Map(); list.forEach(t=>{ const tag=sectionOf(t), key=tag||''; let sec=byKey.get(key);
+      if(!sec){ sec={tag,tasks:[]}; byKey.set(key,sec); out.push(sec); } sec.tasks.push(t); });
+    return out;
+  }
   buildKids(tasks){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
     const kids={};
@@ -2490,9 +2519,12 @@ class Component extends DCLogic {
   rowAtInsert(clientY){
     if(!this.sheetScrollEl) return 0;
     const r=this.sheetScrollEl.getBoundingClientRect();
-    const y=clientY - r.top - this.headH + this.sheetScrollEl.scrollTop;
+    const y=(clientY-r.top)/(this.uiScale()||1) - this.headH + this.sheetScrollEl.scrollTop;
+    const vis=this._visTasks||this.state.tasks, tops=this._yTop;
+    if(tops&&tops.length===vis.length){ let idx=0; while(idx<vis.length && y>=tops[idx]+this.rowH/2) idx++;
+      return idx; } /* PP-EXT V2.3: section headers and expanded descriptions are real Y-space, never task indices */
     const idx=Math.round(y/this.rowH);
-    return Math.max(0, Math.min((this._visTasks||this.state.tasks).length, idx)); /* PP-EXT: rows are the VISIBLE list */
+    return Math.max(0, Math.min(vis.length, idx)); /* PP-EXT: rows are the VISIBLE list */
   }
   /* PP-EXT: drag-to-nest — PURE projection of a row-drop into {index, depth, parentId}. Given the visible rows,
      a depth map + full byId (for the ancestor walk), the insertion gap, the set of rows riding along (moveSet),
@@ -3147,7 +3179,11 @@ class Component extends DCLogic {
        || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips){ /* PP-EXT Phase 7: sort/filter changes must re-derive the visible list too */
       this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
-      this._visTasks=this.visibleTasks();
+      const visible=this.visibleTasks();
+      /* PP-EXT V2.3: section grouping is a render projection only. The persisted task array keeps manual/tree
+         order; sheet and Gantt consume the same flattened projection so every task row still shares one Y. */
+      this._visSections=this.tasksByTagSection(visible);
+      this._visTasks=this._visSections.reduce((out,sec)=>out.concat(sec.tasks),[]);
       /* PP-EXT: subtask maps over the FULL task list (indent/caret/cascades need hidden children too) */
       const kb=this.buildKids(this.state.tasks);
       this._kids=kb.kids; this._byId=kb.byId; this._depth={}; /* PP-EXT: _byId cached for the drag-to-nest ancestor walk */
@@ -6018,22 +6054,42 @@ class Component extends DCLogic {
     const planTasks=(this.state.tasks||[]).filter(t=>!t.archivedAt)
       .slice().sort((a,b)=>(taskDone(a)?1:0)-(taskDone(b)?1:0));
     const taskRow=t=>{ const done=taskDone(t); const pcol=this.PCOL[t.priority]||'var(--pri-default)';
-      return h('div',{key:t.id,onClick:()=>this.openDetail(t.id),title:'Click to open & edit',
-        style:{display:'flex',alignItems:'center',gap:'10px',cursor:'pointer',padding:'8px 11px',borderRadius:'9px',
+      const al=this.allotOf(t.id); const allotted=al.active?(+al.allotted||0):0; const spent=this.getSpentOn(t,todayMs);
+      const progress=allotted>0?Math.max(0,Math.min(1,spent/allotted)):0; const running=this.isRunning(t.id);
+      return h('div',{key:t.id,'data-task-id':t.id,onClick:()=>this.openDetail(t.id),title:'Click to open & edit',
+        style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer',padding:'7px 8px',height:'52px',borderRadius:'9px',position:'relative',overflow:'hidden',
           background:'var(--sheet-bg)',border:'1px solid var(--divider)',
           transition:'background var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard)'}},
+        h('div',{style:{position:'absolute',left:0,bottom:0,height:'3px',width:(progress*100)+'%',background:this._accent,opacity:0.38,pointerEvents:'none'}}),
         h('div',{onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},title:done?'Mark incomplete':'Mark complete',
-          style:{width:'20px',height:'20px',borderRadius:'50%',flex:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',flex:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
             border:'2px solid '+(done?'var(--success-strong)':'var(--divider)'),background:done?'var(--success-strong)':'transparent',color:'var(--on-accent)',fontSize:'12px',
             transition:'background var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard)'}}, done?'✓':''),
         h('span',{style:{width:'7px',height:'7px',borderRadius:'50%',flex:'none',background:done?'var(--divider)':pcol}}),
-        h('span',{style:{flex:1,minWidth:0,fontSize:'13px',fontWeight:500,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
-          color:done?'var(--text-mut2)':'var(--text)',textDecoration:done?'line-through':'none'}}, t.name||'(untitled)')); };
+        h('div',{style:{display:'flex',flexDirection:'column',gap:'2px',flex:1,minWidth:0}},
+          h('span',{style:{fontSize:'13px',fontWeight:550,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
+            color:done?'var(--text-mut2)':'var(--text)',textDecoration:done?'line-through':'none'}}, t.name||'(untitled)'),
+          h('span',{style:{fontSize:'9.5px',color:'var(--tag-text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},
+            (t.labels||[]).map(x=>'@'+x).join('  '))),
+        h('span',{style:{fontSize:'10.5px',fontWeight:700,color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},
+          this.fmtDur(spent)+' / '+(allotted?this.fmtDur(allotted):'—')),
+        h('span',{onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},title:running?'Stop timer':'Start timer',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',
+            cursor:'pointer',fontSize:'9px',fontWeight:800,background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,
+            border:'1px solid var(--divider)',flex:'none'}},running?'■':'▶'),
+        h('span',{onClick:e=>{e.stopPropagation();this.addSpentTime(t.id,this.FOCUS_ADD_MINUTES);},title:'Add '+this.FOCUS_ADD_MINUTES+' minutes worked',
+          style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
+            borderRadius:'var(--r-1)',fontSize:'9.5px',fontWeight:750,color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',flex:'none'}},'+'+this.FOCUS_ADD_MINUTES)); };
     const openN=planTasks.filter(t=>!taskDone(t)).length;
+    const planSections=this.tasksByTagSection(planTasks);
     const taskCol=h('div',{style:{flex:'25 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'8px',padding:'16px',overflow:'auto'}},
       h('div',{style:{display:'flex',alignItems:'baseline',gap:'8px',flex:'none'}}, label('Tasks'),
         planTasks.length?h('span',{style:{fontSize:'11px',color:'var(--text-faint)',fontWeight:600}}, openN+' open'):null),
-      planTasks.length? planTasks.map(taskRow) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No tasks yet.'));
+      planTasks.length? planSections.map((sec,si)=>h('div',{key:'focus-sec-'+(sec.tag||'untagged')+'-'+si,style:{display:'flex',flexDirection:'column',gap:'5px'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:'7px',height:'20px',fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',
+          color:sec.tag?'var(--tag-text)':'var(--text-faint)',textTransform:'uppercase'}},
+          h('span',{},sec.tag?('@'+sec.tag):'No tag'),h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}})),
+        ...sec.tasks.map(taskRow))) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No tasks yet.'));
     const B=this.startOfToday();
     const rightCol=h('div',{style:{flex:'20 1 0',minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',padding:'16px 16px 16px 0'}},
       this.renderDayColumn(B, {showLabels:true}));
@@ -6648,7 +6704,21 @@ class Component extends DCLogic {
     const header=h('div',{ref:el=>this.headerEl=el, style:{display:'flex',height:this.headH+'px',minWidth:totalW+'px',position:'sticky',top:0,zIndex:5,
       background:'var(--top-bg)',borderBottom:'1px solid var(--top-border)'}}, cols.map(headCell));
 
-    const rows = tasks.map((t,i)=>this.sheetRow(t,i,cols,totalW,byId));
+    /* PP-EXT V2.3: real @tag section headers. The matching Gantt rails use the same TAG_SECTION_H and
+       tasksByTagSection projection, so introducing structure does not sacrifice row alignment. */
+    const sections=this.tasksByTagSection(tasks); const rows=[]; let rowIndex=0;
+    sections.forEach((sec,si)=>{
+      const label=sec.tag?('@'+sec.tag):'No tag';
+      rows.push(h('div',{key:'section-'+(sec.tag||'untagged')+'-'+si,'data-tag-section':sec.tag||'',
+        style:{display:'flex',alignItems:'center',height:this.TAG_SECTION_H+'px',minWidth:totalW+'px',padding:'0 12px',
+          background:'var(--top-bg)',borderTop:si?'1px solid var(--top-border)':'none',borderBottom:'1px solid var(--top-border)',
+          color:sec.tag?'var(--tag-text)':'var(--text-faint)',fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
+          textTransform:'uppercase',position:'relative'}},
+        h('span',{style:{whiteSpace:'nowrap'}},label),
+        h('span',{style:{marginLeft:'8px',fontSize:'9px',fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},sec.tasks.length),
+        h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.65,flex:1,marginLeft:'10px'}})));
+      sec.tasks.forEach(t=>rows.push(this.sheetRow(t,rowIndex++,cols,totalW,byId)));
+    });
 
     /* PP-EXT: replaces the removed always-on quick-add bar — a subtle full-width footer row that opens the
        same centered quick-add popup ("q" shortcut, renderQuickAddPopup). */
@@ -6857,10 +6927,14 @@ class Component extends DCLogic {
             border:'1px solid '+mcol,borderRadius:'var(--r-1)',padding:'1px 5px',flex:'none'}},'◆ Milestone'),
           h('span',{style:{fontSize:'var(--fs-3)',fontWeight:600,color:'var(--text)',
             whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',flex:1,minWidth:0}}, t.name)),
-        dueRecurChip);
+        /* PP-EXT V2.3 fix: the chip is a direct child of this column flex, so the default
+           `align-items:stretch` blew it to the full name-column width (~270px vs its natural
+           43-51px). Wrap it in the same row-direction flex the normal task row uses (below), which
+           sizes children to content. */
+        dueRecurChip ? h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0}}, dueRecurChip) : null);
       const mDash=h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—');
       const mContent={name:mNameBlock};
-      return h('div',{key:t.id,
+      return h('div',{key:t.id,'data-task-id':t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
         onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
@@ -6905,7 +6979,22 @@ class Component extends DCLogic {
       collapsedHere?'▸':'▾') : null;
     const kidBadge = (kidsN&&collapsedHere)? h('span',{style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--chip-bg)',
       border:'1px solid var(--divider)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,marginLeft:'5px',whiteSpace:'nowrap'}},'+'+kidsN) : null;
-    const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',minWidth:0,width:'100%',
+    /* PP-EXT V2.3: tags are controls on the row, not passive metadata hidden in a detail sheet. The remove
+       target stays HIT_MIN_PX wide even though its × glyph is visually small; @ input expands only while used. */
+    const inlineTags=h('div',{style:{display:'flex',gap:'3px',alignItems:'center',minWidth:0,overflow:'hidden'}},
+      ...(t.labels||[]).map(l=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',height:'18px',fontSize:'9.5px',color:'var(--tag-text)',
+          background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',paddingLeft:'4px',whiteSpace:'nowrap',flex:'none'}},
+        '@'+l,h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeLabel(t.id,l);},title:'Remove @'+l,
+          style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.HIT_MIN_PX+'px',height:'18px',cursor:'pointer',
+            color:'var(--text-faint2)',fontSize:'12px',lineHeight:1}},'×'))),
+      h('input',{key:'rowtag-'+(t.labels||[]).join('|'),type:'text',placeholder:'@',title:'Add a tag',
+        onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
+        onFocus:e=>e.currentTarget.style.width='72px',
+        onBlur:e=>{ const v=e.currentTarget.value; if(v.trim()) this.addLabel(t.id,v); e.currentTarget.value=''; e.currentTarget.style.width='28px'; },
+        onKeyDown:e=>{ if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur();} },
+        style:{width:'28px',height:'18px',padding:'0 4px',border:'1px dashed var(--tag-border)',borderRadius:'var(--r-1)',
+          background:'transparent',color:'var(--tag-text)',fontSize:'10px',outline:'none',transition:'width var(--dur-fast) var(--ease-standard)',flex:'none'}}));
+    const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'1px',minWidth:0,width:'100%',
         paddingLeft:(depth*16)+'px' /* PP-EXT: subtask indent */}},
       h('div',{style:{fontSize:'13px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
@@ -6913,10 +7002,10 @@ class Component extends DCLogic {
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
         t.name, kidBadge /* PP-EXT */),
-      (dueRecurChip||depChips.length||(t.labels&&t.labels.length))?h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',alignItems:'center',minWidth:0}},
+      h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0,height:'18px',overflow:'hidden'}},
         dueRecurChip,
-        ...(t.labels||[]).map(l=>h('span',{key:l,style:{fontSize:'9.5px',color:'var(--tag-text)',background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,whiteSpace:'nowrap'}},'@'+l)),
-        ...depChips):null
+        inlineTags,
+        ...depChips)
     );
 
     /* PP-EXT Track B: include/exclude/snooze — click opens a popover (renderInclPick), replacing the
@@ -6936,61 +7025,29 @@ class Component extends DCLogic {
           return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
             title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph); })();
 
-    const durIn=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
-      onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
-      onBlur:e=>this.setDur(t.id,key,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
-
-    /* PP-EXT: tags cell (chips) */
-    const tagsCell = h('div',{style:{display:'flex',gap:'4px',flexWrap:'wrap',alignItems:'center',overflow:'hidden'}},
-      (t.labels&&t.labels.length)? t.labels.map(l=>h('span',{key:l,style:{fontSize:'9.5px',color:'var(--tag-text)',
-        background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,whiteSpace:'nowrap'}},'@'+l))
-        : h('span',{style:{fontSize:'11px',color:'var(--text-faint2)'}},'—'));
-
-    /* PP-EXT: spent cell (read-only; driven by drawer timers), live green while running */
     const running=this.isRunning(t.id);
-    const spentVal=this.spentDisplay(t);
-    const spentCell = h('span',{title:this.state.spentScope==='life'?'Lifetime total (click the Spent header to show today)':'Today only (click the Spent header to show lifetime)',
-      style:{fontSize:'11.5px',color:running?'var(--success)':'var(--text-num)',fontVariantNumeric:'tabular-nums'}},
-      (spentVal>0||running)? this.fmtDur(spentVal) : '—', running?h('span',{style:{marginLeft:'4px',color:'var(--danger)'}},'●'):null);
-
-    /* PP-EXT: predicted = allotted/remaining time. Computed (Planned−Spent, redistributed) unless overridden.
-       Manual override shows RED and editable; toggle icon flips computed<->manual. Only meaningful today∈[start,end]. */
     const al=this.allotOf(t.id);
-    let predictedCell;
-    if(!al.active){
-      predictedCell=h('span',{title:'No allotted time — task is not pressed into today',
-        style:{fontSize:'11.5px',color:'var(--text-faint2)'}},'—');
-    } else {
-      const toggle=h('div',{onClick:e=>{e.stopPropagation();this.togglePredictManual(t.id);},onMouseDown:e=>e.stopPropagation(),
-        title:t.predictManual?'Manual override — click to revert to auto':'Auto — click to override manually',
-        style:{cursor:'pointer',fontSize:'11px',flex:'none',color:t.predictManual?'var(--danger)':'var(--text-faint2)'}}, t.predictManual?'✎':'∿');
-      const val = t.predictManual
-        ? h('input',{className:'pp-num',type:'text',key:'pm'+t.predicted,defaultValue:this.fmtDur(t.predicted),
-            onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
-            onBlur:e=>this.setPredict(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
-            style:{color:'var(--danger)'}})
-        : h('span',{style:{fontSize:'11.5px',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',flex:1,textAlign:'right'}},this.fmtDur(al.allotted));
-      predictedCell=h('div',{style:{display:'flex',alignItems:'center',gap:'5px',width:'100%'}}, val, toggle);
-    }
-
-    /* PP-EXT: goal cell (inline editable) */
-    const goalCell = h('input',{className:'pp-num',type:'text',key:'goal'+(t.goal||''),defaultValue:t.goal||'',placeholder:'—',
-      onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),
-      onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
-      style:{textAlign:'left',color:'var(--text-2)'}});
-
-    /* PP-EXT (V1.2 round4): both of these keyed off `isChore` (planned<=0), which let a DURATION suppress
-       date-derived facts — a zero-duration task with a past due date was never flagged overdue, and its span
-       always read "—" even with both dates set. Same rule as the Gantt: dates decide, `planned` doesn't.
-       "—" now means "no span to measure" (an edge is null), which is what `durDays` already returns 0 for. */
-    const durStr = (t.start==null||t.end==null) ? '—' : Math.round(this.durDays(t))+'d';
     const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
       style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
+    const flowCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'6px',width:'100%',fontVariantNumeric:'tabular-nums'}},
+      h('input',{className:'pp-num',type:'text',key:'flow-planned-'+t.planned,defaultValue:this.fmtDur(t.planned),title:'Planned time',
+        onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),onBlur:e=>this.setDur(t.id,'planned',e.target.value),
+        onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},style:{width:'42px',flex:'none',textAlign:'right'}}),
+      h('span',{style:{color:'var(--text-faint2)',fontSize:'11px'}},'→'),
+      h('span',{title:al.active?'Allotted today':'Not included today',style:{minWidth:'38px',textAlign:'right',fontSize:'11.5px',fontWeight:650,
+        color:al.active?'var(--text-num)':'var(--text-faint2)'}},al.active?this.fmtDur(al.allotted):'—'));
+    const timerBtn=h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},
+      title:running?'Stop timer':'Start timer',style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',
+        alignItems:'center',justifyContent:'center',borderRadius:'50%',cursor:'pointer',fontSize:'9px',fontWeight:800,
+        background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,border:'1px solid var(--divider)'}},running?'■':'▶');
+    const addTimeBtn=h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.addSpentTime(t.id,this.FOCUS_ADD_MINUTES);},
+      title:'Add '+this.FOCUS_ADD_MINUTES+' minutes worked',style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',padding:'0 5px',display:'inline-flex',
+        alignItems:'center',justifyContent:'center',borderRadius:'var(--r-1)',cursor:'pointer',fontSize:'9.5px',fontWeight:700,
+        color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)'}},'+'+this.FOCUS_ADD_MINUTES);
+    const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,timerBtn,addTimeBtn);
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
-      name:nameBlock, incl:inclCell,
-      dur:h('span',{style:{fontSize:'11.5px',color:'var(--text-mut2)'}},durStr),
-      planned: durIn('planned'), spent:spentCell, predicted:predictedCell, tags:tagsCell, goal:goalCell,
+      name:nameBlock, planned:flowCell, actions:actionsCell,
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
@@ -7014,7 +7071,7 @@ class Component extends DCLogic {
            stays aligned; no borderTop — the cells row's own borderBottom already separates cells from the panel. */
         background:'var(--card-bg)',borderBottom:'1px solid var(--row-border)',padding:'8px 16px 10px'}},
       this.richEditor(t,{minHeight:34})) : null;
-    return h('div',{key:t.id,
+    return h('div',{key:t.id,'data-task-id':t.id,
       onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
       onMouseDown:e=>this.rowPointerDown(e,t.id,i),
       onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
@@ -7043,7 +7100,11 @@ class Component extends DCLogic {
     const hlbl=x=> x===0?'12a':(x<12?x+'a':(x===12?'12p':(x-12)+'p')); /* compact 12h hour label */
     /* PP-EXT: rows may be taller than rowH when an inline description panel is open in the sheet; precompute
        each row's Y top (yOfRow reads this._yTop) so bars/stripes/arrows stay aligned with the sheet. */
-    const yTop=[]; let acc=0; for(let i=0;i<tasks.length;i++){ yTop[i]=acc; acc+=this.rowH+this.descExtra(tasks[i]); }
+    /* PP-EXT V2.3: section rails consume identical vertical space on both panes. `_yTop` remains indexed by
+       the flattened task list, so bars/arrows/dependency drops continue to target tasks rather than headers. */
+    const sections=this.tasksByTagSection(tasks), sectionBands=[]; const yTop=[]; let acc=0, ti=0;
+    sections.forEach((sec,si)=>{ sectionBands.push({tag:sec.tag,top:acc,key:'gsec-'+(sec.tag||'untagged')+'-'+si}); acc+=this.TAG_SECTION_H;
+      sec.tasks.forEach(t=>{ yTop[ti++]=acc; acc+=this.rowH+this.descExtra(t); }); });
     this._yTop=yTop; const bodyH=acc;
 
     /* PP-EXT: virtualization window — only render timeline chrome + bars within the visible day range. */
@@ -7131,9 +7192,13 @@ class Component extends DCLogic {
 
     const body=h('div',{ref:el=>this.bodyEl=el, style:{position:'relative',minWidth:totalW+'px',height:bodyH+'px'}},
       ...weekendRects, ...gridLines,
+      ...sectionBands.map((sec,si)=>h('div',{key:sec.key,'data-tag-section':sec.tag||'',
+        style:{position:'absolute',left:0,right:0,top:sec.top+'px',height:this.TAG_SECTION_H+'px',zIndex:2,pointerEvents:'none',
+          background:'color-mix(in srgb, var(--top-bg) 88%, transparent)',borderTop:si?'1px solid var(--top-border)':'none',
+          borderBottom:'1px solid var(--top-border)',boxShadow:'inset 0 -1px 0 color-mix(in srgb, var(--tag-border) 55%, transparent)'}})),
       // row hover stripes
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
-        return h('div',{key:'r'+t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
+        return h('div',{key:'r'+t.id,'data-gantt-task-id':t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
           onClick:e=>this.rowClick(e,t.id), onContextMenu:e=>this.rowMenu(e,t.id),
           /* PP-EXT: stripe spans the FULL expanded row (rowH + its desc panel), so opening a description grows
              the expanded task's own Gantt row — hover/selection/border cover the whole thing — instead of the
@@ -7691,10 +7756,8 @@ class Component extends DCLogic {
     /* PP-EXT: detail-panel editors for the new fields */
     /* PP-EXT: chip-based tag editor — each tag is a removable chip (× deletes it); the trailing input adds one
        or more (@a @b or bare words), Enter/blur commits. Much easier than editing one raw "@a @b" string. */
-    const removeLabel=(lab)=>this.commit(tasks=>{ const x=tasks.find(z=>z.id===t.id); if(x) x.labels=(x.labels||[]).filter(l=>l!==lab); });
-    const addLabels=(val)=>{ const add=(String(val).match(/@?([a-z0-9_-]+)/gi)||[]).map(x=>x.replace(/^@/,'').toLowerCase()).filter(Boolean);
-      if(!add.length) return; this.commit(tasks=>{ const x=tasks.find(z=>z.id===t.id); if(!x) return;
-        const seen=new Set(x.labels||[]); add.forEach(a=>{ if(!seen.has(a)){ seen.add(a); } }); x.labels=[...seen]; }); };
+    const removeLabel=(lab)=>this.removeLabel(t.id,lab);
+    const addLabels=(val)=>{ const add=(String(val).match(/@?([a-z0-9_-]+)/gi)||[]); add.forEach(tag=>this.addLabel(t.id,tag)); };
     const tagChip=(l)=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',gap:'4px',fontSize:'11px',color:'var(--tag-text)',
       background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'4px',padding:'1px 4px 1px 6px',whiteSpace:'nowrap'}},
       '@'+l, h('span',{onClick:()=>removeLabel(l),title:'Remove tag',
