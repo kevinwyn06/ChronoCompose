@@ -234,6 +234,7 @@ test('getSpent adds live elapsed while running', () => {
 
 test('timers: multitasking concurrent; stop accumulates spent per task', () => {
   const c = make();
+  c.state.settings.multitask = true; // V2.4: concurrency is opt-in now
   const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 });
   c.state.tasks = [a, b];
   c.startTimer(a.id);
@@ -249,6 +250,73 @@ test('timers: multitasking concurrent; stop accumulates spent per task', () => {
   // toggle the still-running a stops it -> nothing running
   c.toggleTimer(a.id);
   assert.ok(!c.anyRunning());
+});
+
+/* PP-EXT V2.4 */
+test('V2.4: multitask defaults off', () => {
+  const c = make();
+  assert.equal(c.DEFAULT_SETTINGS().multitask, false, 'strict single timer is the default');
+  assert.equal(c.multitaskOn(), false);
+});
+
+test('V2.4: strict single timer - starting one stops the others and credits their spent', () => {
+  const c = make();
+  const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 });
+  c.state.tasks = [a, b];
+  c.startTimer(a.id);
+  assert.ok(c.isRunning(a.id));
+  // 30 min on a, then b starts
+  c.state.running = { [a.id]: { startedAt: Date.now() - 30*60000, beat: Date.now() } };
+  c.startTimer(b.id);
+  assert.ok(!c.isRunning(a.id), 'a stopped when b started');
+  assert.ok(c.isRunning(b.id), 'b running');
+  assert.equal(Object.keys(c.state.running).length, 1, 'exactly one timer runs');
+  const aa = c.state.tasks.find(t=>t.id===a.id);
+  assert.ok(aa.spent >= 29 && aa.spent <= 31, 'a was credited its ~30 min, got '+aa.spent);
+});
+
+test('V2.4: multitask on preserves concurrency', () => {
+  const c = make();
+  c.state.settings.multitask = true;
+  const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 });
+  c.state.tasks = [a, b];
+  c.startTimer(a.id); c.startTimer(b.id);
+  assert.equal(Object.keys(c.state.running).length, 2, 'both timers run');
+});
+
+test('V2.4: activateTask switches active and stops only the prior active', () => {
+  const c = make();
+  c.state.settings.multitask = true; // isolate the switch rule from the strict-stop rule
+  const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 }); const d = activeTask(c, { spent:0 });
+  c.state.tasks = [a, b, d];
+  c.startTimer(d.id);                       // an independently-started multitask timer
+  c.startTimer(a.id);                       // a is now the most recent start -> active
+  assert.equal(c.activeTaskId(), a.id, 'a is active');
+  c.activateTask(b.id);
+  assert.equal(c.activeTaskId(), b.id, 'b is active after the switch');
+  assert.ok(!c.isRunning(a.id), 'the prior active stopped');
+  assert.ok(c.isRunning(d.id), 'the independently-started timer keeps running');
+});
+
+test('V2.4: activateTask on a running-but-not-active task makes it active', () => {
+  const c = make();
+  c.state.settings.multitask = true;
+  const a = activeTask(c, { spent:0 }); const b = activeTask(c, { spent:0 });
+  c.state.tasks = [a, b];
+  c.startTimer(b.id); c.startTimer(a.id);
+  assert.equal(c.activeTaskId(), a.id);
+  c.activateTask(b.id);
+  assert.equal(c.activeTaskId(), b.id, 'b takes over as active');
+  assert.ok(c.isRunning(b.id), 'and is still running');
+});
+
+test('V2.4: orderingSeam puts the active task first', () => {
+  const c = make();
+  const rows = [
+    { id:'x', active:false, priority:1, due:1, rem:60 },
+    { id:'y', active:true,  priority:4, due:9, rem:10 },
+  ];
+  assert.deepEqual(c.orderingSeam(rows).map(r=>r.id), ['y','x'], 'active outranks priority/EDF');
 });
 
 test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open shapes never auto-start', () => {

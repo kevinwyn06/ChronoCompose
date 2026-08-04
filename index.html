@@ -467,6 +467,7 @@ class Component extends DCLogic {
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     syncEnabled:false, /* PP-EXT B1: offline-first Supabase sync; off until the owner signs in (B2 flips it on). Funnel + updatedAt stamping are inert while false. */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
+    multitask:false, /* PP-EXT V2.4: OFF = strict single timer (starting one stops every other). ON restores the legacy concurrent-timer behavior. Switching the ACTIVE task stops only the prior active either way. */
     eisenhowerUrgentDays:2, /* PP-EXT V2.9 §3: a task due within this many days counts as URGENT in the Eisenhower matrix (overdue and today-in-window are always urgent). The urgency axis is derived; importance comes from `priority`. */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
@@ -1293,10 +1294,34 @@ class Component extends DCLogic {
       const by=Object.assign({},t.spentByDay); by[dk]=(by[dk]||0)+add; t.spentByDay=by; }); return true; }
   isRunning(id){ const key=(id&&id.id!==undefined?id.id:id); return !!(this.state.running && this.state.running[key]); }
   anyRunning(){ const r=this.state.running; return !!(r && Object.keys(r).length); } /* PP-EXT: running is a map (multitasking) */
-  /* PP-EXT: multitasking — starting a timer does NOT stop the others. */
-  startTimer(id){ if(this.isRunning(id)) return; const now=Date.now();
+  /* PP-EXT V2.4: the timer policy lives here so every surface (sheet row, Focus row, timeline block,
+     Pomodoro, shape-driven auto-start) obeys it without its own branch. Default `multitask:false` is a
+     STRICT single timer — starting one stops every other, crediting each stopped task normally through
+     stopTimerAt. Flipping settings.multitask on restores the legacy concurrency. Was: unconditional
+     multitasking ("starting a timer does NOT stop the others"). */
+  multitaskOn(){ return !!(this.state.settings && this.state.settings.multitask); }
+  startTimer(id){ if(this.isRunning(id)) return;
+    if(!this.multitaskOn()) this.stopOtherTimers(id);
+    const now=Date.now();
     const r=Object.assign({}, this.state.running, {[id]:{startedAt:now, beat:now}});
     this.setState({running:r, nowTick:now}); this.saveRun(r); }
+  /* PP-EXT V2.4: stop every running timer except `keepId`. Each stop goes through stopTimerAt so spent /
+     spentByDay / undo stay identical to a manual stop; the snapshot is taken first because stopTimerAt
+     rewrites state.running underneath the loop. */
+  stopOtherTimers(keepId){ Object.keys(this.state.running||{}).forEach(k=>{ if(k!==String(keepId)) this.stopTimerAt(k, Date.now()); }); }
+  /* PP-EXT V2.4: click-to-activate. Making a task active starts its timer and pulls it to the front of
+     today's plan — V2.1 already gives the active task the first slot (orderingSeam sorts on `active`, and
+     its notBefore is clamped to now), so activation needs no scheduling change of its own. Switching
+     active stops ONLY the prior active's timer, so independently-started multitask timers keep running;
+     in strict mode startTimer then stops the rest anyway. activeTaskId() stays derived from the most
+     recent start, so activation persists through pp-run with no new field. */
+  activateTask(id){ if(this.isActiveTask({id})) return;
+    const prev=this.activeTaskId();
+    if(prev!=null && prev!==String(id) && this.isRunning(prev)) this.stopTimer(prev);
+    /* already running but not the active one (multitask mode): close its segment and reopen it so the
+       derived "most recently started" selector lands on it. stopTimerAt credits, so no time is lost. */
+    if(this.isRunning(id)) this.stopTimer(id);
+    this.startTimer(id); }
   stopTimer(id){ this.stopTimerAt(id, Date.now()); }
   /* PP-EXT: stop crediting THIS task up to `ts` (clamped to [startedAt, now]). Manual stop and the pinned-end
      auto-pause both credit up to now — a running timer counts wall-clock even across a closed tab / sleep. */
@@ -1321,7 +1346,9 @@ class Component extends DCLogic {
     if(changed){ this.setState({running:nr}); this.saveRun(nr); } }
   toggleTimer(id){ if(this.isRunning(id)) this.stopTimer(id); else this.startTimer(id); }
   /* PP-EXT: shape-driven auto timers. A fixed appointment auto-starts its timer when the clock reaches its
-     start (multitasking, doesn't stop others) and auto-pauses silently (no prompt) at its end. A clocked start
+     start and auto-pauses silently (no prompt) at its end. V2.4: it routes through startTimer, so under the
+     default strict single-timer policy the arriving appointment stops whatever was running (you are at the
+     appointment now); with `multitask` on it stacks, as it always did. A clocked start
      without an end never auto-starts because it has no defined stop; its notification remains the reminder.
      Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
   autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
@@ -4132,6 +4159,10 @@ class Component extends DCLogic {
     if(st==='unpressed') return [ btn('Press into today', ()=>this.setIncludedTrue(t.id)) ];
     /* pressed or active */
     return [
+      /* PP-EXT V2.4: the explicit activate gesture. Row click is selection and row double-click opens the
+         detail panel, so activation lives here rather than stealing either; the ▶ timer control on each row
+         reaches the same policy through startTimer. */
+      st==='active' ? null : btn('Make active now', ()=>this.activateTask(t.id)),
       btn('Snooze today', ()=>this.snoozeToday(t.id)),
       h('div',{key:'su',style:{padding:'4px 10px'}},
         h('input',{className:'pp-num',type:'text',placeholder:'Snooze until… (e.g. "3 days")',
@@ -5408,6 +5439,10 @@ class Component extends DCLogic {
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Archive done after (days)',
           this.infoNote('Completed tasks leave the task page and move to the Archive page. 0 = immediately on 100%; a higher number keeps a task visible for that many grace days first. Recurring series are never auto-archived (they complete per-occurrence).')),
         inp(s.autoArchiveDays,v=>this.saveSettings({autoArchiveDays:Math.max(0,parseInt(v)||0)}))),
+      /* PP-EXT V2.4: single-timer default; the toggle opts back in to concurrent timers */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Multitask timers',
+          this.infoNote('Off (default): starting a task’s timer stops any other — one thing at a time. On: several timers may run at once (the old behavior). Making a task active always stops the previous active task either way.')),
+        toggle(!!s.multitask,()=>this.saveSettings({multitask:!s.multitask}))),
       /* PP-EXT Phase 10: pomodoro interval durations (minutes) + long-break cadence — governs day-carving like the rest of this pane */
       secTitle('Pomodoro'),
       (()=>{ const pm=this.pomoCfg(); const setPomo=(k,v)=>this.saveSettings({pomo:Object.assign({},pm,{[k]:Math.max(1,parseInt(v)||pm[k])})});

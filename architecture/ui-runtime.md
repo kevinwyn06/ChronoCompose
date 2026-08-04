@@ -11,6 +11,15 @@ Overlay coordinates pass through measured UI-scale helpers because the app runs 
 Gantt and sheet rows share explicit height/box-model rules; visible structural changes require a Design
 push after implementation. Timers persist in `pp-run`; Pomodoro state is ephemeral in `pp-pomo`.
 
+Timer concurrency is one policy in one place (V2.4). `settings.multitask` defaults to **false**, and
+`startTimer` calls `stopOtherTimers` before starting, so every surface that starts a timer — sheet row,
+Focus row, timeline block, Pomodoro, shape-driven auto-start — inherits the strict single-timer rule
+without its own branch. Turning the setting on restores concurrency. `activateTask(id)` is the separate
+"make this the active task" path: it stops only the **prior active** timer, leaving independently-started
+multitask timers alone. The active task is still *derived* (`activeTaskId()` = the most recent start in
+`pp-run`), so activation persists with no new field, and V2.1's ordering seam plus `notBefore` clamp
+already place it at the current time.
+
 The V2.3 sheet is a uniform task list rather than a field grid. Each normal row contains priority/done,
 task name, removable `@tag` chips plus an inline `@` input, the due/recur chip, a `planned → allotted`
 readout, and inclusion/timer/add-time actions. Start, Due, and % Done remain Gantt-owned. The due/recur chip

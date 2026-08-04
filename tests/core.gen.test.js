@@ -219,6 +219,7 @@ test('stopTimer accumulates elapsed minutes into spent', () => {
 
 test('timers are multitasking: starting a second does NOT stop the first', () => {
   const c = make();
+  c.state.settings.multitask = true; // V2.4: concurrency is opt-in; strict single timer is the default
   const a = activeTask(c, { spent: 0 });
   const b = activeTask(c);
   c.state.tasks.push(a, b);
