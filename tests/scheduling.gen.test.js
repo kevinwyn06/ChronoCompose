@@ -42,7 +42,7 @@ test('V2.1: latest running task is stronger pressed and pulled to now', () => {
   const c=make(); cleanDay(c,'23:00');
   const B=c.startOfToday(), now=B+10*H;
   c.state.nowTick=now;
-  const t=activeTask(c,{id:'run',included:false,start:B+2*DAY,end:B+3*DAY,planned:60});
+  const t=activeTask(c,{id:'run',included:null,start:B+2*DAY,end:B+3*DAY,planned:60}); // V2.11: unpressed (future window never inherits)
   c.state.running={run:{startedAt:now-5*MIN,beat:now}};
   const {chunks}=pack(c,[t]);
   const block=chunks.find(x=>x.type==='scheduled'&&x.id==='run');
@@ -549,10 +549,10 @@ test('topHover: a dated-but-untimed planned-0 task surfaces; timed/blocked/datel
   assert.deepEqual(c.buildDayTimeline(B).topHover.map(x => x.id).sort(), ['h','hd']);
 });
 
-test('topHover: an excluded (included:false) dated-untimed task does not hover', () => {
+test('topHover: an excluded (unpressed) dated-untimed task does not hover', () => {
   const c = make();
   const B = c.startOfToday();
-  const off = activeTask(c, { id:'o', name:'Off', start:B, end:null, planned:0, included:false });
+  const off = activeTask(c, { id:'o', name:'Out', start:B, end:null, planned:0, included:null });
   c.state.tasks = [off]; c._allot = c.computeAllotted(c.state.tasks);
   assert.deepEqual(c.buildDayTimeline(B).topHover, []);
 });

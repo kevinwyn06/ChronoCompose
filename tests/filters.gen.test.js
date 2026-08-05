@@ -113,7 +113,7 @@ test('priority set filter: matches membership; togglePriority toggles P-chips (m
 
 test('bool filter on incl matches the isActiveToday state', () => {
   const c = make();
-  const on = activeTask(c,{included:true}), off = T(c,{included:false});
+  const on = activeTask(c,{included:true}), off = T(c,{included:null, snoozeUntil: c.startOfToday()+86400000});
   assert.ok(c.matchColFilter(on,'incl',{val:true}));
   assert.ok(!c.matchColFilter(off,'incl',{val:true}));
   assert.ok(c.matchColFilter(off,'incl',{val:false}));

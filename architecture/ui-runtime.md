@@ -81,10 +81,31 @@ user on a surface they never chose, without erroring — hence the named helpers
 **Matrix** is an Eisenhower grid whose urgency axis is derived from dates while importance is read from
 `priority`. Both render `planCard` and share one card-drag path; the drop zone string encodes only the
 target row/half, so sideways movement is structurally a no-op rather than a suppressed gesture.
-`unpressed` renders visibly distinct from `off` (dashed edge) so undecided work is never displayed as
-rejected work. **Both axes are under owner revision** (three inclusion rows, history-based columns, an
-overdue column, card↔row parity) — see `tasks.md`; the redefinition is self-contradictory as stated and
-nothing here should be extended until it resolves.
+`unpressed` renders visibly distinct (dashed edge) so undecided work is never displayed as decided work.
+
+**V2.11 — the cards ARE the row.** Ten shared builders (`taskDisp`, `taskDoneCircle`, `taskDueRecurChip`,
+`taskInlineTags`, `taskDepChips`, `taskInclControl`, `taskFlowCell`, `taskTimerBtn`, `taskAddTimeBtn`,
+`taskDescToggle`) are the single definition of every list-row control, and both `renderSheet`'s row and
+`planCard` call them, so parity holds by construction rather than by two copies agreeing. Cards carry the
+row's gestures too (click → details, double-click → activate, right-click → row menu) while mousedown
+still arms the card drag. Two things stay sheet-only on purpose: the **row-drag grip** and the **subtask
+caret** — in the sheet a drag reorders and re-nests, on a card it includes/excludes, and one gesture
+cannot mean both. The card's description panel uses `state.cardDescOpen`, never `state.descOpen`,
+because the sheet's panel is measured (`observeDescPanel` → `_descH` → `yOfRow`) to offset the Gantt's
+rows — a card sharing that state would silently shift bars.
+
+**Inclusion is four states, not five.** V2.11 retired `off` (`included===false`): `setIncludedOff` writes
+`null`, and snoozes until tomorrow **exactly when `isInheritedToday` would otherwise re-include the task
+on the spot** — without that branch, unpressing carried-over work would be a silent no-op. Snooze means
+"not today"; unpressed means "not chosen". The one-time `retire-off` migration folds surviving `false`
+into `null`. Consequence: nothing vetoes V2.2 inheritance any more, so mid-window work can no longer
+reach the Extra column.
+
+**Origin columns** are `overdue | existing | new | extra`. `overdue` outranks every other rule and its
+column renders only while occupied; `new` admits both a window that opened today and a snooze that ended
+today (`snoozeEndedToday`, read off `snoozeUntil`, which is never cleared on expiry). `rescheduleToToday`
+is the Overdue card's `→ Today` control — per card, never per column, because a bulk date rewrite is the
+same lossy gesture the Matrix drag rules already refuse.
 
 Drags that must also place a text caret — sheet row, section header, column reorder — cannot call
 `preventDefault` on mousedown, so text-selection suppression happens at **drag begin** instead: a

@@ -16,11 +16,13 @@ test('V2.2 eligibility requires today in the window and completed dependencies, 
   assert.strictEqual(c.isEligibleToday(future,tasks),false,'out-of-window task is ineligible');
 });
 
-test('V2.2 inheritance carries yesterday-scheduled unfinished work but respects done and explicit off', () => {
+test('V2.2 inheritance carries yesterday-scheduled unfinished work but respects done and snooze', () => {
   const c=make(); const B=c.startOfToday();
   const inherited=activeTask(c,{id:'carry',start:B-2*DAY,end:B-DAY,included:null,pct:35});
   const done=activeTask(c,{id:'done',start:B-2*DAY,end:B-DAY,included:null,pct:100});
-  const off=activeTask(c,{id:'off',start:B-2*DAY,end:B-DAY,included:false,pct:20});
+  /* V2.11: `included:false` is retired, so nothing VETOES inheritance any more - suppressing a
+     carried-over task for today is snooze's job, which is exactly what setIncludedOff now does. */
+  const off=activeTask(c,{id:'off',start:B-2*DAY,end:B-DAY,included:null,pct:20,snoozeUntil:B+DAY});
   const manual=activeTask(c,{id:'manual',start:B+DAY,end:B+2*DAY,included:null,pct:10,
     pin:{day:B-DAY,start:B-DAY+9*3600000,dur:30}});
   const recurDone=activeTask(c,{id:'recur-done',start:B-DAY,end:B-DAY+3600000,included:null,pct:0,
@@ -32,7 +34,9 @@ test('V2.2 inheritance carries yesterday-scheduled unfinished work but respects 
   assert.strictEqual(c.isOptedOut(inherited),false,'inherited auto-inclusion is not rendered as opted out');
   assert.strictEqual(c.inclState(inherited),'pressed','inherited task receives pressed depth plus shaded tint');
   assert.strictEqual(c.isInheritedToday(done),false,'completed work does not inherit');
-  assert.strictEqual(c.isInheritedToday(off),false,'explicit unpress wins over inheritance');
+  assert.strictEqual(c.isInheritedToday(off),true,'V2.11: inheritance itself is no longer vetoable');
+  assert.strictEqual(c.isActiveToday(off),false,'…but the snooze still keeps it out of today');
+  assert.strictEqual(c.inclState(off),'snoozed','and it reads as snoozed, not as a dead end');
   assert.strictEqual(c.isInheritedToday(manual),true,'yesterday manual placement inherits');
   assert.strictEqual(c.isInheritedToday(recurDone),false,'completed yesterday occurrence does not inherit its series');
 });

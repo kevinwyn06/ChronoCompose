@@ -171,11 +171,11 @@ test('task entirely in the future is inactive with 0 allotment', () => {
   assert.equal(m[t.id].allotted, 0);
 });
 
-test('Milestone and excluded (included:false) tasks never get allotment even if today is in range', () => {
+test('Milestone and excluded tasks never get allotment even if today is in range', () => {
   const c = make();
   cleanDay(c, '03:00');
   const mile = activeTask(c, { type: 'Milestone' });
-  const excl = activeTask(c, { included: false });
+  const excl = activeTask(c, { included:null, snoozeUntil: c.startOfToday()+DAY }); // V2.11: snooze replaces Off
   const m = c.computeAllotted([mile, excl]);
   assert.equal(m[mile.id].active, false);
   assert.equal(m[excl.id].active, false);

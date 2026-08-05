@@ -3,20 +3,46 @@ const test = require('node:test');
 const assert = require('node:assert');
 const { make, activeTask, DAY } = require('./_load.js');
 
-test('setIncludedOff: sets included:false and clears snoozeUntil; one commit', () => {
+// V2.11 - "Off" is retired (owner: *Off is a dangerous button*). setIncludedOff now UNPRESSES, so the
+// task's own triggers can press it back later instead of it being stuck out of today forever. The one
+// subtlety: activeTask's window covers yesterday, so V2.2 inheritance would undo a bare unpress on the
+// spot - hence the snooze, which is what makes the gesture actually take effect.
+test('setIncludedOff: unpresses (never writes false) and snoozes inherited work; one commit', () => {
   const c = make();
+  const today = c.startOfToday();
   const t = activeTask(c, { snoozeUntil: Date.now() + DAY });
   c.state.tasks = [t];
   const histLen = c.history.length;
   c.setIncludedOff(t.id);
-  assert.strictEqual(c.state.tasks[0].included, false);
-  assert.strictEqual(c.state.tasks[0].snoozeUntil, null, 'off clears snooze too');
+  assert.strictEqual(c.state.tasks[0].included, null, 'unpressed, not off');
+  assert.strictEqual(c.state.tasks[0].snoozeUntil, today + DAY, 'inherited work is snoozed through today');
   assert.strictEqual(c.history.length, histLen + 1, 'exactly one undo entry');
+});
+
+test('setIncludedOff on work nothing would inherit leaves the snooze alone', () => {
+  const c = make();
+  const today = c.startOfToday();
+  // window opens today, so V2.2 has no yesterday slice to carry forward
+  const t = activeTask(c, { start: today, end: today + DAY, included: true });
+  c.state.tasks = [t];
+  c.setIncludedOff(t.id);
+  assert.strictEqual(c.state.tasks[0].included, null);
+  assert.strictEqual(c.state.tasks[0].snoozeUntil, null, 'no phantom snooze when unpressing is enough');
+});
+
+test('migrateRetireOff folds any surviving included:false into unpressed', () => {
+  const c = make();
+  const tasks = [activeTask(c, { id:'a', included:false }), activeTask(c, { id:'b', included:true }),
+                 activeTask(c, { id:'c', included:null })];
+  assert.strictEqual(c.migrateRetireOff(tasks), 1, 'only the off task is rewritten');
+  assert.strictEqual(tasks[0].included, null);
+  assert.strictEqual(tasks[1].included, true, 'pressed is untouched');
+  assert.strictEqual(tasks[2].included, null);
 });
 
 test('setIncludedOn: presses task and clears snoozeUntil', () => {
   const c = make();
-  const t = activeTask(c, { included:false, snoozeUntil: Date.now() + DAY });
+  const t = activeTask(c, { included:null, snoozeUntil: Date.now() + DAY });
   c.state.tasks = [t];
   c.setIncludedOn(t.id);
   assert.strictEqual(c.state.tasks[0].included, true);

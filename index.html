@@ -564,8 +564,19 @@ class Component extends DCLogic {
       if(!done['sections-from-primary-tag']){ const r=this.migrateSectionsFromTags(tasks);
         done['sections-from-primary-tag']=1; this.lsSet('pp-migrations', JSON.stringify(done));
         if(r.sections.length){ try{ this.lsSet('pp-sections', JSON.stringify(r.sections)); }catch(e){} }
-        if(r.changed) this.saveTasks(tasks); } }catch(e){}
+        if(r.changed) this.saveTasks(tasks); }
+      /* PP-EXT V2.11: retire "Off". `included===false` no longer exists as a state, so any task still
+         holding it is folded into unpressed. Left in place it would be a value no predicate reads and no
+         UI can clear — a task stuck out of today with no control that returns it. */
+      if(!done['retire-off']){ const n=this.migrateRetireOff(tasks); done['retire-off']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
+  }
+  /* PURE (mutates the array it is handed, returns the count) → unit-tested. Deliberately does NOT snooze
+     the tasks it converts, unlike `setIncludedOff`: the user turned these off before unpressed could bring
+     anything back, so honouring the new rule means letting their triggers run. */
+  migrateRetireOff(tasks){
+    let n=0; (tasks||[]).forEach(t=>{ if(t && t.included===false){ t.included=null; n++; } }); return n;
   }
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
      UTC, which shifts the day and injects a bogus time (e.g. 17:00) depending on the viewer's timezone. */
@@ -720,7 +731,7 @@ class Component extends DCLogic {
       mk('t3','Practice problems','Proportional',0,0,3,[],0,60,0,'2 mediums',['study']),
       mk('t4','Online course lectures','Proportional',0,3,3,[],10,120,0,'',['study']),
       mk('t5','Exercise','Proportional',0,0,2,[],0,45,0,'Full body',['health']),
-      mk('t6','Update website','Proportional',1,6,4,[],0,300,0,'Backlog — excluded from today (Incl toggle off)',['personal'],{included:false}),
+      mk('t6','Update website','Proportional',1,6,4,[],0,300,0,'Backlog — not pressed into today',['personal'],{included:null}),
       mk('t7','Team Meeting','Milestone',0,0,1,[],0,0,0,'',['work']),
     ];
   }
@@ -1065,7 +1076,8 @@ class Component extends DCLogic {
   isOptedOut(t){
     if(this.isActiveTask(t)) return false;
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
-    if(t.included===false) return true;
+    /* PP-EXT V2.11: the `included===false` ("off") branch is gone — see setIncludedOff. Unpressed work is
+       still opted out of today; it simply is no longer barred from ever coming back on its own. */
     return t.included!==true && !this.isInheritedToday(t);
   }
   /* PP-EXT V2.1: the most recently started running timer is the one stronger pressed/active task.
@@ -1093,11 +1105,13 @@ class Component extends DCLogic {
       return +(oi==null?p.pct:this.occPct(p,oi))>=100;
     });
   }
-  /* PP-EXT V2.2: unfinished work that participated yesterday carries into today. `included:false`
-     is the user's explicit unpress and wins; null legacy/unpressed state may be auto-included. A day pin
-     records manual scheduling, while the normal other-day window represents auto scheduling. */
+  /* PP-EXT V2.2: unfinished work that participated yesterday carries into today. A day pin records manual
+     scheduling, while the normal other-day window represents auto scheduling.
+     PP-EXT V2.11: the `included===false` veto is gone with "Off". Suppressing an inherited task for today
+     is now snooze's job — which is why `setIncludedOff` snoozes exactly when this predicate would
+     otherwise re-include the task the instant you unpressed it. */
   isInheritedToday(t){
-    if(!t || t.archivedAt || this.isMilestone(t) || t.included===false) return false;
+    if(!t || t.archivedAt || this.isMilestone(t)) return false;
     const yesterday=this.startOfToday()-this.DAY;
     const manual=!!(t.pin && t.pin.day===yesterday);
     const win=this.isScheduled(t) ? this.occForDay(t, yesterday) : this.ghostSpan(t, this.startOfToday());
@@ -1133,16 +1147,18 @@ class Component extends DCLogic {
     if(B===this.startOfToday()){
       if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
       if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
-      return t.included===true || this.isInheritedToday(t); /* inherited legacy/unpressed work carries forward; explicit false still wins */
+      return t.included===true || this.isInheritedToday(t); /* inherited legacy/unpressed work carries forward */
     }
-    if(t.included===false) return false;
+    /* PP-EXT V2.11: no `included===false` veto on other days — "Off" is retired, so a future day is decided
+       by the window alone. Snooze is deliberately still today-only (see the isOptedOut note above). */
     return inWindow;
   }
   isActiveToday(t){ return this.isActiveOn(t, this.startOfToday()); }
-  /* PP-EXT V2.1: one popover/icon/depth bucket for active, pressed, unpressed, snoozed, and off. */
+  /* PP-EXT V2.1: one popover/icon/depth bucket for active, pressed, unpressed, and snoozed.
+     PP-EXT V2.11: `off` is retired — four states, not five. Callers that switched on 'off' now fall
+     through to 'unpressed', which is the state Off collapses into. */
   inclState(t){
     if(this.isActiveTask(t)) return 'active';
-    if(t.included===false) return 'off';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
     return (t.included===true || this.isInheritedToday(t)) ? 'pressed' : 'unpressed';
   }
@@ -1164,23 +1180,57 @@ class Component extends DCLogic {
     if(!win || win.start==null || win.end==null) return false;
     return this.startOfDay(win.start)===B && B<=this.startOfDay(win.end);
   }
+  /* PP-EXT V2.11: did a snooze RUN OUT today? `snoozeUntil` is never cleared on expiry (only an explicit
+     include/exclude clears it), so the field itself records the ending — no history table needed. This is
+     the second half of the owner's `New` definition: work today brought back, whether the calendar or an
+     expiring snooze did the bringing. */
+  snoozeEndedToday(t){
+    if(!t || t.snoozeUntil==null) return false;
+    return this.startOfDay(t.snoozeUntil)===this.startOfToday();
+  }
   /* PURE-ish: WHY a task is on today's list — the three columns of the Selection view.
      `extra` is a FALLBACK BUCKET, not a category (the same role `No section` plays, and for the same
      reason): making the third column exhaustive means nothing can fall out of the view.
      These columns are DERIVED, never chosen. No user gesture moves a task between them — only the
      calendar does. That is precisely why the Selection view's drags are vertical-only: offering a
-     horizontal drop would be a lever connected to nothing. */
+     horizontal drop would be a lever connected to nothing.
+
+     PP-EXT V2.11 (owner, 2026-08-04): `overdue` is a conditional FOURTH column at the far left that
+     **outranks every other rule**, and the column renders only while something is in it. It is the one
+     column that is about consequence rather than provenance, which is why it takes precedence: if work is
+     late, why it arrived stopped being the interesting question.
+     `new` also now admits a snooze that ended today, per the owner's "autostarted or snooze ended". */
+  isOverdueToday(t){
+    if(!t || t.archivedAt || this.isMilestone(t)) return false;
+    const d=this.taskDisp(t);
+    if(d.dispEnd==null) return false;
+    return this.dueChipClass(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}), this.startOfToday())==='overdue';
+  }
   originOf(t){
-    if(this.isInheritedToday(t)) return 'existing'; /* leftover from yesterday */
-    if(this.startsToday(t)) return 'new';           /* today entered the task's range */
+    if(this.isOverdueToday(t)) return 'overdue';    /* late — outranks provenance */
+    if(this.isInheritedToday(t)) return 'existing'; /* included yesterday, still here today */
+    if(this.startsToday(t) || this.snoozeEndedToday(t)) return 'new'; /* today brought it in */
     return 'extra';                                  /* everything else you pulled in */
   }
-  ORIGIN_KEYS(){ return ['existing','new','extra']; }
-  originLabel(k){ return k==='existing'?'Existing':(k==='new'?'New':'Extra'); }
-  originHint(k){ return k==='existing'?'left from yesterday':(k==='new'?'range starts today':'everything else'); }
+  ORIGIN_KEYS(){ return ['overdue','existing','new','extra']; }
+  originLabel(k){ return k==='overdue'?'Overdue':k==='existing'?'Existing':(k==='new'?'New':'Extra'); }
+  originHint(k){ return k==='overdue'?'past due — reschedule or do it'
+    : k==='existing'?'left from yesterday'
+    : k==='new'?'arrived today' : 'everything else'; }
 
-  /* PURE-ish: the two ROWS. Five states (`active`,`pressed`,`unpressed`,`off`,`snoozed`) fold into two.
-     `unpressed` folds into Excluded but must NOT be conflated with `off` — see isUndecided. */
+  /* PP-EXT V2.11 (owner, 2026-08-04): the quick-reschedule the Overdue column carries. Moves the due date
+     to the end of today and presses the task in, because a task you just rescued from overdue is one you
+     have decided to do — leaving it excluded would make the button a half-gesture. Deliberately touches
+     `end` only: `start` follows via setDate's window-ordering rule, and nothing else is inferred. */
+  rescheduleToToday(id){
+    /* `timed:false` is what makes this a DATE move rather than a datetime one — setDate floors to
+       midnight, matching the schedule-pin-removal convention that a bare day is midnight. */
+    this.setDate(id,'end',this.startOfToday(),false);
+    this.setIncludedOn(id);
+  }
+  /* PURE-ish: the two ROWS. Four states (`active`,`pressed`,`unpressed`,`snoozed`) fold into two.
+     `unpressed` folds into Excluded; since V2.11 retired `off` it is the ONLY undecided state there, and
+     it must still not read as a decision — see isUndecided. */
   inclusionRow(t){
     const st=this.inclState(t);
     return (st==='pressed'||st==='active') ? 'included' : 'excluded';
@@ -1263,11 +1313,24 @@ class Component extends DCLogic {
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.priority=important?2:3; });
   }
   /* PP-EXT Track B: explicit include/exclude/snooze mutators (design doc §2 lifecycle) — the popover UI
-     (Task 4) calls these instead of the old binary include toggle. Off supersedes snooze (turning off
-     clears it — no need for both); turning on presses and clears snooze; snoozing never touches
-     `included` (so an expired snooze always falls back to whatever `included` already was). */
+     (Task 4) calls these instead of the old binary include toggle. Turning on presses and clears snooze;
+     snoozing never touches `included` (so an expired snooze always falls back to whatever `included`
+     already was). */
   setIncludedTrue(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.included=true; }); }
-  setIncludedOff(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=false; t.snoozeUntil=null; } }); }
+  /* ==== PP-EXT V2.11: "Off" is RETIRED (owner rule, 2026-08-04: *Off is a dangerous button*) ====
+     `included===false` used to mean "decided against, permanently, until you say otherwise" — a state
+     nothing could rescue you from, which is exactly the failure the standing tenet forbids (the
+     shortest-effort path must never silently drop a deadline). Turning a task off now returns it to
+     **unpressed**, where its own triggers — start date, occurrence window — can press it back later.
+
+     One wrinkle makes this more than deleting a branch: unpressing a task that V2.2 is *inheriting* from
+     yesterday is a no-op, because inheritance re-includes it on the spot. So an unpress that would be
+     immediately undone snoozes until tomorrow instead. That is not a special case bolted on — it is the
+     division of labour the owner named: **snooze means "not today", unpressed means "not chosen"**, and
+     turning off a carried-over task is a statement about today. */
+  setIncludedOff(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+    t.included=null;
+    if(this.isInheritedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.snoozeUntil=null; } }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
@@ -1700,8 +1763,8 @@ class Component extends DCLogic {
   isTopHoverOn(t, B){
     if(this.isMilestone(t) || t.archivedAt) return false;
     if((t.planned||0) > 0) return false;                         /* packs a block → not a hover line */
-    if(t.included===false) return false;                        /* manual EXCLUDE, any day */
-    if(B===this.startOfToday() && this.isOptedOut(t)) return false; /* today snooze/off */
+    /* PP-EXT V2.11: the any-day `included===false` exclusion left with "Off". */
+    if(B===this.startOfToday() && this.isOptedOut(t)) return false; /* today snooze/unpressed */
     if(this.isFixedOn(t, B)) return false;                      /* has a clock span → drawn as a block */
     if(this.isPointOn(t, B)) return false;                      /* clocked anchor → drawn as a caret */
     if(this.hasDragPinToday(t, B)) return false;                /* drawn as a pinned block */
@@ -3008,8 +3071,14 @@ class Component extends DCLogic {
       if(reparent) moving.forEach(t=>{ t.parentId = parentId; }); /* PP-EXT: descendants keep pointing here → carried along */
       if(resection){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         tasks.forEach(t=>{ if(roots.has(t.id)) t.sectionId=sectionId; }); }
+      /* PP-EXT V2.11: excluding writes `null` (unpressed), not `false` — "Off" is retired. The snooze that
+         `setIncludedOff` adds for inherited work is applied here too, so a cross-divider drag and the
+         popover cannot disagree about what "move this out of today" means. */
       if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
-        tasks.forEach(t=>{ if(roots.has(t.id)){ t.included=(inclusion==='included'); t.snoozeUntil=null; } }); }
+        const on=(inclusion==='included');
+        tasks.forEach(t=>{ if(!roots.has(t.id)) return;
+          if(on){ t.included=true; t.snoozeUntil=null; }
+          else { t.included=null; if(this.isInheritedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; } }); }
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
       let ti = anchorId==null ? tasks.length : tasks.findIndex(t=>t.id===anchorId);
       if(ti<0) ti=tasks.length;
@@ -4177,9 +4246,6 @@ class Component extends DCLogic {
       style:{padding:'6px 10px',borderRadius:'6px',cursor:'pointer',fontSize:'12.5px',color:'var(--text-2)'},
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
       onMouseLeave:e=>e.currentTarget.style.background='transparent'}, label);
-    if(st==='off') return [
-      h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},'Off'),
-      btn('Turn on', ()=>this.setIncludedOn(t.id)) ];
     if(st==='snoozed') return [
       h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},
         'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
@@ -4196,7 +4262,9 @@ class Component extends DCLogic {
           style:{width:'100%',border:'1px solid var(--divider)'},
           onClick:e=>e.stopPropagation(),
           onKeyDown:e=>{ if(e.key==='Enter'){ if(this.snoozeUntilText(t.id, e.target.value)){ e.target.value=''; after(); } } }})),
-      btn('Turn off', ()=>this.setIncludedOff(t.id)) ];
+      /* PP-EXT V2.11: was "Turn off". The label changed with the behaviour — this unpresses, and the task's
+         own triggers can press it back, so promising "off" would now be a lie. */
+      btn('Take out of today', ()=>this.setIncludedOff(t.id)) ];
   }
   /* PP-EXT Track B: the table-cell popover — same anchored-card + full-screen click-outside-closes
      pattern as renderDatePick. */
@@ -6490,7 +6558,7 @@ class Component extends DCLogic {
             background:'var(--chip-bg)',color:'var(--text-2)'}},
         h('span',{style:{width:'6px',height:'6px',borderRadius:'50%',flex:'none',background:(this.PCOL[t.priority]||'var(--pri-default)')}}),
         h('span',{style:{overflow:'hidden',textOverflow:'ellipsis'}},t.name),
-        optedOut?h('span',{style:{fontSize:'8px',flex:'none'}}, this.inclState(t)==='snoozed'?'💤':'⊘'):null); };
+        optedOut?h('span',{style:{fontSize:'8px',flex:'none'}}, this.inclState(t)==='snoozed'?'💤':'☐'):null); };
     const MAXCHIPS=compact?1:4;
     const dayMap=this.tasksByDayMap(cells.map(c=>c.dayStart)); /* PP-EXT (V0.3): one expandTask per task, not per cell */
     const cellEls=cells.map((c,i)=>{
@@ -6620,38 +6688,201 @@ class Component extends DCLogic {
      (cardPointerDown → beginCardDrag → onMouseUp) because the two gestures differ only in what the drop
      writes: inclusion in Selection, priority in Matrix. */
 
-  /* One card. `zone` is the drop target it currently sits in, used only to skip a no-op write on drop. */
+  /* ==== PP-EXT V2.11: the task row's controls, defined ONCE ====
+     Owner rule, 2026-08-04: *"the task chips in those views should be the same as what we see in the plan
+     list view. We should be able to do everything we can do in the list view in the selection and matrix
+     view."* Two renderers building "the same" controls from two copies is the drift this repo has already
+     paid for twice (`tasksByTagSection`, the two `_yTop` call sites). So the sheet row and `planCard` now
+     call the same builders, and a control added to one appears in the other by construction.
+
+     What deliberately does NOT cross over: the row-drag grip and the subtask caret. In the sheet a drag
+     reorders and re-nests; in a triage grid a drag means include/exclude, and the two cannot share a
+     gesture. Cards are a flat triage surface, so nesting has nothing to express there. Everything else —
+     complete, priority, due/recur, tags, dependencies, description, inclusion, planned→allotted, timer,
+     add-time, details, and the right-click menu — is the same control object. */
+
+  /* The recurrence-aware display facts every control below keys off. */
+  taskDisp(t){
+    const curOcc = t.recur ? this.currentOcc(t) : null;
+    const recIdx = curOcc ? curOcc.idx : 0;
+    const dispPct = t.recur ? this.occPct(t,recIdx) : t.pct;
+    return {curOcc, recIdx, dispPct, dispEnd: curOcc ? curOcc.end : t.end,
+      done: dispPct>=100, pcol: this.PCOL[t.priority]||'var(--pri-default)'};
+  }
+  /* Complete + priority in one control: click completes, right-click cycles priority. */
+  taskDoneCircle(t, d){
+    const h=React.createElement; d=d||this.taskDisp(t);
+    return h('div',{title:'Click to complete · right-click to change priority',
+      onMouseDown:e=>e.stopPropagation(),
+      onClick:e=>{e.stopPropagation();this.toggleDone(t.id);}, onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
+      style:{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flex:'none'}},
+      h('svg',{width:18,height:18,viewBox:'0 0 18 18'},
+        h('circle',{cx:9,cy:9,r:7,fill:d.done?d.pcol:'none',stroke:d.pcol,strokeWidth:1.7}),
+        d.done?h('path',{d:'M5.4 9.2 L7.8 11.5 L12.4 6.4',fill:'none',stroke:'var(--on-accent)',strokeWidth:1.7,strokeLinecap:'round',strokeLinejoin:'round'}):null));
+  }
+  /* PP-EXT V1.5: Start/Due/%Done left the sheet, but due + recurrence stay glanceable under the name. */
+  taskDueRecurChip(t, d){
+    const h=React.createElement; d=d||this.taskDisp(t);
+    if(d.dispEnd==null && !t.recur) return null;
+    const tone=d.dispEnd==null ? 'recur' : this.dueChipClass(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}),this.startOfToday());
+    const dueText=d.dispEnd==null ? '' : this.fmtDT(t.allDay?d.dispEnd-1:d.dispEnd,true);
+    const recurText=t.recur ? ('↻ '+(t.recur.label||'Repeats')) : '';
+    const label=[dueText,recurText].filter(Boolean).join(' · ');
+    return h('span',{className:'pp-due-chip pp-due-chip--'+tone,title:label},label);
+  }
+  /* PP-EXT V2.3: tags are controls, not passive metadata. The × target stays HIT_MIN_PX wide even though
+     its glyph is small (the §12 hit-target tenet); the @ input expands only while used. */
+  taskInlineTags(t){
+    const h=React.createElement;
+    return h('div',{style:{display:'flex',gap:'3px',alignItems:'center',minWidth:0,overflow:'hidden'}},
+      ...(t.labels||[]).map(l=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',height:'18px',fontSize:'9.5px',color:'var(--tag-text)',
+          background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',paddingLeft:'4px',whiteSpace:'nowrap',flex:'none'}},
+        '@'+l,h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeLabel(t.id,l);},title:'Remove @'+l,
+          style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.HIT_MIN_PX+'px',height:'18px',cursor:'pointer',
+            color:'var(--text-faint2)',fontSize:'12px',lineHeight:1}},'×'))),
+      h('input',{key:'rowtag-'+(t.labels||[]).join('|'),type:'text',placeholder:'@',title:'Add a tag',
+        onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
+        onFocus:e=>e.currentTarget.style.width='72px',
+        onBlur:e=>{ const v=e.currentTarget.value; if(v.trim()) this.addLabel(t.id,v); e.currentTarget.value=''; e.currentTarget.style.width='28px'; },
+        onKeyDown:e=>{ if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur();} },
+        style:{width:'28px',height:'18px',padding:'0 4px',border:'1px dashed var(--tag-border)',borderRadius:'var(--r-1)',
+          background:'transparent',color:'var(--tag-text)',fontSize:'10px',outline:'none',transition:'width var(--dur-fast) var(--ease-standard)',flex:'none'}}));
+  }
+  /* Removable predecessor chips. `byId` is passed in where the caller already built one (the sheet). */
+  taskDepChips(t, byId){
+    const h=React.createElement;
+    if(!byId){ byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x); }
+    const seqOf=this._seqOf||{};
+    return (t.deps||[]).map(dp=>{ const pid=this.depId(dp); const oc=this.depOcc(dp); const p=byId[pid]; if(!p) return null;
+      return h('span',{key:pid+'_'+oc,onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeDep(t.id,pid);},
+        title:'Predecessor: '+p.name+(oc!=null?(' (occurrence '+(oc+1)+')'):'')+' · click to remove',
+        style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)',borderRadius:'var(--r-1)',
+          padding:'0 var(--sp-0)',cursor:'pointer',whiteSpace:'nowrap'}}, '↳ '+(seqOf[pid]||'')+(oc!=null?('·'+(oc+1)):'')); });
+  }
+  /* PP-EXT Track B: inclusion opens a popover rather than toggling, because pressed/snoozed/unpressed are
+     independently meaningful states a single click cannot safely flip between. V2.11: four states, no ⊘. */
+  taskInclControl(t){
+    const h=React.createElement;
+    if(this.isMilestone(t)) return h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—');
+    const st=this.inclState(t);
+    const glyph = st==='snoozed' ? '💤' : st==='active' ? '▶' : st==='pressed' ? '☑' : '☐';
+    const color = st==='snoozed' ? 'var(--warn)' : st==='active' ? this._accent
+      : st==='pressed' ? 'var(--success)' : 'var(--text-faint2)';
+    const title = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString()+' · click to change')
+      : st==='active' ? 'Active now · stronger pressed state'
+      : st==='pressed' ? 'Pressed into today · click to change'
+      : 'Not pressed today · click to include';
+    return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
+      title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph);
+  }
+  /* `planned → allotted`, flush right. Planned is editable in place; allotted is computed. */
+  taskFlowCell(t){
+    const h=React.createElement; const al=this.allotOf(t.id);
+    return h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'6px',width:'100%',fontVariantNumeric:'tabular-nums'}},
+      h('input',{className:'pp-num',type:'text',key:'flow-planned-'+t.planned,defaultValue:this.fmtDur(t.planned),title:'Planned time',
+        onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),onBlur:e=>this.setDur(t.id,'planned',e.target.value),
+        onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},style:{width:'42px',flex:'none',textAlign:'right'}}),
+      h('span',{style:{color:'var(--text-faint2)',fontSize:'11px'}},'→'),
+      h('span',{title:al.active?'Allotted today':'Not included today',style:{minWidth:'38px',textAlign:'right',fontSize:'11.5px',fontWeight:650,
+        color:al.active?'var(--text-num)':'var(--text-faint2)'}},al.active?this.fmtDur(al.allotted):'—'));
+  }
+  taskTimerBtn(t){
+    const h=React.createElement; const running=this.isRunning(t.id);
+    return h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},
+      title:running?'Stop timer':'Start timer',style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',
+        alignItems:'center',justifyContent:'center',borderRadius:'50%',cursor:'pointer',fontSize:'9px',fontWeight:800,flex:'none',
+        background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,border:'1px solid var(--divider)'}},running?'■':'▶');
+  }
+  taskAddTimeBtn(t){
+    const h=React.createElement;
+    return h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.addSpentTime(t.id,this.FOCUS_ADD_MINUTES);},
+      title:'Add '+this.FOCUS_ADD_MINUTES+' minutes worked',style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',padding:'0 5px',display:'inline-flex',
+        alignItems:'center',justifyContent:'center',borderRadius:'var(--r-1)',cursor:'pointer',fontSize:'9.5px',fontWeight:700,flex:'none',
+        color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)'}},'+'+this.FOCUS_ADD_MINUTES);
+  }
+  /* Description disclosure. `openSet`/`toggle` are injected because the sheet's panel is MEASURED for
+     Gantt row alignment (`observeDescPanel` → `_descH` → `yOfRow`) while a card's is not — sharing the
+     open-state would let a card's height silently offset the Gantt's rows. Same control, separate state. */
+  taskDescToggle(t, open, toggle){
+    const h=React.createElement;
+    return h('span',{onClick:e=>{e.stopPropagation();toggle();}, onMouseDown:e=>e.stopPropagation(),
+      title: open?'Hide description':'Show / edit description',
+      style:{cursor:'pointer',marginRight:'6px',fontSize:'13px',lineHeight:1,flex:'none',userSelect:'none',
+        color: (open||this.hasDesc(t.description))?this._accent:'var(--text-faint)'}}, '☰');
+  }
+  /* Card-local description open state — deliberately NOT `state.descOpen` (see taskDescToggle). */
+  toggleCardDesc(id){ const d=Object.assign({}, this.state.cardDescOpen||{});
+    if(d[id]) delete d[id]; else d[id]=true; this.setState({cardDescOpen:d}); }
+
+  /* One card — a task row in card clothing. `zone` is the drop target it currently sits in, used only to
+     skip a no-op write on drop.
+
+     PP-EXT V2.11: this was a read-mostly summary (name, due, planned→allotted, a snooze glyph). It now
+     carries the SAME controls as the sheet row, from the same builders, plus the sheet's three gestures:
+     click opens details, double-click activates, right-click opens the row menu. The `_suppressCardClick`
+     guard is what keeps a real drag from also opening the detail panel. */
   planCard(t, zone){
     const h=React.createElement;
     const cd=this.state.cardDrag;
     const dragging=cd && cd.id===t.id;
     const undecided=this.isUndecided(t);
-    const oc=this.occOf(t);
-    const due=(oc&&oc.end!=null)?this.fmtDT(oc.end,true):null;
-    const planned=+((t.planned)||0), allot=+((t._allot!=null?t._allot:t.planned)||0);
-    const snoozed=this.inclState(t)==='snoozed';
-    return h('div',{key:t.id,'data-card-id':t.id,
+    const d=this.taskDisp(t);
+    const descOpen=!!(this.state.cardDescOpen||{})[t.id];
+    const st=this.inclState(t);
+    const snoozed=st==='snoozed';
+    /* V2.1 pressed/active depth, the same channel the sheet row uses — inclusion is depth, not colour. */
+    let bsh=dragging?'none':'var(--sh-1)';
+    if(st==='active') bsh='inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
+    else if(st==='pressed') bsh='inset 0 3px 7px rgba(0,0,0,0.16)';
+    const chip=(el,key)=>el?h('span',{key,style:{display:'inline-flex',alignItems:'center',flex:'none'}},el):null;
+    return h('div',{key:t.id,'data-card-id':t.id,'data-task-id':t.id,
       onMouseDown:e=>this.cardPointerDown(e,t.id,zone),
-      onClick:e=>{ if(this._suppressCardClick){ this._suppressCardClick=false; return; } e.stopPropagation(); this.openDetail(t.id); },
+      onClick:e=>{ if(this._suppressCardClick){ this._suppressCardClick=false; return; } this.rowClick(e,t.id); },
+      onDoubleClick:e=>this.rowDblClick(e,t.id),
+      onContextMenu:e=>this.rowMenu(e,t.id),
       title:t.name+(undecided?' · not yet decided':''),
-      style:{display:'flex',flexDirection:'column',gap:'3px',padding:'6px 8px',borderRadius:'var(--r-2)',
+      style:{display:'flex',flexDirection:'column',gap:'4px',padding:'6px 8px',borderRadius:'var(--r-2)',
         background:'var(--card-bg)',cursor:'grab',opacity:dragging?0.4:(t.archivedAt?0.5:1),
-        /* PP-EXT V2.9 §4.2: undecided ("I haven't looked at this") must NOT look like off ("I decided no").
-           A dashed edge is the whole guard — without it the view silently converts undecided work into
-           rejected work, which is the one way this design could quietly lose something. */
+        /* PP-EXT V2.9 §4.2, still load-bearing after V2.11 retired Off: undecided ("I haven't looked at
+           this") must not read as a decision. With Off gone the Excluded row is entirely undecided or
+           snoozed, so the dashed edge now distinguishes "not chosen" from "snoozed until a date". */
         border:(undecided?'1px dashed var(--divider)':'1px solid var(--divider)'),
         color:undecided?'var(--text-mut2)':'var(--text)',
-        boxShadow:dragging?'none':'var(--sh-1)',fontSize:'12px',minWidth:0}},
-      h('div',{key:'n',style:{fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name||'Untitled'),
-      h('div',{key:'m',style:{display:'flex',alignItems:'center',gap:'6px',fontSize:'10px',color:'var(--text-faint2)',flexWrap:'wrap'}},
-        due?h('span',{key:'d'},due):null,
-        h('span',{key:'p'},this.fmtDur(planned)+' → '+this.fmtDur(allot)),
-        undecided?h('span',{key:'u',style:{fontStyle:'italic'}},'undecided'):null,
-        /* Snooze stays a per-card CONTROL, never a third row — two rows is the whole point of the grid. */
-        h('span',{key:'z',title:snoozed?'Snoozed for today':'Snooze until tomorrow',
+        boxShadow:bsh,fontSize:'12px',minWidth:0}},
+      /* Line 1 — complete/priority, description toggle, name, inclusion. */
+      h('div',{key:'n',style:{display:'flex',alignItems:'center',gap:'5px',minWidth:0}},
+        this.taskDoneCircle(t,d),
+        this.taskDescToggle(t, descOpen, ()=>this.toggleCardDesc(t.id)),
+        h('span',{key:'nm',style:{fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',flex:1,minWidth:0}},
+          t.name||'Untitled'),
+        this.taskInclControl(t)),
+      /* Line 2 — due/recur chip, tags, dependencies. */
+      h('div',{key:'m',style:{display:'flex',alignItems:'center',gap:'5px',minWidth:0,flexWrap:'wrap'}},
+        chip(this.taskDueRecurChip(t,d),'due'),
+        /* PP-EXT V2.11: the Overdue column's quick reschedule. Rendered on the card rather than the column
+           header because rescheduling is a per-task decision — a "reschedule everything" button is exactly
+           the kind of one-click bulk date rewrite the Matrix drag rules already refuse. */
+        this.isOverdueToday(t) ? h('span',{key:'resched',title:'Move the due date to today and press it in',
+          onMouseDown:e=>e.stopPropagation(),
+          onClick:e=>{e.stopPropagation(); this.rescheduleToToday(t.id);},
+          style:{display:'inline-flex',alignItems:'center',height:'18px',padding:'0 6px',flex:'none',cursor:'pointer',
+            fontSize:'9.5px',fontWeight:700,borderRadius:'var(--r-1)',color:'var(--on-accent)',
+            background:'var(--danger)',border:'1px solid var(--danger)'}},'→ Today') : null,
+        this.taskInlineTags(t),
+        ...this.taskDepChips(t)),
+      /* Line 3 — planned→allotted, snooze, timer, add-time. */
+      h('div',{key:'a',style:{display:'flex',alignItems:'center',gap:'5px',minWidth:0}},
+        h('span',{key:'z',title:snoozed?'Snoozed — click to press back into today':'Snooze until tomorrow',
           onMouseDown:e=>e.stopPropagation(),
           onClick:e=>{e.stopPropagation(); snoozed?this.setIncludedOn(t.id):this.snoozeToday(t.id);},
-          style:{cursor:'pointer',marginLeft:'auto',opacity:snoozed?1:0.55}},'💤')));
+          style:{cursor:'pointer',flex:'none',opacity:snoozed?1:0.55}},'💤'),
+        this.taskTimerBtn(t), this.taskAddTimeBtn(t),
+        h('div',{key:'f',style:{flex:1,minWidth:0}}, this.taskFlowCell(t))),
+      /* The description editor, on card-local state so a card's height can never offset the Gantt's rows. */
+      descOpen?h('div',{key:'d',onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
+        onContextMenu:e=>e.stopPropagation(),
+        style:{cursor:'default',borderTop:'1px solid var(--divider)',paddingTop:'4px'}},
+        this.richEditor(t,{minHeight:34})):null);
   }
 
   /* --- card drag: shared by both views, vertical-only by construction (see resolveCardZone) --- */
@@ -6682,9 +6913,11 @@ class Component extends DCLogic {
     const h=React.createElement;
     const p=this.selectionProjection(tasks);
     const cd=this.state.cardDrag;
-    /* An empty Extra COLUMN collapses (same rule as the No-section bucket: a fallback earns its space).
+    /* An empty Extra COLUMN collapses (same rule as the No-section bucket: a fallback earns its space),
+       and so does Overdue — the owner's rule is that it "only pops up when there is stuff overdue", which
+       is also what keeps it from becoming a permanent guilt column on a clean week.
        Empty CELLS still render — an empty New cell is informative, it means today brought you nothing. */
-    const cols=p.keys.filter(k=>k!=='extra'||p.colCount.extra>0);
+    const cols=p.keys.filter(k=>(k!=='extra'&&k!=='overdue')||p.colCount[k]>0);
 
     const cell=(colKey,row)=>{
       const zone='incl:'+row;
@@ -7763,16 +7996,10 @@ class Component extends DCLogic {
     const cell=(c,content,extra)=>h('div',{key:c.k,style:Object.assign({flex:'0 0 '+c.w+'px',padding:'0 9px',
       display:'flex',alignItems:'center',height:'100%',borderRight:'1px solid var(--row-border)',minWidth:0},extra||{})},content);
 
-    /* PP-EXT V1.5: Start/Due/%Done left the sheet, but due + recurrence stay glanceable under the name.
-       Current recurring occurrences supply `dispEnd`; the task shape stays untouched. */
-    const dueRecurChip=(()=>{
-      if(dispEnd==null && !t.recur) return null;
-      const tone=dispEnd==null ? 'recur' : this.dueChipClass(Object.assign({},t,{end:dispEnd,pct:dispPct}),this.startOfToday());
-      const dueText=dispEnd==null ? '' : this.fmtDT(t.allDay?dispEnd-1:dispEnd,true);
-      const recurText=t.recur ? ('↻ '+(t.recur.label||'Repeats')) : '';
-      const label=[dueText,recurText].filter(Boolean).join(' · ');
-      return h('span',{className:'pp-due-chip pp-due-chip--'+tone,title:label},label);
-    })();
+    /* PP-EXT V2.11: built from the shared builder (see taskDueRecurChip) so the sheet row and the plan
+       cards cannot show different chips for the same task. `_disp` is the same fact bundle both use. */
+    const _disp={curOcc,recIdx,dispPct,dispEnd,done,pcol};
+    const dueRecurChip=this.taskDueRecurChip(t,_disp);
 
     // ---- distinct milestone row ----
     // PP-EXT (Phase D bugfix): was a flat flex strip with its own fixed-width grip/diamond/seq offsets that
@@ -7819,27 +8046,11 @@ class Component extends DCLogic {
         cols.map(c=>cell(c, mContent[c.k]!=null ? mContent[c.k] : mDash, c.k==='name'?{paddingRight:'6px'}:null)));
     }
 
-    const circle=h('div',{title:'Click to complete · right-click to change priority',
-      onMouseDown:e=>e.stopPropagation(),
-      onClick:e=>{e.stopPropagation();this.toggleDone(t.id);}, onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
-      style:{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}},
-      h('svg',{width:18,height:18,viewBox:'0 0 18 18'},
-        h('circle',{cx:9,cy:9,r:7,fill:done?pcol:'none',stroke:pcol,strokeWidth:1.7}),
-        done?h('path',{d:'M5.4 9.2 L7.8 11.5 L12.4 6.4',fill:'none',stroke:'var(--on-accent)',strokeWidth:1.7,strokeLinecap:'round',strokeLinejoin:'round'}):null
-      ));
-
-    const depChips = (t.deps||[]).map(d=>{ const pid=this.depId(d); const oc=this.depOcc(d); const p=byId[pid]; if(!p) return null;
-      return h('span',{key:pid+'_'+oc,onClick:e=>{e.stopPropagation();this.removeDep(t.id,pid);},
-        title:'Predecessor: '+p.name+(oc!=null?(' (occurrence '+(oc+1)+')'):'')+' · click to remove',
-        style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,
-          padding:'0 var(--sp-0)'/* PP-EXT B3 round2: 4px maps exactly to --sp-0 */,cursor:'pointer',whiteSpace:'nowrap'}}, '↳ '+(seqOf[pid]||'')+(oc!=null?('·'+(oc+1)):'')); });
-    /* PP-EXT: inline description disclosure */
+    /* PP-EXT V2.11: circle / dep chips / description toggle all come from the shared builders. */
+    const circle=this.taskDoneCircle(t,_disp);
+    const depChips=this.taskDepChips(t, byId);
     const descOpen = !!this.state.descOpen[t.id];
-    const descToggle = h('span',{onClick:e=>{e.stopPropagation();this.toggleDescOpen(t.id);}, onMouseDown:e=>e.stopPropagation(),
-      title: descOpen?'Hide description':'Show / edit description',
-      /* PP-EXT: distinct glyph (lines = text) + larger, so it doesn't read like the subtask caret */
-      style:{cursor:'pointer',marginRight:'6px',fontSize:'13px',lineHeight:1,flex:'none',userSelect:'none',
-        color: (descOpen||this.hasDesc(t.description))?this._accent:'var(--text-faint)'}}, '☰');
+    const descToggle = this.taskDescToggle(t, descOpen, ()=>this.toggleDescOpen(t.id));
     /* PP-EXT: subtasks — indent by depth; parents get a collapse caret (+N badge when collapsed) */
     const kidsN=((this._kids&&this._kids[t.id])||[]).length;
     const depth=(this._depth&&this._depth[t.id])||0;
@@ -7851,21 +8062,8 @@ class Component extends DCLogic {
       collapsedHere?'▸':'▾') : null;
     const kidBadge = (kidsN&&collapsedHere)? h('span',{style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--chip-bg)',
       border:'1px solid var(--divider)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,marginLeft:'5px',whiteSpace:'nowrap'}},'+'+kidsN) : null;
-    /* PP-EXT V2.3: tags are controls on the row, not passive metadata hidden in a detail sheet. The remove
-       target stays HIT_MIN_PX wide even though its × glyph is visually small; @ input expands only while used. */
-    const inlineTags=h('div',{style:{display:'flex',gap:'3px',alignItems:'center',minWidth:0,overflow:'hidden'}},
-      ...(t.labels||[]).map(l=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',height:'18px',fontSize:'9.5px',color:'var(--tag-text)',
-          background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',paddingLeft:'4px',whiteSpace:'nowrap',flex:'none'}},
-        '@'+l,h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeLabel(t.id,l);},title:'Remove @'+l,
-          style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.HIT_MIN_PX+'px',height:'18px',cursor:'pointer',
-            color:'var(--text-faint2)',fontSize:'12px',lineHeight:1}},'×'))),
-      h('input',{key:'rowtag-'+(t.labels||[]).join('|'),type:'text',placeholder:'@',title:'Add a tag',
-        onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
-        onFocus:e=>e.currentTarget.style.width='72px',
-        onBlur:e=>{ const v=e.currentTarget.value; if(v.trim()) this.addLabel(t.id,v); e.currentTarget.value=''; e.currentTarget.style.width='28px'; },
-        onKeyDown:e=>{ if(e.key==='Enter'){e.preventDefault();e.currentTarget.blur();} },
-        style:{width:'28px',height:'18px',padding:'0 4px',border:'1px dashed var(--tag-border)',borderRadius:'var(--r-1)',
-          background:'transparent',color:'var(--tag-text)',fontSize:'10px',outline:'none',transition:'width var(--dur-fast) var(--ease-standard)',flex:'none'}}));
+    /* PP-EXT V2.11: shared builder — see taskInlineTags. */
+    const inlineTags=this.taskInlineTags(t);
     const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'1px',minWidth:0,width:'100%',
         paddingLeft:(depth*16)+'px' /* PP-EXT: subtask indent */}},
       h('div',{style:{fontSize:'13px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
@@ -7880,42 +8078,15 @@ class Component extends DCLogic {
         ...depChips)
     );
 
-    /* PP-EXT Track B: include/exclude/snooze — click opens a popover (renderInclPick), replacing the
-       old binary click-to-toggle now that snooze/off/pressed are independently meaningful
-       states a single click can't safely flip between. */
-    const inclCell = this.isMilestone(t)
-      ? h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—')
-      : (()=>{ const st=this.inclState(t);
-          const glyph = st==='off' ? '⊘' : st==='snoozed' ? '💤' : st==='active' ? '▶' : st==='pressed' ? '☑' : '☐';
-          const color = st==='off' ? 'var(--text-mut2)' : st==='snoozed' ? 'var(--warn)'
-            : st==='active' ? this._accent : st==='pressed' ? 'var(--success)' : 'var(--text-faint2)';
-          const title = st==='off' ? 'Off · click to change'
-            : st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString()+' · click to change')
-            : st==='active' ? 'Active now · stronger pressed state'
-            : st==='pressed' ? 'Pressed into today · click to change'
-            : 'Not pressed today · click to include';
-          return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
-            title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph); })();
-
+    /* PP-EXT V2.11: inclusion / planned→allotted / timer / add-time all come from the shared builders,
+       so the sheet row and the Selection + Matrix cards offer exactly the same actions. */
+    const inclCell=this.taskInclControl(t);
     const running=this.isRunning(t.id);
-    const al=this.allotOf(t.id);
     const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
-      style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
-    const flowCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'6px',width:'100%',fontVariantNumeric:'tabular-nums'}},
-      h('input',{className:'pp-num',type:'text',key:'flow-planned-'+t.planned,defaultValue:this.fmtDur(t.planned),title:'Planned time',
-        onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),onBlur:e=>this.setDur(t.id,'planned',e.target.value),
-        onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},style:{width:'42px',flex:'none',textAlign:'right'}}),
-      h('span',{style:{color:'var(--text-faint2)',fontSize:'11px'}},'→'),
-      h('span',{title:al.active?'Allotted today':'Not included today',style:{minWidth:'38px',textAlign:'right',fontSize:'11.5px',fontWeight:650,
-        color:al.active?'var(--text-num)':'var(--text-faint2)'}},al.active?this.fmtDur(al.allotted):'—'));
-    const timerBtn=h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},
-      title:running?'Stop timer':'Start timer',style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',
-        alignItems:'center',justifyContent:'center',borderRadius:'50%',cursor:'pointer',fontSize:'9px',fontWeight:800,
-        background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,border:'1px solid var(--divider)'}},running?'■':'▶');
-    const addTimeBtn=h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.addSpentTime(t.id,this.FOCUS_ADD_MINUTES);},
-      title:'Add '+this.FOCUS_ADD_MINUTES+' minutes worked',style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',padding:'0 5px',display:'inline-flex',
-        alignItems:'center',justifyContent:'center',borderRadius:'var(--r-1)',cursor:'pointer',fontSize:'9.5px',fontWeight:700,
-        color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)'}},'+'+this.FOCUS_ADD_MINUTES);
+      style:{cursor:'grab',color:'var(--text-faint)',fontSize:'12px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'⠿');
+    const flowCell=this.taskFlowCell(t);
+    const timerBtn=this.taskTimerBtn(t);
+    const addTimeBtn=this.taskAddTimeBtn(t);
     const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,timerBtn,addTimeBtn);
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
@@ -8154,7 +8325,8 @@ class Component extends DCLogic {
        existing overdue-red check), not baked into the cached _occById structural block, so it reacts
        instantly to a popover action without a full structural recompute. */
     const optedOut = !this.isMilestone(t) && this.isOptedOut(t);
-    const optedOutGlyph = optedOut ? (this.inclState(t)==='snoozed' ? '💤' : '⊘') : null;
+    /* PP-EXT V2.11: was ⊘ ("off"). Opted-out-but-not-snoozed is now simply unpressed, and ⊘ overstated it. */
+    const optedOutGlyph = optedOut ? (this.inclState(t)==='snoozed' ? '💤' : '☐') : null;
     const optedOutHatch = 'repeating-linear-gradient(45deg, rgba(184,134,11,0.35) 0 3px, transparent 3px 9px)';
     const key='bk'+t.id+'_'+o.idx;
     const recurring=!!t.recur;
@@ -8217,7 +8389,7 @@ class Component extends DCLogic {
        date via the existing bar-drag machinery (de-ghosts that edge). */
     const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
-    const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'off')) : '';
+    const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'not in today')) : '';
     return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
         opacity:optedOut?0.55:1}}),
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,
@@ -8632,8 +8804,7 @@ class Component extends DCLogic {
     const inclCtl = this.isMilestone(t)
       ? h('span',{style:{fontSize:'13px',color:'var(--text-faint2)'}},'— (milestone)')
       : (()=>{ const st=this.inclState(t);
-          const statusTxt = st==='off' ? 'Off'
-            : st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))
+          const statusTxt = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))
             : st==='active' ? 'Active now · stronger pressed'
             : st==='pressed' ? 'Pressed into today'
             : 'Not pressed today';

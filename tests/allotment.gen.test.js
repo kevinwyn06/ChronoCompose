@@ -57,10 +57,13 @@ test("today: two proportional split, then manual override redistributes", () => 
   assert.strictEqual(m[p1.id].computed, 200);
 });
 
-// ---- 3. Inactive tasks: excluded (included:false) / Milestone / future / past ----
+// ---- 3. Inactive tasks: excluded / Milestone / future / past ----
+// V2.11: `included:false` ("Off") is retired, so "the user took this out of today" is now a snooze.
+// Unpressed alone would NOT do here: activeTask's window straddles yesterday, so V2.2 inheritance
+// would carry it straight back in -- which is exactly why setIncludedOff snoozes inherited work.
 test("inactive tasks are active:false with allotted 0", () => {
   const c = fresh('10:00');
-  const excluded = activeTask(c, { included:false, planned:120 });
+  const excluded = activeTask(c, { included:null, snoozeUntil: c.startOfToday()+DAY, planned:120 });
   const milestone = activeTask(c, { type:'Milestone', planned:0 });
   const now = Date.now();
   const future = activeTask(c, { included:null, planned:120, start: now+2*DAY, end: now+3*DAY });

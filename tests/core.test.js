@@ -64,13 +64,13 @@ test('isActiveToday: explicit pressed state plus V2.2 inheritance replace today-
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:null })), true, 'unfinished work scheduled yesterday inherits');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:today, end:today+DAY, included:null })), false, 'today window alone does not include');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), true, 'pressed future task is user discretion');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { included:false })), false, 'excluded');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { included:null, snoozeUntil: today+DAY })), false, 'excluded (V2.11: a snooze, not Off)');
   assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
   // included:true forces active even outside the [start,end] window
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
-test('dateless task: pressed joins today; unpressed/off/snoozed do not', () => {
+test('dateless task: pressed joins today; unpressed/snoozed do not', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -80,7 +80,9 @@ test('dateless task: pressed joins today; unpressed/off/snoozed do not', () => {
   assert.strictEqual(c.isScheduled(dateless()), false, 'no dates => unscheduled');
   assert.strictEqual(c.isActiveToday(dateless({ included:null })), false, 'unpressed stays out despite ghost window');
   assert.strictEqual(c.isActiveToday(dateless({ included:true })), true, 'pressed is active');
-  assert.strictEqual(c.isActiveToday(dateless({ included:false })), false, 'Off still excludes');
+  // V2.11: `included:false` is retired. A dateless task has no window to inherit from, so unpressed
+  // (asserted above) is the whole of "not in today" here; snooze covers the deliberate opt-out.
+  assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today + DAY })), false, 'snoozed excludes');
   assert.strictEqual(c.isActiveToday(dateless({ snoozeUntil: today + 2*DAY })), false, 'active snooze still excludes');
   assert.strictEqual(c.isActiveToday(dateless({ included:true, snoozeUntil: today })), true, 'expired snooze falls back to pressed');
   // never surfaces on another day — now for a structural reason (ghostSpan anchored at real-today), not a manual gate
@@ -101,7 +103,7 @@ test('dateless task: pressed joins today; unpressed/off/snoozed do not', () => {
   assert.strictEqual(map2[zeroPlanned.id].allotted, c.DEFAULT_TASK_MINUTES);
 });
 
-test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-expired} x {today,other day}', () => {
+test('isActiveOn: {dated,dateless} x {auto,forced-in,snoozed-active,snoozed-expired} x {today,other day}', () => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -114,7 +116,6 @@ test('isActiveOn: {dated,dateless} x {auto,forced-in,off,snoozed-active,snoozed-
   const cases = [
     { label:'unpressed',       over:{ included:null },                    today:false, other:false },
     { label:'pressed',         over:{ included:true },                    today:true,  other:false },
-    { label:'off',             over:{ included:false },                   today:false, other:false },
     { label:'snoozed-active',  over:{ included:true, snoozeUntil: today + 2*DAY }, today:false, other:false },
     { label:'snoozed-expired', over:{ included:true, snoozeUntil: today }, today:true, other:false },
   ];
@@ -134,7 +135,7 @@ test('isOptedOut: unpressed/snoozed work is out unless V2.2 inherited it', () =>
   c.state.nowTick = B;
   const today = c.startOfToday();
   const t = () => activeTask(c, {start:today,end:today+DAY});
-  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:false, snoozeUntil:null })), true, 'included:false alone');
+  // V2.11: the `included:false` case is gone with Off; unpressed (below) is what it collapsed into.
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today + DAY })), true, 'active snooze alone');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), true, 'null is unpressed');
   assert.strictEqual(c.isOptedOut(activeTask(c,{included:null})), false, 'yesterday-scheduled null state is inherited');
@@ -147,13 +148,14 @@ test('inclState: active is stronger than pressed; inherited work receives presse
   const today = c.startOfToday();
   const inWin = () => activeTask(c); // straddles today
   const outWin = () => activeTask(c, { start: today+2*DAY, end: today+4*DAY });
-  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false })), 'off');
-  assert.strictEqual(c.inclState(Object.assign(inWin(), { included:false, snoozeUntil: today+DAY })), 'off', 'off beats snoozed');
+  // V2.11: 'off' no longer exists. There are four states, and nothing outranks snooze except active.
   assert.strictEqual(c.inclState(Object.assign(inWin(), { snoozeUntil: today+DAY })), 'snoozed');
+  assert.strictEqual(c.inclState(Object.assign(outWin(), { included:true, snoozeUntil: today+DAY })), 'snoozed',
+    'a snooze covering today beats an explicit press');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:true })), 'pressed');
   assert.strictEqual(c.inclState(Object.assign(inWin(), { included:null })), 'pressed', 'inherited task is auto-included');
   assert.strictEqual(c.inclState(Object.assign(outWin(), { included:null })), 'unpressed');
-  const active=Object.assign(outWin(), { included:false });
+  const active=Object.assign(outWin(), { included:null });
   c.state.running={ [active.id]:{startedAt:Date.now(),beat:Date.now()} };
   assert.strictEqual(c.inclState(active), 'active');
 });
@@ -193,7 +195,7 @@ test('computeAllotted: manual-override fixed, excluded/milestone inactive, Propo
   const ex = activeTask(c, { predictManual:true, predicted:120, planned:120 });
   const p1 = activeTask(c, { planned:120 });
   const p2 = activeTask(c, { planned:240 });
-  const excl = activeTask(c, { included:false, planned:999 });
+  const excl = activeTask(c, { included:null, snoozeUntil: c.startOfToday()+DAY, planned:999 });
   c.state.tasks = [ex, p1, p2, excl];
   const a = c.computeAllotted(c.state.tasks);
   assert.strictEqual(a[ex.id].allotted, 120, 'override = predicted');
