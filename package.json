@@ -5,10 +5,14 @@
   "description": "Gantt + daily-timeline planner (replaces the old GAS/Sheets time tracker).",
   "scripts": {
     "test": "node --test \"tests/*.test.js\"",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:all": "npm test && npm run test:e2e",
     "build-design": "node tools/build-design-file.js",
     "build-chrono": "node tools/build-chrono.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "chrono-node": "2.10.0",
     "esbuild": "^0.28.1"
   }

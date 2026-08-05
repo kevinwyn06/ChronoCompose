@@ -2943,7 +2943,13 @@ class Component extends DCLogic {
     if(el&&el.classList) el.classList.remove('pp-dragging');
   }
   headPointerDown(e,k){ if(e.button!==0) return; this.headPending={k,x:e.clientX,y:e.clientY,shiftKey:e.shiftKey,ctrlKey:e.ctrlKey,metaKey:e.metaKey}; }
-  rowPointerDown(e,id,index){ if(e.button!==0) return; this.rowPending={id,index,x:e.clientX,y:e.clientY}; }
+  /* PP-EXT: `_suppressRowClick` is a one-shot flag consumed by the click that follows a drag's mouseup.
+     But a cross-row drag ends over a DIFFERENT element, so the browser fires `click` on the common
+     ancestor, not on the origin row — the flag was never consumed and swallowed the user's next genuine
+     row click instead. Clearing it on the next press makes "one-shot" true regardless of where the drag
+     landed: a same-element drag still consumes it via the immediate click, before any new mousedown.
+     Found by `tests/e2e/gestures.spec.js`; unreachable from the mock DOM, which has no real hit-testing. */
+  rowPointerDown(e,id,index){ if(e.button!==0) return; this._suppressRowClick=false; this.rowPending={id,index,x:e.clientX,y:e.clientY}; }
   beginRowDrag(){
     const p=this.rowPending; if(!p) return;
     this.dragSelectSuppress(); /* PP-EXT V2.9 §1 */
@@ -6887,6 +6893,8 @@ class Component extends DCLogic {
 
   /* --- card drag: shared by both views, vertical-only by construction (see resolveCardZone) --- */
   cardPointerDown(e,id,zone){ if(e.button!==0) return; e.stopPropagation();
+    this._suppressCardClick=false; /* PP-EXT: same one-shot leak as rowPointerDown — a card dropped in a
+       different zone never fires click on the origin card, so the flag would eat the next real click. */
     this.cardPending={id,zone,x:e.clientX,y:e.clientY}; }
   beginCardDrag(){
     const p=this.cardPending; if(!p) return;

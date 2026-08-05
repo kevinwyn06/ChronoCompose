@@ -18,6 +18,12 @@ build/
 tmp/
 *.tmp
 
+# Playwright e2e output (browsers live in the shared ms-playwright cache, not here)
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+
 # Local env overrides (config.js IS committed on purpose — the OAuth Client ID is public;
 # put anything genuinely secret in a git-ignored file instead)
 .env
