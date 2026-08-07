@@ -16,7 +16,8 @@ ctrl/cmd-click toggles selection; shift-click selects a range; **double-click ma
 right-click opens the row context menu. **Gantt bar, milestone, and collapsed recurrence strip:** a click
 without a drag opens details; dragging the body moves it, dragging an edge sets a date, a no-drag click on
 an edge opens the date picker; right-click opens the bar menu. **Scheduled block (Today timeline and
-Schedule chips):** a click without a drag opens details; dragging pins it to a time. **Double-click never
+Schedule chips):** a click without a drag opens details; dragging pins THAT block — only the dragged chunk
+follows the cursor, only its own minutes are pinned, and its ✕ unpins just that block. **Double-click never
 opens details anywhere** — bars and blocks route their no-drag click through the existing mouseup branch, so
 one gesture cannot both drag and open. The inclusion popover on the row status glyph is strictly
 inclusion/exclusion and carries no time-tracking action.
@@ -118,6 +119,87 @@ Every Gantt element layered above a row stripe owns its own `state.hoverId` ente
 wrapper contains the right-side dependency handle, so moving onto the handle cannot clear hover. Collapsed
 recurrence strips follow the same rule. Milestones own hover only for row/day glow and deliberately expose
 no dependency handle. Bar handles use separate glyph and hit-box sizes: `HIT_MIN_PX` is 24; the %-done
-control is an upward caret below the bar, not a circle inside it.
+control is an upward caret below the bar, not a circle inside it. The timeline block's unpin ✕ and regroup ⧉
+follow the same rule: the glyph stays 16px inside a transparent `HIT_MIN_PX`-wide, full-height hit column at
+the block's left edge, and the block's left padding clears that column so the title never shares its pixels.
+
+A block drag in flight outranks every overlay in `onKey`'s Escape chain: Escape drops `_blockDrag` (or
+`_edgeDrag`), the block repaints at its real start and size, and the release that follows falls through
+`onMouseUp` without writing — so a cancelled drag commits nothing and leaves nothing to undo. Both drags'
+px→minutes conversion runs through `uiPt`, because `e.clientY` is viewport px while `_curColPx` is
+px-per-minute in the zoomed subtree's local space; without it the block travelled `uiScale`× the pointer's
+distance. Both use the same 4px raw promotion threshold.
+
+A block's **body** and its bottom **edge** are two gestures (V4.2): the body repositions (drag-pin), the edge
+resizes the task's allotted minutes. They must be distinguishable *before* the press, so the edge handle
+carries `cursor:ns-resize` against the body's `grab`, a visible 26×3 grip, and its own tooltip. Per the
+hit-target tenet the grip is not the target: the target is a full-width `HIT_MIN_PX`-tall strip
+(`data-tl-edge`, `data-tl-edge-task`) at the block's bottom, inset past the ✕/⧉ column when one is present so
+it can never steal that control's bottom corner. The handle is rendered only on blocks at least
+`EDGE_MIN_BLOCK_PX` (3×`HIT_MIN_PX`) tall, which leaves the body a target twice the handle's size and makes a
+press in a block's upper half unambiguously a body-drag; shorter blocks are body-drag only and are resized
+from the sheet's Predict column instead. The handle stops propagation, so `_blockDrag` and `_edgeDrag` are
+mutually exclusive by construction rather than by precedence.
+
+V4.3 adds a **Reset ↺** control and a snap-back cue. The left edge of a block is now a *column* of
+`HIT_MIN_PX` slots rather than one fixed position: ✕ (unpin), ⧉ (regroup) and ↺ (reset) each take a slot,
+and both the block's left padding and the edge handle's inset follow the slot **count**. ↺
+(`data-tl-reset`, `data-tl-reset-task`) is offered only on a block whose task carries a manual allotment —
+a pin-only override already has the ✕, and two adjacent controls doing the same thing is worse than one.
+While a drag sits on the priority snap-to-original the block is **ringed** instead of shadowed, because
+"let go here and this goes back to being the app's decision" is otherwise invisible before the release.
+
+Every child of a block now carries a **stable key**. The left controls are a spread array whose length
+changes as ↺ appears, and React reconciles keyless siblings by *position*: without keys the ▶ timer's
+handler ended up on a DOM node that had shifted under the pointer, so the click after a resize started a
+timer on the task just resized — which, being the active task, was then pulled to `now` and fell out of
+the day. Any future block child must be keyed for the same reason.
+
+The multi-day grid (V4.1) is `renderMultiDayView` over N `renderDayColumn`s that share one hour gutter and
+one vertical scroll. Each column carries `data-tl-col` (its day, epoch-ms midnight) and `data-tl-today`;
+weekend columns are tinted and today's is accent-washed, and the day header shows the month on the first
+column and wherever a month turns over, so a straddling week still says which month each half is in. Inside
+a column the hours are readable without labels: an alternating band per hour plus a stronger line every
+sixth hour, both `pointerEvents:none` so neither can intercept a block drag, with each band painted before
+its own hour line.
+
+Blocks distinguish **locked** from **auto-scheduled** by surface, not only by hue: a clock-fixed or
+hand-pinned block is flat-filled and carries a solid inset left rail, while an auto-scheduled one carries a
+diagonal hatch that reads as provisional. The 📌/📍 glyphs remain the non-colour channel, so the
+distinction survives greyscale and colour-blind reading. Every block carries `data-tl-block`,
+`data-tl-day` (the column's day), `data-tl-kind` (`auto` · `pinned` · `fixed` · `meal`) and `data-tl-task`.
+Those hooks are the supported way for tests to address a block — the e2e layer previously matched three
+tooltip **strings**, so a copy change read as a gesture regression.
+
+**Overlapping blocks** are laid out by `overlapLayout(list, px)` — pure, `tests/overlap.test.js`. The owner
+spec (2026-08-06, Google Calendar as the reference) is *"side by side if the titles will overlap (50/50),
+offset otherwise (~90/10), recursively defined for >2 tasks"*, and the rule is: group blocks into clusters
+(connected components under time intersection — abutting is **not** intersection, so an ordinary packed day
+is untouched), sort each cluster by start, and run every block from its own left edge to the cluster's
+**right** edge with the later block on top. Only the left edge moves; each step is a fraction of the
+**remaining** width — `OVERLAP_STEP_TITLE` (0.5) when the next block's top falls inside the current one's
+top `TITLE_BAND_PX`, `OVERLAP_STEP_OFFSET` (0.1) when it does not. Three or more blocks fall out of the same
+recursion with no special case. The title-band test is a **pixel** test, so the same pair can legitimately
+read 50/50 zoomed out and 90/10 fitted. The renderer takes the returned fraction as a `calc()` left edge
+(the band's px insets stay exact at any column width, which is what makes it hold in the narrow 4-Day/Week
+columns), publishes it as `data-tl-ov`, and stacks by `z` clamped to `OVERLAP_MAX_Z` so a cluster can never
+paint over the Points (4) or now-line (5) layers. Overlap only exists between things the **user** placed —
+clock-fixed events, hand pins, meals — because the packer never lays two flexible chunks over each other.
+
+The Today drawer's vertical **zoom is a two-level toggle** (V4.4): `DRAWER_ZOOM_FIT` (1 — the whole day
+fitted to the pane) ⇄ `DRAWER_ZOOM_EXPANDED` (3 — the body outgrows the pane and the drawer's
+`overflow:auto` wrapper scrolls). It replaces Track B Group 2's ＋/－ incremental stepping, whose
+`DRAWER_ZOOM_MIN`/`MAX`/`STEP` are retired. Two pure helpers own the mapping —
+`drawerZoomFactor(expanded)` and `drawerZoomIsExpanded(zoom)` — and `renderDayColumn` **snaps**
+`opts.zoom` through them rather than clamping it into a range, so any value that is not exactly the
+expanded level renders as fit and no third scale can exist. `toggleDrawerZoom` is the whole state
+transition. The level stays **session-only** in the instance field `_drawerZoom` (owner, 2026-07-22): it
+is never React state and never a `pp-*` key, so a reload is fitted again. The control is one
+`HIT_MIN_PX`-square target carrying `data-tl-zoom` (`fit` | `expanded`). It belongs to the **day drawer
+only** — the 4-Day/Week columns pass no `zoom` and therefore always render fitted.
+
+Because the drag's px→minute conversion reads the scale the column rendered at (`_curColPx` → `bd.px`,
+after `uiPt`), changing the level changes that conversion; a body-drag lands on the same minute at both
+levels, and `tests/e2e/drawer-zoom.spec.js` holds that at the non-default level specifically.
 
 Tests mount the component in a Node VM with mocked runtime/storage. Browser QA uses localhost.

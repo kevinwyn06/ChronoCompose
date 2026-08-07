@@ -7,7 +7,8 @@
    the stale-server failure this layer exists to remove. */
 const { defineConfig, devices } = require('@playwright/test');
 
-const PORT = 8901;
+/* Port is overridable so two runs can coexist later; unset PP_E2E_PORT keeps the historic 8901. */
+const PORT = Number(process.env.PP_E2E_PORT) || 8901;
 
 module.exports = defineConfig({
   testDir: './tests/e2e',

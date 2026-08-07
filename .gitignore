@@ -38,3 +38,6 @@ supabase/config.toml
 supabase/.branches/
 supabase/.temp/
 .supabase/
+
+# Orchestration process artifacts (block handoffs, queue state)
+.orchestration/

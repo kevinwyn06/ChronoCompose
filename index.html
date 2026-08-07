@@ -306,10 +306,13 @@ class Component extends DCLogic {
     this.GANTT_ZOOM_SENS = 0.004;    // exp zoom factor per unit (pixel-normalized) wheel deltaY
     this.GANTT_ZOOM_STEP_CAP = 0.182;// max |ln(newW/oldW)| a single wheel event/notch may apply (~20%)
     this.ZOOM_BURST_MS = 200;        // wheel events within this gap share one cursor-anchor (stops drift on trackpad bursts)
-    /* PP-EXT (Group 2): day-drawer vertical zoom — session-only (not persisted; owner 2026-07-22). */
-    this.DRAWER_ZOOM_MIN = 1;        // 1 = fit-to-height (no zoom)
-    this.DRAWER_ZOOM_MAX = 8;        // up to 8× taller for dense afternoons
-    this.DRAWER_ZOOM_STEP = 1.5;     // ×/÷ per ＋/－ click
+    /* PP-EXT (V4.4): day-drawer vertical zoom is a TWO-LEVEL TOGGLE (fit ⇄ expanded), replacing the
+       Track B Group 2 ＋/－ incremental stepping and its DRAWER_ZOOM_MIN/MAX/STEP (owner request
+       2026-07-22). Still session-only — `_drawerZoom` is an instance field, so a reload is fit again.
+       Two states, not a range: there is nothing to "tune to", so the control has no bounds, no disabled
+       edge case, and no intermediate level the user has to step through to read a dense afternoon. */
+    this.DRAWER_ZOOM_FIT = 1;        // the whole day fitted to the pane — the default, no scroll
+    this.DRAWER_ZOOM_EXPANDED = 3;   // the one expanded level: 3× taller, the drawer wrapper scrolls
     this.GANTT_HOUR_GRID_DAYW = 240; // at/above this px-per-day, draw hour gridlines + ticks (240 ⇒ 10px/hr)
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     /* PP-EXT (V1.4): the repeat presets the bar's right-click menu offers. `recur` shapes are IDENTICAL to
@@ -331,6 +334,44 @@ class Component extends DCLogic {
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
+    /* PP-EXT (V4.2): edge-drag = a sticky manual ALLOTTED override (predicted/predictManual). */
+    this.EDGE_MIN_ALLOT = 5;     // PP-EXT V4.2: minutes floor for an edge-dragged allotment (a 0-minute task would vanish mid-gesture)
+    this.EDGE_MIN_BLOCK_PX = 72; // PP-EXT V4.2: no edge handle below this block height (local px) — 3×HIT_MIN_PX, so the body keeps a target twice the handle's size and a press anywhere in a block's upper half is ALWAYS a body-drag
+    /* PP-EXT (V4.3): SNAPPING. A drag back to the block's ORIGINAL — the value the app computed before
+       any hand override — is a PRIORITY snap: it is tested BEFORE the neighbour magnet and before the
+       grid, and its window is wider than either, so nothing else can win near the original. Landing on
+       it does not merely restore the number, it restores AUTO formatting (drops the day's pin / clears
+       the manual allotment), which is what makes a mis-drag undoable by simply dragging back. Hold Alt
+       to disable every snap and place freely. */
+    this.PIN_ORIG_MAGNET = 18;   // PP-EXT V4.3: minutes — priority snap-back window for a body-dragged block (> PIN_MAGNET 10 and > PIN_SNAP/2, so it beats both)
+    this.ALLOT_SNAP = 5;         // PP-EXT V4.3: minutes — grid an edge-dragged allotment steps in
+    this.ALLOT_ORIG_MAGNET = 12; // PP-EXT V4.3: minutes — priority snap-back window for an edge-dragged allotment (> ALLOT_SNAP, so it beats the grid)
+    /* PP-EXT (10): BLOCKING vs BACKGROUND busy. A busy interval is *blocking* when nothing may be
+       scheduled through it, *background* when it is a container the user deliberately works inside
+       (owner 2026-08-06: a real "Work 08:00–18:30" calendar event). The distinction is a property of
+       the BUSY INTERVAL, not only of a task: lunch, dinner and the free-time reserve carry no task and
+       still need an answer. BLOCKING_DEFAULT is that answer, and it is also what a task's tri-state
+       `blocking:null` inherits. Block 10 only ANNOTATES intervals with this flag — nothing reads it to
+       schedule differently yet; block 11 is what consumes it. */
+    this.BLOCKING_DEFAULT = true;
+    /* PP-EXT (12): OVERLAP LAYOUT. Owner spec, 2026-08-06, given against Google Calendar's own overlap
+       rendering: "Side by side if the titles will overlap (50/50), offset otherwise (~90/10).
+       Recursively defined for >2 tasks." TITLE_BAND_PX is the top strip of a block its TITLE occupies
+       (3px padding + one 11px/600 line ≈ 17px, rounded up) — when the NEXT block's top edge falls inside
+       it, the two titles would be drawn on the same pixels and the pair has to go side by side; when it
+       does not, the later block only has to be seen, so it is merely offset. Both steps are fractions of
+       the REMAINING width, which is what makes the rule recursive rather than a two-block special case. */
+    this.TITLE_BAND_PX = 18;        // PP-EXT 12: local px at the top of a block that its title occupies
+    this.OVERLAP_STEP_TITLE = 0.5;  // PP-EXT 12: left-edge step (fraction of the remaining width) when the titles collide → 50/50
+    this.OVERLAP_STEP_OFFSET = 0.1; // PP-EXT 12: left-edge step when they do not → the ~90/10 inset
+    this.OVERLAP_MAX_Z = 3;         // PP-EXT 12: stacking depth is clamped below the Points (4) and now-line (5) layers
+    /* PP-EXT V3.2: guided-journal tuning. AGING_DAYS is the "surface aging" threshold — a task whose window
+       opened this many days ago with zero recorded time feeds the "still relevant?" prompt (vision §11:
+       surfaced in the guided journal, NEVER as inline nagging). JOURNAL_EVENING_HOUR is when the prompt
+       panel counts as "evening" and auto-opens once per session. */
+    this.AGING_DAYS = 14;
+    this.JOURNAL_EVENING_HOUR = 18;
+    this.JOURNAL_AGING_MAX = 8;  // most aging tasks listed in the prompt — a review cue, not a backlog dump
     /* PP-EXT Phase 9 (PR5): journal mood scale + keyless auto-weather (Open-Meteo — no API key / no secret to commit). */
     this.MOODS = [{k:'great',e:'😄',l:'Great'},{k:'good',e:'🙂',l:'Good'},{k:'ok',e:'😐',l:'Okay'},{k:'low',e:'😕',l:'Low'},{k:'rough',e:'😣',l:'Rough'}];
     /* PP-EXT: tiered emotion wheel (post-Phase-10 UI ask) — Geoffrey Roberts' Feelings Wheel, an adaptation of
@@ -442,6 +483,15 @@ class Component extends DCLogic {
       collapsedSections: pf.collapsedSections||{}, /* PP-EXT V2.6: section id → 1 when collapsed (view pref, persisted) */
       secEdit:null, /* PP-EXT V2.6: id of the section header being renamed inline — UI-only, not persisted */
       journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
+      scratch:this.loadScratch(), /* PP-EXT V3.1: pp-scratch {html,updatedAt} — ONE continuous doc, not per-day (see loadScratch) */
+      /* PP-EXT V3.2: guided journal. `journalPrompts` is the persisted, user-reshapeable prompt SET
+         (pp-journal-prompts) — guidance only, never persisted Q&A: nothing the prompts ask is stored
+         anywhere but the day's own free-text entry. `journalPromptsOpen` is a view pref (pp-prefs, default
+         open); `journalPromptsEdit` is the transient reorder/delete mode and is deliberately not persisted
+         — nobody should reopen the app in edit mode. */
+      journalPrompts:this.loadJournalPrompts(),
+      journalPromptsOpen: pf.journalPromptsOpen!==false,
+      journalPromptsEdit:false,
       journalCollapse:{done:true,actuals:true,planning:false}, /* PP-EXT C2/Phase D: right-rail collapse state for Done Today/Actuals/Needs Planning — UI-only, not persisted. Needs Planning starts expanded per Phase D brief. */
       zoomMoreOpen:false, /* PP-EXT C3: toolbar zoom-presets overflow ("More ▾") open/closed — UI-only, not persisted */
       filterMoreOpen:false, /* PP-EXT C3: filter-bar "Filters ▾" popover (priority + tag/calendar search) open/closed — UI-only, not persisted */
@@ -528,13 +578,23 @@ class Component extends DCLogic {
       startClock:null, endClock:null,
       included:true, /* PP-EXT V2.1: pressed = in today. New tasks start pressed; false/null are unpressed legacy/off states. */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
+      blocking:null, /* PP-EXT (10): busy-interval semantics for this task's fixed span. TRI-STATE —
+         true = blocking (nothing schedules through it), false = background (a Work-shaped container the
+         user deliberately places tasks inside), null = inherit BLOCKING_DEFAULT. Owner decision
+         2026-08-06: a per-event flag, defaulted from the calendar's busy/free transparency. NOT a
+         category and NOT overloaded onto `type`. Mirrored (SYNC_FIELDS + supabase migration 0008) —
+         `null` mirrors as null, so no existing row needs a data migration and an untouched task keeps
+         today's behaviour exactly. Read via isBlockingTask, never directly. */
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       sectionId:null, /* PP-EXT V2.6: id into the pp-sections entity; null = the explicit "No section" bucket.
          A section is a one-per-task, exclusive, ordered CONTAINER — deliberately NOT a @tag, which is a
          many-per-task, non-exclusive attribute (V2.3 derived sections from tags and produced a singleton
          explosion). Not in SYNC_FIELDS: it joins the deferred batch with snoozeUntil (spec §2.6). */
-      pin:null, /* PP-EXT: drag-pin {day, start, dur} — a block dragged in the drawer, fixed for that day only (Phase 5; see dragBlock) */
+      pin:null, /* PP-EXT: drag-pins — null or a LIST [{day, start, dur, partial?}] of blocks dragged in the drawer,
+         each fixed for its day only (Phase 5; 04 made it a list so one chunk of a split task can be pinned while the
+         rest repacks). Legacy single-object rows are read transparently by pinsOf and converted by migrateDragPinList.
+         Stays the same jsonb column / SYNC_FIELDS entry — an array is valid jsonb. */
       demo:false, /* PP-EXT V0.2: marks a task from the opt-in demo seed (loadDemo) — drives the dismissible "demo tasks" banner + Clear demo. Not in SYNC_FIELDS, so it never mirrors to the backend (signed-in demo becomes real data after a sync round-trip; the banner is a local convenience, chiefly for anon). */
       updatedAt:null, /* PP-EXT B1: row-level last-write-wins clock (epoch ms). Stamped by commit() when sync is on; null until then (see stampUpdated / applyRemoteSnapshot). */
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
@@ -553,6 +613,11 @@ class Component extends DCLogic {
     if('pinStart' in t){ delete t.pinStart; hit=true; }
     if('pinEnd' in t){ delete t.pinEnd; hit=true; }
     if(hit) n++; }); return n; }
+  /* PP-EXT (04): drag-pin becomes a LIST. Converts a legacy single `{day,start,dur}` object into a
+     one-element list (a whole-task pin — no `partial` flag, the pre-04 meaning). PURE, idempotent;
+     returns the number of rows changed. Readers tolerate both shapes, so this is normalization only. */
+  migrateDragPinList(tasks){ let n=0; (tasks||[]).forEach(t=>{
+    if(t && t.pin && !Array.isArray(t.pin) && t.pin.day!=null){ t.pin=[t.pin]; n++; } }); return n; }
   runOnceMigrations(tasks){
     try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
       if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
@@ -569,6 +634,9 @@ class Component extends DCLogic {
          holding it is folded into unpressed. Left in place it would be a value no predicate reads and no
          UI can clear — a task stuck out of today with no control that returns it. */
       if(!done['retire-off']){ const n=this.migrateRetireOff(tasks); done['retire-off']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (04): normalize the drag-pin object into the list shape. */
+      if(!done['drag-pin-list']){ const n=this.migrateDragPinList(tasks); done['drag-pin-list']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
@@ -584,7 +652,7 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6 (local-only until the deferred sync batch, so backup is its ONLY portability) */ }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections','pp-scratch','pp-journal-prompts']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6, pp-scratch: V3.1, pp-journal-prompts: V3.2 (all local-only until the deferred sync batch, so backup is their ONLY portability) */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=this.lsGet(k); if(v==null) return; /* PP-EXT: active-workspace scoped (pp-theme stays global) */
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
@@ -873,7 +941,16 @@ class Component extends DCLogic {
   }
   onKey(e){
     const k=e.key.toLowerCase();
-    if(e.key==='Escape'){ if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
+    if(e.key==='Escape'){
+      /* PP-EXT (04b): a drag in flight outranks every overlay — it is the most transient thing on
+         screen and the only one the pointer is still holding. Dropping `_blockDrag` makes the block
+         repaint at its real start and makes onMouseUp fall through without pinning, so the release
+         that follows is a no-op: nothing is committed, so there is nothing to undo. */
+      /* PP-EXT (V4.2): an edge-drag is the same kind of in-flight gesture and cancels the same way —
+         nothing is written until the release, so dropping the record IS the cancel. */
+      if(this._edgeDrag){ this._edgeDrag=null; this.forceUpdate(); return; }
+      if(this._blockDrag){ this._blockDrag=null; this.forceUpdate(); return; }
+      if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
       else if(this.state.pctPop) this.closePctPop(); else if(this.state.inclPick) this.closeInclPick();
       else if(this.state.barMenu) this.closeBarMenu(); /* PP-EXT V1.4: bar menu sits under the popups it opens */
       else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail(); return; }
@@ -889,6 +966,10 @@ class Component extends DCLogic {
       if(e.key==='a'){ e.preventDefault(); this.addTask('bottom'); return; }
       if(e.key==='A'){ e.preventDefault(); this.addTask('top'); return; }
       if(k==='u'){ e.preventDefault(); this.undo(); return; }
+      /* PP-EXT V3.1: "n" jumps to the running scratchpad (Focus) with the caret in it. Safe as a bare
+         letter for the same reason q/a/u are: the guard above already excludes any editing target,
+         contentEditable included, so this cannot fire while the user is typing into the pad itself. */
+      if(k==='n'){ e.preventDefault(); this.gotoScratchpad(); return; }
       /* PP-EXT V2.9 §5: j/k/space only while the Selection view is the active Plan sub-view. Fast passes
          matter more here than anywhere else — this is the surface you sweep once a morning. Scoped to the
          view so these letters stay free everywhere else. */
@@ -1039,6 +1120,7 @@ class Component extends DCLogic {
       tbBtn('B','bold','Bold'), tbBtn('I','italic','Italic'), tbBtn('U','underline','Underline'),
       tbBtn('• List','insertUnorderedList','Bullet list'), tbBtn('1. List','insertOrderedList','Numbered list'));
     const editor=h('div',{key:'rf'+fieldKey, className:'pp-rich', contentEditable:true, suppressContentEditableWarning:true,
+      id:opts.id||undefined, /* PP-EXT V3.1: optional stable DOM id so a hotkey can focus() a named field */
       'data-ph':opts.placeholder||'Write…',
       ref:el=>{ if(el && el._fkey!==fieldKey){ el._fkey=fieldKey; el.innerHTML=this.sanitizeHtml(initialHtml); } },
       onFocus:e=>{ this._genEl=e.currentTarget; },
@@ -1113,7 +1195,7 @@ class Component extends DCLogic {
   isInheritedToday(t){
     if(!t || t.archivedAt || this.isMilestone(t)) return false;
     const yesterday=this.startOfToday()-this.DAY;
-    const manual=!!(t.pin && t.pin.day===yesterday);
+    const manual=this.pinsOf(t).some(p=>p.day===yesterday); /* PP-EXT (04): pin is a list */
     const win=this.isScheduled(t) ? this.occForDay(t, yesterday) : this.ghostSpan(t, this.startOfToday());
     const done=t.recur && win && win.idx!=null ? this.occPct(t,win.idx)>=100 : (+t.pct||0)>=100;
     if(done) return false;
@@ -1571,11 +1653,15 @@ class Component extends DCLogic {
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
     const lo=from!=null?Math.max(winStart,Math.min(from,winEnd)):winStart;
     const busy=[];
-    const addBusy=(a,b,note,taskId)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId}); }; /* PP-EXT: taskId marks pinned-task blocks */
-    addBusy(B+this.timeParts(s.lunchStart)*60000, B+this.timeParts(s.lunchEnd)*60000, 'Lunch');
-    addBusy(B+this.timeParts(s.dinnerStart)*60000, B+this.timeParts(s.dinnerEnd)*60000, 'Dinner');
-    const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time');
-    (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId)); /* PP-EXT */
+    /* PP-EXT (10): every busy interval carries `blocking`. Lunch, Dinner and the Free-time reserve are
+       BLOCKING (owner 2026-08-06) — they carry no task, so they can never hold a per-task field and need
+       this default stated here. extraBusy keeps whatever fixedBlocksToday stamped on it. Annotation only:
+       no consumer in this block branches on it (block 11 does). */
+    const addBusy=(a,b,note,taskId,blocking)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId,blocking:(blocking==null?this.BLOCKING_DEFAULT:!!blocking)}); }; /* PP-EXT: taskId marks pinned-task blocks */
+    addBusy(B+this.timeParts(s.lunchStart)*60000, B+this.timeParts(s.lunchEnd)*60000, 'Lunch', undefined, true);
+    addBusy(B+this.timeParts(s.dinnerStart)*60000, B+this.timeParts(s.dinnerEnd)*60000, 'Dinner', undefined, true);
+    const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time', undefined, true);
+    (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId, b.blocking)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
     let free=[]; let cur=lo;
     arr.forEach(b=>{ if(b.end<=lo) return; const bs=Math.max(b.start,lo); if(bs>cur) free.push({start:cur,end:bs}); cur=Math.max(cur,b.end); });
@@ -1682,6 +1768,19 @@ class Component extends DCLogic {
     return this.isActiveOn(t, B);
   }
   isFixedToday(t){ return this.isFixedOn(t, this.startOfToday()); }
+  /* PP-EXT (10): resolve a task's tri-state `blocking` against BLOCKING_DEFAULT. PURE. The ONLY reader of
+     the raw field — everything else asks this, so "null means inherit" can never drift between callers.
+     Nothing in block 10 changes its scheduling behaviour on the answer; fixedBlocksToday merely stamps it
+     onto the busy intervals it emits so block 11 has a single, already-tested place to read. */
+  isBlockingTask(t){ const v=t&&t.blocking; return v==null ? this.BLOCKING_DEFAULT : !!v; }
+  /* PP-EXT (10): a Google Calendar event's busy/free setting -> the tri-state field. Google sends
+     `transparency:'transparent'` for "Free" and OMITS the field for "Busy" (the default), so only the
+     explicitly-free case produces a value; everything else stays `null` = inherit = blocking. Returning
+     null rather than true is deliberate: an import must not stamp an opinion the user never expressed,
+     which would also overwrite nothing but would churn every row's sync fingerprint. PURE. */
+  blockingFromEvent(ev){ return (ev && ev.transparency==='transparent') ? false : null; }
+  /* PP-EXT (10): the detail-panel toggle. Routed through commit() like every other task mutation. */
+  setBlocking(id, v){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.blocking=(v==null?null:!!v); }); }
   /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
      manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
      scheduled (occurrence-for-B); omitted ⇒ today. */
@@ -1703,14 +1802,33 @@ class Component extends DCLogic {
      later allotment churn (mirrors a fixed appointment's clock span — no circular dependency with the pool).
      Stale pins (pin.day ≠ today) are ignored; milestones can't be pinned. A drag-pinned subtask (leaf child)
      leaves its parent's family packing and becomes its own fixed block — see famAllot / distribute / queueFor. */
-  dragBlock(t, B){
-    const p=t.pin; if(!p || p.day!==B) return null;
-    if(this.isMilestone(t)) return null;
-    const dur=Math.max(0, p.dur||0);
-    const a=Math.max(p.start, B), b=Math.min(p.start + dur*60000, B+this.DAY);
-    return b>a ? {start:a, end:b} : null;
+  /* PP-EXT (04): `t.pin` is a LIST of pin records. Reading C (owner, 2026-08-05): a task whose day
+     is split into several chunks can have one chunk pinned while the rest stays flexible, so one pin
+     per task is no longer enough. Shape: [{day, start, dur, partial?}]. `partial:true` means "these
+     minutes only" — the task keeps the rest of its allotment in the flexible pool. A record without
+     `partial` is a WHOLE-task pin (the pre-04 meaning: the task becomes fixed work for that day).
+     The legacy single-object shape is still read here and converted once by migrateDragPinList, so
+     the jsonb `pin` column and SYNC_FIELDS are unchanged (an array is valid jsonb). */
+  pinsOf(t){ const p=t&&t.pin; if(!p) return []; return (Array.isArray(p)?p:[p]).filter(x=>x&&x.day!=null&&x.start!=null); }
+  /* Every pin span this task holds on day B, clamped to the day, earliest first. */
+  dragBlocksOn(t, B){
+    if(!t || this.isMilestone(t)) return [];
+    const out=[];
+    this.pinsOf(t).forEach(p=>{
+      if(p.day!==B) return;
+      const dur=Math.max(0, p.dur||0);
+      const a=Math.max(p.start, B), b=Math.min(p.start + dur*60000, B+this.DAY);
+      if(b>a) out.push({start:a, end:b, partial:!!p.partial});
+    });
+    return out.sort((x,y)=>x.start-y.start);
   }
-  hasDragPinToday(t, B){ return !!this.dragBlock(t, B); }
+  dragBlock(t, B){ return this.dragBlocksOn(t, B)[0] || null; }
+  hasDragPinToday(t, B){ return this.dragBlocksOn(t, B).length>0; }
+  /* The pre-04 predicate: the task's WHOLE day is pinned, so it leaves the flexible pool entirely.
+     A task holding any partial pin stays packable for its unpinned remainder. */
+  hasFullDragPinToday(t, B){ const l=this.dragBlocksOn(t, B); return l.length>0 && l.every(p=>!p.partial); }
+  /* Minutes of day B this task already holds as pins (whole or partial). */
+  pinnedMinsOn(t, B){ return this.dragBlocksOn(t, B).reduce((a,p)=>a+(p.end-p.start)/60000, 0); }
   /* Today's FIXED busy blocks — the SINGLE source consumed by both computeAllotted (pool shrinks) and
      buildDayTimeline (blocks render + free slots exclude them), so they always agree. Two kinds:
      fixed appointments occupy their occurrence clock span; drag-pinned tasks occupy their dropped span. */
@@ -1723,14 +1841,51 @@ class Component extends DCLogic {
       if(this.isFixedOn(t, B)){
         const oc=this.occForDay(t, B);
         const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
-        if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id});
+        /* PP-EXT (10): a fixed appointment's block inherits the task's tri-state flag. */
+        if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id, blocking:this.isBlockingTask(t)});
         return;
       }
       if(!this.isActiveOn(t, B)) return; /* a drag-pin only holds while the task participates that day */
-      const db=this.dragBlock(t, B);
-      if(db) out.push({start:db.start, end:db.end, note:labelOf(t), taskId:t.id, dragPin:true});
+      /* PP-EXT (04): one busy block per pin record — a split task can hold several. `partial` rides
+         along so computeAllotted can tell "this task is now fixed" from "these minutes are fixed". */
+      /* PP-EXT (10): a drag pin is BACKGROUND (owner 2026-08-06) — two manually placed blocks may overlap
+         each other, which is an existing permission block 11 must not revoke. It is deliberately NOT
+         isBlockingTask(t): the flag describes the task's *appointment*, not a hand-placed chunk of it. */
+      this.dragBlocksOn(t, B).forEach(db=>out.push({start:db.start, end:db.end, note:labelOf(t),
+        taskId:t.id, dragPin:true, partial:db.partial, blocking:false}));
     });
     return out;
+  }
+  /* PP-EXT (04b): how much FREE time each busy interval actually consumed, when intervals may overlap.
+     Dropping a drag-pin across an appointment is permitted (owner, 2026-08-04), but the pin then costs
+     the day less free time than its own span — the shared minutes were never free. Attributing every
+     busy minute to exactly one interval keeps computeAllotted's pool honest: non-pin busy claims first
+     (it was already there), then pins in start order, so an overlap is counted once and always against
+     the thing that was there first, and two overlapping pins can never claim the same minute twice.
+     Returns minutes {byTask, total} for the intervals `isPin` selects. Pure — unit-tested. */
+  netBusyClaim(busy, isPin, lo, hi){
+    const order=(busy||[]).map((b,i)=>({b, i, pin:!!isPin(b)}))
+      .sort((x,y)=> (x.pin?1:0)-(y.pin?1:0) || x.b.start-y.b.start || x.i-y.i);
+    const claimed=[]; /* kept sorted + merged so the "already taken" measure is a simple sweep */
+    const merge=iv=>{ claimed.push(iv); claimed.sort((a,b)=>a.start-b.start);
+      const out=[]; claimed.forEach(k=>{ const last=out[out.length-1];
+        if(last && k.start<=last.end) last.end=Math.max(last.end,k.end); else out.push({start:k.start,end:k.end}); });
+      claimed.length=0; out.forEach(k=>claimed.push(k)); };
+    const byTask={}; let total=0;
+    order.forEach(o=>{
+      const s=Math.max(o.b.start, lo), e=Math.min(o.b.end, hi);
+      if(e>s && o.pin){
+        let free=0, cur=s;
+        claimed.forEach(k=>{ if(k.end<=cur || k.start>=e) return;
+          if(k.start>cur) free+=Math.min(k.start,e)-cur; cur=Math.max(cur,k.end); });
+        if(cur<e) free+=e-cur;
+        const mins=Math.round(free/60000);
+        if(o.b.taskId!=null){ byTask[o.b.taskId]=(byTask[o.b.taskId]||0)+mins; }
+        total+=mins;
+      }
+      if(e>s) merge({start:s, end:e});
+    });
+    return {byTask, total};
   }
   /* PP-EXT: keep-clear Point: a clocked instant with no end and no duration. It reserves no time,
      but its clock is a divider the packer will not cross. The missing end is the discriminator. */
@@ -1949,12 +2104,15 @@ class Component extends DCLogic {
     });
   }
   /* Family allotted = own remainder + all descendants' shares (what the parent's timeline block spans).
-     A drag-pinned child leaves the family (it renders as its own fixed block), so it isn't summed here. */
+     A WHOLE-pinned child leaves the family (it renders as its own fixed block), so it isn't summed here.
+     PP-EXT (04): this returns FLEXIBLE minutes — a partly-pinned member keeps its remainder in the
+     family total but its pinned minutes are already drawn as their own fixed block, so subtract them. */
   famAllot(id, kids, byId, B){
     byId = byId || this.buildKids(this.state.tasks).byId;
     if(B==null) B=this.startOfDay(this.state.nowTick||Date.now());
-    return (this.allotOf(id).allotted||0) + (kids[id]||[]).reduce((a,c)=>{
-      const ct=byId[c]; if(ct && this.hasDragPinToday(ct, B)) return a; /* pinned child: separate fixed block */
+    const a0=this.allotOf(id);
+    return Math.max(0, (a0.allotted||0) - (a0.pinnedMin||0)) + (kids[id]||[]).reduce((a,c)=>{
+      const ct=byId[c]; if(ct && this.hasFullDragPinToday(ct, B)) return a; /* pinned child: separate fixed block */
       return a + this.famAllot(c, kids, byId, B);
     }, 0);
   }
@@ -2302,6 +2460,357 @@ class Component extends DCLogic {
     return s.days.slice().sort((a,b)=>a-b).map(d=>L[d]).join(' '); }
   /* ==== /PP-EXT Phase 9: Habits ==== */
 
+  /* ==== PP-EXT V3.1: running scratchpad — ONE continuous rich-text document per workspace (`pp-scratch`).
+     Not per-day and not per-task: the journal already owns "today's entry", and this is the thing that
+     outlives a day. "Append-only" here means there is no processing step and nothing in the app ever
+     rotates, truncates or clears the doc — only the user editing the field changes it.
+     It reuses `richField` (the same editor as the journal entry and the task description) rather than
+     introducing a second editor, so the stored value is exactly the sanitized HTML subset those produce.
+     LOCAL-ONLY, like `pp-sections`: `KV_TABLES` names real Supabase tables, so a new store cannot ride the
+     kv sync funnel without a schema migration. It joins the deferred sync batch; until then `BACKUP_KEYS`
+     is its only portability, which is why it is in that list. ==== */
+  loadScratch(){ try{ return this.normalizeScratch(JSON.parse(this.lsGet('pp-scratch')||'null')); }
+    catch(e){ return this.normalizeScratch(null); } }
+  /* PURE: coerce whatever came out of the store (or a hand-edited backup) into {html,updatedAt}. A bare
+     string is read as the document itself — that is the one legacy/foreign shape worth honouring, since
+     losing the user's notes to a shape mismatch is not a recoverable failure. Anything else degrades to
+     an empty doc rather than throwing at render time. */
+  normalizeScratch(o){
+    if(typeof o==='string') return { html:o, updatedAt:0 };
+    o=(o&&typeof o==='object')?o:{};
+    return { html: typeof o.html==='string' ? o.html : '', updatedAt: (+o.updatedAt||0) };
+  }
+  scratchHtml(){ return (this.state.scratch||{}).html||''; }
+  /* Sanitize, then no-op when the document did not actually change: a blur that touched nothing must not
+     bump `updatedAt` or re-render. An edit that empties the field is stored as '' (not '<br>'), so
+     "is the scratchpad empty" stays a plain string test everywhere. Returns the stored record. */
+  saveScratchHtml(html){
+    let clean=this.sanitizeHtml(html); if(!this.hasDesc(clean)) clean='';
+    const cur=this.state.scratch||this.normalizeScratch(null);
+    if(clean===cur.html) return cur;
+    this.stampScratchDayMark(cur.html); /* PP-EXT V3.2: first real edit of a new day fixes where "today" starts */
+    const next={ html:clean, updatedAt:Date.now() };
+    try{ this.lsSet('pp-scratch', JSON.stringify(next)); }catch(e){}
+    this.setState({scratch:next});
+    return next;
+  }
+  /* The one scratchpad editor, rendered wherever the doc is surfaced (Focus = home, Journal = echo). The
+     `fieldKey` is the same constant on every surface on purpose: `richField` seeds innerHTML once per
+     fieldKey, so two surfaces sharing it can never disagree about what the document is. */
+  renderScratchpad(opts){ opts=opts||{};
+    return this.richField('scratch', this.scratchHtml(), html=>this.saveScratchHtml(html),
+      Object.assign({ id:'pp-scratch-editor',
+        placeholder:'One continuous scratchpad — it never resets. Anything you jot here is still here tomorrow.',
+        minHeight:160 }, opts));
+  }
+  /* Hotkey target: Focus is the scratchpad's home, so "n" from anywhere lands there with the caret in the
+     field. The focus() is deferred a tick because the editor does not exist until the mode re-renders. */
+  gotoScratchpad(){
+    this.setView('dashboard');
+    this.setState({dashMode:'focus'}); this.savePrefs({dashMode:'focus', dashModeV:2});
+    try{ setTimeout(()=>{ const el=document.getElementById('pp-scratch-editor'); if(el) el.focus(); }, 0); }catch(e){}
+  }
+  /* ==== /PP-EXT V3.1 ==== */
+
+  /* ==== PP-EXT V3.2: guided journal — a curated, EDITABLE prompt set (`pp-journal-prompts`).
+     Three rules this block exists to enforce:
+     1. Prompts are GUIDANCE, NOT persisted Q&A. Nothing typed against a prompt is stored per prompt —
+        the day's single free-text entry (pp-journal) remains the only place a day's writing lives. That
+        is why there is no `answers` map anywhere here, and why deleting a prompt can never delete text.
+     2. The set is the USER'S. Every default can be re-worded, reordered or deleted, and new ones added.
+        Absence of the key means "never configured" → the defaults; a STORED empty list means "I deleted
+        them all" and is honoured. Those two states must stay distinguishable, hence loadJournalPrompts
+        checks for a null raw value rather than falling back on an empty items array.
+     3. LOCAL-ONLY, exactly like `pp-scratch` and `pp-sections`. `KV_TABLES` names real Supabase tables;
+        a `journal_prompts` table does not exist, so this store cannot ride the kv funnel without a schema
+        migration, and no new synced field was invented for it. It joins the deferred sync batch; until
+        then `BACKUP_KEYS` is its only portability.
+     Defaults are psychology-informed rather than decorative: three-good-things (Seligman's gratitude/
+     savouring work), an obstacle review (implementation-intention framing — name the friction, not the
+     failure), one concrete intention for tomorrow, and gratitude. The two DERIVED prompts ('scratch' and
+     'aging') are the ones the app can answer for you. ==== */
+  DEFAULT_JOURNAL_PROMPTS(){ return [
+    { id:'scratch',  kind:'scratch', text:'Review your scratchpad — what did today actually leave in it?' },
+    { id:'wins',     kind:'text',    text:'Three things that went well today, and what made each one go well.' },
+    { id:'friction', kind:'text',    text:'What got in the way? Was it the plan, or was it the day?' },
+    { id:'aging',    kind:'aging',   text:'Still relevant? These have been sitting open with no time on them.' },
+    { id:'tomorrow', kind:'text',    text:'One thing that would make tomorrow feel good — when will you start it?' },
+    { id:'grateful', kind:'text',    text:'One thing you are grateful for right now.' },
+  ]; }
+  /* The kinds a stored prompt may claim. Anything else is read as plain guidance text rather than
+     dropped, so a hand-edited backup degrades to a usable prompt instead of vanishing. */
+  JOURNAL_PROMPT_KINDS(){ return { text:1, scratch:1, aging:1 }; }
+  /* PURE: coerce a stored value into {items:[{id,kind,text}],updatedAt}, or null when the value carries no
+     usable list at all (the caller turns null into the defaults). Blank prompts are dropped — an empty
+     prompt is not guidance — and duplicate ids are disambiguated so React keys and delete/move stay
+     addressable. */
+  normalizeJournalPrompts(o){
+    if(Array.isArray(o)) o={ items:o };
+    if(!o || typeof o!=='object' || !Array.isArray(o.items)) return null;
+    const KINDS=this.JOURNAL_PROMPT_KINDS(); const seen={}; const items=[];
+    o.items.forEach((p,i)=>{
+      if(typeof p==='string') p={ text:p };
+      if(!p || typeof p!=='object') return;
+      const text = typeof p.text==='string' ? p.text : '';
+      if(!text.trim()) return;
+      let id = (typeof p.id==='string' && p.id) ? p.id : ('p'+i);
+      while(seen[id]) id=id+'~';
+      seen[id]=1;
+      items.push({ id:id, kind: KINDS[p.kind]?p.kind:'text', text:text });
+    });
+    return { items:items, updatedAt:(+o.updatedAt||0) };
+  }
+  loadJournalPrompts(){
+    const raw=this.lsGet('pp-journal-prompts');
+    if(raw==null) return { items:this.DEFAULT_JOURNAL_PROMPTS(), updatedAt:0 }; /* never configured */
+    let parsed=null; try{ parsed=this.normalizeJournalPrompts(JSON.parse(raw)); }catch(e){ parsed=null; }
+    /* Corrupt/unusable value → defaults, not an empty journal. An empty *list* is only honoured when it
+       actually parsed as a list. */
+    return parsed || { items:this.DEFAULT_JOURNAL_PROMPTS(), updatedAt:0 };
+  }
+  journalPromptList(){ return ((this.state.journalPrompts||{}).items)||[]; }
+  /* The single writer. Every CRUD helper below funnels through here so persistence can never diverge
+     from state, and so `updatedAt` is stamped in exactly one place. Returns the stored record. */
+  saveJournalPrompts(items){
+    const rec=this.normalizeJournalPrompts({ items:items||[], updatedAt:Date.now() }) || { items:[], updatedAt:Date.now() };
+    rec.updatedAt=Date.now(); /* normalize floors updatedAt from the input; re-stamp so a write always moves it */
+    try{ this.lsSet('pp-journal-prompts', JSON.stringify(rec)); }catch(e){}
+    this.setState({journalPrompts:rec});
+    return rec;
+  }
+  addJournalPrompt(text){
+    const t=String(text||'').trim(); if(!t) return this.state.journalPrompts;
+    const id='p'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    return this.saveJournalPrompts(this.journalPromptList().concat([{ id:id, kind:'text', text:t }]));
+  }
+  deleteJournalPrompt(id){ return this.saveJournalPrompts(this.journalPromptList().filter(p=>p.id!==id)); }
+  /* Re-wording a default is allowed and keeps its kind — the derived prompts stay derived even when the
+     user phrases them their own way. A blank edit is ignored rather than silently deleting the prompt. */
+  setJournalPromptText(id, text){
+    const t=String(text||'').trim(); if(!t) return this.state.journalPrompts;
+    return this.saveJournalPrompts(this.journalPromptList().map(p=>p.id===id?{ id:p.id, kind:p.kind, text:t }:p));
+  }
+  /* dir=-1 up, +1 down. A move off either end is a no-op, so holding the button cannot wrap the list. */
+  moveJournalPrompt(id, dir){
+    const list=this.journalPromptList().slice(); const i=list.findIndex(p=>p.id===id);
+    const j=i+(dir<0?-1:1);
+    if(i<0 || j<0 || j>=list.length) return this.state.journalPrompts;
+    list.splice(j,0,list.splice(i,1)[0]);
+    return this.saveJournalPrompts(list);
+  }
+  /* Back to "never configured": remove the key so a later default-set change reaches the user, rather
+     than freezing today's defaults into their store. */
+  resetJournalPrompts(){
+    try{ this.lsRemove('pp-journal-prompts'); }catch(e){}
+    const rec={ items:this.DEFAULT_JOURNAL_PROMPTS(), updatedAt:0 };
+    this.setState({journalPrompts:rec});
+    return rec;
+  }
+
+  /* ---- "today's lines" in the running scratchpad ----------------------------------------------
+     V3.1 deliberately stores ONE html blob with no day marker, and `tests/scratch.test.js` asserts that
+     record stays exactly {html,updatedAt}. So the marker lives OUTSIDE the document, in `pp-prefs` as
+     `scratchDayMark:{ymd, blocks}` — a high-water mark, not a partition. Consequences, on purpose:
+       · the scratchpad document shape is unchanged, so NO migration is needed and no existing pad can be
+         damaged by this feature;
+       · a user who clears prefs loses only the highlight for the current day, never a line of text;
+       · reading is lazy — if the stored mark is not today's, today's lines are simply empty (nothing has
+         been typed today yet), so a legacy pad with no mark highlights NOTHING rather than everything. */
+  /* PURE: split the stored html into top-level "lines". contentEditable emits one block per line
+     (`<div>`/`<p>`, or a bare `<br>` between text runs), so a depth counter over the tags is enough and
+     — unlike a DOM parse — it works under Node, which is where this is tested. Nested markup inside a
+     block stays with its block. */
+  splitScratchBlocks(html){
+    const s=String(html==null?'':html); if(!s) return [];
+    const BLOCK={ div:1, p:1, ul:1, ol:1, h1:1, h2:1, h3:1, blockquote:1, pre:1 };
+    const out=[]; let buf=''; let depth=0; let last=0; let m;
+    /* `hasDesc` is the same emptiness test the rest of the app uses, so a block that is only markup
+       (`<div></div>`, `<div><br></div>` — what contentEditable leaves behind) is not a line. */
+    const flush=()=>{ if(this.hasDesc(buf)) out.push(buf); buf=''; };
+    const re=/<(\/?)([a-zA-Z0-9]+)([^>]*)>/g;
+    while((m=re.exec(s))){
+      buf+=s.slice(last, m.index); last=re.lastIndex;
+      const close=(m[1]==='/'), tag=m[2].toLowerCase();
+      if(tag==='br' && !close && depth===0){ flush(); continue; } /* a top-level <br> IS a line break */
+      if(BLOCK[tag]){
+        if(!close){ if(depth===0) flush(); depth++; buf+=m[0]; continue; }
+        depth=Math.max(0, depth-1); buf+=m[0];
+        if(depth===0) flush();
+        continue;
+      }
+      buf+=m[0];
+    }
+    buf+=s.slice(last); flush();
+    return out;
+  }
+  /* PURE-ish: {ymd, blocks} where `blocks` is the index the CURRENT day's lines start at. When the stored
+     mark is stale (or absent) the answer is "everything so far is previous days" — computed, not written;
+     the write happens on the next real edit (stampScratchDayMark). */
+  scratchDayMark(){
+    const ymd=this.ymdOf(this.startOfToday());
+    const n=this.splitScratchBlocks(this.scratchHtml()).length;
+    let m=null; try{ m=this.loadPrefs().scratchDayMark; }catch(e){ m=null; }
+    if(m && typeof m==='object' && m.ymd===ymd){
+      const b=Math.max(0, Math.min(n, Math.floor(+m.blocks||0)));
+      return { ymd:ymd, blocks:b };
+    }
+    return { ymd:ymd, blocks:n };
+  }
+  /* Called from saveScratchHtml on the first content-changing write of a new day: freeze the mark at the
+     block count the document had BEFORE this edit, so everything this edit adds counts as today. Idempotent
+     within a day — a mark already stamped for today is never moved, or the highlight would shrink with
+     every keystroke. */
+  stampScratchDayMark(prevHtml){
+    const ymd=this.ymdOf(this.startOfToday());
+    let m=null; try{ m=this.loadPrefs().scratchDayMark; }catch(e){ m=null; }
+    if(m && typeof m==='object' && m.ymd===ymd) return m;
+    const mark={ ymd:ymd, blocks:this.splitScratchBlocks(prevHtml).length };
+    this.savePrefs({scratchDayMark:mark});
+    return mark;
+  }
+  /* PURE-ish: the scratchpad split into {html, today} rows, oldest first — what the "review your
+     scratchpad" prompt renders. `today` drives both the highlight and the scroll target. */
+  scratchReviewLines(){
+    const blocks=this.splitScratchBlocks(this.scratchHtml());
+    const from=this.scratchDayMark().blocks;
+    return blocks.map((b,i)=>({ html:b, today:i>=from }));
+  }
+  todayScratchLines(){ return this.scratchReviewLines().filter(l=>l.today); }
+
+  /* ---- surface aging (V2 hook, landing here as ONE default prompt) ----------------------------
+     `plans/product-vision.md` §11: a task open for many days with zero progress should be SURFACED, never
+     nagged about inline. Fully derived — no new persisted field, and nothing here mutates a task. A task
+     with no start has no measurable age, so it is not "aging", it is merely undated: Extra/unplanned
+     already surfaces those and double-nagging is the failure mode this prompt exists to avoid. */
+  agingTasks(){
+    const B=this.startOfToday(); const cutoff=B - this.AGING_DAYS*this.DAY;
+    return (this.state.tasks||[]).filter(t=>{
+      if(!t || t.archivedAt || this.isMilestone(t)) return false;
+      if(t.completion || (+t.pct||0)>=100) return false;
+      if((+t.spent||0)>0) return false;                 /* any recorded time at all = not stalled */
+      if(t.start==null) return false;                   /* undated: no measurable age */
+      return this.startOfDay(t.start) <= cutoff;
+    }).sort((a,b)=>a.start-b.start).slice(0, this.JOURNAL_AGING_MAX);
+  }
+  /* ---- prompt-set UI plumbing (view prefs, session guard) -------------------------------------- */
+  toggleJournalPrompts(){ const open=!this.state.journalPromptsOpen;
+    this.setState({journalPromptsOpen:open}); this.savePrefs({journalPromptsOpen:open}); }
+  toggleJournalPromptsEdit(){ this.setState({journalPromptsEdit:!this.state.journalPromptsEdit}); }
+  /* "Auto-open the first evening open, reopenable." Session-guarded by an instance flag (the same shape as
+     `_weatherTried`), so it fires at most once per page load and a user who closes the panel afterwards
+     stays closed. It only ever OPENS — it never forces the panel shut — and it does not write the pref,
+     so a deliberate "keep it collapsed" survives the next morning. */
+  journalPromptsEveningAutoOpen(){
+    if(this._journalPromptsAuto) return false;
+    this._journalPromptsAuto=true;
+    if(this.state.journalPromptsOpen) return false;
+    let hr=0; try{ hr=new Date().getHours(); }catch(e){ return false; }
+    if(hr < this.JOURNAL_EVENING_HOUR) return false;
+    Promise.resolve().then(()=>this.setState({journalPromptsOpen:true}));
+    return true;
+  }
+  /* ---- render ---------------------------------------------------------------------------------- */
+  /* The "review your scratchpad" body: the running pad rendered READ-ONLY, oldest first, with today's
+     lines highlighted and the first of them scrolled into view. Read-only on purpose — the editable pad
+     is one card away in the rail (and is its home in Focus); a second editable mount of the same fieldKey
+     inside a prompt would be a third view of the document competing for the same blur commit. */
+  renderScratchReview(){
+    const h=React.createElement;
+    const lines=this.scratchReviewLines();
+    if(!lines.length) return h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
+      h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-faint)'}},'Nothing in the scratchpad yet.'),
+      h('button',{className:'pp-tbtn',onClick:()=>this.gotoScratchpad(),style:{alignSelf:'flex-start'}},'Open the scratchpad'));
+    const firstToday=lines.findIndex(l=>l.today);
+    const todayN=lines.length-(firstToday<0?lines.length:firstToday);
+    return h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
+      h('div',{'data-scratch-review':'1',
+        style:{maxHeight:'220px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',
+          background:'var(--gantt-bg)',padding:'8px 10px',display:'flex',flexDirection:'column',gap:'2px'}},
+        ...lines.map((l,i)=>h('div',{ key:'sl'+i,
+          'data-scratch-line': l.today?'today':'past',
+          id: i===firstToday ? 'pp-scratch-today' : undefined,
+          /* Scroll once per mount: the prompt is a review cue, so it must land on today's first line
+             rather than on the top of a pad that may be months long. */
+          ref: i===firstToday ? (el=>{ if(el && !el._ppScrolled){ el._ppScrolled=true;
+            try{ el.scrollIntoView({block:'nearest'}); }catch(e){} } }) : undefined,
+          dangerouslySetInnerHTML:{__html:this.sanitizeHtml(l.html)},
+          style:{ fontSize:'12.5px',lineHeight:1.55,padding:'2px 6px',borderRadius:'5px',
+            color: l.today?'var(--text)':'var(--text-mut2)',
+            background: l.today?'var(--chip-bg)':'transparent',
+            boxShadow: l.today?('inset 2px 0 0 '+this._accent):'none' }}))),
+      h('span',{style:{fontSize:'11px',color:'var(--text-faint)'}},
+        todayN ? (todayN===1?'1 line added today (highlighted).':todayN+' lines added today (highlighted).')
+               : 'Nothing added today — everything above is from earlier days.'));
+  }
+  /* The surface-aging body. Click-through to the task is the whole point: the prompt asks "still
+     relevant?", and answering it means opening the task and deciding — not typing a status report. */
+  renderAgingBody(){
+    const h=React.createElement;
+    const rows=this.agingTasks(); const B=this.startOfToday();
+    if(!rows.length) return h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-faint)'}},
+      'Nothing has been sitting untouched for '+this.AGING_DAYS+'+ days. Good.');
+    return h('div',{'data-aging-list':'1',style:{display:'flex',flexDirection:'column',gap:'5px'}},
+      ...rows.map(t=>{ const days=Math.max(0, Math.round((B-this.startOfDay(t.start))/this.DAY));
+        return h('div',{key:t.id,'data-aging-task':t.id,onClick:()=>this.openDetail(t.id),
+          style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer',fontSize:'12.5px'}},
+          h('span',{style:{flex:1,minWidth:0,color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name),
+          h('span',{style:{fontSize:'11px',color:'var(--text-mut2)',fontVariantNumeric:'tabular-nums'}},'open '+days+'d · no time logged')); }));
+  }
+  /* The prompt panel itself. Sits ABOVE the day's free-text editor: prompts lead the entry, they do not
+     own it — there is exactly one text field on this page and it is the day's entry. */
+  renderJournalPrompts(){
+    const h=React.createElement;
+    const list=this.journalPromptList(); const open=!!this.state.journalPromptsOpen; const edit=!!this.state.journalPromptsEdit;
+    const hdr=h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
+      h('div',{onClick:()=>this.toggleJournalPrompts(),'data-prompts-toggle':'1',
+        style:{display:'flex',alignItems:'center',cursor:'pointer',userSelect:'none',minHeight:this.HIT_MIN_PX+'px',
+          fontSize:'12px',fontWeight:700,color:'var(--text-mut2)',textTransform:'uppercase',letterSpacing:'0.4px'}},
+        h('span',{style:{marginRight:'6px',fontSize:'10px',display:'inline-block',transform:open?'rotate(90deg)':'none',
+          transition:'transform var(--dur-fast) var(--ease-standard)'}},'›'),
+        'Guided prompts'+(list.length?' ('+list.length+')':'')),
+      h('span',{style:{flex:1}}),
+      open?h('button',{className:'pp-tbtn','data-prompts-edit':'1',onClick:()=>this.toggleJournalPromptsEdit()}, edit?'Done':'Edit'):null,
+      (open&&edit)?h('button',{className:'pp-tbtn','data-prompts-reset':'1',onClick:()=>this.resetJournalPrompts()},'Restore defaults'):null);
+    if(!open) return h('div',{'data-journal-prompts':'1',style:{display:'flex',flexDirection:'column',marginBottom:'8px'}}, hdr);
+    const row=(p,i)=>{
+      const body = p.kind==='scratch' ? this.renderScratchReview() : (p.kind==='aging' ? this.renderAgingBody() : null);
+      const label = edit
+        ? h('input',{className:'pp-num',type:'text',defaultValue:p.text,'data-prompt-input':p.id,
+            onBlur:e=>this.setJournalPromptText(p.id, e.target.value),
+            onKeyDown:e=>{ e.stopPropagation(); if(e.key==='Enter') e.target.blur(); },
+            style:{flex:1,minWidth:0,fontSize:'12.5px',padding:'5px 8px',borderRadius:'6px',
+              border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}})
+        : h('span',{style:{flex:1,minWidth:0,fontSize:'12.5px',fontWeight:600,color:'var(--text-2)'}},p.text);
+      const btn=(glyph,title,fn,dim)=>h('button',{key:glyph,className:'pp-tbtn',title:title,onClick:fn,
+        style:{minWidth:this.HIT_MIN_PX+'px',minHeight:this.HIT_MIN_PX+'px',opacity:dim?0.35:1,cursor:dim?'default':'pointer'}},glyph);
+      return h('div',{key:p.id,'data-prompt-id':p.id,
+        style:{display:'flex',flexDirection:'column',gap:body?'6px':'0',padding:'8px 0',borderTop:i?'1px solid var(--divider)':'none'}},
+        h('div',{style:{display:'flex',alignItems:'center',gap:'6px'}}, label,
+          edit?btn('↑','Move up',()=>this.moveJournalPrompt(p.id,-1), i===0):null,
+          edit?btn('↓','Move down',()=>this.moveJournalPrompt(p.id,1), i===list.length-1):null,
+          edit?btn('✕','Delete this prompt',()=>this.deleteJournalPrompt(p.id), false):null),
+        body);
+    };
+    const adder = edit ? h('div',{style:{display:'flex',alignItems:'center',gap:'6px',paddingTop:'8px',borderTop:'1px solid var(--divider)'}},
+      h('input',{className:'pp-num',type:'text','data-prompt-new':'1',placeholder:'Add your own prompt…',
+        onKeyDown:e=>{ e.stopPropagation(); if(e.key==='Enter'){ this.addJournalPrompt(e.target.value); e.target.value=''; } },
+        style:{flex:1,minWidth:0,fontSize:'12.5px',padding:'5px 8px',borderRadius:'6px',
+          border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}}),
+      h('button',{className:'pp-tbtn','data-prompt-add':'1',
+        onClick:e=>{ const inp=e.currentTarget.parentNode.querySelector('[data-prompt-new]');
+          if(inp){ this.addJournalPrompt(inp.value); inp.value=''; } },
+        style:{minHeight:this.HIT_MIN_PX+'px'}},'Add')) : null;
+    const empty = (!list.length && !edit)
+      ? h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-faint)',padding:'8px 0'}},
+          'No prompts — the day is yours to write however you like. “Edit → Restore defaults” brings them back.')
+      : null;
+    return h('div',{'data-journal-prompts':'1',
+      style:{display:'flex',flexDirection:'column',marginBottom:'10px',background:'var(--sheet-bg)',
+        border:'1px solid var(--divider)',borderRadius:'10px',padding:'10px 14px',maxHeight:'46%',overflow:'auto',flex:'none'}},
+      hdr, empty, ...list.map(row), adder);
+  }
+  /* ==== /PP-EXT V3.2 ==== */
+
   /* ==== PP-EXT Phase 9: Journaling / next-day planning — an end-of-day ritual. One free-text entry per day
      (pp-journal, keyed by ymd), the day's actuals (allotted vs recorded), and the "needs planning" queue
      (Phase-7 unplanned) with inline Planned editing so tomorrow gets scheduled. ==== */
@@ -2437,8 +2946,19 @@ class Component extends DCLogic {
     /* PP-EXT: fixed appointments occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline renders as fixed blocks. */
     const fixed=this.fixedBlocksToday(B, tasks);
-    fixed.forEach(b=>{ const mins=Math.round((b.end-b.start)/60000);
-      map[b.taskId]={allotted:mins, computed:mins, active:true, fixed:true}; });
+    /* PP-EXT (04): a PARTIAL drag-pin fixes only some of the task's minutes. Those minutes stay part of
+       the task's allotment (map[id].allotted is the day TOTAL) but are recorded in `pinnedMin` so the
+       packer only packs the remainder — the task is NOT stamped `fixed`, so it keeps competing in the
+       pool exactly once (never both fixed and packable, which would double-count the break reserve). */
+    const partialPin={};
+    /* PP-EXT (11): a WHOLE-task pin may now be several records — one per piece of a drop that split
+       around blocking busy — so the fixed minutes ACCUMULATE. Assigning per block (the pre-11 shape,
+       correct while a whole pin was always a single record) would have let the last piece overwrite
+       the earlier ones and shrink the task's day to its final fragment. */
+    fixed.forEach(b=>{ if(b.partial){ partialPin[b.taskId]=true; return; }
+      const mins=Math.round((b.end-b.start)/60000);
+      const tot=((map[b.taskId]&&map[b.taskId].allotted)||0)+mins;
+      map[b.taskId]={allotted:tot, computed:tot, active:true, fixed:true}; });
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
     const acts=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
@@ -2448,8 +2968,27 @@ class Component extends DCLogic {
        allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled. */
     const brk=Math.max(0, this.state.settings.breakMin||0);
     const kc=this.keepClearToday(B, tasks); /* PP-EXT: same dividers buildDayTimeline uses; zero-width ⇒ pool unchanged, kept for lockstep */
-    const rawAvail=this.dayIntervals(B, this.packStart(B), fixed, kc).free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
-    const avail=Math.max(0, rawAvail - brk*Math.max(0, acts.length));
+    const di=this.dayIntervals(B, this.packStart(B), fixed, kc);
+    const rawAvail=di.free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
+    /* PP-EXT (04): partial-pin minutes were carved out of the free intervals above, but they are still
+       the task's own minutes. Add them back before the split so the seam divides the SAME pool it would
+       have divided with no pin at all — every task's total for the day is then unchanged by a drag, and
+       flexible demand (Σ allotted − Σ pinnedMin) still equals the free space that actually remains.
+       Measured from di.busy, not from the pin records: that is the window-clamped span the timeline
+       actually draws, so the pool and the rendered blocks cannot disagree. */
+    /* PP-EXT (04b): the two quantities are NOT the same measure and used to be computed as if they
+       were, which is what let an overlapping drop grant the task free minutes.
+         · pinnedMin — the pin's whole DRAWN span. It is what the task visibly holds, so its flexible
+           remainder must shrink by all of it or the task draws more than its allotment.
+         · pinBack   — the free time the pin actually CONSUMED. Minutes it shares with an appointment
+           were never in `rawAvail` to begin with, so adding them back invented time (04v defect 1).
+       Both still measure `di.busy` — window-clamped, exactly what the timeline draws — so the pool
+       and the rendered blocks cannot disagree. */
+    const pinnedMin={};
+    di.busy.forEach(b=>{ if(!b.taskId || !partialPin[b.taskId]) return;
+      pinnedMin[b.taskId]=(pinnedMin[b.taskId]||0)+Math.round((b.end-b.start)/60000); });
+    const pinBack=this.netBusyClaim(di.busy, b=>!!(b.taskId && partialPin[b.taskId]), di.lo, di.winEnd).total;
+    const avail=Math.max(0, rawAvail + pinBack - brk*Math.max(0, acts.length));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
     /* PP-EXT S1: one caller-facing compression seam; the default implementation is linear/proportional. */
     const compressed=this.compressionSeam(acts.map(t=>Object.assign({},t,{spent:spentById[t.id]})), avail);
@@ -2478,9 +3017,18 @@ class Component extends DCLogic {
       pm.allotted=Math.max(0, A-given); pm.computed=pm.allotted; /* parent keeps the remainder */
     };
     tasks.forEach(t=>{ if(!(t.parentId!=null && kb.byId[t.parentId]) && kb.kids[t.id]) distribute(t.id); });
+    /* PP-EXT (04): record each partly-pinned task's fixed slice AFTER distribute, so it applies equally to
+       a top-level task (share from the seam) and to a subtask (share from its parent). `allotted` stays the
+       day total — never below the pinned minutes, or the rendered blocks would exceed the allotment. */
+    Object.keys(pinnedMin).forEach(id=>{ const m=map[id]; if(!m || m.fixed) return;
+      m.pinnedMin=pinnedMin[id];
+      if((m.allotted||0) < m.pinnedMin){ m.allotted=m.pinnedMin; m.computed=Math.max(m.computed||0, m.pinnedMin); } });
     return map;
   }
   allotOf(id){ return (this._allot && this._allot[id]) || {allotted:0,computed:0,active:false}; }
+  /* PP-EXT (04): the minutes still to be PACKED — the day total minus whatever a partial drag-pin has
+     already fixed in place. `allotted` stays the total everywhere it is displayed. */
+  flexAllot(id){ const a=this.allotOf(id); return Math.max(0, (a.allotted||0) - (a.pinnedMin||0)); }
   setPredict(id,str){ const m=this.parseDur(str); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.predicted=m; t.predictManual=true; } }); }
   togglePredictManual(id){ const cur=this.allotOf(id).computed;
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; if(t.predictManual){ t.predictManual=false; } else { t.predictManual=true; t.predicted=cur; } }); }
@@ -2860,6 +3408,20 @@ class Component extends DCLogic {
     const k = Math.max(-this.GANTT_ZOOM_STEP_CAP, Math.min(this.GANTT_ZOOM_STEP_CAP, -delta*this.GANTT_ZOOM_SENS));
     return this.clampDayW(oldW*Math.exp(k));
   }
+  /* PP-EXT (V4.4): the day drawer's zoom is exactly TWO states. These two pure helpers are the only
+     place the mapping lives, so the control, the render clamp and the tests cannot drift apart:
+       drawerZoomFactor(expanded) : boolean → the px multiplier
+       drawerZoomIsExpanded(zoom) : any     → is this value the expanded level?
+     Anything that is not exactly DRAWER_ZOOM_EXPANDED reads as fit — that is deliberate, and it is what
+     retires the old incremental range: a stale 1.5 or 8 from anywhere collapses to fit instead of
+     rendering a level the toggle can no longer produce. Round-trips: isExpanded(factor(b)) === b. */
+  drawerZoomFactor(expanded){ return expanded ? this.DRAWER_ZOOM_EXPANDED : this.DRAWER_ZOOM_FIT; }
+  drawerZoomIsExpanded(zoom){ return zoom===this.DRAWER_ZOOM_EXPANDED; }
+  /* The whole state transition, so the button is a one-liner and the field can never hold a third value. */
+  toggleDrawerZoom(){
+    this._drawerZoom=this.drawerZoomFactor(!this.drawerZoomIsExpanded(this._drawerZoom));
+    this.forceUpdate();
+  }
   /* PP-EXT (C1): the end a bar should DRAW to — a zero/negative span (start>=end) renders one full day so it's
      never a zero-length, undraggable point; a real forward span (incl. a ghost's derived end) draws as itself.
      Pure; the pixel-floor (BAR_MIN_PX) is applied at render on top of this. */
@@ -3095,12 +3657,41 @@ class Component extends DCLogic {
   }
 
   onMouseMove(e){
+    /* PP-EXT (V4.2): EDGE-drag — the bottom edge of a block resizes the task's ALLOTTED minutes.
+       It is checked before the body drag because the two are mutually exclusive by construction (the
+       handle stops propagation, so `_blockDrag` is never set for an edge gesture) and this keeps the
+       precedence explicit rather than incidental. The px→minute conversion is the SAME unit rule 04b
+       established for the body drag: `e.clientY` is viewport px, `px` is px-per-minute inside the
+       zoom wrapper, so the raw delta has to go through `uiPt` before it means anything in minutes.
+       No zoom value is re-tuned — this is a new call site adopting the existing rule. */
+    if(this._edgeDrag){
+      const ed=this._edgeDrag; const dyRaw=e.clientY-ed.startClientY;
+      if(!ed.moved && Math.abs(dyRaw)<4) return; ed.moved=true; /* same 4px raw promotion threshold as every other gesture */
+      const px=ed.px||this.TL_PXPM;
+      const dyPx=this.uiPt(0, dyRaw).y;
+      /* PP-EXT (V4.3): Alt is read LIVE off the move event, not latched at pointer-down, so the user can
+         press or release it mid-gesture and see the block follow immediately — the same way every other
+         app's modifier-drag behaves. `atOrig` records that this frame landed on the priority snap, so
+         the release knows to restore AUTO rather than write the same number as a manual override. */
+      ed.free=!!e.altKey;
+      ed.allot=this.edgeAllotFor(ed.base, (dyPx/px), {free:ed.free, orig:ed.orig});
+      ed.atOrig=!ed.free && ed.orig!=null && ed.allot===this.edgeOrigAllot(ed.orig);
+      this.forceUpdate(); return;
+    }
     if(this._blockDrag){ /* PP-EXT: dragging a day-timeline block to pin it (per-day) */
-      const bd=this._blockDrag; const dyPx=e.clientY-bd.startClientY;
-      if(!bd.moved && Math.abs(dyPx)<4) return; bd.moved=true;
+      const bd=this._blockDrag; const dyRaw=e.clientY-bd.startClientY;
+      if(!bd.moved && Math.abs(dyRaw)<4) return; bd.moved=true;
       const B=bd.day!=null?bd.day:this.startOfDay(this.state.nowTick||Date.now());
       const px=bd.px||this.TL_PXPM; /* PP-EXT: match the scale the block was rendered at (fit-to-height) */
-      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/px)*60000, bd.dur, B, bd.targets);
+      /* PP-EXT (04b): `e.clientY` is VIEWPORT px; `px` is px-per-minute in the app's LOCAL space inside
+         the zoom wrapper, so converting the raw delta made the block travel `uiScale`× the pointer's
+         distance (0.8× at the shipped zoom) and drift further the longer the drag. Same family as the
+         V1.3/V1.4 uiPt fixes — this call site was missed by them. NOT a zoom re-tune: no global zoom
+         value and no other call site changes; the delta is simply expressed in the unit `px` speaks. */
+      const dyPx=this.uiPt(0, dyRaw).y;
+      bd.free=!!e.altKey; /* PP-EXT (V4.3): live modifier — see the edge branch above */
+      bd.previewStart=this.snapPinStart(bd.origStart + (dyPx/px)*60000, bd.dur, B, bd.targets, {free:bd.free, orig:bd.orig});
+      bd.atOrig=!bd.free && bd.orig!=null && bd.previewStart===bd.orig;
       this.forceUpdate(); return;
     }
     if(this.colDrag){
@@ -3197,12 +3788,35 @@ class Component extends DCLogic {
   }
   onMouseUp(e){
     this.dragSelectRelease(); /* PP-EXT V2.9 §1: the ONE release point — above every branch, all of which return */
+    /* PP-EXT (V4.2): release an edge-drag → write the sticky manual allotment. A gesture that never
+       crossed the threshold, or that ended back on the value it started from, writes NOTHING — so a
+       stray press on the handle cannot silently flip a task to "manual" (which would freeze it out of
+       every future re-compression). One `commit()` ⇒ one undo entry. */
+    if(this._edgeDrag){
+      const ed=this._edgeDrag; this._edgeDrag=null;
+      /* PP-EXT (V4.3): a release ON the priority snap means "make this auto again" — the override is
+         cleared rather than rewritten, so the block regains its auto formatting (hatched, no ↺) and the
+         seam recomputes its share. `clearAllottedManual` is a no-op on a task that was never manual, so
+         a drag out and back on an auto block still writes nothing at all. */
+      if(ed.moved && ed.atOrig){ this.clearAllottedManual(ed.id); this.forceUpdate(); } /* forceUpdate too: the clear is a no-op on an already-auto task and the preview still has to drop */
+      else if(ed.moved && ed.allot!==ed.base) this.setAllottedManual(ed.id, ed.allot);
+      else this.forceUpdate();
+      return;
+    }
     if(this._blockDrag){ /* PP-EXT: drop a dragged timeline block → pin it for today (Phase 5) */
       const bd=this._blockDrag; this._blockDrag=null;
       /* PP-EXT (owner 2026-08-04): a click (no drag) on a scheduled block opens details, matching the
          Gantt rule. Blocks previously had no details path at all — only drag-to-pin, ▶, and unpin. Meals
          and any block without a real task fall through. */
-      if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day);
+      /* PP-EXT (V4.3): released on the priority snap-to-original ⇒ restore AUTO instead of pinning.
+         A pinned block gives its pin back (it returns to the packer's own position and to auto
+         formatting); an unpinned block was already at its original, so this writes nothing rather than
+         pinning it exactly where the app had already put it. Both are one `commit()` or none. */
+      if(bd.moved && bd.atOrig){ if(bd.wasPin) this.unpinBlock(bd.id, bd.day, bd.origStart); this.forceUpdate(); }
+      /* PP-EXT (11): `free` carries Alt through to the drop — held, the block stays one contiguous span
+         and may overlap; released, its minutes split around blocking busy. Same modifier as V4.3's
+         free placement, latched live in onMouseMove, never a second gesture. */
+      else if(bd.moved) this.pinBlockAt(bd.id, bd.previewStart, bd.dur, bd.targets, bd.day, {partial:bd.partial, origStart:bd.origStart, free:bd.free}); /* PP-EXT (04): per-chunk pin */
       else if((this.state.tasks||[]).some(t=>t.id===bd.id)) this.openDetail(bd.id);
       else this.forceUpdate();
       return;
@@ -4672,9 +5286,19 @@ class Component extends DCLogic {
        - pp-sync-queue / pp-sync-tombstones persistence + coalescing enqueue, echo-suppressed by
          _syncApplying. syncFlushQueue is a stub here (the network lands in B2).
      All IO-free and unit-tested in tests/sync.gen.test.js (CLAUDE.md "keep new logic pure"). */
+  /* PP-EXT (10): `snoozeUntil` and `blocking` join here TOGETHER, as one batch, satisfying the standing
+     tasks.md instruction not to ship a one-off migration per field. Both are self-contained scalars whose
+     meaning survives alone. `sectionId` deliberately does NOT ride along even though it is in the same
+     backlog line: its value is an id into `pp-sections`, and that STORE has no Supabase table, so syncing
+     the field alone would restore a fresh device's tasks pointing at sections that exist nowhere. Its
+     COLUMN is created by migration 0008 anyway so the tasks table never needs a second schema change —
+     adding it to this list is then a one-line client change with no SQL.
+     Every name here must equal its Postgres column verbatim (the row is mirrored 1:1, no mapping layer):
+     that is the `t.pin` rename trap, and it is why `blocking` is the field name in normalizeTask too. */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
-    'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin']; }
+    'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
+    'snoozeUntil','blocking']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -4861,7 +5485,9 @@ class Component extends DCLogic {
      per-account user data; the constructor reads them through lsGet/wsKey, so switching = persist the new
      workspace id and reload (the constructor then re-hydrates ALL state from that namespace). */
   WS_SCOPED_KEYS(){ return ['pp-tasks','pp-settings','pp-prefs','pp-gcal','pp-run','pp-pomo','pp-notify',
-    'pp-migrations','pp-habits','pp-journal','pp-sections'/* PP-EXT V2.6 */,'pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
+    'pp-migrations','pp-habits','pp-journal','pp-sections'/* PP-EXT V2.6 */,
+    'pp-scratch'/* PP-EXT V3.1 */,'pp-journal-prompts'/* PP-EXT V3.2 */, /* both per-account user data: omitting them from this list would make a future explicit import silently drop the pad and the prompt set */
+    'pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
     'pp-sync-kv-tombstones','pp-gcal-queue','pp-gcal-tombstones']; }
   /* does the anon (signed-out) workspace hold real task data worth offering to import on first sign-in? */
   anonHasData(){ try{ const s=localStorage.getItem('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length>0; }catch(e){ return false; } }
@@ -5313,7 +5939,12 @@ class Component extends DCLogic {
           const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
           const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:'Proportional',
             start,end,allDay,priority:4,deps:[],pct:0,planned:evMins,spent:0,goal:'',
-            description:src.description||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid});
+            description:src.description||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid,
+            /* PP-EXT (10): busy/free transparency seeds the blocking flag on FIRST import only. Re-import
+               never overwrites it, exactly like planned/goal/description above — once the user has toggled
+               it locally, that is the authority. Google omits `transparency` for Busy, so absent ⇒ null
+               ⇒ inherit ⇒ blocking. The events list request sends no `fields=` mask, so the field arrives. */
+            blocking:this.blockingFromEvent(src)});
           tasks.push(nt); byEid[eid]=nt; added++; }
       }); });
     return {added,updated};
@@ -5881,11 +6512,11 @@ class Component extends DCLogic {
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
     const kb=this.buildKids(this.state.tasks);
     const flex=this.orderingSeam(this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
-        && !this.hasDragPinToday(t, B) /* PP-EXT: drag-pinned tasks are placed as fixed blocks, not packed */
+        && !this.hasFullDragPinToday(t, B) /* PP-EXT: WHOLE-pinned tasks are placed as fixed blocks, not packed (04: a partly-pinned task still packs its remainder) */
         && !(t.parentId!=null && kb.byId[t.parentId])
-        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.allotOf(t.id).allotted>0))
+        && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.flexAllot(t.id)>0))
       .map(t=>{
-        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.allotOf(t.id).allotted;
+        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.flexAllot(t.id);
         const active=B===today && this.isActiveTask(t);
         return Object.assign({},t,{title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
           active, dueMs:active?null:this.dueMsOf(t,B),
@@ -5929,10 +6560,10 @@ class Component extends DCLogic {
     const queueFor=pid=>{
       if(queues[pid]) return queues[pid];
       const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const ct=kb.byId[cid];
-        if(this.hasDragPinToday(ct, B)) return; /* PP-EXT: a pinned child renders as its own fixed block, not in the family */
-        const mins=this.famAllot(cid,kb.kids,kb.byId,B);
+        if(this.hasFullDragPinToday(ct, B)) return; /* PP-EXT: a WHOLE-pinned child renders as its own fixed block, not in the family */
+        const mins=this.famAllot(cid,kb.kids,kb.byId,B); /* PP-EXT (04): already net of a partial pin */
         if(mins>0) q.push({id:cid,title:(kb.byId[pid].name+' › '+ct.name),goal:ct.goal,mins}); });
-      const own=this.allotOf(pid).allotted||0;
+      const own=this.flexAllot(pid);
       if(own>0) q.push({id:pid,title:kb.byId[pid].name,goal:kb.byId[pid].goal,mins:own});
       return queues[pid]=q;
     };
@@ -5960,34 +6591,174 @@ class Component extends DCLogic {
      inside today's window. Two-stage snap: if either edge (start or end) lands within PIN_MAGNET minutes of a
      neighbour block's edge (`targets` = clock times of other blocks/meals), snap magnetically so blocks abut;
      otherwise snap to the PIN_SNAP grid. Pure given `targets`, so scheduling.gen tests can exercise it. */
-  snapPinStart(rawStart, dur, B, targets){
-    const s=this.state.settings;
+  /* PP-EXT (V4.3): `opts` adds the two snapping modes the milestone asks for. Both are OPT-IN, so every
+     pre-V4.3 4-argument call site keeps byte-identical behaviour.
+       · `opts.orig` — the block's UNDRAGGED start. Tested FIRST and with a window (PIN_ORIG_MAGNET, 18m)
+         wider than both the neighbour magnet (10m) and half a grid step (7.5m), so within that window the
+         original always wins: that is what "priority snap, stronger than grid increments" means. The
+         caller then treats landing on it as "restore auto formatting", not merely "pin here again".
+       · `opts.free` — Alt held: no magnet, no grid, whole minutes. The window CLAMP still applies; free
+         placement means free within the day, not the right to drop a block outside its own window. */
+  snapPinStart(rawStart, dur, B, targets, opts){
+    const s=this.state.settings; const o=opts||{};
     const winStart=B+this.timeParts(s.dayStart)*60000, winEnd=B+this.timeParts(s.dayEnd)*60000;
     const snap=this.PIN_SNAP*60000, durMs=Math.max(0,dur)*60000;
     let st;
+    if(o.free){ st=Math.round(rawStart/60000)*60000; }                                     /* Alt: free placement */
+    else if(o.orig!=null && Math.abs(rawStart-o.orig)<=this.PIN_ORIG_MAGNET*60000){ st=o.orig; } /* PRIORITY snap-to-original */
+    else {
     let best=null, bestD=this.PIN_MAGNET*60000+1;
     (targets||[]).forEach(tt=>{
       const ds=Math.abs(rawStart-tt);          if(ds<bestD){ bestD=ds; best=tt; }          /* start edge meets a neighbour */
       const de=Math.abs((rawStart+durMs)-tt);  if(de<bestD){ bestD=de; best=tt-durMs; }     /* end edge meets a neighbour */
     });
     st = (best!=null) ? best : B + Math.round((rawStart-B)/snap)*snap;
+    }
     const maxStart=Math.max(winStart, winEnd - durMs);
     return Math.max(winStart, Math.min(st, maxStart));
   }
   /* Clock times a dragged block should magnetically snap to: every other block's start & end (meals, fixed,
      packed blocks) plus the window edges. Excludes the dragged task's own chunks. Impure (reads the timeline). */
-  snapTargets(excludeId, B){
-    const data=this.buildDayTimeline(B);
+  /* PP-EXT (04): `excludeStart` narrows the exclusion to the ONE chunk being dragged, so a split task's
+     other chunks become valid magnets. Omit it for the old whole-task exclusion. `data` lets a caller
+     reuse a timeline it has already built. */
+  snapTargets(excludeId, B, excludeStart, data){
+    data=data||this.buildDayTimeline(B);
     const set=new Set([data.dayStart, data.dayEnd]);
-    data.chunks.forEach(c=>{ if(!c.start) return; if(c.id && c.id===excludeId) return; set.add(c.start); set.add(c.end); });
+    data.chunks.forEach(c=>{ if(!c.start) return;
+      if(c.id && c.id===excludeId && (excludeStart==null || c.start===excludeStart)) return;
+      set.add(c.start); set.add(c.end); });
     return [...set];
   }
-  pinBlockAt(id, rawStart, dur, targets, B){
+  /* ==== PP-EXT (11): a dropped block SPLITS around blocking busy ====================================
+     Owner, 2026-08-06: *split around it; Alt to overlap.* Before this a drop pinned ONE contiguous span
+     (04, Reading C), so a 90-minute chunk dropped at 12:00 ran straight through Lunch. The dragged
+     chunk's minutes are now laid into the intervals that are free of BLOCKING busy from the drop point
+     onward, producing one pin record per piece — `dragBlocksOn` already returns a list and
+     `fixedBlocksToday` already emits one busy block per record, so the multi-piece shape needs no new
+     data shape. Block 10 resolved `blocking` on every busy interval; this is its first consumer.
+
+     What is deliberately NOT an obstacle:
+       · a drag pin (`blocking:false`) — two hand-placed blocks may overlap, the owner's standing
+         permission from block 04, which this block must not revoke;
+       · a background appointment (`blocking:false`) — the "Work 08:00–18:30" container the owner
+         deliberately works INSIDE, which is the whole reason block 10 exists;
+       · the dragged task's own blocks, excluded by id as well as by the two rules above.
+     Alt (the V4.3 free-placement modifier, reused rather than a second gesture) skips the split
+     entirely and keeps today's contiguous behaviour, overlap and all. */
+  /* PURE. `blocked` = the intervals to split around, `winEnd` the day window's end. Returns
+     `[{start, dur}]` with INTEGER minute durations summing to exactly `dur` — that exactness is what
+     keeps the day's total for the task unchanged by a drag (04b's accounting invariant) — or `null`
+     when the minutes cannot be laid inside the window from `start`, in which case the caller keeps the
+     single contiguous pin rather than silently dropping minutes on the floor. */
+  splitDropPieces(start, dur, blocked, winEnd){
+    const want=Math.max(0, Math.round(dur||0)); if(want<=0) return null;
+    const walls=(blocked||[]).filter(b=>b && b.end>b.start).map(b=>({start:b.start, end:b.end}))
+      .sort((a,b)=>a.start-b.start);
+    const merged=[]; walls.forEach(w=>{ const last=merged[merged.length-1];
+      if(last && w.start<=last.end) last.end=Math.max(last.end, w.end); else merged.push({start:w.start, end:w.end}); });
+    const gaps=[]; let cur=start;
+    merged.forEach(w=>{ if(w.end<=cur) return; const e=Math.min(w.start, winEnd);
+      if(e>cur) gaps.push({start:cur, end:e}); cur=Math.max(cur, w.end); });
+    if(cur<winEnd) gaps.push({start:cur, end:winEnd});
+    const out=[]; let left=want;
+    gaps.forEach(g=>{ if(left<=0) return;
+      const cap=Math.floor((g.end-g.start)/60000); if(cap<=0) return;
+      const take=Math.min(cap, left); out.push({start:g.start, dur:take}); left-=take; });
+    return left>0 ? null : out;
+  }
+  /* The blocking obstacles a drop on day B must split around, `id`'s own blocks excluded. Impure (it
+     reads the day) but built from `dayIntervals` + `fixedBlocksToday` — the SAME single source
+     computeAllotted and buildDayTimeline consume — so a split can never land somewhere the pool does
+     not know about. */
+  dropWallsOn(B, id, tasks){
+    const src=tasks||this.state.tasks;
+    const di=this.dayIntervals(B, null, this.fixedBlocksToday(B, src), []);
+    return {walls:di.busy.filter(b=>b.blocking && b.taskId!==id), winStart:di.winStart, winEnd:di.winEnd};
+  }
+  /* PP-EXT (04): `opts.partial` pins only these minutes (the dragged chunk of a split task) and leaves the
+     rest of the task in the flexible pool; `opts.origStart` is the dragged chunk's own start and is the pin
+     IDENTITY — (day, start), never a chunk index, because a repack changes indices but a pin must survive
+     one. Without opts this is the pre-04 whole-task pin: the task becomes fixed work for the day.
+     PP-EXT (11): `opts.free` (Alt) keeps the drop contiguous; otherwise it may land as several records. */
+  pinBlockAt(id, rawStart, dur, targets, B, opts){
     if(B==null) B=this.startOfDay(this.state.nowTick||Date.now());
     const start=this.snapPinStart(rawStart, dur, B, targets), d=Math.round(dur);
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin={day:B, start, dur:d}; });
+    const partial=!!(opts&&opts.partial), origStart=opts?opts.origStart:null;
+    /* PP-EXT (11): one drop → one or more records. `recs` is the contiguous single record whenever the
+       split is suppressed (Alt), unnecessary (nothing blocking in the way) or impossible (the minutes
+       do not fit), so every pre-11 drop still writes exactly what it wrote before. */
+    const w=(opts&&opts.free) ? null : this.dropWallsOn(B, id);
+    const pieces=w ? this.splitDropPieces(start, d, w.walls, w.winEnd) : null;
+    const recs=(pieces && pieces.length) ? pieces : [{start, dur:d}];
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      if(!partial){ t.pin=recs.map(p=>({day:B, start:p.start, dur:p.dur})); return; }
+      /* keep other days' pins and this day's OTHER chunks; drop the record this drag replaces and any
+         whole-day pin for B (a whole pin and a partial pin cannot both describe the same day). */
+      const list=this.pinsOf(t).filter(p=>p.day!==B || (p.partial && p.start!==origStart));
+      recs.forEach(p=>list.push({day:B, start:p.start, dur:p.dur, partial:true}));
+      t.pin=list; });
   }
-  unpinBlock(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.pin=null; }); }
+  /* Unpin one block when (B, start) identify it, else every pin the task holds. */
+  unpinBlock(id, B, start){
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      if(B==null || start==null){ t.pin=null; return; }
+      /* PP-EXT (11): a WHOLE-task pin can now be several records (the pieces of one split drop), but it
+         is still ONE placement of the whole day's work, so its ✕ takes all of them off — otherwise the
+         user would have to dismiss a placement they made with one gesture piece by piece. A PARTIAL pin
+         is still removed record by record: those are separate chunks by construction. */
+      const hit=this.pinsOf(t).find(p=>p.day===B && p.start===start);
+      const drop=(hit && !hit.partial) ? (p=>p.day===B && !p.partial) : (p=>p.day===B && p.start===start);
+      const list=this.pinsOf(t).filter(p=>!drop(p));
+      t.pin=list.length?list:null; });
+  }
+  /* ==== PP-EXT (04b): REGROUP — re-join a task's split blocks into one contiguous block ====
+     Owner, 2026-08-05. A day that splits a task around an appointment (or around a pin the user has
+     since moved) leaves no way back to a single run of work: undo rewinds edits, it cannot re-join
+     blocks the packer split. Regroup is a NEW action, not a restore. It works the only way it can —
+     by pinning the task's whole drawn span for the day at a time where it fits in one piece.
+     "Moving what is in the way or scheduling after it" (the owner's words) resolves as: other
+     FLEXIBLE work is what moves, because it repacks around the new pin on its own; appointments,
+     meals and other tasks' pins do not move, so the span is scheduled after them. */
+  /* The contiguous span regroup would use, or null when there is nothing to regroup (fewer than two
+     chunks) or nowhere it fits. Callers render the affordance only when this returns a span, so the
+     button never offers something the day cannot do. `data` reuses an already-built timeline. */
+  regroupSpan(B, id, data){
+    if(B==null) B=this.startOfToday();
+    data=data||this.buildDayTimeline(B);
+    const mine=data.chunks.filter(c=>c.start && c.id===id).sort((a,b)=>a.start-b.start);
+    if(mine.length<2) return null;
+    const durMs=mine.reduce((a,c)=>a+(c.end-c.start), 0);
+    if(durMs<=0) return null;
+    /* Immovable: appointments, meals, and OTHER tasks' pins — all of which render as fixed/meal.
+       The task's own chunks (including its own pins) are what we are re-joining, so they are not
+       obstacles. Flexible blocks are absent by design: they repack. */
+    const walls=data.chunks.filter(c=>c.start && c.id!==id && (c.type==='fixed'||c.type==='meal'))
+      .map(c=>({start:c.start, end:c.end})).sort((a,b)=>a.start-b.start);
+    const gaps=[]; let cur=data.dayStart;
+    walls.forEach(w=>{ if(w.start>cur) gaps.push({start:cur, end:w.start}); cur=Math.max(cur, w.end); });
+    if(cur<data.dayEnd) gaps.push({start:cur, end:data.dayEnd});
+    const from=mine[0].start;
+    /* Prefer the earliest slot at or after where the task already starts — regrouping should not
+       silently drag today's work backwards past what the user has already done. */
+    let start=null;
+    gaps.forEach(g=>{ if(start!=null) return; const s=Math.max(g.start, from); if(s+durMs<=g.end) start=s; });
+    if(start==null) gaps.forEach(g=>{ if(start!=null) return; if(g.start+durMs<=g.end) start=g.start; });
+    return start==null ? null : {start, end:start+durMs};
+  }
+  /* Pin that span. A regrouped task holds its whole day in one block, so this is a WHOLE-task pin
+     (no `partial`) — the pre-04 meaning, and the accurate one here. Other days' pins survive; this
+     day's pins are replaced by the single joined record, and the ✕ still unpins it. */
+  regroupTask(id, B){
+    if(B==null) B=this.startOfToday();
+    const span=this.regroupSpan(B, id); if(!span) return false;
+    const d=Math.round((span.end-span.start)/60000);
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      const list=this.pinsOf(t).filter(p=>p.day!==B);
+      list.push({day:B, start:span.start, dur:d});
+      t.pin=list; });
+    return true;
+  }
   /* Timeline block draggable for any LEAF flexible block (top-level or subtask) or an existing drag-pin (to
      move it). Both-pinned / gcal-timed fixed blocks and parent (family) blocks are not draggable — a family
      block is subdivided, so there's no single span to pin. A pinned leaf subtask leaves its parent's family. */
@@ -6000,14 +6771,133 @@ class Component extends DCLogic {
   blockPointerDown(e, c, B, opts){
     if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
     const today=this.startOfToday(); if(B==null) B=today;
-    let dur;
-    if(c.type==='fixed') dur=Math.round((c.end-c.start)/60000);
-    else { const allot=(B===today)?this._allot:this.computeAllotted(this.state.tasks, B); /* PP-EXT: pin the day's own allotment */
-      const a=allot&&allot[c.id]; dur=Math.round(a?a.allotted:((c.end-c.start)/60000)); }
+    /* PP-EXT (04): the drag unit is the CHUNK, so the pinned duration is the chunk's own span for every
+       block type. (Pre-04 a flexible block pinned the task's whole-day allotment, which forced a split
+       task back into one continuous block.) When the task renders as more than one chunk today the pin
+       is partial: only these minutes are fixed, the rest repacks. */
+    const dur=Math.round((c.end-c.start)/60000);
     if(dur<=0) return;
-    this._blockDrag={ id:c.id, dur, day:B, px:(opts&&opts.px)||this._curColPx||this.TL_PXPM, /* PP-EXT: px/min at render → calibrates the drag */
-      startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false,
-      targets:this.snapTargets(c.id, B) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging */ };
+    const data=this.buildDayTimeline(B);
+    const partial=data.chunks.filter(x=>x.start && x.id===c.id).length>1;
+    /* PP-EXT (V4.3): the ORIGINAL this drag can snap back to. For an already-pinned block that is where
+       the packer WOULD put it (autoStartFor), so returning there means "give this block back to the
+       app"; for an unpinned block the block is already where the app put it, so its current start is
+       the original and returning there simply writes nothing instead of pinning it in place. */
+    const wasPin=!!c.dragPin;
+    const orig=wasPin?this.autoStartFor(c.id, B):c.start;
+    this._blockDrag={ id:c.id, dur, day:B, partial, px:(opts&&opts.px)||this._curColPx||this.TL_PXPM, /* PP-EXT: px/min at render → calibrates the drag */
+      startClientY:e.clientY, origStart:c.start, previewStart:c.start, moved:false, wasPin, orig, free:false, atOrig:false,
+      targets:this.snapTargets(c.id, B, c.start, data) /* PP-EXT: neighbour edges captured once so the block snaps to them while dragging (04: siblings included) */ };
+    this.forceUpdate();
+  }
+  /* ==== PP-EXT (V4.2): EDGE-DRAG = sticky manual ALLOTTED override ====
+     Two gestures on one block, and the semantic split is the whole point:
+       · BODY-drag  → WHEN the work happens (a per-day drag-pin; blockPointerDown, unchanged).
+       · EDGE-drag  → HOW MUCH of the day the task gets (a manual allotment that survives every later
+                      re-compression until it is reset).
+     The override reuses the EXISTING `predicted` / `predictManual` pair — the same seam the sheet's
+     Predict column writes through `setPredict`/`togglePredictManual` — rather than a parallel per-block
+     field. Consequences that fall out of that reuse, all deliberate:
+       · `compressionSeam` already takes every `predictManual` task's minutes off the top before it
+         splits the pool, so the OTHER tasks re-compress around the fixed one with no new code, and the
+         pool-agreement invariant is untouched (`fixedBlocksToday` is still the single source).
+       · the sheet shows the resized task as "✎ manual", and its existing ∿/✎ toggle is already the
+         Reset. V4.3 owns a dedicated Reset control.
+       · `predicted` is a TASK field, not a per-day one, so an edge-drag in a future column overrides
+         that task's allotment on every day. That is what "do not add a field" costs; the alternative
+         is a per-day override map, which is a data-model change this chunk is not authorised to make. */
+  /* Resizable = the block actually participates in the compression seam as itself. A family block is
+     subdivided among its children, a subtask's allotment is handed down by `distribute` (writing
+     `predicted` on it would be overwritten on the next pack), an appointment's span is its event's, and
+     a pinned block's span is its pin's — none of those is an allotment this override could move. */
+  blockResizable(c, kb){
+    if(!c || !c.start || !c.id || c.type!=='scheduled') return false;
+    const t=kb.byId[c.id]; if(!t) return false;
+    if(kb.kids[c.id] && kb.kids[c.id].length) return false;
+    if(t.parentId!=null && kb.byId[t.parentId]) return false;
+    return true;
+  }
+  /* Pure: the day total an edge-drag of `deltaMin` minutes produces. Floored so a drag past the top of
+     the block cannot allot 0 (or negative) minutes and make the block it is holding disappear. */
+  /* PP-EXT (V4.3): the same three-way rule the body drag now uses, in the allotment's own units.
+       · `opts.orig` — the COMPUTED (auto) allotment. Priority snap: ALLOT_ORIG_MAGNET (12m) is wider
+         than a whole grid step, so near the computed value the grid can never win, and the release
+         treats landing there as "go back to auto", not "manually override to the same number".
+       · `opts.free` — Alt: whole minutes, no grid.
+       · otherwise the ALLOT_SNAP grid, which is what V4.2 deliberately left to this block.
+     With no `opts` at all the result still floors at EDGE_MIN_ALLOT, so a drag past the top of the
+     block can never allot 0 minutes and make the block vanish under the pointer. */
+  edgeAllotFor(base, deltaMin, opts){
+    const o=opts||{}; const raw=Math.max(0,base||0)+(deltaMin||0);
+    let v;
+    if(o.free) v=Math.round(raw);
+    else if(o.orig!=null && Math.abs(raw-o.orig)<=this.ALLOT_ORIG_MAGNET) v=Math.round(o.orig);
+    else v=Math.round(raw/this.ALLOT_SNAP)*this.ALLOT_SNAP;
+    return Math.max(this.EDGE_MIN_ALLOT, v);
+  }
+  /* The allotment an edge-drag lands on when it snaps back to the original, i.e. the value that means
+     "this task is auto again". Kept as one expression so the move handler, the release and the tests
+     cannot drift apart on the floor. */
+  edgeOrigAllot(orig){ return orig==null?null:Math.max(this.EDGE_MIN_ALLOT, Math.round(orig)); }
+  /* The numeric sibling of `setPredict` (which parses a duration STRING off the sheet input). */
+  setAllottedManual(id, minutes){
+    const m=Math.max(0, Math.round(minutes||0));
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; t.predicted=m; t.predictManual=true; });
+  }
+  /* ==== PP-EXT (V4.3): RESET — restore the computed schedule ====
+     One method, one `commit()`, therefore ONE undo entry that recovers both halves of an override at
+     once. It clears exactly the two things a hand can override on a block: the manual allotment flag
+     (HOW MUCH — the `predictManual` the edge-drag and the sheet's Predict column both write) and this
+     day's drag-pins (WHEN — what the body-drag writes). `predicted` itself is left alone, exactly as
+     `togglePredictManual` leaves it: the seam only honours it while `predictManual` is set, and keeping
+     the number means re-enabling the override restores the value the user chose.
+     No parallel undo path: `commit()` snapshots, and Ctrl+Z is the same key it always was. */
+  blockOverridden(t, B){ return !!t && (!!t.predictManual || (B!=null && this.pinsOf(t).some(p=>p.day===B))); }
+  resetBlock(id, B){
+    const t0=(this.state.tasks||[]).find(x=>x.id===id);
+    if(!this.blockOverridden(t0, B)) return;                 /* nothing to restore ⇒ no empty undo entry */
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      t.predictManual=false;
+      const rest=(B==null)?[]:this.pinsOf(t).filter(p=>p.day!==B);
+      t.pin=rest.length?rest:null; });
+  }
+  /* The edge-drag's own snap-back: it restores the ALLOTMENT only. A resize says nothing about when the
+     work happens, so it must not silently unpin a task that is pinned on some other chunk or day. */
+  clearAllottedManual(id){
+    const t0=(this.state.tasks||[]).find(x=>x.id===id);
+    if(!t0 || !t0.predictManual) return;
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.predictManual=false; });
+  }
+  /* PP-EXT (V4.3): where this task's block would start on day B if it were NOT pinned there — i.e. the
+     ORIGINAL the body drag snaps back to. Computed by re-packing the day once, at pointer-down, against
+     a copy of the tasks with day B's pins for this task removed. The task/allot swap is the same
+     synchronous, restored-in-finally trick `buildDayTimeline` already uses for multi-day allotments;
+     nothing renders in between. `_allot=null` forces the today branch to recompute against the copy.
+     Returns null when the unpinned task would not schedule at all — the caller then simply offers no
+     original-snap, which is strictly better than snapping to a position that does not exist. */
+  autoStartFor(id, B){
+    const origTasks=this.state.tasks, origAllot=this._allot;
+    try{
+      this.state.tasks=origTasks.map(t=>{ if(t.id!==id) return t;
+        const rest=this.pinsOf(t).filter(p=>p.day!==B); return Object.assign({},t,{pin:rest.length?rest:null}); });
+      this._allot=null;
+      const mine=this.buildDayTimeline(B).chunks.filter(c=>c.start && c.id===id);
+      return mine.length?mine[0].start:null;
+    }catch(err){ return null; }
+    finally{ this.state.tasks=origTasks; this._allot=origAllot; }
+  }
+  /* `opts.px` is the px-per-minute the block was RENDERED at, passed explicitly by the caller rather
+     than read off `_curColPx` — on a multi-day grid `_curColPx` holds whichever column rendered last. */
+  edgePointerDown(e, c, B, opts){
+    if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
+    if(B==null) B=this.startOfToday();
+    const am=this.computeAllotted(this.state.tasks, B);
+    const base=Math.max(0, (am[c.id]&&am[c.id].allotted)||0);
+    /* PP-EXT (V4.3): `orig` is the COMPUTED allotment, not `base` — on a task that was already resized
+       the two differ, and it is the computed one a drag-back has to restore. */
+    const orig=(am[c.id]&&am[c.id].computed);
+    this._edgeDrag={ id:c.id, day:B, origStart:c.start, base, allot:base, orig:(orig==null?null:orig), free:false, atOrig:false,
+      px:(opts&&opts.px)||this._curColPx||this.TL_PXPM, startClientY:e.clientY, moved:false };
     this.forceUpdate();
   }
   /* PP-EXT: one day's vertical timeline (Today view + each 4-Day/Week column). B = the day; opts.showLabels
@@ -6018,6 +6908,57 @@ class Component extends DCLogic {
       meal:{bg:'linear-gradient(45deg,#D3C7E6,#E8D8E0)',fg:'#332b3a'},
       fixed:{bg:'linear-gradient(45deg,#C8E6D2,#E2F0DC)',fg:'#233529'},
       unscheduled:{bg:'linear-gradient(45deg,#BEDAE3,#DEE6DF)',fg:'#2a3538'}}; }
+  /* PP-EXT (12): OVERLAP LAYOUT — pure. Owner spec, 2026-08-06 (Google Calendar as the reference):
+     "Side by side if the titles will overlap (50/50), offset otherwise (~90/10). Recursively defined
+     for >2 tasks."
+
+     The rule, once, so it is never re-invented downstream:
+       1. Group blocks into overlap CLUSTERS — connected components under time intersection. Abutting
+          (`a.end === b.start`) is not an intersection, so a normally-packed day is one block per cluster
+          and this function is a no-op on it. That is what keeps every pre-12 column byte-identical.
+       2. Sort each cluster by start.
+       3. Every block runs from its own left edge to the cluster's RIGHT edge; the later block draws on
+          top. Only the left edge moves — nobody's right edge is ever cut, which is why the last block in
+          a cluster is always fully readable.
+       4. The step from one block's left edge to the next is a fraction of the REMAINING width (i.e. of
+          the previous block's own width): OVERLAP_STEP_TITLE when their title bands collide,
+          OVERLAP_STEP_OFFSET when they do not. Two colliding blocks read 50/50; two non-colliding read
+          90/10 (the later one takes 90% and the earlier shows a 10% sliver — exactly GCal's short-task-
+          inside-a-long-Work-event shape). Three or more fall out of the same recursion: each step is
+          taken against what is left, so no case is special-cased and none is needed.
+     "Title bands collide" is a PIXEL test, not a minutes test — the next block's top edge falls within
+     the top TITLE_BAND_PX of the current one — so the answer legitimately changes with the column's
+     scale. At the drawer's fit scale a 30-minute gap clears the band; zoomed far out it does not, and
+     the pair correctly goes side by side because that is when the titles really would collide.
+
+     @param {{start:number,end:number}[]} list blocks in render order; epoch ms. Entries without a
+       `start` are laid out at the full width and take part in no cluster.
+     @param {number} px px-per-minute the column is rendered at (local, pre-zoom).
+     @returns {{left:number,z:number}[]} parallel to `list`. `left` is the fraction of the block band the
+       block's left edge sits at (0 = full width); `z` is its depth within its cluster, clamped to
+       OVERLAP_MAX_Z. Paint order is DOM order (buildDayTimeline sorts chunks by start), so `z` is
+       belt-and-braces for the case where two blocks share a start. */
+  overlapLayout(list, px){
+    const n=(list&&list.length)||0; const out=[];
+    for(let i=0;i<n;i++) out.push({left:0,z:0});
+    if(!n) return out;
+    const bandMs=(this.TITLE_BAND_PX/Math.max(1e-6, px||this.TL_PXPM))*60000;
+    const ord=[]; for(let i=0;i<n;i++){ const b=list[i]; if(b && b.start!=null && b.end!=null) ord.push(i); }
+    /* Longest-first on a tie so a same-start container is the one that keeps the full width. */
+    ord.sort((a,b)=>(list[a].start-list[b].start)||(list[b].end-list[a].end)||(a-b));
+    let clusterEnd=null, prev=-1, depth=0;
+    ord.forEach(i=>{ const b=list[i];
+      if(prev<0 || b.start>=clusterEnd){ out[i]={left:0,z:0}; clusterEnd=b.end; depth=0; }
+      else {
+        const collide=(b.start-list[prev].start) < bandMs;
+        const step=collide?this.OVERLAP_STEP_TITLE:this.OVERLAP_STEP_OFFSET;
+        const pl=out[prev].left; depth++;
+        out[i]={left: pl + step*(1-pl), z: Math.min(depth, this.OVERLAP_MAX_Z)};
+        clusterEnd=Math.max(clusterEnd, b.end);
+      }
+      prev=i; });
+    return out;
+  }
   renderDayColumn(B, opts){
     opts=opts||{}; const showLabels=opts.showLabels!==false; const allowDrag=opts.drag!==false;
     const h=React.createElement; const data=this.buildDayTimeline(B);
@@ -6028,60 +6969,192 @@ class Component extends DCLogic {
     /* PP-EXT: fit the timeline to the measured available height (no scroll until an Unscheduled list overflows).
        Falls back to the fixed TL_PXPM scale before the container is measured. `_curColPx` feeds the block-drag
        px→minutes conversion so dragging stays calibrated to whatever scale we render at. */
-    /* PP-EXT (Group 2): opts.zoom scales the fitted px; H always follows px so zoom-in grows the body and
-       the drawer's overflow:auto wrapper scrolls. zoom omitted / 1 ⇒ identical to fit-to-height. */
-    const zoom = Math.max(this.DRAWER_ZOOM_MIN, Math.min(this.DRAWER_ZOOM_MAX, opts.zoom||1));
+    /* PP-EXT (V4.4): opts.zoom scales the fitted px, and is now SNAPPED to one of the two levels rather
+       than clamped into a range — an out-of-vocabulary value reads as fit rather than as "some zoom".
+       H always follows px, so expanding grows the body and the drawer's overflow:auto wrapper scrolls.
+       zoom omitted / DRAWER_ZOOM_FIT ⇒ byte-identical to fit-to-height, which is what keeps every
+       pre-V4.4 caller (both multi-day views, the Schedule view) exactly where it was. */
+    const zoom = this.drawerZoomFactor(this.drawerZoomIsExpanded(opts.zoom));
     const basePx = (opts.availH && opts.availH>40) ? Math.max(0.15, opts.availH/totalMin) : this.TL_PXPM;
     const px = basePx * zoom;
-    const H = (zoom===1 && opts.availH && opts.availH>40) ? opts.availH : totalMin * px; /* PP-EXT (Group 2): preserve exact fit-to-height at zoom=1 (incl. the 0.15 px-floor clamp case) */
+    const H = (zoom===this.DRAWER_ZOOM_FIT && opts.availH && opts.availH>40) ? opts.availH : totalMin * px; /* preserve exact fit-to-height at the fit level (incl. the 0.15 px-floor clamp case) */
     this._curColPx = px;
     const now=this.state.nowTick||Date.now();
     const bd=this._blockDrag; /* PP-EXT: live drag-pin preview (only for the column being dragged) */
+    const ed=this._edgeDrag;  /* PP-EXT (V4.2): live edge-drag preview (only for the column being dragged) */
     const gut=showLabels?34:2, blkLeft=showLabels?40:4;
     const topOf=ms=>((ms-dStart)/60000)*px;
     const TYP=this.TL_TYP();
     const labels=[]; if(showLabels) for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){
       const ms=new Date(dStart); ms.setHours(hh,0,0,0);
       labels.push(h('div',{key:'l'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:0,fontSize:'10px',color:'var(--text-mut2)',fontWeight:600}},((hh%12)||12)+(hh<12?'a':'p'))); }
-    const grid=[]; for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){ const ms=new Date(dStart); ms.setHours(hh,0,0,0);
-      grid.push(h('div',{key:'g'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:gut+'px',right:0,height:'1px',background:'var(--row-border-gantt)'}})); }
-    const blocks=data.chunks.filter(c=>c.start).map((c,i)=>{
+    /* PP-EXT (V4.1): hour BANDS beneath the hour lines. The multi-day columns share one gutter and draw
+       no labels of their own, so without banding every column is an identical blank field and the eye
+       cannot read a time off a block's position — that is the "identical bland columns" the V4 milestone
+       names. Bands are pointerEvents:none so they can never intercept a block drag, and each band is
+       pushed BEFORE its own hour line so the line always paints over it. Every 6th hour line is drawn
+       stronger, which gives the column a readable morning/midday/evening rhythm at any zoom. */
+    const grid=[]; const lastHour=new Date(dEnd).getHours();
+    for(let hh=startHour; hh<=lastHour; hh++){ const ms=new Date(dStart); ms.setHours(hh,0,0,0);
+      const y=topOf(ms.getTime()); const major=(hh%6===0);
+      if(hh<lastHour) grid.push(h('div',{key:'gb'+hh,style:{position:'absolute',top:y+'px',left:gut+'px',right:0,
+        height:(60*px)+'px',background:(hh%2)?'rgba(0,0,0,0.035)':'transparent',pointerEvents:'none'}}));
+      grid.push(h('div',{key:'g'+hh,style:{position:'absolute',top:y+'px',left:gut+'px',right:0,height:'1px',
+        pointerEvents:'none',background:'var(--row-border-gantt)',opacity:major?1:0.55}})); }
+    const drawn=data.chunks.filter(c=>c.start);
+    /* PP-EXT (12): overlap layout runs on the SHOWN geometry, not the committed one, so a block dragged
+       over a neighbour widens/narrows the pair live instead of snapping into place only on release. The
+       preview arithmetic is repeated from the map below rather than hoisted, because hoisting it would
+       move the drag/edge preview out of the one place a reader looks for it. */
+    const lay=this.overlapLayout(drawn.map(c=>{
+      const dg = bd && bd.moved && bd.id===c.id && bd.day===B && c.start===bd.origStart && c.type!=='unscheduled';
+      const eg = ed && ed.moved && ed.id===c.id && ed.day===B && c.start===ed.origStart;
+      const s = dg ? bd.previewStart : c.start;
+      return {start:s, end:s+(c.end-c.start)+(eg?(ed.allot-ed.base)*60000:0)};
+    }), px);
+    const blocks=drawn.map((c,i)=>{
       /* PP-EXT: while dragging this block on THIS day, float it to the (snapped) preview position */
-      const dragging = bd && bd.moved && bd.id===c.id && bd.day===B && c.type!=='unscheduled';
+      /* PP-EXT (04): match the ONE dragged chunk by (id, start) — matching by id alone floated every
+         chunk of a split task to the same preview position, so they visibly stacked. */
+      const dragging = bd && bd.moved && bd.id===c.id && bd.day===B && c.start===bd.origStart && c.type!=='unscheduled';
       const shownStart = dragging ? bd.previewStart : c.start;
-      const top=topOf(shownStart), height=Math.max(13,((c.end-c.start)/60000)*px-2);
+      /* PP-EXT (V4.2): while the bottom edge of THIS chunk is being dragged, preview the new size by
+         growing/shrinking the chunk by the whole allotment delta. Matched by (id, start) exactly as
+         the body drag is, so a split task previews on the chunk under the pointer and not on all of
+         them. After the release the packer decides how the new total is actually laid out. */
+      const edging = ed && ed.moved && ed.id===c.id && ed.day===B && c.start===ed.origStart;
+      const edgeDelta = edging ? (ed.allot-ed.base) : 0;
+      const top=topOf(shownStart), height=Math.max(13,(((c.end-c.start)/60000)+edgeDelta)*px-2);
       const cur = isToday && now>=c.start && now<c.end; const ty=TYP[c.type]||TYP.scheduled;
       const running=c.id && this.isRunning(c.id);
       const canDrag=allowDrag && this.blockDraggable(c, kb); /* PP-EXT */
-      const btn = c.type==='meal' ? null : h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
+      /* PP-EXT (V4.3): EVERY block child carries a stable key. The left controls are now a spread ARRAY
+         whose length changes as ↺ appears and disappears, and React reconciles keyless siblings BY
+         POSITION — so without keys the ▶ timer's node was reused for a control that had shifted into
+         its slot, and the click that followed a resize started a timer on the task just resized (which,
+         being the active task, was then pulled to `now` and fell out of the day entirely). Keys, not
+         re-ordering, are the fix: a keyed child is matched by key however many siblings precede it. */
+      const btn = c.type==='meal' ? null : h('div',{key:'tmr',onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
         title:running?'Stop timer':'Start timer',
         style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%',
           display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
           background:running?'#ea4335':'rgba(255,255,255,0.85)',color:running?'var(--on-accent)':'#1a73e8'}}, running?'■':'▶');
       /* PP-EXT: unpin ✕ on drag-pinned blocks (clears the pin → repacks flexibly) */
-      const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id);},onMouseDown:e=>e.stopPropagation(),
-        title:'Unpin (return to flexible scheduling)',
-        style:{position:'absolute',top:'2px',left:'2px',width:'16px',height:'16px',borderRadius:'50%',
-          display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'9px',
-          background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕') : null;
+      /* PP-EXT (04b, HIT_MIN_PX tenet): the ✕ used to BE its 16px glyph, inside a block whose height
+         floors at 13px and whose text starts 4px later — the one control that undoes a mis-drop was
+         the hardest thing on the timeline to hit. The glyph is unchanged; it now sits inside a
+         transparent HIT_MIN_PX-wide, full-height hit column at the block's left edge, and the block's
+         left padding clears that column so the title never shares pixels with it. The ▶ timer is on
+         the opposite edge, so the two targets cannot collide however short the block is. */
+      /* PP-EXT (V4.3): the left controls are now a COLUMN of HIT_MIN_PX slots rather than one fixed
+         position, because Reset can coexist with ✕/⧉ on the same block. Each keeps the full tenet-sized
+         target; the block's left padding and the edge handle's inset both follow the slot COUNT. */
+      const leftCtl = (inner, title, onClick, slot, extra) => h('div',
+        Object.assign({key:'lc'+(slot||0),onClick:e=>{e.stopPropagation();onClick();},onMouseDown:e=>e.stopPropagation(),
+          title,
+          style:{position:'absolute',top:0,bottom:0,left:((slot||0)*this.HIT_MIN_PX)+'px',width:this.HIT_MIN_PX+'px',zIndex:2,
+            display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}, extra||{}),
+        h('span',{style:{width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',
+          justifyContent:'center',fontSize:'9px',background:'rgba(255,255,255,0.85)',color:'#233529'}}, inner));
+      /* PP-EXT (04b): regroup — offered on the FIRST non-pinned chunk of a task the day has split,
+         and only when a contiguous slot for the whole thing actually exists, so the affordance never
+         offers something that would silently do nothing. */
+      const mineHere = data.chunks.filter(x=>x.start && x.id===c.id);
+      const rgSpan = (allowDrag && c.id && !c.dragPin && mineHere.length>1 && mineHere.find(x=>!x.dragPin)===c)
+        ? this.regroupSpan(B, c.id, data) : null;
+      /* PP-EXT (V4.3): RESET ↺ — restores the computed allotment AND drops this day's pin, in one
+         `commit()` (so one Ctrl+Z undoes the whole restoration). It is offered only when the task
+         carries a MANUAL ALLOTMENT, because a pin-only override already has a dedicated control — the
+         ✕ — and two adjacent buttons doing the same thing is worse than one. On a block that is both
+         resized and pinned the ↺ is the one that undoes both. */
+      const tkHere = (c.id!=null) ? kb.byId[c.id] : null;
+      const canReset = allowDrag && c.type!=='meal' && !!(tkHere && tkHere.predictManual);
+      const ctlDefs=[];
+      if(c.dragPin) ctlDefs.push(['✕','Unpin (return to flexible scheduling)', ()=>this.unpinBlock(c.id, B, c.start), null]); /* PP-EXT (04): unpins THIS block */
+      if(rgSpan) ctlDefs.push(['⧉','Regroup — join this task\'s blocks into one', ()=>this.regroupTask(c.id, B), null]);
+      if(canReset) ctlDefs.push(['↺','Reset — restore the computed time and position', ()=>this.resetBlock(c.id, B),
+        {'data-tl-reset':'1','data-tl-reset-task':String(c.id)}]);
+      const leftEls = ctlDefs.map((d,ix)=>leftCtl(d[0],d[1],d[2],ix,d[3]));
+      const nLeft = ctlDefs.length;
       const tip = c.type==='fixed'
         ? (c.dragPin ? 'Pinned to this day — drag to move, ✕ to unpin'
                      : 'Pinned at its clock time — edit the event time to move it')
-        : (canDrag ? 'Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')
+        : (canDrag ? 'Drag to pin at a time · hold Alt for free placement'+(c.goal?(' · Goal: '+c.goal):'') /* PP-EXT (V4.3) */
                    : (c.goal?('Goal: '+c.goal):c.title));
+      /* PP-EXT (V4.1): LOCKED (hand-placed pin or clock-fixed event) vs AUTO-SCHEDULED. The grid has to
+         answer "did I put this here, or did the app?" at a glance, so the two get different SURFACES and
+         not merely different hues: a locked block is flat-filled and carries a solid left rail, while an
+         auto-scheduled one carries a diagonal hatch that reads as provisional — the objective-vs-seized
+         distinction the V4 milestone asks for. The 📌/📍 glyphs stay as the non-colour channel, so the
+         distinction survives a colour-blind reader and a greyscale screenshot. Render only: nothing here
+         changes which minutes a task gets, only how the minutes it already has are drawn. */
+      const locked = c.type==='fixed';
+      const kind = c.type==='meal' ? 'meal'
+        : (locked ? (c.dragPin?'pinned':'fixed')
+                  : (c.type==='scheduled' ? 'auto' : c.type));
+      const bg = (kind==='auto')
+        ? 'repeating-linear-gradient(45deg,rgba(255,255,255,0.34) 0 6px,rgba(255,255,255,0) 6px 14px), '+ty.bg
+        : ty.bg;
+      const rail = locked ? ('inset 3px 0 0 '+(c.dragPin?'#1e7a4c':'#14532d')) : 'inset 3px 0 0 rgba(0,0,0,0.07)';
+      /* PP-EXT (V4.2): the EDGE handle — a HIT_MIN_PX-tall strip along the block's BOTTOM edge that
+         drags the task's allotted minutes. Design constraints it satisfies, each for a stated reason:
+           · BOTTOM edge, not left/right. 04b's ✕/⧉ hit column already owns the left edge and the ▶
+             timer the right; the horizontal edges were the only ones still free (05 confirmed it).
+             A bottom edge is also the one whose meaning is unambiguous — it moves the END of the
+             block, i.e. how long the task runs, without also moving when it starts.
+           · DISTINGUISHABLE BEFORE COMMITTING. The handle carries `cursor:ns-resize` against the
+             body's `grab`, plus a visible grip bar and its own tooltip — all three readable on hover,
+             before the button goes down. This is the requirement that rules out an invisible edge zone.
+           · HIT_MIN_PX tall, glyph ≠ hit box (owner tenet): the grip bar is 26×3, the target is the
+             full width × HIT_MIN_PX strip around it.
+           · It only appears on blocks at least EDGE_MIN_BLOCK_PX (3×HIT_MIN_PX) tall, so the body
+             keeps a target twice the handle's height and a press anywhere in a block's upper half is
+             ALWAYS a body-drag — the two gestures can never race for the same pixel. A shorter block
+             is body-drag only; its allotment is still editable from the sheet's Predict column (the
+             same `predicted` field), and zooming the day drawer in makes the handle appear. Better
+             than two gestures fighting over a block whose height floors at 13px.
+           · It is inset past the left control column when one is present, so it can never steal the
+             bottom-left corner of the ✕ that 04b widened on purpose. */
+      const canResize = allowDrag && kind==='auto' && height>=this.EDGE_MIN_BLOCK_PX && this.blockResizable(c, kb);
+      const edgeH = canResize ? h('div',{key:'edge',onMouseDown:e=>this.edgePointerDown(e,c,B,{px}),
+        'data-tl-edge':'1', 'data-tl-edge-task':(c.id!=null?String(c.id):''),
+        title:'Drag to change how much time this task gets — the override sticks through re-scheduling · drag back to the original size to go auto again · hold Alt for free sizing', /* PP-EXT (V4.3) */
+        style:{position:'absolute',left:(nLeft*this.HIT_MIN_PX)+'px',right:0,bottom:0, /* PP-EXT (V4.3): clear the WHOLE left control column, however many slots it holds */
+          height:this.HIT_MIN_PX+'px',zIndex:3,cursor:'ns-resize',
+          display:'flex',alignItems:'flex-end',justifyContent:'center',paddingBottom:'2px'}},
+        h('span',{style:{width:'26px',height:'3px',borderRadius:'2px',pointerEvents:'none',
+          background:edging?'rgba(0,0,0,0.6)':'rgba(0,0,0,0.28)'}})) : null;
+      /* PP-EXT (V4.1): stable machine hooks. Before this the e2e layer addressed blocks by matching three
+         tooltip STRINGS, so any copy change looked like a gesture regression (04v flagged it and could not
+         fix it, being tests-only). `data-tl-day` is what makes "this block is in the right day's column"
+         assertable at all on the multi-day grid. */
+      /* PP-EXT (12): the block band runs from blkLeft to 6px off the right edge; an overlapped block's
+         left edge steps into that band by `lay.left` of its width and keeps the same right edge. Written
+         as a calc() rather than a percentage so the band's own two px insets stay exact at any column
+         width — which is what makes this hold in the narrow 4-Day/Week columns as well as the drawer. */
+      const ov=lay[i]||{left:0,z:0};
+      const blkLeftCss = ov.left>0
+        ? ('calc('+blkLeft+'px + '+ov.left+' * (100% - '+(blkLeft+6)+'px))')
+        : (blkLeft+'px');
       return h('div',{key:'b'+i,title:tip,
+        'data-tl-block':'1','data-tl-day':String(B),'data-tl-kind':kind,
+        'data-tl-ov':String(ov.left), /* PP-EXT (12): the layout's own answer, so an e2e failure reads as "the rule said 0.5" and not as a pixel mystery */
+        'data-tl-task':(c.id!=null?String(c.id):''),
         onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B)):null, /* PP-EXT: drag to pin (this day) */
         /* PP-EXT (owner 2026-08-04): a non-draggable block (a fixed appointment with no drag-pin, or a
            parent with children) still opens details on click; draggable ones go through the no-move
            branch in the block mouseup instead, so they don't open twice. */
         onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
-        style:{position:'absolute',left:blkLeft+'px',right:'6px',top:top+'px',height:height+'px',background:ty.bg,color:ty.fg,
-          borderRadius:'6px',padding:'3px 22px 3px '+(c.dragPin?'20px':'7px'),fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap',
-          textOverflow:'ellipsis',boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)',
+        style:{position:'absolute',left:blkLeftCss,right:'6px',top:top+'px',height:height+'px',background:bg,color:ty.fg,
+          borderRadius:'6px',padding:'3px 22px 3px '+(nLeft?(nLeft*this.HIT_MIN_PX+3):7)+'px',fontSize:'11px',fontWeight:600,overflow:'hidden',whiteSpace:'nowrap', /* PP-EXT (04b): clear the left hit column (V4.3: one slot per control) */
+          /* PP-EXT (V4.3): while a gesture sits ON the priority snap-to-original, ring the block instead of
+           shadowing it — "let go here and this goes back to being the app's decision" is the one thing
+           about the snap a user cannot otherwise see before committing to the release. */
+        textOverflow:'ellipsis',boxShadow:(((dragging&&bd.atOrig)||(edging&&ed.atOrig))?'0 0 0 2px #1a73e8':(dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)'))+', '+rail, /* PP-EXT (V4.1): + locked/auto left rail */
           cursor:canDrag?(dragging?'grabbing':'grab'):'default',
-          opacity:dragging?0.9:1, zIndex:dragging?6:'auto',
+          opacity:dragging?0.9:1, zIndex:dragging?6:(ov.z?ov.z:'auto'), /* PP-EXT (12): later-in-cluster paints over earlier; clamped under Points (4) and the now-line (5) */
           border:cur?'2px solid #ea4335':(c.type==='fixed'?(c.dragPin?'2px dashed rgba(35,53,41,0.6)':'2px solid rgba(35,53,41,0.45)'):'1px solid rgba(0,0,0,0.15)')}}, /* PP-EXT: dashed = drag-pin */
-        (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, unpin, btn); });
+        (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, ...leftEls, btn, edgeH); });
     const nowLine = (isToday && now>=dStart&&now<=dEnd) ? h('div',{key:'now',style:{position:'absolute',left:gut+'px',right:0,top:topOf(now)+'px',height:'2px',background:'#ea4335',zIndex:5}},
       h('div',{style:{position:'absolute',left:0,top:'-3px',width:'8px',height:'8px',borderRadius:'50%',background:'#ea4335'}})) : null;
     /* PP-EXT (Group 2): render-only Points — a dotted marker + time label at a bare-time task's clock.
@@ -6163,13 +7236,22 @@ class Component extends DCLogic {
           borderBottom:'1px solid var(--row-border-gantt)',fontSize:'11.5px',fontWeight:700,
           color:isToday?'var(--on-accent)':'var(--text-2)',background:glow?'rgba(245,181,54,0.30)':(isToday?this._accent:(isHoverDay?'var(--hover)':'var(--gantt-bg)')),
           boxShadow:glow?'inset 0 0 0 2px rgba(245,181,54,0.75)':'none'}},
-        h('span',{},lab.dow),h('span',{style:{opacity:0.85,fontWeight:600}},lab.dom));
-      return h('div',{key:'col'+i,style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',
+        h('span',{},lab.dow),h('span',{style:{opacity:0.85,fontWeight:600}},lab.dom),
+        /* PP-EXT (V4.1): the month is shown on the first column and wherever a month turns over, so a
+           week that straddles a boundary still says which month each half is in. */
+        (i===0||lab.dom===1)?h('span',{style:{opacity:0.7,fontWeight:600,fontSize:'10px'}},lab.mon):null);
+      /* PP-EXT (V4.1): weekend columns are tinted and today's column is accent-washed, so the week reads
+         as a calendar rather than N identical fields. `data-tl-col` is the machine hook the e2e layer uses
+         to assert that a block landed in the right DAY's column and not a neighbour's. */
+      const dow=new Date(B).getDay(); const weekend=(dow===0||dow===6);
+      return h('div',{key:'col'+i,'data-tl-col':String(B),'data-tl-today':isToday?'1':'0',
+        style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',
+        background:isToday?'rgba(245,181,54,0.07)':(weekend?'rgba(0,0,0,0.05)':'transparent'),
         borderRight:i<days.length-1?'1px solid var(--row-border-gantt)':'none'}},
         hdr, h('div',{style:{flex:'none',minWidth:0}}, this.renderDayColumn(B, {showLabels:false, availH}))); });
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header||null,
-      h('div',{ref:el=>this.observeTLHeight(el),
+      h('div',{ref:el=>this.observeTLHeight(el),'data-tl-grid':String(days.length), /* PP-EXT (V4.1) */
         style:{flex:1,minHeight:0,display:'flex',alignItems:'flex-start',overflow:'auto'}},
         this.renderHourGutter(availH), ...cols));
   }
@@ -6244,17 +7326,23 @@ class Component extends DCLogic {
     const availH=(this._tlAvailH && this._tlAvailH>60) ? this._tlAvailH-12 : null;
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header, gerr, serr, /* PP-EXT B2 */ note, runbar, this.renderPomodoroBar(), /* PP-EXT Phase 10 */ this.renderTodayHabits(), /* PP-EXT Phase 9: today's habit check-off */
-      /* PP-EXT (Group 2): session-only day-drawer zoom. The ＋/－ overlay is pinned to the pane (not the
-         scrolling body); _drawerZoom is an instance field so a reload resets to fit-to-height. */
-      (()=>{ const zoom=this._drawerZoom||1;
-        const zBtn=(lbl,fn,dis,tip)=>h('div',{onClick:dis?null:fn,title:tip,
-          style:{width:'22px',height:'22px',borderRadius:'6px',display:'flex',alignItems:'center',justifyContent:'center',
-            fontSize:'14px',fontWeight:700,cursor:dis?'default':'pointer',opacity:dis?0.4:1,userSelect:'none',
-            background:'var(--sheet-bg)',border:'1px solid var(--divider)',color:'var(--text-2)'}}, lbl);
+      /* PP-EXT (V4.4): session-only day-drawer zoom, now ONE two-level toggle (fit ⇄ expanded) instead of
+         Group 2's ＋/－ pair. The overlay is still pinned to the pane (not the scrolling body), and
+         `_drawerZoom` is still an instance field, so a reload resets to fit. One control replaces two
+         because there is nothing between the levels: neither button can be disabled, so the "at a bound"
+         state that the ＋/－ pair spent half its logic on no longer exists.
+         The target is HIT_MIN_PX square (the owner tenet: the glyph is 14px, the hit box is not). */
+      (()=>{ const zoom=this.drawerZoomFactor(this.drawerZoomIsExpanded(this._drawerZoom));
+        const expanded=this.drawerZoomIsExpanded(zoom);
+        const zBtn=h('div',{onClick:()=>this.toggleDrawerZoom(),
+          'data-tl-zoom':expanded?'expanded':'fit',
+          title:expanded?'Fit the whole day to the pane':'Expand the day (taller hours, scrolls)',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'6px',display:'flex',
+            alignItems:'center',justifyContent:'center',fontSize:'14px',fontWeight:700,cursor:'pointer',
+            userSelect:'none',background:'var(--sheet-bg)',border:'1px solid var(--divider)',color:'var(--text-2)'}},
+          expanded?'⇱':'⇲');
         return h('div',{style:{position:'relative',flex:1,minHeight:0,display:'flex',flexDirection:'column'}},
-          h('div',{style:{position:'absolute',top:'8px',right:'12px',zIndex:8,display:'flex',gap:'4px'}},
-            zBtn('－',()=>{ this._drawerZoom=Math.max(this.DRAWER_ZOOM_MIN,(this._drawerZoom||1)/this.DRAWER_ZOOM_STEP); this.forceUpdate(); }, zoom<=this.DRAWER_ZOOM_MIN+0.001, 'Zoom out'),
-            zBtn('＋',()=>{ this._drawerZoom=Math.min(this.DRAWER_ZOOM_MAX,(this._drawerZoom||1)*this.DRAWER_ZOOM_STEP); this.forceUpdate(); }, zoom>=this.DRAWER_ZOOM_MAX-0.001, 'Zoom in')),
+          h('div',{style:{position:'absolute',top:'8px',right:'12px',zIndex:8,display:'flex',gap:'4px'}}, zBtn),
           h('div',{ref:el=>this.observeTLHeight(el), style:{flex:1,minHeight:0,overflow:'auto',padding:'6px 8px'}},
             this.renderDayColumn(B, {showLabels:true, availH, zoom}))); })(),
       this.renderMusicDock()); /* PP-EXT Phase 10: placeholder music dock (engine chosen later) */
@@ -6423,12 +7511,15 @@ class Component extends DCLogic {
         h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}}, timed.length?(timed.length+' block'+(timed.length>1?'s':'')):'—'));
       const chips=timed.map((c,i)=>{ const ty=TYP[c.type]||TYP.scheduled; const running=c.id&&this.isRunning(c.id);
         const canDrag=this.blockDraggable(c, kb);
-        const dragging = bd && bd.moved && bd.id===c.id && bd.day===B;
+        const dragging = bd && bd.moved && bd.id===c.id && bd.day===B && c.start===bd.origStart; /* PP-EXT (04): per-chunk, see renderDayColumn */
         const span=c.end-c.start; const st=dragging?bd.previewStart:c.start; const en=dragging?bd.previewStart+span:c.end;
-        const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id);},onMouseDown:e=>e.stopPropagation(),
+        const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id, B, c.start);},onMouseDown:e=>e.stopPropagation(), /* PP-EXT (04): unpins THIS block */
           title:'Unpin (return to flexible scheduling)',
-          style:{flex:'none',cursor:'pointer',width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
-            fontSize:'9px',background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕') : null;
+          /* PP-EXT (04b, HIT_MIN_PX tenet): same enlargement as the timeline block's ✕ — the glyph is
+             unchanged, the hit box around it is now HIT_MIN_PX square. */
+          style:{flex:'none',cursor:'pointer',width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center'}},
+          h('span',{style:{width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
+            fontSize:'9px',background:'rgba(255,255,255,0.85)',color:'#233529'}}, '✕')) : null;
         return h('div',{key:'sc'+i,
           title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
           onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
@@ -7039,8 +8130,16 @@ class Component extends DCLogic {
       this.richField('focusnote'+this.ymdOf(todayMs), this.journalHtmlFor(todayMs), html=>this.saveJournalHtml(todayMs, html), {
         placeholder:'Jot a note — bold, lists, whatever. Saved to today’s journal.', minHeight:154,
         style:{background:'var(--sheet-bg)'}}));
+    /* PP-EXT V3.1: the running scratchpad's home. It sits BELOW the day note deliberately — the note above
+       is today's journal entry and still rotates daily; this one never does. Reachable from any view with
+       "n" (gotoScratchpad). */
+    const scratchBox=h('div',{key:'scratch',style:{display:'flex',flexDirection:'column',gap:'6px',flex:'none'}},
+      label('Scratchpad'),
+      h('span',{style:{fontSize:'10px',color:'var(--text-faint)',marginTop:'-4px'}},
+        'One continuous doc — never resets, never per-day. Press “n” from anywhere to jump here.'),
+      this.renderScratchpad({minHeight:180, style:{background:'var(--sheet-bg)'}}));
     const leftCol=h('div',{style:{flex:'25 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'14px',padding:'16px',overflow:'auto'}},
-      this.renderPomodoroPanel(), this.renderMusicDock(), noteBox);
+      this.renderPomodoroPanel(), this.renderMusicDock(), noteBox, scratchBox);
     const habits=(this.state.habits||[]); const today=this.startOfToday();
     const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
     const due=habits.filter(hb=>this.habitScheduledOn(hb,today));
@@ -7552,7 +8651,13 @@ class Component extends DCLogic {
     const jHeader=h('div',{style:{display:'flex',alignItems:'baseline',gap:'8px',marginBottom:'8px'}},
       h('span',{style:{fontSize:'13px',fontWeight:700,color:'var(--text)'}},dstr),
       h('span',{style:{fontSize:'11px',color:'var(--text-faint)'}},'One free-text entry per day, saved automatically.'));
+    /* PP-EXT V3.2: "auto-open the first evening open" — session-guarded, and only for today's page (a
+       user paging back through last week is reading, not journalling). */
+    if(isToday) this.journalPromptsEveningAutoOpen();
     const editorCol=h('div',{style:{flex:'0 0 66%',minWidth:0,display:'flex',flexDirection:'column',padding:'16px',gap:'4px',minHeight:0}},
+      /* PP-EXT V3.2: the guided prompt set leads the page; the day's single free-text entry below is
+         still the only thing that persists. Prompts never capture answers. */
+      this.renderJournalPrompts(),
       jHeader,
       this.richField('j'+ymd, this.journalHtmlFor(B), html=>this.saveJournalHtml(B, html), {
         placeholder:'How did today go? What got in the way? What matters tomorrow…',
@@ -7563,7 +8668,12 @@ class Component extends DCLogic {
       card('Weather', wxBody, 'Today’s conditions, fetched once from Open-Meteo using your device location (keyless, no account). Turn off in Settings → Journal.'),
       collCard('done', isToday?'Done today':'Done', logBody, 'Auto-recorded: ✓ tasks completed, ⏱ tasks you logged time on, 🔁 habits done. Derived from your data — nothing to fill in.'),
       collCard('actuals', isToday?'Today’s actuals':'Actuals', actBody, 'Recorded (timer) vs allotted (that day’s plan) per task. Accent = recorded, grey = allotted.'),
-      collCard('planning', 'Needs planning', planned, 'Upcoming tasks with no Planned budget (Phase-7 “Unplanned”). Give them time here so tomorrow’s timeline can schedule them.', unplanned.length||null));
+      collCard('planning', 'Needs planning', planned, 'Upcoming tasks with no Planned budget (Phase-7 “Unplanned”). Give them time here so tomorrow’s timeline can schedule them.', unplanned.length||null),
+      /* PP-EXT V3.1: the scratchpad echoed into the evening review. Same document as Focus (same fieldKey
+         and the same pp-scratch record) — this is a second view of it, never a second copy. Left expanded
+         by default: `journalCollapse` has no `scratch` key, and collCard treats absent as open. */
+      collCard('scratch', 'Scratchpad', this.renderScratchpad({minHeight:200}),
+        'Your one continuous scratchpad — the same document Focus shows. It does not reset daily; nothing here belongs to just today.'));
     const body=h('div',{style:{flex:1,minHeight:0,display:'flex',overflow:'hidden'}}, editorCol,
       h('div',{style:{flex:'0 0 1px',background:'var(--divider)'}}), railCol);
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, body);
@@ -8867,6 +9977,26 @@ class Component extends DCLogic {
           h('span',{onClick:()=>this.togglePredictManual(t.id),title:t.predictManual?'Revert to auto':'Override manually',
             style:{cursor:'pointer',fontSize:'12px',color:t.predictManual?'var(--danger)':'var(--text-faint2)'}}, t.predictManual?'✎ manual':'∿ auto'));
 
+    /* PP-EXT (10): blocking vs background. Only meaningful for a task that HAS a fixed clock span (that is
+       what becomes a busy interval), so the row is hidden otherwise rather than shown inert. Three states
+       because the field is tri-state: Auto is what an untouched or opaque-imported task holds, and clicking
+       the active state returns to it, so a mis-toggle is one click from undone. HIT_MIN_PX per the owner's
+       hit-target tenet — the glyph is not the hit box. NOTHING reads this to schedule yet (block 11). */
+    const blockingCtl = (!this.isMilestone(t) && this.hasStartTime(t)) ? (()=>{
+      const cur = t.blocking;
+      const opt=(val,label,title)=>{ const on = (cur===val);
+        return h('div',{key:String(val),onClick:()=>this.setBlocking(t.id, on&&val!=null ? null : val),title,
+          role:'button',tabIndex:0,'aria-pressed':on,
+          onKeyDown:e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); this.setBlocking(t.id, on&&val!=null?null:val); } },
+          style:{flex:1,minHeight:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
+            cursor:'pointer',fontSize:'12px',borderRadius:'var(--r-2)',
+            color:on?'var(--on-accent)':'var(--text-mut2)',background:on?(this._accent||'#3f7bd6'):'var(--field-bg)',
+            border:'1px solid '+(on?'transparent':'var(--field-border)')}}, label); };
+      return h('div',{style:{display:'flex',gap:'5px'}},
+        opt(null,'Auto','Inherit the default (blocking), or the calendar event’s busy/free setting on import.'),
+        opt(true,'Blocking','Nothing else may be scheduled through this span.'),
+        opt(false,'Background','A container you work inside — other tasks may be scheduled within it.')); })() : null;
+
     const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
@@ -8886,6 +10016,7 @@ class Component extends DCLogic {
         field('Planned', durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
         field('Spent',spentField,{flex:1})),
       field(h('span',null,'Allotted (remaining)',this.infoNote('Auto-scheduled time for this task today: its share of the day’s free time (window minus meals, reserved free time and fixed blocks), scaled by remaining Planned work and split across active tasks by priority then due date. Click ∿ auto → ✎ manual to pin a fixed amount off the top (a Predict override) instead of the computed value.')),allotField),
+      blockingCtl?field(h('span',null,'Busy type',this.infoNote('Whether this appointment’s time is blocking (nothing else is scheduled through it) or background (a container — like a Work day — you deliberately place other tasks inside). Auto follows the imported calendar event’s busy/free setting, and defaults to blocking.')),blockingCtl):null,
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
       field('Priority',prioRow),
       field('Progress',pctBig),

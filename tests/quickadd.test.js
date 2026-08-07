@@ -497,6 +497,11 @@ test('3-axis: "sync with sam every 2 weeks tue 3pm for 30m" — n-weekly appoint
 
 // ---- R7 Window (start + due, two days) — KNOWN GAP: single-date resolver only finds one day.
 // Documented in architecture.md; deferred to a follow-up. Kept as todo so the region is tracked.
+// NOT clock-flaky, despite the absolute epoch in the failure message: every test in this file passes
+// the fixed BASE (2026-07-15 10:00) as the reference date, and eod(17) is an absolute local instant.
+// Swept at 23:55, 00:05, 00:19, 12:00, year-end and a DST-spring-forward hour — `end` is null in all
+// of them. The todo marks a genuinely unimplemented feature, so it stays a todo; the clock injection
+// in _load.js (withNow) deliberately does not touch this file.
 test('R7: "start mon due fri" resolves a two-day window', { todo: true }, () => {
   const c = make();
   const r = c.parseDateText('sprint start monday due friday', BASE);

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { make, activeTask, cleanDay, DAY } = require('./_load.js');
+const { make, activeTask, cleanDay, DAY, withNow } = require('./_load.js');
 
 test('migratePins: 9am placeholder start collapses to midnight and the flag clears', () => {
   const c = make();
@@ -338,7 +338,11 @@ test('V2.4: orderingSeam puts the active task first', () => {
   assert.deepEqual(c.orderingSeam(rows).map(r=>r.id), ['y','x'], 'active outranks priority/EDF');
 });
 
-test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open shapes never auto-start', () => {
+// Clock-injected: the fixtures below sit ±1h around "now" and autoTimerPlan gates on isFixedToday(),
+// which asks whether the occurrence *starts* on the current local day. Run for real at 00:05 and the
+// "started an hour ago" fixture starts yesterday, so it is legitimately not fixed-today and the
+// auto-pause assertion fails. Freezing noon keeps the assertions pinned to the behaviour they mean.
+test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open shapes never auto-start', () => withNow(() => {
   const c = make();
   const now = Date.now();
   c.state.nowTick = now;
@@ -369,7 +373,7 @@ test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open sha
   c.state.running = { [bp.id]: { startedAt: now - 3600000, beat: now } };
   const plan2 = c.autoTimerPlan(now);
   assert.ok(plan2.pause.includes(bp.id), 'fixed running task past its end should auto-pause');
-});
+}));
 
 test('daily ledger: stopTimerAt credits both lifetime spent and spentByDay[startDay]', () => {
   const c = make();
@@ -397,7 +401,10 @@ test('daily ledger: getSpentOn is per-day; lifetime spent from prior days is not
   assert.strictEqual(c.getSpent(t), 90, 'lifetime total unchanged');
 });
 
-test('daily ledger: getSpentOn adds live running only on the timer\'s start day', () => {
+// Clock-injected: "started 20 minutes ago" is yesterday's timer if the suite runs before 00:20, so
+// getSpentOn credits yesterday and today reads 0. That is the correct per-day behaviour — the fixture,
+// not the assertion, is what needs pinning.
+test('daily ledger: getSpentOn adds live running only on the timer\'s start day', () => withNow(() => {
   const c = make();
   const today = c.startOfToday();
   const t = activeTask(c, { spent:0, spentByDay:{} });
@@ -406,7 +413,7 @@ test('daily ledger: getSpentOn adds live running only on the timer\'s start day'
   c.state.nowTick = Date.now();
   assert.ok(c.getSpentOn(t, today) >= 19 && c.getSpentOn(t, today) <= 21, 'live ~20 today');
   assert.strictEqual(c.getSpentOn(t, today + DAY), 0, 'no live credit on a different day');
-});
+}));
 
 test('computeAllotted subtracts today-only spent (prior-day spent no longer shrinks the pool)', () => {
   const c = make();

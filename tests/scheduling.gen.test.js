@@ -345,6 +345,126 @@ test('drag-pin: snapPinStart magnetically snaps to a neighbour block edge', () =
     B + (2 * 60) * 60000, 'far targets leave the grid snap in charge');
 });
 
+/* --- 04 (Reading C): the drag unit is the CHUNK, not the task ------------------------------------
+   A task interrupted by a fixed appointment legitimately renders as several chunks. Dragging one of
+   them pins THAT chunk's minutes; the task's remaining minutes stay in the flexible pool and repack
+   around all fixed work, including the new pin. A pin record without `partial` keeps the pre-04
+   whole-task meaning (the task becomes fixed work for the day), which is what tests 12/14/15 cover. */
+
+// Fixture: window 00:00-10:00, an appointment at 04:00-05:00, one flexible task -> two chunks.
+function splitDay(c){
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;                       // pack from the window edge — no part-minute at the seam
+  cleanDay(c, '10:00');
+  const ev = activeTask(c, { id:'ev', name:'Appt', eventId:'g1', allDay:false,
+    start: B + 4 * H, end: B + 5 * H, planned: 60 });
+  const x = activeTask(c, { id:'x', name:'Split', planned: 120 });
+  return { B, ev, x };
+}
+
+// 18. Pinning ONE chunk of a split task leaves the rest flexible and preserves the daily total.
+test('drag-pin (04): pinning one chunk of a split task keeps the task\'s daily minutes', () => {
+  const c = make();
+  const { B, ev, x } = splitDay(c);
+
+  const before = pack(c, [ev, x]);
+  const mine = before.chunks.filter(k => k.start && k.id === 'x').sort((a, b) => a.start - b.start);
+  assert.ok(mine.length > 1, 'fixture: the appointment splits the task into more than one chunk');
+  const total = c._allot['x'].allotted;
+  assert.strictEqual(schedMin(before.chunks, 'x'), total, 'baseline: blocks sum to the allotment');
+
+  // drag the FIRST chunk to the end of the window — its own span only, so the pin is partial
+  const dur = Math.round((mine[0].end - mine[0].start) / MIN);
+  const drop = B + 10 * H - dur * MIN;
+  x.pin = [{ day: B, start: drop, dur, partial: true }];
+  const after = pack(c, [ev, x]);
+
+  assert.strictEqual(c._allot['x'].allotted, total, 'the task\'s daily total is unchanged by the drag');
+  assert.strictEqual(c._allot['x'].pinnedMin, dur, 'the dragged chunk is recorded as fixed minutes');
+  assert.ok(!c._allot['x'].fixed, 'a partly-pinned task is NOT wholly fixed');
+
+  const pinned = after.chunks.filter(k => k.type === 'fixed' && k.id === 'x');
+  assert.strictEqual(pinned.length, 1, 'the dragged chunk renders as one fixed block');
+  assert.strictEqual(pinned[0].start, drop, 'at the dropped time');
+  assert.ok(pinned[0].dragPin, 'flagged as a drag-pin (draggable + unpin)');
+
+  const flex = schedMin(after.chunks, 'x');
+  assert.ok(flex > 0, 'the task\'s other minutes are still scheduled — it did not become fixed work');
+  assert.strictEqual(flex + dur, total, 'pinned + repacked = the same daily minutes');
+  for (const s of after.chunks.filter(k => k.type === 'scheduled' && k.id === 'x'))
+    assert.ok(!overlaps(s, pinned[0]), 'the repacked remainder never overlaps the new pin');
+});
+
+// 19. Every block keeps a positive span and the day's rendered minutes still equal the allotments.
+test('drag-pin (04): a partial pin leaves no zero-length block and no lost minutes', () => {
+  const c = make();
+  const { B, ev, x } = splitDay(c);
+  pack(c, [ev, x]);
+  const dur = 60;
+  x.pin = [{ day: B, start: B + 7 * H, dur, partial: true }];
+  const { chunks } = pack(c, [ev, x]);
+
+  for (const k of chunks) if (k.start) assert.ok(k.end > k.start, 'no zero/negative-length block');
+  const drawn = chunks.filter(k => k.start && k.id === 'x')
+    .reduce((s, k) => s + (k.end - k.start) / MIN, 0);
+  assert.strictEqual(drawn, c._allot['x'].allotted, 'Σ drawn minutes = the task\'s allotment');
+  assert.strictEqual(chunks.filter(k => k.type === 'unscheduled' && k.id === 'x').length, 0,
+    'nothing spilled to Unscheduled');
+});
+
+// 20. Two partial pins coexist; each is its own block, keyed by (day, start), not by chunk index.
+test('drag-pin (04): a task can hold several partial pins, one per dragged chunk', () => {
+  const c = make();
+  const { B, ev, x } = splitDay(c);
+  x.pin = [{ day: B, start: B + 6 * H, dur: 60, partial: true },
+           { day: B, start: B + 8 * H, dur: 60, partial: true }];
+  const { chunks } = pack(c, [ev, x]);
+  const pinned = chunks.filter(k => k.type === 'fixed' && k.id === 'x').sort((a, b) => a.start - b.start);
+  assert.strictEqual(pinned.length, 2, 'both pinned chunks render');
+  assert.strictEqual(pinned[0].start, B + 6 * H);
+  assert.strictEqual(pinned[1].start, B + 8 * H);
+  assert.strictEqual(c._allot['x'].pinnedMin, 120, 'both spans count as fixed minutes');
+  assert.ok(!overlaps(pinned[0], pinned[1]), 'the two pins do not overlap');
+  assert.strictEqual(schedMin(chunks, 'x') + 120, c._allot['x'].allotted,
+    'the unpinned remainder still packs');
+});
+
+// 21. A pin record with no `partial` flag keeps the pre-04 whole-task meaning (legacy rows included).
+test('drag-pin (04): a whole-task pin still removes the task from the flexible pool', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B + 30000;
+  cleanDay(c, '10:00');
+  const whole = activeTask(c, { id: 'w', name: 'W', planned: 120 });
+  whole.pin = [{ day: B, start: B + 5 * H, dur: 120 }];      // list shape, no `partial`
+  const legacy = activeTask(c, { id: 'l', name: 'L', planned: 120 });
+  legacy.pin = { day: B, start: B + 2 * H, dur: 60 };         // legacy object shape
+  pack(c, [whole, legacy]);
+  assert.ok(c._allot['w'].fixed, 'list-shaped whole pin is fixed work');
+  assert.strictEqual(c._allot['w'].allotted, 120);
+  assert.ok(c._allot['l'].fixed, 'legacy object pin reads as a whole pin');
+  assert.strictEqual(c._allot['l'].allotted, 60);
+  assert.strictEqual(c.hasFullDragPinToday(whole, B), true);
+  assert.strictEqual(c.hasFullDragPinToday(legacy, B), true);
+  whole.pin = [{ day: B, start: B + 5 * H, dur: 120, partial: true }];
+  assert.strictEqual(c.hasFullDragPinToday(whole, B), false, 'a partial pin is not a whole pin');
+  assert.strictEqual(c.hasDragPinToday(whole, B), true, 'but it is still a pin');
+});
+
+// 22. migrateDragPinList normalizes the legacy object into a one-element list, idempotently.
+test('drag-pin (04): migrateDragPinList converts the legacy object shape once', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const t = { id: 't', pin: { day: B, start: B + 3 * H, dur: 45 } };
+  const already = { id: 'a', pin: [{ day: B, start: B + H, dur: 30, partial: true }] };
+  const none = { id: 'n', pin: null };
+  assert.strictEqual(c.migrateDragPinList([t, already, none]), 1, 'only the legacy row changes');
+  assert.ok(Array.isArray(t.pin) && t.pin.length === 1, 'legacy object became a one-element list');
+  assert.strictEqual(t.pin[0].dur, 45);
+  assert.strictEqual(t.pin[0].partial, undefined, 'a converted legacy pin is a WHOLE pin');
+  assert.strictEqual(c.migrateDragPinList([t, already, none]), 0, 'idempotent');
+});
+
 // 17. Break-between-tasks reserves settings.breakMin after each packed task and shrinks the pool to match.
 test('break: breakMin shrinks the pool and spaces packed tasks apart', () => {
   const c = make();
@@ -583,4 +703,323 @@ test('Point guard: a real user-typed clock (startClock:true) stays a Point, not 
   const data = pack(c, [t]);
   assert.deepEqual(data.points, [{ id:'m5', ms:B + 17*H, title:'Meeting' }], 'stays a clocked Point');
   assert.deepEqual(data.topHover, [], 'a real clock is never a hover line');
+});
+
+/* --- 04b: drag-recovery arithmetic + regroup -----------------------------------------------------
+   Dropping a pin ACROSS an appointment is permitted (owner, 2026-08-04). What was not intended is
+   that it used to hand the task the overlapping minutes as extra time: `pinBack` added the pin's
+   whole span back into the pool, but the shared minutes were never free, so the day grew. The pin's
+   drawn span (pinnedMin) and the free time it consumed (pinBack) are two different measures. */
+
+// 23. netBusyClaim: every busy minute is attributed once, and never to the later-arriving pin.
+test('04b: netBusyClaim credits a pin only for the free time it actually consumed', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  const at = (h0, h1) => ({ start: B + h0 * H, end: B + h1 * H });
+  const appt = Object.assign(at(4, 5), { note: 'Appt' });
+  const pin = Object.assign(at(3.5, 7.5), { taskId: 'x' });   // 240 min, 60 of them under the appt
+
+  const claim = c.netBusyClaim([appt, pin], b => b.taskId === 'x', B, B + 10 * H);
+  assert.strictEqual(claim.total, 180, 'the 60 minutes shared with the appointment are not free time');
+  assert.strictEqual(claim.byTask['x'], 180, 'and they are attributed per task the same way');
+
+  // A pin that overlaps nothing claims its whole span; two overlapping pins claim the union once.
+  assert.strictEqual(c.netBusyClaim([Object.assign(at(6, 7), { taskId: 'y' })],
+    b => b.taskId === 'y', B, B + 10 * H).total, 60, 'a clear pin claims all of its own span');
+  assert.strictEqual(c.netBusyClaim([Object.assign(at(6, 8), { taskId: 'z' }),
+    Object.assign(at(7, 9), { taskId: 'z' })], b => b.taskId === 'z', B, B + 10 * H).total, 180,
+    'two overlapping pins of one task claim the union, not the sum');
+});
+
+// 24. The e2e defect this fixes: an overlapping drop must not grow the day.
+test('04b: a partial pin dropped across an appointment does not grant the task extra minutes', () => {
+  const c = make();
+  const { B, ev, x } = splitDay(c);           // window 00:00-10:00, appointment 04:00-05:00
+  pack(c, [ev, x]);
+  const total = c._allot['x'].allotted;
+  assert.strictEqual(total, 540, 'baseline: the single flexible task holds the whole pool');
+
+  // drop a 240-minute chunk at 03:30 — 03:30-07:30, overlapping the appointment by a full hour
+  x.pin = [{ day: B, start: B + 3.5 * H, dur: 240, partial: true }];
+  const after = pack(c, [ev, x]);
+
+  assert.strictEqual(c._allot['x'].allotted, total, 'the overlapping drop is a MOVE, not a grant');
+  assert.strictEqual(c._allot['x'].pinnedMin, 240,
+    'the pin still holds its whole drawn span, so the flexible remainder shrinks by all of it');
+  const drawn = after.chunks.filter(k => k.start && k.id === 'x')
+    .reduce((s, k) => s + (k.end - k.start) / MIN, 0);
+  assert.strictEqual(drawn, total, 'Σ drawn minutes still equals the allotment');
+  assert.strictEqual(after.chunks.filter(k => k.type === 'unscheduled' && k.id === 'x').length, 0,
+    'and nothing spilled to Unscheduled');
+});
+
+// Fixture: window 00:00-10:00, an appointment at 01:00-02:00 that splits a 100-minute task in two,
+// plus a filler that soaks up the rest of the pool so a contiguous slot for the 100 exists.
+function regroupDay(c){
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;
+  cleanDay(c, '10:00');
+  const ev = activeTask(c, { id:'ev', name:'Appt', eventId:'g1', allDay:false,
+    start: B + 1 * H, end: B + 2 * H, planned: 60 });
+  const a = activeTask(c, { id:'a', name:'Split me', planned: 100, priority: 1 });
+  const b = activeTask(c, { id:'b', name:'Filler', planned: 440, priority: 2 });
+  return { B, ev, a, b };
+}
+
+// 25. regroupSpan picks the earliest slot at or after where the task already starts, or nothing.
+test('04b: regroupSpan finds a contiguous slot, and reports null when there is none', () => {
+  const c = make();
+  const { B, ev, a, b } = regroupDay(c);
+  const data = pack(c, [ev, a, b]);
+  assert.ok(data.chunks.filter(k => k.start && k.id === 'a').length > 1,
+    'fixture: the appointment splits the task');
+
+  const span = c.regroupSpan(B, 'a', data);
+  assert.strictEqual(span.start, B + 2 * H, 'the 60-minute gap before the appointment cannot hold 100 minutes');
+  assert.strictEqual((span.end - span.start) / MIN, 100, 'the span is the task\'s whole drawn day');
+
+  // The filler is drawn across the whole day and has no gap big enough for its own 440 minutes.
+  assert.strictEqual(c.regroupSpan(B, 'b', data), null, 'no contiguous room ⇒ no regroup offered');
+  // A task the day did not split has nothing to re-join.
+  const solo = pack(c, [a]);
+  assert.strictEqual(c.regroupSpan(B, 'a', solo), null, 'one chunk ⇒ nothing to regroup');
+});
+
+// 26. regroupTask joins the chunks and leaves every other task's minutes alone.
+test('04b: regroupTask re-joins a split task into one block without changing the day\'s minutes', () => {
+  const c = make();
+  const { B, ev, a, b } = regroupDay(c);
+  const before = pack(c, [ev, a, b]);
+  const wasA = schedMin(before.chunks, 'a'), wasB = schedMin(before.chunks, 'b');
+
+  assert.strictEqual(c.regroupTask('a', B), true, 'regroup applied');
+  const after = pack(c, c.state.tasks);
+
+  const mine = after.chunks.filter(k => k.start && k.id === 'a');
+  assert.strictEqual(mine.length, 1, 'one contiguous block');
+  assert.strictEqual((mine[0].end - mine[0].start) / MIN, wasA, 'holding the same minutes as before');
+  assert.ok(mine[0].dragPin, 'as a pin — the only way to hold a slot against the packer');
+  assert.strictEqual(schedMin(after.chunks, 'b') + (after.chunks
+    .filter(k => k.type === 'fixed' && k.id === 'b')
+    .reduce((s, k) => s + (k.end - k.start) / MIN, 0)), wasB, 'the other task neither gained nor lost');
+  assert.strictEqual(after.chunks.filter(k => k.type === 'unscheduled').length, 0, 'nothing spilled');
+});
+
+// ── V4.2: edge-drag = a sticky manual `allotted` override ────────────────────────────────────────
+// The gesture itself (a real pointer on a real edge handle) is e2e-only by the AGENTS.md split; what
+// belongs here is the arithmetic underneath it: what an edge-drag writes, what it does to everybody
+// else's minutes, and whether it survives the next pack.
+
+// 27. The pure delta→minutes step, including its floor.
+test('V4.2: edgeAllotFor moves the day total by the dragged minutes and never falls below the floor', () => {
+  const c = make();
+  assert.strictEqual(c.edgeAllotFor(120, 45), 165, 'dragging the edge DOWN grows the allotment');
+  assert.strictEqual(c.edgeAllotFor(120, -45), 75, 'dragging it UP shrinks the allotment');
+  assert.strictEqual(c.edgeAllotFor(120, 0.4), 120, 'sub-minute drags round, they do not accumulate');
+  assert.strictEqual(c.edgeAllotFor(120, -600), c.EDGE_MIN_ALLOT,
+    'a drag past the top of the block floors at EDGE_MIN_ALLOT — a 0-minute block would vanish under the pointer');
+  assert.strictEqual(c.edgeAllotFor(0, 30), 30, 'a task with no time yet can be given some');
+});
+
+// 28. Which blocks offer the handle at all. Every `false` here is a case where writing `predicted`
+//     would be overwritten on the next pack, or would describe minutes the task does not own.
+test('V4.2: only a block whose own allotment the seam decides is edge-resizable', () => {
+  const c = make();
+  const parent = c.normalizeTask({ id: 'p', name: 'Parent', planned: 60 });
+  const kid = c.normalizeTask({ id: 'k', name: 'Kid', planned: 30, parentId: 'p' });
+  const solo = c.normalizeTask({ id: 's', name: 'Solo', planned: 60 });
+  const kb = c.buildKids([parent, kid, solo]);
+  const ch = (id, extra) => Object.assign({ id, start: 1, end: 2, type: 'scheduled' }, extra || {});
+
+  assert.strictEqual(c.blockResizable(ch('s'), kb), true, 'a flexible top-level leaf');
+  assert.strictEqual(c.blockResizable(ch('p'), kb), false, 'a family block is subdivided among its children');
+  assert.strictEqual(c.blockResizable(ch('k'), kb), false, 'a subtask is handed its share by distribute()');
+  assert.strictEqual(c.blockResizable(ch('s', { type: 'fixed' }), kb), false, 'an appointment / drag-pin holds a fixed span');
+  assert.strictEqual(c.blockResizable(ch(null, { type: 'meal' }), kb), false, 'a meal is not a task');
+  assert.strictEqual(c.blockResizable(ch('s', { start: null }), kb), false, 'an unscheduled chunk has no edge');
+});
+
+// 29. The behaviour the V4.2 milestone actually names: it sticks, and the others re-compress.
+test('V4.2: an edge-drag sets a sticky allotment; the other tasks re-compress and it survives a re-pack', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;
+  cleanDay(c, '10:00');                                   // a 600-minute pool
+  const a = activeTask(c, { id: 'a', name: 'Resized', planned: 60, priority: 1 });
+  const b = activeTask(c, { id: 'b', name: 'Other', planned: 540, priority: 2 });
+
+  pack(c, [a, b]);
+  const wasA = c._allot['a'].allotted, wasB = c._allot['b'].allotted;
+  assert.strictEqual(wasA + wasB, 600, 'baseline: the two share the whole pool');
+  assert.strictEqual(wasA, 60, 'baseline: proportional-by-planned');
+
+  // The drop: the user drags A's bottom edge down by 120 minutes' worth of pixels.
+  c.setAllottedManual('a', c.edgeAllotFor(wasA, 120));
+
+  const after = pack(c, c.state.tasks);
+  assert.strictEqual(c.state.tasks.find(t => t.id === 'a').predictManual, true,
+    'the override is written through the EXISTING predicted/predictManual seam, not a new field');
+  assert.strictEqual(c._allot['a'].allotted, 180, 'the resized task holds exactly what the drag asked for');
+  assert.strictEqual(c._allot['b'].allotted, 600 - 180, 'the other task re-compressed to fill the rest of the day');
+  assert.strictEqual(schedMin(after.chunks, 'a'), 180, 'and the timeline draws the new allotment');
+  assert.strictEqual(after.chunks.filter(k => k.type === 'unscheduled').length, 0, 'nothing spilled');
+
+  // Sticky: re-packing (here, after an unrelated change to the OTHER task) must not recompute it away.
+  // (mutate through `c.state.tasks` — `commit()` replaced the array, so the fixture objects are stale)
+  c.state.tasks.find(t => t.id === 'b').planned = 60;
+  pack(c, c.state.tasks);
+  assert.strictEqual(c._allot['a'].allotted, 180,
+    'a re-compression triggered by another task leaves the manual allotment alone');
+  assert.strictEqual(c._allot['b'].allotted, 420, 'the other task absorbed the whole rest of the pool');
+
+  // …until it is reset, which is the existing ∿/✎ toggle — no second reset mechanism was invented.
+  c._allot = c.computeAllotted(c.state.tasks, B);
+  c.togglePredictManual('a');
+  pack(c, c.state.tasks);
+  assert.strictEqual(c.state.tasks.find(t => t.id === 'a').predictManual, false, 'reset clears the override');
+  assert.strictEqual(c._allot['a'].allotted + c._allot['b'].allotted, 600, 'and the pool is shared again');
+  assert.strictEqual(c._allot['a'].allotted, 300, 'back to proportional (60/60 planned ⇒ half each)');
+});
+
+// ── V4.3: snapping — priority snap-to-original, Alt-disable, Reset ───────────────────────────────
+// The rule under test is a PRECEDENCE, not an arithmetic: the original is tried before the grid and
+// before the neighbour magnet, with a wider window than either, so a value close to the original can
+// never be pulled off it by a grid line that happens to be closer.
+
+// 30. The allotment axis: the computed value beats the grid, and Alt turns every snap off.
+test('V4.3: an edge-drag snaps to the ORIGINAL allotment in preference to the grid, unless Alt is held', () => {
+  const c = make();
+  const orig = 100;
+
+  // A raw value 3 minutes off the original: the grid line at 105 is only 2 minutes away and would win
+  // a nearest-wins contest. The priority snap must take it anyway.
+  const near = c.edgeAllotFor(orig, 3, { orig });
+  assert.strictEqual(near, orig, 'inside the magnet the ORIGINAL wins, even when a grid line is nearer');
+  assert.notStrictEqual(near, 105, 'the grid did not get to decide');
+
+  // Outside the magnet the grid is back in charge.
+  assert.strictEqual(c.edgeAllotFor(orig, 22, { orig }), 120, 'past the magnet it snaps to the ALLOT_SNAP grid');
+  assert.ok(c.ALLOT_ORIG_MAGNET > c.ALLOT_SNAP,
+    'the priority window is wider than a whole grid step — otherwise "priority" would be a coin toss');
+
+  // Alt: neither snap applies, and the value is free to the minute.
+  assert.strictEqual(c.edgeAllotFor(orig, 3, { orig, free: true }), 103, 'Alt ignores the priority snap');
+  assert.strictEqual(c.edgeAllotFor(orig, 22, { orig, free: true }), 122, 'Alt ignores the grid too');
+
+  // The floor still governs every mode — a snap must never hand back a vanishing block.
+  assert.strictEqual(c.edgeAllotFor(orig, -600, { orig, free: true }), c.EDGE_MIN_ALLOT, 'Alt does not defeat the floor');
+  assert.strictEqual(c.edgeOrigAllot(2), c.EDGE_MIN_ALLOT, 'nor does the original itself, if it is below the floor');
+  // Omitting opts entirely is the pre-V4.3 call: grid only, no original.
+  assert.strictEqual(c.edgeAllotFor(orig, 3), 105, 'with no original supplied the grid decides');
+});
+
+// 31. The position axis: same precedence, against BOTH of snapPinStart's existing snaps.
+test('V4.3: a body-drag snaps to the ORIGINAL start ahead of the neighbour magnet and the grid, unless Alt is held', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;
+  cleanDay(c, '10:00');                                   // window 00:00-10:00
+  const orig = B + 2 * H;                                 // the block's undragged start
+  const neighbour = orig + 6 * MIN;                       // a neighbour edge 6 minutes away…
+  const targets = [neighbour];
+  const dur = 60;
+
+  // …and a raw start 8 minutes off the original. The neighbour magnet (10 min) would take it, and the
+  // 15-minute grid would take it somewhere else again. The original outranks both.
+  const raw = orig + 8 * MIN;
+  assert.strictEqual(c.snapPinStart(raw, dur, B, targets, { orig }), orig,
+    'inside PIN_ORIG_MAGNET the original wins over a nearer neighbour edge');
+  assert.strictEqual(c.snapPinStart(raw, dur, B, targets), neighbour,
+    'without an original supplied, the pre-V4.3 neighbour magnet is unchanged');
+  assert.ok(c.PIN_ORIG_MAGNET > c.PIN_MAGNET && c.PIN_ORIG_MAGNET > c.PIN_SNAP / 2,
+    'the priority window outranges both older snaps by construction');
+
+  // Past the window, the older behaviour is untouched.
+  const far = orig + 40 * MIN;
+  assert.strictEqual(c.snapPinStart(far, dur, B, targets, { orig }), c.snapPinStart(far, dur, B, targets),
+    'outside the magnet an original changes nothing at all');
+
+  // Alt: no magnet, no grid — the raw minute survives.
+  const odd = orig + 7 * MIN + 20000;
+  assert.strictEqual(c.snapPinStart(odd, dur, B, targets, { orig, free: true }), orig + 7 * MIN,
+    'Alt places freely, to the minute, ignoring both the original and the neighbour');
+  // …but free placement is still placement INSIDE the day.
+  assert.strictEqual(c.snapPinStart(B - 3 * H, dur, B, targets, { free: true }), B,
+    'Alt does not license dropping a block outside its own window');
+});
+
+// 32. Reset, and undo. The milestone's promise is that the objective schedule is always recoverable.
+test('V4.3: Reset restores the computed allotment and position in one commit, and undo recovers', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;
+  cleanDay(c, '10:00');                                   // a 600-minute pool
+  const a = activeTask(c, { id: 'a', name: 'Seized', planned: 60, priority: 1 });
+  const b = activeTask(c, { id: 'b', name: 'Other', planned: 540, priority: 2 });
+  pack(c, [a, b]);
+  const computedA = c._allot['a'].allotted;
+  assert.strictEqual(computedA, 60, 'baseline: proportional-by-planned');
+
+  // Seize the block on both axes: a manual allotment AND a hand-placed pin for today.
+  c.setAllottedManual('a', c.edgeAllotFor(computedA, 120));
+  c.pinBlockAt('a', B + 5 * H, 180, [], B);
+  pack(c, c.state.tasks);
+  const seized = c.state.tasks.find(t => t.id === 'a');
+  assert.strictEqual(seized.predictManual, true, 'precondition: the allotment is manual');
+  assert.strictEqual(c.pinsOf(seized).filter(p => p.day === B).length, 1, 'precondition: the position is pinned');
+  assert.strictEqual(c.blockOverridden(seized, B), true, 'and the block reads as overridden');
+
+  // One Reset. One commit(). Both halves of the override go.
+  const before = c.history.length;
+  c.resetBlock('a', B);
+  assert.strictEqual(c.history.length, before + 1, 'Reset is ONE undo entry, not one per axis');
+  const reset = c.state.tasks.find(t => t.id === 'a');
+  assert.strictEqual(reset.predictManual, false, 'the manual allotment is released');
+  assert.strictEqual(c.pinsOf(reset).filter(p => p.day === B).length, 0, 'and so is the day pin');
+  pack(c, c.state.tasks);
+  assert.strictEqual(c._allot['a'].allotted, computedA, 'the task is back on its COMPUTED allotment');
+  assert.strictEqual(c._allot['a'].allotted + c._allot['b'].allotted, 600, 'and the pool is shared again');
+
+  // Undo puts the seized schedule back — the same history stack every other mutation uses.
+  c.undo();
+  const undone = c.state.tasks.find(t => t.id === 'a');
+  assert.strictEqual(undone.predictManual, true, 'undo restores the manual allotment');
+  assert.strictEqual(undone.predicted, 180, 'with the minutes the user chose');
+  assert.strictEqual(c.pinsOf(undone).filter(p => p.day === B).length, 1, 'and restores the pin');
+
+  // Resetting a block that is already auto writes nothing at all — no empty undo entry to step over.
+  c.resetBlock('b', B);
+  const quiet = c.history.length;
+  c.resetBlock('b', B);
+  assert.strictEqual(c.history.length, quiet, 'an already-auto block is not a mutation');
+  assert.strictEqual(c.blockOverridden(c.state.tasks.find(t => t.id === 'b'), B), false, 'and it still reads as auto');
+});
+
+// 33. The snap-back RELEASE path: landing on the original restores auto formatting, it does not
+//     rewrite the same number as a manual override. (This is the half a pure-arithmetic test misses.)
+test('V4.3: releasing an edge-drag on the original clears the override rather than re-writing it', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.nowTick = B;
+  cleanDay(c, '10:00');
+  const a = activeTask(c, { id: 'a', name: 'Seized', planned: 60, priority: 1 });
+  const b = activeTask(c, { id: 'b', name: 'Other', planned: 540, priority: 2 });
+  pack(c, [a, b]);
+  const computed = c._allot['a'].computed;
+
+  c.setAllottedManual('a', 180);
+  pack(c, c.state.tasks);
+  assert.strictEqual(c._allot['a'].allotted, 180, 'precondition: overridden');
+
+  // Drag back to within the magnet of the computed value: the snap lands exactly on it…
+  const landed = c.edgeAllotFor(180, (computed + 2) - 180, { orig: computed });
+  assert.strictEqual(landed, c.edgeOrigAllot(computed), 'the drag lands on the computed value');
+  // …and the release clears the flag instead of writing `predicted = computed`.
+  c.clearAllottedManual('a');
+  assert.strictEqual(c.state.tasks.find(t => t.id === 'a').predictManual, false,
+    'the task is AUTO again — not manually pinned to the same number, which would freeze it out of the next re-compression');
+  c.state.tasks.find(t => t.id === 'b').planned = 60;
+  pack(c, c.state.tasks);
+  assert.strictEqual(c._allot['a'].allotted, 300,
+    'and it re-compresses with everyone else again (60/60 planned means half the pool each)');
 });

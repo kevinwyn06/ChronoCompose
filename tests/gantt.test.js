@@ -129,3 +129,48 @@ test('the %-done handle sits BELOW the bar, never inside it (owner 2026-07-26)',
   assert.ok(px(s.top) + px(s.height) <= c.barH + (c.rowH - c.barH) / 2 + 6,
     'handle stays within the row (≤6px into the next stripe), got bottom=' + (px(s.top) + px(s.height)));
 });
+
+// ---- V4.4: the day-drawer zoom is a two-level toggle, not a range ----
+// The Track B Group 2 control stepped `_drawerZoom` by DRAWER_ZOOM_STEP between DRAWER_ZOOM_MIN and
+// DRAWER_ZOOM_MAX. The owner asked (2026-07-22) for two states instead: fit ⇄ expanded. These tests
+// hold the collapse itself — that the range constants are GONE, not merely unused — plus the pure
+// mapping `renderDayColumn`, the toggle button and `toggleDrawerZoom` all share.
+test('V4.4: the incremental drawer-zoom range collapsed to two named levels', () => {
+  const c = make();
+  assert.strictEqual(c.DRAWER_ZOOM_MIN, undefined, 'DRAWER_ZOOM_MIN is retired, not kept as a synonym');
+  assert.strictEqual(c.DRAWER_ZOOM_MAX, undefined, 'DRAWER_ZOOM_MAX is retired');
+  assert.strictEqual(c.DRAWER_ZOOM_STEP, undefined, 'DRAWER_ZOOM_STEP is retired — nothing steps any more');
+  assert.strictEqual(c.DRAWER_ZOOM_FIT, 1, 'the fit level must be exactly 1 — it is the no-op multiplier');
+  assert.ok(c.DRAWER_ZOOM_EXPANDED > 1, 'the expanded level is taller than fit');
+});
+
+test('V4.4: drawerZoomFactor/drawerZoomIsExpanded are a two-state pair with no third value', () => {
+  const c = make();
+  assert.strictEqual(c.drawerZoomFactor(false), c.DRAWER_ZOOM_FIT);
+  assert.strictEqual(c.drawerZoomFactor(true), c.DRAWER_ZOOM_EXPANDED);
+  // Round-trip both ways: the two helpers cannot disagree about what a level means.
+  assert.strictEqual(c.drawerZoomIsExpanded(c.drawerZoomFactor(true)), true);
+  assert.strictEqual(c.drawerZoomIsExpanded(c.drawerZoomFactor(false)), false);
+  // Every value the RETIRED control could produce now reads as fit rather than as "some zoom" — this
+  // is what stops a stale intermediate level surviving anywhere as a third rendered scale.
+  for (const stale of [1.5, 2.25, 3.375, 8, 0, -1, null, undefined, NaN, '3']) {
+    assert.strictEqual(c.drawerZoomIsExpanded(stale), false, 'stale level reads as fit: ' + String(stale));
+    assert.strictEqual(c.drawerZoomFactor(c.drawerZoomIsExpanded(stale)), c.DRAWER_ZOOM_FIT,
+      'and snaps to the fit factor: ' + String(stale));
+  }
+});
+
+test('V4.4: toggleDrawerZoom flips between exactly the two levels and stays session-only', () => {
+  const c = make();
+  assert.strictEqual(c._drawerZoom, undefined, 'a fresh session starts unset, i.e. fitted');
+  c.toggleDrawerZoom();
+  assert.strictEqual(c._drawerZoom, c.DRAWER_ZOOM_EXPANDED, 'first press expands');
+  c.toggleDrawerZoom();
+  assert.strictEqual(c._drawerZoom, c.DRAWER_ZOOM_FIT, 'second press fits — it is a toggle, not a ratchet');
+  c.toggleDrawerZoom();
+  assert.strictEqual(c._drawerZoom, c.DRAWER_ZOOM_EXPANDED, 'and it keeps alternating');
+  // Owner decision 2026-07-22: NOT persisted. It is an instance field, never React state and never a
+  // `pp-*` key, so a reload is fit-to-height again.
+  assert.ok(!('drawerZoom' in c.state), 'the level is not React state');
+  assert.ok(!('drawerZoom' in (c.state.prefs || {})), 'and not a persisted pref');
+});
