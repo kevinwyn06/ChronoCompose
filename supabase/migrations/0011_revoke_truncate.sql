@@ -27,6 +27,18 @@ revoke truncate, references, trigger on public.habits       from anon, authentic
 revoke truncate, references, trigger on public.journal      from anon, authenticated;
 revoke truncate, references, trigger on public.usage_events from anon, authenticated;
 
+-- AMENDED 2026-08-12, after applying the four lines above against production and re-checking the
+-- catalog: 18 structural grants SURVIVED, on three tables no migration in this repo names —
+--   gcal_channels | gcal_pings | gcal_tokens
+-- They come from the same default-privilege source. This is the more serious half of the finding:
+-- all three have RLS ENABLED, and gcal_channels and gcal_tokens have ZERO policies, so ordinary
+-- SELECT/INSERT/UPDATE/DELETE is denied outright for both roles. TRUNCATE is the one operation that
+-- walks past that, and `anon` held it — on the table storing Google Calendar tokens. Deny-all RLS
+-- over a table an anonymous role can empty is not deny-all.
+revoke truncate, references, trigger on public.gcal_tokens   from anon, authenticated;
+revoke truncate, references, trigger on public.gcal_channels from anon, authenticated;
+revoke truncate, references, trigger on public.gcal_pings    from anon, authenticated;
+
 -- And stop the next raw-SQL table from inheriting them. `postgres` is the role these migrations run as,
 -- so this is the default-privilege set that produced the grants above.
 alter default privileges for role postgres in schema public
