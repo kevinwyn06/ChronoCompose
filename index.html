@@ -467,6 +467,13 @@ class Component extends DCLogic {
     this.TRACK_FLUSH_MS = 15000;    // idle debounce before the buffer is persisted + posted to the local sink
     this.TRACK_TYPE_IDLE_MS = 2000; // a typing burst closes (and emits its COUNT) after this much quiet
     this.TRACK_SINK_PATH = '/__usage'; // POST sink served by tools/static-server.mjs → .telemetry/<session>.jsonl
+    /* PP-EXT (33): the THIRD sink — Supabase `usage_events` (migration 0010). Deliberately reverses the
+       block-31 "local-only" constraint: the owner alpha-tests on the deployed site, which has no writable
+       filesystem, so TRACK_SINK_PATH only ever fires on localhost and a deployed session dies with the tab.
+       ADDITIVE — the ring buffer and the local POST sink both stay. One-directional and append-only: this
+       is NOT in SYNC_FIELDS, NOT in KV_TABLES, NOT in BACKUP_KEYS, and never participates in LWW. */
+    this.TRACK_UP_TABLE = 'usage_events'; // PostgREST table for the upload sink
+    this.TRACK_UP_BATCH = 200;            // rows per POST — batched on flush points, never per event
     /* Field ids whose contents are PROSE the owner writes for themselves. They still produce counts (a
        count is analytics, not content) but are named here so the boundary is auditable in one place. */
     this.TRACK_PROSE_IDS = { 'pp-scratch-editor':1, 'pp-journal-editor':1 };
@@ -977,6 +984,13 @@ class Component extends DCLogic {
     /* Hard cap, oldest-first eviction: a marathon session degrades to "the last TRACK_CAP events"
        rather than throwing a QuotaExceededError and losing the lot. */
     if(buf.length>this.TRACK_CAP) buf.splice(0, buf.length-this.TRACK_CAP);
+    /* PP-EXT (33): enqueue for the Supabase sink. The SAME object reference the redaction gate produced
+       goes into the upload queue — there is no second construction of an event on the upload path, so
+       there is no place for raw content to be reintroduced. Same hard cap, same oldest-first eviction:
+       an upload that keeps failing degrades to "the last TRACK_CAP events", it never blocks or throws. */
+    if(!this._trackUpQ) this._trackUpQ=[];
+    this._trackUpQ.push(ev);
+    if(this._trackUpQ.length>this.TRACK_CAP) this._trackUpQ.splice(0, this._trackUpQ.length-this.TRACK_CAP);
     this._trackCounts=this._trackCounts||{};
     this._trackCounts[t]=(this._trackCounts[t]||0)+1;
     this.trackScheduleFlush();
@@ -989,13 +1003,63 @@ class Component extends DCLogic {
   }
   /* Persist to the scoped store, then hand the new lines to the disk sink. Idempotent and safe to call
      from visibilitychange/pagehide, which is what stops a closed tab from losing the session. */
-  trackFlush(){
+  trackFlush(teardown){
     this.trackTypingFlush();
     const buf=this.trackBuffer();
     try{ this.lsSet(this.TRACK_KEY, JSON.stringify(buf)); }catch(e){}
     const from=this._trackSent||0;
     if(buf.length>from){ const lines=buf.slice(from); this._trackSent=buf.length; this.trackPost(lines); }
+    this.trackUpload(teardown); /* PP-EXT (33): third sink — Supabase. No-op when signed out or unconfigured. */
     return buf.length;
+  }
+
+  /* ---- PP-EXT (33): Supabase upload sink -----------------------------------------------------
+     Only for signed-in sessions. An anonymous/local workspace has no auth.uid(), `anon` holds no grant
+     on usage_events (migration 0010, matching 0002), and that is CORRECT, not an error condition — such
+     a session simply keeps buffering locally and exporting by hand. */
+  trackUploadReady(){
+    const c=window.PP_CONFIG||{};
+    if(!this.trackEnabled()) return null;
+    if(!c.supabaseUrl || !c.supabaseAnonKey) return null;
+    const s=this._session;
+    if(!s || !s.user || !s.access_token) return null; /* signed out → skip silently */
+    return { url:String(c.supabaseUrl).replace(/\/+$/,'')+'/rest/v1/'+this.TRACK_UP_TABLE,
+      key:c.supabaseAnonKey, token:s.access_token };
+  }
+  /* Rows are a thin envelope around the event. `payload` is the event object VERBATIM — no re-derivation,
+     no re-serialization of anything the gate did not emit — and `owner_id` is left to auth.uid(). */
+  trackUploadRows(evs){
+    return (evs||[]).map(e=>({ session:e.s, ts:e.ts, payload:e }));
+  }
+  /* Batched on the existing flush points, never per event. `teardown` marks the visibilitychange/pagehide
+     path: there the request must outlive the document, which is what the fetch keepalive flag is for.
+     NOTE (deviation from the block-33 sketch, deliberate): navigator.sendBeacon cannot carry the
+     Authorization/apikey headers PostgREST requires, and Supabase offers no query-param route for a user
+     JWT — a beacon would arrive unauthenticated and be rejected by RLS. `fetch(..., {keepalive:true})`
+     sets the SAME Fetch keepalive flag sendBeacon uses internally, so the teardown guarantee is kept
+     while the request stays authenticated. */
+  trackUpload(teardown){
+    const cfg=this.trackUploadReady();
+    const q=this._trackUpQ||[];
+    if(!cfg || !q.length || this._trackUpBusy) return null;
+    const batch=q.slice(0, this.TRACK_UP_BATCH);
+    this._trackUpBusy=true;
+    const done=(ok)=>{
+      this._trackUpBusy=false;
+      /* Success: drop exactly what went up, by identity, so events appended DURING the request survive.
+         Failure: touch nothing. The events stay queued and the next flush retries them. */
+      if(ok){ const sent=new Set(batch); this._trackUpQ=(this._trackUpQ||[]).filter(e=>!sent.has(e));
+        if(!teardown && this._trackUpQ.length) this.trackUpload(); }
+    };
+    try{
+      if(typeof fetch!=='function'){ this._trackUpBusy=false; return null; }
+      return fetch(cfg.url, { method:'POST', keepalive:true,
+        headers:{ 'Content-Type':'application/json', apikey:cfg.key,
+          Authorization:'Bearer '+cfg.token, Prefer:'return=minimal' },
+        body:JSON.stringify(this.trackUploadRows(batch)) })
+        .then(r=>done(!!(r && r.ok)))
+        .catch(()=>done(false));
+    }catch(e){ this._trackUpBusy=false; return null; }
   }
   /* Local disk sink. Fire-and-forget; a 404 (deployed site, or python -m http.server) is EXPECTED and
      silent — the scoped store and the manual export are the sinks that always work. keepalive lets the
@@ -1019,7 +1083,7 @@ class Component extends DCLogic {
       setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
     }catch(e){ try{ alert('Export failed: '+e.message); }catch(e2){} }
   }
-  trackClear(){ this._trackBuf=[]; this._trackBurst=null; this._trackSent=0; this._trackCounts={}; this.lsRemove(this.TRACK_KEY); this.forceUpdate(); }
+  trackClear(){ this._trackBuf=[]; this._trackBurst=null; this._trackSent=0; this._trackCounts={}; this._trackUpQ=[]; /* PP-EXT (33) */ this.lsRemove(this.TRACK_KEY); this.forceUpdate(); }
   /* Cheap counters for the pill's tooltip: totals per type + session duration. */
   trackStats(){
     const buf=this.trackBuffer();
@@ -1205,8 +1269,8 @@ class Component extends DCLogic {
        visibilitychange covers a backgrounded/closed tab, pagehide covers navigation and BFCache. Without
        both, a session that ends by closing the window loses whatever the debounce still held. */
     this.trackSessionStart();
-    this._onTrackHide=()=>{ try{ if(document.visibilityState==='hidden') this.trackFlush(); }catch(e){ this.trackFlush(); } };
-    this._onTrackBye=()=>this.trackFlush();
+    this._onTrackHide=()=>{ try{ if(document.visibilityState==='hidden') this.trackFlush(true); }catch(e){ this.trackFlush(true); } };
+    this._onTrackBye=()=>this.trackFlush(true); /* PP-EXT (33): teardown — the Supabase POST goes keepalive */
     try{ document.addEventListener('visibilitychange', this._onTrackHide); }catch(e){}
     try{ window.addEventListener('pagehide', this._onTrackBye); window.addEventListener('beforeunload', this._onTrackBye); }catch(e){}
     try{ document.documentElement.setAttribute('data-theme', this.state.theme); }catch(e){}
