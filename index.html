@@ -3560,7 +3560,19 @@ class Component extends DCLogic {
       map[b.taskId]={allotted:tot, computed:tot, active:true, fixed:true}; });
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
-    const acts=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    /* PP-EXT V5 (34): a COMPLETED task stops consuming the day's pool. Owner ruling 2026-08-11, and it is
+       independent of archiving — `autoArchiveDays:0` was merely masking it, and recurring series are never
+       auto-archived at all, so the archive path could never have been the fix.
+       What is freed is the REMAINING demand only: the minutes already SPENT on it today stay spent (they
+       are in the per-day ledger and the day really did contain that work), so completing a task at 60%
+       done does not retroactively empty the morning. See the `demand`/`remaining` split below.
+       `planned` semantics are UNCHANGED and deliberate over-subscription is still a feature — a task that
+       is not finished asks the day for its whole figure exactly as before. Un-completing is symmetric for
+       free: `doneOn` is derived, never stored, so clearing pct restores the demand on the next render. */
+    const cand=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    const fin=cand.filter(t=>this.doneOn(t, B));
+    const acts=cand.filter(t=>!this.doneOn(t, B));
+    /* /PP-EXT */
     /* PP-EXT: break-between-tasks (settings.breakMin) reserves breakMin after each packed family in
        buildDayTimeline; shrink the pool by the same estimate (one break per packable family) so allotment
        stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
@@ -3603,7 +3615,20 @@ class Component extends DCLogic {
        whole day figure, never a fraction of it. `pool` is `avail`, the free minutes actually available after
        fixed appointments, the pack start and the break reserve. Reporting only: nothing here caps anything. */
     if(opts && opts.capacity){
-      opts.capacity.demand = Math.round(acts.reduce((a,t)=>a + this.requestedMinutes(t), 0));
+      /* PP-EXT V5 (34): TWO demand figures, because two different questions are being asked and one
+         number cannot honestly answer both.
+           · remaining — what the day is still ASKED for. Completed tasks contribute nothing: their
+                         remaining demand is what ticking them freed. This is what "all done" reads.
+           · demand    — what the day was asked for IN TOTAL, which is what the capacity bar has always
+                         shown. A completed task contributes the minutes actually SPENT on it that day,
+                         so finishing at 60% done leaves the morning's real work on the bar instead of
+                         erasing it. A completed task with no logged time contributes nothing, correctly.
+         Neither figure caps anything; both are still reporting-only, and `acts` — the set the seam
+         divides the pool between — is the same set both are derived from, so they cannot drift. */
+      opts.capacity.remaining = Math.round(acts.reduce((a,t)=>a + this.requestedMinutes(t), 0));
+      opts.capacity.demand = opts.capacity.remaining
+        + Math.round(fin.reduce((a,t)=>a + Math.max(0, this.getSpentOn(t, B)), 0));
+      /* /PP-EXT */
       opts.capacity.pool = Math.round(avail);
       /* PP-EXT V5 (30b): WHY the pool is what it is. 28b made EVERY zero pool read "no room", and its own
          handoff flagged that as wrong — an empty day window, or `packFromNow` with the day already over,
@@ -3634,7 +3659,10 @@ class Component extends DCLogic {
         /* PP-EXT: a drag-pinned child already holds a fixed slice (map[cid].fixed) — it's out of the family
            split entirely (weight 0, keeps its pinned allotment, doesn't reduce the parent's remainder). */
         if(map[cid] && map[cid].fixed){ w[cid]=0; return; }
-        w[cid]=this.isActiveOn(ct,B)?Math.max(0,ct.planned||0):0; S+=w[cid]; });
+        /* PP-EXT V5 (34): a COMPLETED child weighs 0, so its share returns to its siblings and the
+           parent's remainder rather than sitting in a finished row. Same rule as the top-level `acts`
+           filter — the family split must free what the pool split freed, or the two would disagree. */
+        w[cid]=(this.isActiveOn(ct,B) && !this.doneOn(ct,B))?Math.max(0,ct.planned||0):0; S+=w[cid]; });
       const P=Math.max(0, p.planned||0), denom=Math.max(P,S);
       let given=0;
       kidIds.forEach(cid=>{ if(map[cid] && map[cid].fixed){ distribute(cid); return; } /* keep the pinned slice */
@@ -3675,10 +3703,11 @@ class Component extends DCLogic {
   dayCapacity(B, tasks){
     const today=this.startOfToday(); if(B==null) B=today;
     if(B<today) return null;
-    const cap={demand:0,pool:0};
+    const cap={demand:0,pool:0,remaining:0};
     this.computeAllotted(tasks||this.state.tasks||[], B, {capacity:cap});
     const demand=Math.max(0,cap.demand), pool=Math.max(0,cap.pool);
-    return {demand, pool, over:demand>pool, booked: pool<=0,
+    const remaining=Math.max(0,cap.remaining);
+    return {demand, pool, remaining, over:demand>pool, booked: pool<=0,
       /* PP-EXT V5 (30b): `booked` stays exactly what it was (pool <= 0) because DOM hooks and other
          call sites read it. What is NEW is `state`, which says WHY, and it is the thing the readout
          words itself from. Owner's three phrases, and the order is deliberate:
@@ -3704,6 +3733,21 @@ class Component extends DCLogic {
     if(t.recur){ const ov=t.recur.overrides||{};
       return Object.keys(ov).some(oi=>ov[oi] && ov[oi].completion && this.ymdOf(ov[oi].completion)===ymd); }
     return false; }
+  /* PP-EXT V5 (34): PURE. Is this task FINISHED as far as day B is concerned — i.e. does it still owe the
+     day any work? Deliberately distinct from `isCompletedOn`, which asks the narrower question "was the
+     completion stamped on THIS day" and is what the journal and the `finished` counter need.
+       · recurring — per-occurrence, so only the occurrence completed on B counts as done on B. A series
+         completed yesterday still owes today its next occurrence.
+       · anything else — 100% is 100% on B and on every day after it. A task completed on Monday must not
+         keep asking Tuesday for its planned minutes. (`completion` is stamped by every completion mutator;
+         a legacy row at pct 100 with no stamp is treated as done, which is the safe direction — it frees
+         demand rather than inventing it.)
+     Milestones are never "done" here: they allot nothing in the first place. */
+  doneOn(t, B){
+    if(!t || this.isMilestone(t)) return false;
+    if(t.recur) return this.isCompletedOn(t, B);
+    if(!(t.pct>=100)) return false;
+    return t.completion==null ? true : this.startOfDay(t.completion) <= B; }
   /* /PP-EXT */
   setPredict(id,str){ const m=this.parseDur(str); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.predicted=m; t.predictManual=true; } }); }
   togglePredictManual(id){ const cur=this.allotOf(id).computed;
