@@ -61,8 +61,36 @@ the same sections and uniform 52px task rows with `spent / allotted`, a progress
 
 V2.9 removed the V2.2 ambient row encodings (`ambientRowBackground`: the ineligibility crosshatch and the
 carried-over tint). The predicates behind them remain and are load-bearing — `isInheritedToday` decides
-what carries onto today via `isActiveOn` — so only the paint was deleted. V2.1 pressed/active depth,
-selection, critical-path inset, and day-hover glow all stay.
+what carries onto today via `isActiveOn` — so only the paint was deleted. Selection, critical-path inset,
+and day-hover glow stay.
+
+**2026-08-12 — the PRESSED depth is deleted too; only ACTIVE depth remains.** V2.1 made inclusion a depth
+channel and V2.9 left it as "the only visual the inclusion model has". On a real workspace most rows are
+included, so the inset shadow meant to mark a state became the sheet's background texture, competing with
+striping, hover and selection. Inclusion is now read from `taskInclControl`'s explicit ☑/☐/💤/▶ glyph.
+Active depth is kept deliberately: it marks the running timer — transient, single-row, and not something
+the inclusion glyph duplicates. The sheet row and `planCard` share this channel (V2.11 parity), so both
+changed together. The generalisation, which the hatch already demonstrated once: **an ambient channel can
+only encode a rare state; a state most rows hold needs an explicit per-row mark.**
+
+**Inclusion click rule (2026-08-12).** Clicking the glyph on an **unpressed** row includes it directly —
+that state's popover held exactly one action, making it a confirmation dialog attached to a checkbox. The
+popover still opens for pressed/active/snoozed, which offer real alternatives (snooze today, snooze
+until…, take out of today). The rule is: *a click with one possible outcome performs it; a click with
+several opens the menu.* Both paths go through the same mutators, so undo is identical either way.
+
+**Milestone ⇄ task (2026-08-12).** `setType`/`setTypeMulti` are reachable from three surfaces — the row
+menu (`renderMenu`), the Gantt bar menu (`renderBarMenu`, where point-vs-span is the menu's own remit),
+and the detail panel's **Type** field. The conversion writes **only** `type`: a milestone draws as a
+diamond at its start and its `end` is never read, so collapsing the span would destroy the due date for
+no rendering benefit and make the round trip lossy. `allMilestones(ids)` drives the label so it cannot
+disagree with the action on a mixed selection.
+
+**Row-menu ↔ detail-panel parity (2026-08-12).** Everything in the row menu is reachable from the detail
+panel. The panel previously lacked type, section, duplicate, archive and delete. All five call the
+existing mutators rather than reimplementing — load-bearing for `deleteMulti`, which routes a recurring
+delete to the scope prompt instead of guessing which occurrences were meant. Parity is by shared mutator,
+not by two renderers that happen to agree (the drift this repo has already paid for twice).
 
 The Dashboard has four tabs (`dashMode`): **Overview · Plan · Focus · Review**. Overview
 (`renderDashOverview`) is the sheet + Gantt split and owns the six scheduling views via `state.planView`;

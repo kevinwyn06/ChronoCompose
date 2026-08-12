@@ -175,10 +175,20 @@ test('V4.4: toggleDrawerZoom flips between exactly the two levels and stays sess
   assert.ok(!('drawerZoom' in (c.state.prefs || {})), 'and not a persisted pref');
 });
 
-// ---- V5.27b: a Gantt bar carries its task's NAME (owner: "gantt … should be given tasks labels") ----
-// Before this, the ONLY identification on a bar was a `title` tooltip, so on a triage surface you had
-// to hover — or trust row alignment with the sheet — to know which bar was which. These tests assert
-// RENDERED TEXT, never a title: a check that passes on a tooltip has not tested this fix.
+// ---- Gantt bars are ANONYMOUS again (owner 2026-08-12) ----
+// V5.27b drew every bar's task name as rendered text (inside the fill when wide and solid, otherwise
+// beside the bar). Four tests pinned that contract; they are RETIRED WITH IT rather than deleted
+// silently, and replaced by the inverse assertion below.
+//
+// Why it was reversed: the feature was designed against sparse fixtures, where one bar per row makes a
+// label clarifying. A real workspace repeats — a daily task drew one label per occurrence, so a single
+// row emitted the same name across the whole chart width and rows of recurring work became stacked
+// text (owner: "the name completely overwhelms the interface"). These very tests passed throughout,
+// because none of them rendered more than two occurrences of anything: the defect was density, and the
+// fixtures had none. That is the gap worth remembering, not the removed code.
+//
+// The replacement test asserts rendered text is ABSENT while the tooltip still carries the name, so a
+// future re-introduction has to be a deliberate change to this contract rather than an accident.
 const textOf = n => {
   if (n == null || n === false) return '';
   if (Array.isArray(n)) return n.map(textOf).join('');
@@ -188,72 +198,56 @@ const textOf = n => {
 const nameNodes = root => findAll(root, n => n.props && n.props['data-ganttname'] != null);
 const titlesOf = root => findAll(root, n => n.props && n.props.title).map(n => n.props.title);
 
-test('V5.27b: a wide Gantt bar renders its task name as text inside the bar, not only as a tooltip', () => {
+test('no Gantt shape renders its task name as text; the tooltip still carries it', () => {
   const c = ganttReady();
-  const t = mkTask(c, { name: 'Quarterly board deck' });
-  const bar = c.ganttBlock(t, 0, occOf(t));
-  const labels = nameNodes(bar);
-  assert.strictEqual(labels.length, 1, 'exactly one name label is drawn');
-  assert.strictEqual(labels[0].props['data-ganttname'], t.id, 'the label identifies its task');
-  assert.strictEqual(textOf(labels[0]), 'Quarterly board deck', 'the NAME is rendered text');
-  // The point of the fix: identification does not depend on a hover.
-  assert.ok(!('onMouseEnter' in labels[0].props), 'the label is not hover-gated');
-  const s = styleOf(labels[0]);
-  assert.ok(!/^0$/.test(String(s.opacity)) && s.opacity !== 0, 'and it is not hidden at rest');
-  assert.strictEqual(s.pointerEvents, 'none', 'it never steals a bar drag');
-  // 3 days at dayW 42 is ~126px — comfortably inside the inside-label threshold.
-  assert.ok(c.GANTT_LABEL_MIN_PX > 0 && 3 * 42 >= c.GANTT_LABEL_MIN_PX);
-});
 
-test('V5.27b: a bar too narrow for an inside name keeps the name OUTSIDE it — never invisible', () => {
-  const c = ganttReady();
-  c.state.dayW = 6;                        // month-ish zoom: a 1-day bar floors at BAR_MIN_PX
-  const t = mkTask(c, { name: 'Renew passport', end: B0 + DAY });
-  const bar = c.ganttBlock(t, 0, occOf(t));
-  const labels = nameNodes(bar);
-  assert.strictEqual(labels.length, 1, 'the narrow bar still has exactly one name label');
-  assert.strictEqual(textOf(labels[0]), 'Renew passport', 'the full name is still rendered');
-  const s = styleOf(labels[0]);
-  assert.strictEqual(s.textOverflow, 'ellipsis', 'it truncates with an ellipsis rather than clipping blind');
-  assert.strictEqual(s.whiteSpace, 'nowrap', 'and never reflows into the row below');
-  // It must be OUTSIDE the bar: the label's row starts past the bar's right edge.
-  const row = findAll(bar, n => styleOf(n).display === 'flex' && nameNodes(n).length)[0];
-  assert.ok(row, 'the outside label lives in the side row');
-  assert.ok(px(styleOf(row).left) >= c.BAR_MIN_PX,
-    'the side row starts at/after the bar right edge, got ' + styleOf(row).left);
-  // …and clear of the link dot's hit box, so it cannot swallow a dependency drag.
-  assert.ok(px(styleOf(row).left) >= c.BAR_MIN_PX + c.HIT_MIN_PX,
-    'the side row clears the HIT_MIN_PX link box');
-});
-
-test('V5.27b: the inside/outside decision is a width rule, and a ghost fill always goes outside', () => {
-  const c = ganttReady();
-  assert.strictEqual(c.ganttLabelInside(c.GANTT_LABEL_MIN_PX, true), true, 'at the threshold: inside');
-  assert.strictEqual(c.ganttLabelInside(c.GANTT_LABEL_MIN_PX - 1, true), false, 'one px under: outside');
-  // A ghost's fill dissolves toward the derived edge, so --on-accent on it is not reliably legible.
-  assert.strictEqual(c.ganttLabelInside(400, false), false, 'a wide ghost still labels outside');
-  const t = mkTask(c, { name: 'Ghosted work' });
-  const gb = c.ganttBlock(t, 0, { idx: 0, start: t.start, end: t.end, ghost: true, ghostStart: true });
-  const labels = nameNodes(gb);
-  assert.strictEqual(labels.length, 1, 'a ghost bar is named too');
-  assert.strictEqual(textOf(labels[0]), 'Ghosted work');
-});
-
-test('V5.27b: milestones and collapsed recurrence strips are named too, and no bar stays anonymous', () => {
-  const c = ganttReady();
+  // A wide solid bar — the case V5.27b labelled INSIDE the fill.
+  const wide = mkTask(c, { name: 'Quarterly board deck' });
+  // A bar floored at BAR_MIN_PX — the case V5.27b labelled OUTSIDE.
+  c.state.dayW = 6;
+  const narrow = mkTask(c, { id: 'n1', name: 'Renew passport', end: B0 + DAY });
+  c.state.dayW = 42;
   const ms = mkTask(c, { id: 'm1', name: 'Launch', type: 'Milestone' });
-  const dia = c.ganttBlock(ms, 0, occOf(ms));
-  assert.strictEqual(textOf(nameNodes(dia)[0] || null), 'Launch', 'the milestone diamond carries its name');
-  // The hover contract from V1.5 must survive the wrapper the label needed.
+  const rt = mkTask(c, { id: 'r1', name: 'Standup', recur: { kind: 'day', n: 1, label: 'Daily' } });
+
+  const shapes = [
+    ['wide bar', c.ganttBlock(wide, 0, occOf(wide)), 'Quarterly board deck'],
+    ['narrow bar', c.ganttBlock(narrow, 0, occOf(narrow)), 'Renew passport'],
+    ['ghost bar', c.ganttBlock(wide, 0,
+      { idx: 0, start: wide.start, end: wide.end, ghost: true, ghostStart: true }), 'Quarterly board deck'],
+    ['milestone', c.ganttBlock(ms, 0, occOf(ms)), 'Launch'],
+    ['recur strip', c.ganttRecurStrip(rt, 0,
+      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }]), 'Standup'],
+  ];
+
+  for (const [what, node, name] of shapes) {
+    assert.strictEqual(nameNodes(node).length, 0, what + ' draws no [data-ganttname] label');
+    assert.ok(!textOf(node).includes(name),
+      what + ' does not render the task name as text anywhere, got: ' + JSON.stringify(textOf(node)));
+    // Identification is not lost — it moved back to the tooltip (plus sheet row alignment).
+    assert.ok(titlesOf(node).some(ti => String(ti).includes(name)),
+      what + ' still names the task in a title tooltip');
+  }
+
+  // The recurrence strip keeps its RULE chip: that is per-row, not per-occurrence, so it does not
+  // multiply with density the way the name did.
+  const strip = shapes[4][1];
+  assert.ok(textOf(strip).includes('Daily'), 'the recurrence strip still announces its rule');
+
+  // The V1.5 hover contract and the drag must survive the removal.
+  const dia = shapes[3][1];
   assert.strictEqual(typeof dia.props.onMouseEnter, 'function', 'milestone still owns its hover state');
   assert.strictEqual(typeof dia.props.onMouseDown, 'function', 'and is still draggable');
-  const rt = mkTask(c, { id: 'r1', name: 'Standup', recur: { kind: 'day', n: 1, label: 'Daily' } });
-  const strip = c.ganttRecurStrip(rt, 0, [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }]);
-  assert.strictEqual(textOf(nameNodes(strip)[0] || null), 'Standup', 'the recurrence strip names its task');
-  // And the negative: none of the three relies on the tooltip alone any more.
-  for (const [what, node] of [['bar', c.ganttBlock(mkTask(c, { name: 'Nm' }), 0, occOf(mkTask(c)))],
-                              ['milestone', dia], ['recur strip', strip]]) {
-    assert.ok(titlesOf(node).length, what + ' keeps its tooltip as a bonus');
-    assert.ok(nameNodes(node).length, what + ' is identifiable WITHOUT the tooltip');
-  }
+});
+
+test('the side row survives the name removal and still carries the %-done readout, clear of the link box', () => {
+  const c = ganttReady();
+  const t = mkTask(c, { name: 'Half done', pct: 50 });
+  const bar = c.ganttBlock(t, 0, occOf(t));
+  const row = findAll(bar, n => styleOf(n).display === 'flex' && /%/.test(textOf(n)))[0];
+  assert.ok(row, 'the %-done readout still renders in the side row');
+  // Unchanged from V5.27b: it must clear the link dot so it cannot swallow a dependency drag.
+  assert.ok(px(styleOf(row).left) >= c.BAR_MIN_PX + c.HIT_MIN_PX,
+    'the side row clears the HIT_MIN_PX link box, got ' + styleOf(row).left);
+  assert.strictEqual(styleOf(row).pointerEvents, 'none', 'and never takes pointer events');
 });

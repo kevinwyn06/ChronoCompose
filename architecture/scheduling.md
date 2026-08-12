@@ -19,9 +19,18 @@ the current time. Other-day columns remain date-window-derived. Non-Point presse
 V2.2 adds two derived ambient signals without gating discretion. `isEligibleToday` requires today's day
 inside the real/derived occurrence window and all existing predecessors complete; planned duration is not
 part of eligibility. `isInheritedToday` detects unfinished work scheduled automatically or manually on
-yesterday, auto-includes legacy/unpressed state today, and yields to explicit off or snooze. Sheet and Gantt
-rows layer the ineligible hatch texture and inherited tint over their selection/hover base while keeping
-pressed/active depth and calendar glow in box-shadow.
+yesterday, auto-includes legacy/unpressed state today, and yields to explicit off or snooze. Both remain
+live *predicates*; neither paints a row any more. The hatch and tint went in V2.9 §2, and the **pressed
+depth went on 2026-08-12** — sheet and Gantt rows now carry only selection/hover, ACTIVE depth, the
+critical-path inset and the calendar glow. Inclusion is read from `taskInclControl`'s glyph. See
+`ui-runtime.md` for why (an ambient channel cannot encode a state most rows hold).
+
+A **dateless recurring** task is expanded from a derived anchor rather than dropped. `renderVals` used to
+give one an empty occurrence list; since 2026-08-12 it expands a shadow task built from `recurGhostAnchor`
+(pure: anchor on whichever of start/due exists, else today; every occurrence one day) with each occurrence
+flagged ghost. `t.start`/`t.end` stay null — dragging an edge commits a real date through the normal
+bar-drag path. `ghostDrawSpan` skips its view-fraction floor for any occurrence carrying `occ`, since a
+series tiles and does not need any one member enlarged.
 
 `autoSchedule` and `computeCPM`/`computeSlack` handle dependency-driven scheduling and critical path.
 Scheduling shapes are derived from dates, planned duration, and whether each edge has a user-entered clock.

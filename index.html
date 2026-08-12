@@ -43,6 +43,11 @@
   --grid-strong:rgba(255,255,255,0.07);--grid-weak:rgba(255,255,255,0.035);
   --scroll-thumb:#3a3a3c;--scroll-thumb-hover:#4a4a4d;--toggle-off:#3a3b40;--split-bar:#101011;
   --bar-ring:rgba(255,255,255,0.85);
+  /* PP-EXT (owner 2026-08-12): ghost-bar paint. Was a single hardcoded rgba(148,163,184,0.16) in JS,
+     used unchanged in BOTH themes — which is why the owner read it as washed out in each ("greyish and
+     just hard on the eyes whether in light or dark mode"). Now a token per theme, and considerably more
+     opaque: a derived date is meant to look derived, not to look absent. */
+  --ghost-flat:rgba(160,174,192,0.34);--ghost-dots:rgba(198,208,222,0.78);
   /* PP-EXT (B2 — color/contrast): semantic status tokens, replacing scattered inline hex.
      Dark-theme values keep the original hex (already AA-passing against dark surfaces). */
   --danger:#e5484d;--danger-strong:#e5615d;--success:#79c08e;--success-strong:#2f9e5f;
@@ -65,6 +70,9 @@
   --grid-strong:rgba(0,0,0,0.08);--grid-weak:rgba(0,0,0,0.04);
   --scroll-thumb:#d6d6d3;--scroll-thumb-hover:#c2c2bf;--toggle-off:#cfcfcb;--split-bar:#e6e6e3;
   --bar-ring:rgba(0,0,0,0.5);
+  /* PP-EXT (owner 2026-08-12): see the dark-theme note. A grey that reads on #191919 disappears on
+     white, so the light values are DARKER rather than the same rgba at a different alpha. */
+  --ghost-flat:rgba(90,105,130,0.44);--ghost-dots:rgba(71,85,105,0.72);
   /* PP-EXT (B2 — color/contrast): semantic status tokens, darkened from the dark-theme hex to
      clear WCAG AA (4.5:1) for small text against white/light surfaces — see progress log for
      the measured ratios. */
@@ -361,10 +369,12 @@ class Component extends DCLogic {
     this.barH = 20; /* PP-EXT (C1): a few px taller than the old 16 → a bigger vertical drag target on the Gantt bar */
     this.headH = 48;
     /* PP-EXT (C1/C2): Gantt-bar draggability + sub-day zoom. */
-    /* PP-EXT V5.27b: narrowest bar that can carry its task name INSIDE the fill. Below this the name
-       is not dropped — it moves outside, to the right of the bar. ~56px fits an ellipsised word at
-       10.5px with the 6px insets; anything less reads as "…" and is worse than a label beside it. */
-    this.GANTT_LABEL_MIN_PX = 56;
+    /* PP-EXT: GANTT_LABEL_MIN_PX retired 2026-08-12 with the Gantt bar names — see ganttSideRow. */
+    /* PP-EXT (owner 2026-08-12): the two values `type` takes as a SCHEDULING MODE. Named because the
+       milestone⇄task converter now writes them from three surfaces, and `type` is not a category —
+       spelling either one wrong silently produces a task that is neither. */
+    this.MILESTONE_TYPE = 'Milestone';
+    this.DEFAULT_TASK_TYPE = 'Proportional';
     this.BAR_MIN_PX = 24;            // min bar width — fits two 7px edge grips + a draggable middle, so a short/zero-span bar never collapses into an undraggable, stacked sliver
     /* PP-EXT (V1.5, owner tenet 2026-07-26): "all the clickboxes are all too tiny. Humans do not have
        machine precision. They want as much leeway as possible." Every interactive handle gets a
@@ -377,11 +387,23 @@ class Component extends DCLogic {
        edge toward the derived one. Two mirrored ramps drive it: the fill fades colour OUT, the dotted
        outline mask fades dots IN, so "solid + no dots" and "no colour + dots" are the same axis read
        twice. Stops are percentages of bar width. */
-    this.GHOST_FILL_HOLD = 12;       // % of the bar that stays at full task colour next to the committed edge
-    this.GHOST_FILL_FADE = 92;       // % where the colour has fully dissolved to transparent
-    this.GHOST_DOTS_HOLD = 8;        // % nearest the committed edge where the dotted outline is fully hidden
-    this.GHOST_DOTS_FADE = 55;       // % where the dotted outline reaches full opacity
-    this.GHOST_FLAT = 'rgba(148,163,184,0.16)'; // double-ghost fill: nothing is committed, so nothing is anchored
+    /* PP-EXT (owner 2026-08-12, contrast): the ramps were retuned after the first real-workspace
+       session — "contrast too low for tasks like Heritage Day; it's greyish and just hard on the eyes
+       whether in light or dark mode". Heritage Day is the exact shape that read worst: a due date with
+       no start, so a half-ghost, and at HOLD 12 only the leftmost eighth of the bar carried any task
+       colour at all — the other 88% was a fade to transparent over the chart background. The anchor
+       semantics from V1.2 round2 are UNCHANGED (colour still sits at the committed edge and dissolves
+       toward the derived one); the dissolve simply starts much later and the dots hold with it, so the
+       bar reads as a bar first and as derived second. */
+    this.GHOST_FILL_HOLD = 45;       // % of the bar that stays at full task colour next to the committed edge
+    this.GHOST_FILL_FADE = 100;      // % where the colour has fully dissolved to transparent
+    this.GHOST_DOTS_HOLD = 40;       // % nearest the committed edge where the dotted outline is fully hidden
+    this.GHOST_DOTS_FADE = 85;       // % where the dotted outline reaches full opacity
+    /* Theme tokens, not a literal: one hardcoded rgba cannot serve a #191919 and a #ffffff chart. */
+    this.GHOST_FLAT = 'var(--ghost-flat)'; // double-ghost fill: nothing is committed, so nothing is anchored
+    /* Whole-bar mute for work that is not in today. Named because it MULTIPLIES with the ghost fade
+       above — the two were tuned independently and compounded on the bars the owner flagged. */
+    this.BAR_OPTED_OUT_OPACITY = 0.75;
     /* PP-EXT (V1.2 round3): a ghost's derived extent is ALWAYS 1 day in data (ghostSpan is pure and now feeds
        scheduling — making it zoom-dependent would mean zooming the chart changes what gets allotted). But 1 day
        at year zoom is a sliver, so the DRAWING gets a floor of `max(1 day, GHOST_VIEW_FRAC × visible width)`.
@@ -1449,6 +1471,34 @@ class Component extends DCLogic {
   }
   rename(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.name=val.trim()||'Untitled'; }); }
   setType(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.type=val; }); }
+  /* PP-EXT (owner 2026-08-12): "There is no way to switch something from a milestone to a task and vice
+     versa." `setType` has always existed and worked; nothing in the UI called it, and isMilestone's
+     comment even claimed the mode was "no longer user-selectable". It is now reachable from the row
+     menu, the Gantt bar menu and the detail panel.
+
+     The conversion writes ONLY `type` — deliberately. A milestone is drawn as a diamond at its START
+     and its `end` is never read (see the isMilestone branch in ganttBlock), so collapsing end onto start
+     would destroy the task's due date to no rendering benefit and make the round trip lossy. Leaving the
+     span intact means converting back restores exactly what was there, which matters because this is a
+     two-way toggle a user will flip while deciding. Same principle the Matrix quadrant drag follows: a
+     gesture must not silently rewrite dates, because that loss is invisible at the moment it happens.
+
+     `planned` is likewise untouched. A milestone never allots (isMilestone gates it out), so the value
+     simply lies dormant and comes back on conversion. */
+  setTypeMulti(ids, val){
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.type=val; }); });
+    this.closeMenu();
+  }
+  /* Toggle for a selection: if every one of them is already a milestone, convert them all back to
+     ordinary tasks; otherwise make them all milestones. Reading the whole selection (rather than the
+     clicked row) is what keeps the menu label and the action agreeing on a mixed selection. */
+  allMilestones(ids){
+    const sel=this.state.tasks.filter(t=>ids.includes(t.id));
+    return sel.length>0 && sel.every(t=>this.isMilestone(t));
+  }
+  toggleMilestoneMulti(ids){
+    this.setTypeMulti(ids, this.allMilestones(ids) ? this.DEFAULT_TASK_TYPE : this.MILESTONE_TYPE);
+  }
   setNum(id,key,val){ const n=Math.max(0,Math.round(parseFloat(val)||0)); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t[key]=n; }); }
   fmtDur(min){ if(min==null) return '—'; const h=Math.floor(min/60), m=Math.round(min%60); return h+':'+String(m).padStart(2,'0'); }
   parseDur(str){ str=String(str).trim(); if(!str) return 0; if(str.includes(':')){ const p=str.split(':'); return Math.max(0,(parseInt(p[0])||0)*60+(parseInt(p[1])||0)); } return Math.max(0,Math.round((parseFloat(str)||0)*60)); }
@@ -2278,8 +2328,27 @@ class Component extends DCLogic {
      floor is a `max`, never a shrink. Solid bars pass straight through. PURE (ms + px in, ms out) → unit-tested.
      Both the renderer and startBarDrag call this, so a ghost edge is dragged from where it is actually DRAWN
      rather than from its hidden derived date (which would make the bar jump on the first pixel of the gesture). */
+  /* PP-EXT (owner 2026-08-12): where a dateless REPEAT anchors its series. `ghostSpan` is the right
+     answer for a one-off (derive a single 1-day window from today), but wrong for a repeat in one
+     specific way: when a start is set and a due is not, ghostSpan returns `end = max(start,today)+DAY`,
+     so a series anchored months ago would give every occurrence a months-long duration and the whole
+     row would collapse into one smeared overlap. A repeat missing either edge has no meaningful span,
+     so each occurrence is exactly one day; only the ANCHOR is derived.
+       • no dates at all   → anchor today, both edges ghost
+       • start, no due     → anchor the real start, due edge ghost
+       • due, no start     → anchor the real due, start edge ghost
+     PURE (task + today in, span out) → unit-tested. */
+  recurGhostAnchor(t, today){
+    const start = t.start!=null ? t.start : (t.end!=null ? t.end : today);
+    return {start, end:start+this.DAY, ghostStart:t.start==null, ghostEnd:t.end==null};
+  }
   ghostDrawSpan(o, dayW, viewW){
     if(!o || !o.ghost) return {start:o.start, end:o.end};
+    /* PP-EXT (owner 2026-08-12): a RECURRING ghost occurrence is never widened to the view floor. The
+       floor exists so a lone dateless task stays grabbable when zoomed out; applied per occurrence it
+       would give a daily repeat ~75 bars each a fifth of the viewport wide, stacked on top of each
+       other. A series is findable because it tiles — it does not need any one member enlarged. */
+    if(o.occ) return {start:o.start, end:o.end};
     const minMs = Math.max(this.DAY, (viewW||0)*this.GHOST_VIEW_FRAC/(dayW||1)*this.DAY);
     if(o.end - o.start >= minMs) return {start:o.start, end:o.end};
     if(o.ghostStart && !o.ghostEnd) return {start:o.end-minMs, end:o.end};   /* anchored on the due date */
@@ -5073,9 +5142,41 @@ class Component extends DCLogic {
   }
   /* /PP-EXT */
 
-  /* ---------- scroll sync ---------- */
-  syncFromSheet(e){ if(this._sync)return; this._sync=true; if(this.ganttScrollEl) this.ganttScrollEl.scrollTop=e.target.scrollTop; this._sync=false; }
-  syncFromGantt(e){ if(this._sync)return; this._sync=true; if(this.sheetScrollEl) this.sheetScrollEl.scrollTop=e.target.scrollTop; this._sync=false;
+  /* ---------- scroll sync ----------
+     PP-EXT (owner 2026-08-12): "The scrolling between the list and the gantt is not fully synced. One
+     kind of follows the other rather than always being equal."
+
+     Two independent defects, and the obvious one was not the cause.
+
+     1. THE GUARD NEVER COVERED THE ECHO. The old code set `_sync`, wrote the other pane's scrollTop,
+        and cleared `_sync` — all synchronously. But assigning scrollTop does not fire `scroll`
+        synchronously; the browser dispatches it later, before the next paint. So the guard was always
+        already down by the time the echo arrived, and every programmatic write produced an unguarded
+        reciprocal event. That is harmless only while both panes agree on the value, which is defect 2.
+     2. THE PANES HAD DIFFERENT SCROLL HEIGHTS. The sheet ends in a trailing `+ Add task` row; the Gantt
+        had no counterpart, so the sheet's content was exactly `rowH` taller. Near the bottom the sheet
+        could scroll to a value the Gantt cannot reach, the write clamped, and the unguarded echo wrote
+        the clamped value BACK — dragging the sheet up under the user. That is the "one follows the
+        other" drift, and it is why it only ever felt wrong toward the end of a long list.
+
+     The guard is now an OWNER held across a frame: the pane the user is actually scrolling claims it,
+     the echo from the other pane is recognised and dropped, and the claim is released on the next
+     animation frame — after the echo has been dispatched. `_syncOwner` is an instance field, never
+     React state: it must not schedule a render, and it is meaningless across one.
+     The height half is fixed at the source, in renderGantt — see ganttTailSpacer. */
+  scrollSyncFrom(which, srcEl){
+    const dst = which==='sheet' ? this.ganttScrollEl : this.sheetScrollEl;
+    if(!srcEl || !dst) return;
+    /* This event is the echo of our own write to `which`'s partner — swallow it. */
+    if(this._syncOwner && this._syncOwner!==which) return;
+    this._syncOwner = which;
+    const y = srcEl.scrollTop;
+    if(dst.scrollTop !== y) dst.scrollTop = y;
+    if(this._syncRaf) cancelAnimationFrame(this._syncRaf);
+    this._syncRaf = requestAnimationFrame(()=>{ this._syncRaf=0; this._syncOwner=null; });
+  }
+  syncFromSheet(e){ this.scrollSyncFrom('sheet', e.target); }
+  syncFromGantt(e){ this.scrollSyncFrom('gantt', e.target);
     /* PP-EXT: horizontal scroll shifts the virtualization window — re-render (rAF-throttled) only when the
        visible day range actually changes, so scrolling reveals off-screen bars without a per-frame re-render. */
     if(this._tl && !this._vraf){ this._vraf=requestAnimationFrame(()=>{ this._vraf=0;
@@ -5151,9 +5252,28 @@ class Component extends DCLogic {
       this._occById={}; let gmin=bmin,gmax=bmax;
       tasks.forEach(t=>{ if(!this.isScheduled(t)){
           /* PP-EXT (V1.2): a dateless (or half-dated) NON-recurring task still gets one draggable GHOST
-             occurrence, derived from today — the task's start/end stay null in data. Recurring tasks need
-             real dates to expand, so a rule-less/dateless recur (shouldn't happen) still yields no bar. */
-          if(t.recur){ this._occById[t.id]=[]; return; }
+             occurrence, derived from today — the task's start/end stay null in data. */
+          /* PP-EXT (owner 2026-08-12): a dateless REPEAT used to be given an explicitly EMPTY list here,
+             on the reasoning that "recurring tasks need real dates to expand" and a dateless one
+             "shouldn't happen". It happens on the laziest path there is: type a title, set Daily, never
+             open the date picker. The task then sat in the sheet showing its ↻ Daily chip and drew
+             NOTHING on the chart, at any zoom, forever — the owner hit it with two tasks in one session
+             ("GRE prep, despite having a daily recurrence, does not show up once in the gantt chart").
+             It also broke the standing tenet that unallocated work stays passively visible rather than
+             being silently dropped: an empty list is indistinguishable from having no such task.
+             The rule expands from a DERIVED anchor instead (recurGhostAnchor), and every occurrence is
+             flagged ghost so it paints as derived rather than committed. `t.start`/`t.end` stay null in
+             data — dragging an edge writes a real date through the existing bar-drag machinery. */
+          if(t.recur){
+            const a=this.recurGhostAnchor(t, todayStart);
+            const shadow=Object.assign({}, t, {start:a.start, end:a.end});
+            const rocc=this.expandTask(shadow, horizon).map(o=>Object.assign({}, o,
+              {ghost:true, ghostStart:a.ghostStart, ghostEnd:a.ghostEnd}));
+            this._occById[t.id]=rocc;
+            rocc.forEach(o=>{ if(o.start<todayStart || this.occPct(t,o.idx)>=100) return;
+              gmin=Math.min(gmin,o.start); gmax=Math.max(gmax,o.end); });
+            return;
+          }
           const g=this.ghostSpan(t, todayStart);
           this._occById[t.id]=[{idx:0, start:g.start, end:g.end, ghost:true, ghostStart:g.ghostStart, ghostEnd:g.ghostEnd}];
           gmin=Math.min(gmin,g.start); gmax=Math.max(gmax,g.end); return;
@@ -9046,7 +9166,18 @@ class Component extends DCLogic {
       : st==='active' ? 'Active now · stronger pressed state'
       : st==='pressed' ? 'Pressed into today · click to change'
       : 'Not pressed today · click to include';
-    return h('span',{onClick:e=>this.openInclPick(e,t.id), onMouseDown:e=>e.stopPropagation(),
+    /* PP-EXT (owner 2026-08-12): "ticking a task from unincluded to included should not bring up a
+       confirmation popup." An unpressed row's popover held exactly ONE action — "Press into today" — so
+       it was a menu with no choice in it, i.e. a confirmation dialog for a checkbox tick. Clicking ☐ now
+       just includes the task.
+       The popover survives for the other states because there it genuinely offers alternatives (snooze
+       today, snooze until…, take out of today) and the destination is not obvious from the glyph. So the
+       rule is: a click that has one possible outcome performs it; a click with several opens the menu.
+       Both paths still route through the same mutators, so undo behaves identically either way. */
+    const onClick = st==='unpressed'
+      ? (e=>{ e.stopPropagation(); this.setIncludedTrue(t.id); })
+      : (e=>this.openInclPick(e,t.id));
+    return h('span',{onClick, onMouseDown:e=>e.stopPropagation(),
       title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph);
   }
   /* `planned → allotted`, flush right. Planned is editable in place; allotted is computed. */
@@ -9104,10 +9235,11 @@ class Component extends DCLogic {
     const descOpen=!!(this.state.cardDescOpen||{})[t.id];
     const st=this.inclState(t);
     const snoozed=st==='snoozed';
-    /* V2.1 pressed/active depth, the same channel the sheet row uses — inclusion is depth, not colour. */
+    /* PP-EXT (owner 2026-08-12): the PRESSED depth is gone here too — the card and the sheet row share
+       this channel by design (V2.11 card↔row parity), so dropping it on one surface only would put them
+       back out of step. ACTIVE depth stays on both. See the depthState note in sheetRow. */
     let bsh=dragging?'none':'var(--sh-1)';
     if(st==='active') bsh='inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
-    else if(st==='pressed') bsh='inset 0 3px 7px rgba(0,0,0,0.16)';
     const chip=(el,key)=>el?h('span',{key,style:{display:'inline-flex',alignItems:'center',flex:'none'}},el):null;
     return h('div',{key:t.id,'data-card-id':t.id,'data-task-id':t.id,
       onMouseDown:e=>this.cardPointerDown(e,t.id,zone),
@@ -10441,10 +10573,19 @@ class Component extends DCLogic {
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
-    const depthState=this.inclState(t); /* PP-EXT V2.1: pressed/active is depth, independent of selection */
+    /* PP-EXT (owner 2026-08-12): the PRESSED depth is gone. Owner: "get rid of the pressed-in effect —
+       it's the same thing as the inclusion check, but is super annoying to work with."
+       V2.1 made inclusion a depth channel, and V2.9 §2 later stripped every other ambient encoding and
+       left this as "the only visual the inclusion model has". That reasoning does not survive contact
+       with a real workspace: most rows are included, so an inset shadow meant to mark a state became the
+       background texture of the whole sheet, and it was drawn on top of the row striping and the hover
+       and selection washes it had to share the surface with. The state is not lost — `taskInclControl`
+       renders it as an explicit ☑/☐ glyph per row, which is what the owner means by "the same thing".
+       ACTIVE depth stays: it is the running timer, a transient single-row state that the inclusion
+       control does NOT duplicate meaningfully, and it reads as an accent ring rather than a muddy inset. */
+    const depthState=this.inclState(t);
     let bsh = crit?'inset 3px 0 0 var(--danger)':(sel?'inset 2px 0 0 '+(this._accent||'#3b82f6'):''); /* PP-EXT (B2): unify sel indicator on this._accent */
     if(depthState==='active') bsh=(bsh?bsh+',':'')+'inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
-    else if(depthState==='pressed') bsh=(bsh?bsh+',':'')+'inset 0 3px 7px rgba(0,0,0,0.16)';
     /* PP-EXT: calendar day-hover glow — hovering a day (Month/Week/4-Day/Schedule) sets _glowIds via renderVals;
        this is the NORMAL-row wash (the milestone + Gantt rows already had it; the plain rows were the missing case). */
     if(this._glowIds && this._glowIds.has(t.id)) bsh = (bsh?bsh+',':'')+'inset 0 0 0 9999px rgba(245,181,54,0.16)';
@@ -10470,10 +10611,11 @@ class Component extends DCLogic {
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
-        /* PP-EXT V2.9 §2: ambient hatch/tint layers stripped; V2.1 pressed/active DEPTH stays — it is not
-           colour, and it is the only visual the inclusion model has. */
+        /* PP-EXT V2.9 §2: ambient hatch/tint layers stripped. The PRESSED tint went with them on
+           2026-08-12 (see the depthState note above); only the ACTIVE wash remains, so an ordinary row
+           is plain striping again. */
         background:(sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
-          (depthState==='pressed'?'color-mix(in srgb, '+this._accent+' 6%, '+(i%2?'var(--sheet-alt)':'var(--sheet-bg)')+')':(i%2?'var(--sheet-alt)':'var(--sheet-bg)'))))),
+          (i%2?'var(--sheet-alt)':'var(--sheet-bg)')))),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
         borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,
@@ -10604,11 +10746,21 @@ class Component extends DCLogic {
             boxShadow: (this._glowIds&&this._glowIds.has(t.id)?'inset 0 0 0 9999px rgba(245,181,54,0.16)':(crit?'inset 3px 0 0 rgba(229,72,77,0.5)':'none'))}}); }), /* PP-EXT: month-view day glow */
       arrows, ...bars, todayLine);
 
+    /* PP-EXT (owner 2026-08-12): the Gantt's counterpart to the sheet's trailing "+ Add task" row.
+       It has no content and no behaviour — its only job is to make the two panes' scrollable content
+       exactly the same height. Without it the sheet is `rowH` taller, so near the bottom of a long list
+       the sheet reaches a scrollTop the Gantt cannot, the sync write clamps, and the panes settle at
+       different offsets — which is half of the "not fully synced" report (the other half is the echo
+       guard in scrollSyncFrom). Height is read from the same `this.rowH` the add-row uses, so a row-mode
+       change keeps them equal by construction rather than by a matching pair of literals. */
+    const tailSpacer=h('div',{key:'ganttTailSpacer','data-gantt-tail':'1','aria-hidden':'true',
+      style:{height:this.rowH+'px',minWidth:totalW+'px',pointerEvents:'none'}});
+
     return h('div',{ref:el=>{this.ganttScrollEl=el; if(el&&!el._wz){el._wz=1; el.addEventListener('wheel',ev=>this.onWheelZoom(ev),{passive:false});}}, onScroll:e=>this.syncFromGantt(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}},
       h('div',{onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
-        style:{minWidth:totalW+'px'}}, header, body));
+        style:{minWidth:totalW+'px'}}, header, body, tailSpacer));
   }
 
   /* PP-EXT: repeat is "too dense" when the on-screen spacing between consecutive occurrence starts falls
@@ -10646,48 +10798,37 @@ class Component extends DCLogic {
       style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',
         background:hatch,border:'1px solid '+base,borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'pointer',zIndex:5,overflow:'hidden',
         boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',display:'flex',alignItems:'center'}},
+      /* PP-EXT (owner 2026-08-12): the task NAME is no longer drawn here. V5.27b put it after the chip
+         so a dense repeat was identifiable without hovering, but a daily rule renders one strip per row
+         across the whole chart, and the repeated name drowned the surface it was meant to clarify
+         (owner: "the name completely overwhelms the interface"). The rule chip stays — it is per-row,
+         not per-occurrence — and identification falls back to row alignment with the sheet plus the
+         `title` tooltip, which still carries the name. */
       h('span',{key:'chip',style:{padding:'1px 6px',margin:'0 4px',fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',
-        background:base,borderRadius:'3px',whiteSpace:'nowrap',pointerEvents:'none',flex:'0 0 auto'}}, lbl+' · '+occs.length+'×'),
-      /* PP-EXT V5.27b: the collapsed-recurrence strip was anonymous too — it announced the RULE but
-         never the task. The name follows the chip, ellipsised, so a dense repeat is identifiable
-         without hovering. Outside the hatch it would collide with the next row's bars, so it lives
-         inside the strip and truncates rather than disappearing. */
-      h('span',{key:'nmi','data-ganttname':t.id,
-        style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',minWidth:0,
-          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',pointerEvents:'none',
-          textShadow:'0 1px 1px rgba(0,0,0,0.35)'}}, t.name));
+        background:base,borderRadius:'3px',whiteSpace:'nowrap',pointerEvents:'none',flex:'0 0 auto'}}, lbl+' · '+occs.length+'×'));
   }
   /* /PP-EXT */
 
-  /* PP-EXT V5.27b (owner: "gantt … should be given tasks labels"): a Gantt bar used to be ANONYMOUS —
-     its only identification was a `title` tooltip, so on a triage surface you had to hover, or trust
-     row alignment with the sheet, to know which bar was which. Every bar now carries its task's NAME
-     as rendered text.
+  /* PP-EXT (owner 2026-08-12): V5.27b gave every bar its task's NAME as rendered text — inside the fill
+     when wide and solid, otherwise beside the bar. It is REMOVED, on the owner's call after the first
+     real-workspace session: "the task name in the gantt chart doesn't work, especially for recurring
+     tasks where the name completely overwhelms the interface."
 
-     Where the name goes is decided by width, and it is NEVER dropped:
-       • wide enough AND solid-filled  → INSIDE the bar, on the fill, clipped with an ellipsis;
-       • otherwise (short bar, ghost fill, milestone diamond, dense-recurrence strip)
-                                       → OUTSIDE, immediately to the right of the bar, in --text.
-     A ghost's fill dissolves toward the derived edge, so `--on-accent` text on it is unreliable —
-     ghosts take the outside label for contrast, not because they are narrow.
-     No new colours: inside uses `--on-accent` over the existing bar `base`, outside uses `--text`.
-     `data-ganttname` carries the task id so tests can identify a bar without hovering it. */
-  ganttLabelInside(w,solid){ return !!solid && w>=this.GANTT_LABEL_MIN_PX; }
-  ganttNameInside(t){
-    return React.createElement('span',{key:'nmi','data-ganttname':t.id,
-      style:{position:'absolute',left:'6px',right:'6px',top:0,bottom:0,display:'flex',alignItems:'center',
-        fontSize:'10.5px',fontWeight:600,lineHeight:1,color:'var(--on-accent)',
-        whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',pointerEvents:'none',
-        textShadow:'0 1px 1px rgba(0,0,0,0.35)'}}, t.name);
-  }
-  ganttNameOutside(t){
-    return React.createElement('span',{key:'nmo','data-ganttname':t.id,
-      style:{fontSize:'11px',fontWeight:600,color:'var(--text)',
-        maxWidth:'240px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name);
-  }
-  /* The strip to the right of a bar: outside name (when there is one) then the %-done readout, in one
-     flex row so they can never overlap. It starts past the link dot's HIT_MIN_PX box so it can never
-     swallow a dependency drag (pointerEvents:none besides). */
+     The reason it failed is density, not styling. V5.27b was designed against sparse fixtures, where one
+     bar per row makes a label clarifying. A real workspace repeats: a daily task draws an outside label
+     per occurrence, so a single row emits the same name across the width of the chart, and rows of
+     recurring work turn the surface into stacked text. The label also cannot shrink out of the way —
+     `ganttNameOutside` had no width floor to fall below, so zooming out made it worse, not better.
+
+     What replaces it: nothing new. Identification returns to row alignment with the sheet — which is an
+     enforced invariant here, tested to sub-pixel agreement — plus the `title` tooltip, which still
+     carries the name on every bar, diamond and strip. `GANTT_LABEL_MIN_PX`, `ganttLabelInside`,
+     `ganttNameInside` and `ganttNameOutside` are all gone with it.
+
+     `ganttSideRow` SURVIVES: it still hosts the %-done readout, which is per-bar data rather than a
+     repeated identifier. It keeps its flex shape so a future right-hand adornment cannot overlap it. */
+  /* The strip to the right of a bar: the %-done readout. It starts past the link dot's HIT_MIN_PX box
+     so it can never swallow a dependency drag (pointerEvents:none besides). */
   ganttSideRow(w,kids){
     return React.createElement('div',{key:'side',
       style:{position:'absolute',left:(w+this.HIT_MIN_PX+2)+'px',top:'-1px',height:this.barH+'px',
@@ -10755,17 +10896,17 @@ class Component extends DCLogic {
 
     if(this.isMilestone(t)){
       const sz=this.barH;
-      /* PP-EXT V5.27b: the diamond is now an unrotated WRAPPER carrying the hover/drag/context props
-         (so the existing hover contract is unchanged) with the rotated diamond and an OUTSIDE name
-         label as children — a child of the rotated node would have inherited the 45° rotation. A
-         milestone is only barH wide, so its name can never go inside: it always sits beside it. */
+      /* PP-EXT V5.27b: the diamond is an unrotated WRAPPER carrying the hover/drag/context props (so the
+         existing hover contract is unchanged) with the rotated diamond as its child — a child of the
+         rotated node would have inherited the 45° rotation. The wrapper outlived the outside name label
+         it was introduced for (removed 2026-08-12) and is kept: the rotation-isolation reason stands on
+         its own, and anything added beside a diamond later needs exactly this shape. */
       return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,title:t.name+occLbl},hov,{
         style:{position:'absolute',left:(left-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
           cursor:'grab',zIndex:5}}),
         h('div',{key:'dia',style:{position:'absolute',inset:0,
           background:done?base:'var(--gantt-bg)',border:'2px solid '+base,transform:'rotate(45deg)',borderRadius:'3px',
-          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none'}}),
-        this.ganttSideRow(sz,[this.ganttNameOutside(t)]));
+          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none'}}));
     }
     /* PP-EXT (V1.2 round4, owner 2026-07-25): the chore CIRCLE is gone from the Gantt entirely. It used to be
        returned here whenever `planned <= 0`, before any ghost/bar code ran — so a zero-duration task drew as a
@@ -10779,9 +10920,6 @@ class Component extends DCLogic {
        edge grips + move body stop stacking on top of each other on a short bar (the old 8px floor was narrower
        than the two 7px grips). At high zoom the real width dominates, so a true sub-day appointment still reads. */
     const w=Math.max(this.BAR_MIN_PX,this.xOf(this.effBarEnd(st,en))-left);
-    /* PP-EXT V5.27b: name inside the fill only when it is wide enough AND solid (a ghost's fill fades
-       out, so --on-accent on it is not reliably legible — it takes the outside label instead). */
-    const inLbl=this.ganttLabelInside(w,!ghost);
     const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),
       style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:'7px',cursor:'ew-resize',zIndex:3}});
     /* PP-EXT (V1.2 round2 — anchored ghosts): a derived span no longer greys out WHOLESALE. The committed
@@ -10792,8 +10930,12 @@ class Component extends DCLogic {
     const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
     const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'not in today')) : '';
+    /* PP-EXT (owner 2026-08-12, contrast): 0.55 → BAR_OPTED_OUT_OPACITY. This multiplies with the ghost
+       fade rather than replacing it, so a not-in-today ghost — which is most of what the owner was
+       looking at — was being dulled twice over. Opted-out still reads as recessive; it no longer
+       compounds into illegibility. */
     return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
-        opacity:optedOut?0.55:1}}),
+        opacity:optedOut?this.BAR_OPTED_OUT_OPACITY:1}}),
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,
         title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+optedOutTitle,
         style:{position:'absolute',inset:0,
@@ -10810,11 +10952,9 @@ class Component extends DCLogic {
            be dashed for only part of its length), masked by the inverse of the fill ramp so the dots fade in
            exactly as the colour fades out. Unmasked on a double-ghost — dotted all round at full opacity. */
         gp?h('div',{style:{position:'absolute',inset:0,borderRadius:'var(--r-1)',boxSizing:'border-box',
-          border:'2px dotted var(--text-mut2)',pointerEvents:'none',
+          border:'2px dotted var(--ghost-dots)',pointerEvents:'none',
           WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null,
-        optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null,
-        /* PP-EXT V5.27b: the name, drawn ON the fill when the bar is wide enough and solid. */
-        inLbl?this.ganttNameInside(t):null),
+        optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
       grip('l'), grip('r'), linkDot,
       /* PP-EXT (V1.5, owner 2026-07-26): the %-done handle moved OUT of the bar and UNDER it. It used to
          be a ringed disc sitting ON the fill at the progress boundary — at low % that put it near the
@@ -10837,10 +10977,7 @@ class Component extends DCLogic {
         h('div',{style:{position:'absolute',left:'50%',top:'1px',transform:'translateX(-50%)',width:0,height:0,
           borderLeft:'5px solid transparent',borderRight:'5px solid transparent',borderBottom:'6px solid '+base,
           pointerEvents:'none'}})) : null,
-      /* PP-EXT V5.27b: the %-done readout moved into the shared side row so the outside name and it
-         sit in one flex line instead of stacking on the same absolute offset. */
       this.ganttSideRow(w,[
-        inLbl?null:this.ganttNameOutside(t),
         pct>0?h('span',{key:'pct',style:{fontSize:'11px',color:'var(--text-mut)'}},pct+'%'):null
       ])
     );
@@ -11021,6 +11158,12 @@ class Component extends DCLogic {
       ) : null,
       divider,
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
+      /* PP-EXT (owner 2026-08-12): "There is no way to switch something from a milestone to a task and
+         vice versa." The label reads the whole selection, so it can never offer "Convert to milestone"
+         and then convert the other way. Writes `type` only — the span and planned time survive the round
+         trip (see setTypeMulti). */
+      row([ic(this.allMilestones(ids)?'▭':'◇'),
+        this.allMilestones(ids)?'Convert to task':'Convert to milestone'],()=>this.toggleMilestoneMulti(ids)),
       row([ic('⧉'),'Duplicate'],()=>this.duplicateMulti(ids)),
       !multi?row([ic('↳'),'Add subtask',kbd('Tab')],()=>{this.addSubtask(ids[0]); this.closeMenu();}):null, /* PP-EXT: subtasks */
       divider,
@@ -11095,6 +11238,16 @@ class Component extends DCLogic {
       row([ic('◍'),'% done…',tail(pct+'%')],()=>{ this.closeBarMenu(); this.openPctPop(t.id, m.cx, m.cy); }),
       divider,
       label('Repeat'), ...recurRows,
+      divider,
+      /* PP-EXT (owner 2026-08-12): milestone ⇄ task. It belongs in THIS menu as much as the row menu —
+         point-versus-span is a property of the span under the cursor, which is this menu's whole remit,
+         and a diamond is the thing you would naturally right-click to turn back into a bar. Writes
+         `type` only, so the dates this menu edits are untouched by the conversion (see setTypeMulti). */
+      label('Shape'),
+      row([ic(this.isMilestone(t)?'▭':'◇'), this.isMilestone(t)?'Convert to task':'Convert to milestone'],
+        ()=>{ this.setTypeMulti([t.id], this.isMilestone(t)?this.DEFAULT_TASK_TYPE:this.MILESTONE_TYPE); this.closeBarMenu(); },
+        null, this.isMilestone(t)?'Draw as a bar again; its dates and planned time are still there.'
+                                 :'Draw as a diamond at its start. The due date and planned time are kept.'),
       divider,
       row([ic('⤢'),'Open details'],()=>{ this.closeBarMenu(); this.openDetail(t.id); }));
 
@@ -11287,6 +11440,55 @@ class Component extends DCLogic {
         opt(true,'Blocking','Nothing else may be scheduled through this span.'),
         opt(false,'Background','A container you work inside — other tasks may be scheduled within it.')); })() : null;
 
+    /* PP-EXT (owner 2026-08-12): "Everything in the right click menu should be in the more expansive
+       detail menu." The row menu had five things this panel did not — task TYPE (new in the same pass),
+       section assignment, duplicate, archive and delete — so a user who works from the detail panel
+       simply could not reach them. The four blocks below close that gap.
+
+       Milestone ⇄ task. Same segmented shape as Busy type, and the same tri-state courtesy of clicking
+       the live option being harmless. Writes `type` only, so the span and planned time survive a round
+       trip (see setTypeMulti). Shown for every task: it is the one control that ANSWERS "why does this
+       row have no allotment", so hiding it on milestones is exactly backwards. */
+    const typeCtl=(()=>{
+      const isMs=this.isMilestone(t);
+      const opt=(val,label,title)=>{ const on=(isMs ? val===this.MILESTONE_TYPE : val!==this.MILESTONE_TYPE);
+        return h('div',{key:val,onClick:()=>{ if(!on) this.setTypeMulti([t.id], val); },title,
+          role:'button',tabIndex:0,'aria-pressed':on,
+          onKeyDown:e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); if(!on) this.setTypeMulti([t.id], val); } },
+          style:{flex:1,minHeight:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
+            gap:'6px',cursor:on?'default':'pointer',fontSize:'12px',borderRadius:'var(--r-2)',
+            color:on?'var(--on-accent)':'var(--text-mut2)',background:on?(this._accent||'#3f7bd6'):'var(--field-bg)',
+            border:'1px solid '+(on?'transparent':'var(--field-border)')}}, label); };
+      return h('div',{style:{display:'flex',gap:'5px'}},
+        opt(this.DEFAULT_TASK_TYPE,'▭ Task','A span of work: it allots time and draws as a bar.'),
+        opt(this.MILESTONE_TYPE,'◇ Milestone','A point in time: it never allots and draws as a diamond at its start. The due date and planned time are kept, so converting back restores them.'));
+    })();
+
+    /* Section assignment. The row menu hides this under Group by: None, where there are no section bands
+       on screen to move things between; the detail panel shows it always, because here it is a property
+       of the task being inspected rather than a move between two visible containers. Routed through the
+       same setTaskSectionMulti, so it resolves to the subtree root exactly like the menu does. */
+    const secOfRoot=(()=>{ const r=this.state.tasks.find(x=>x.id===this.sectionRootId(this.state.tasks,t.id));
+      return r?(r.sectionId||null):null; })();
+    const sectionCtl=h('select',{className:'pp-num',value:secOfRoot==null?'':secOfRoot,
+      onChange:e=>this.setTaskSectionMulti([t.id], e.target.value===''?null:e.target.value),
+      style:{textAlign:'left',width:'100%',border:'1px solid var(--divider)',cursor:'pointer'}},
+      h('option',{key:'none',value:''},'No section'),
+      ...this.sectionsInOrder().map(s=>h('option',{key:s.id,value:s.id},s.name)));
+
+    const actBtn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
+      style:{flex:1,minHeight:this.HIT_MIN_PX+'px',cursor:'pointer',
+        color:danger?'var(--danger-strong)':undefined}},label);
+    /* Duplicate / archive / delete. Delete keeps the row menu's exact behaviour, including handing a
+       recurring task off to the scope prompt rather than guessing which occurrences were meant —
+       deleteMulti already owns that branch, so this is one more caller, not a second implementation. */
+    const actionsCtl=h('div',{style:{display:'flex',flexDirection:'column',gap:'7px'}},
+      h('div',{style:{display:'flex',gap:'7px'}},
+        actBtn('⧉ Duplicate',()=>this.duplicateMulti([t.id])),
+        t.archivedAt ? actBtn('↩ Unarchive',()=>this.unarchiveMulti([t.id]))
+                     : actBtn('▣ Archive',()=>this.archiveMulti([t.id]))),
+      actBtn('✕ Delete task',()=>this.deleteMulti([t.id]),true));
+
     const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
@@ -11310,7 +11512,11 @@ class Component extends DCLogic {
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
       field('Priority',prioRow),
       field('Progress',pctBig),
-      field('Completed',valWithX(t.completion,t.completion?'var(--success)':'var(--text-faint2)','completion'),{borderBottom:'none'}));
+      field('Completed',valWithX(t.completion,t.completion?'var(--success)':'var(--text-faint2)','completion')),
+      /* PP-EXT (owner 2026-08-12): parity with the row menu — see the block above renderDetail's sidebar. */
+      field(h('span',null,'Type',this.infoNote('A Task is a span of work: it allots time and draws as a bar. A Milestone is a point in time: it never allots and draws as a diamond at its start. Switching keeps the dates and planned time, so you can convert back and forth without losing anything.')),typeCtl),
+      field('Section',sectionCtl),
+      field('Actions',actionsCtl,{borderBottom:'none'}));
 
     const card=h('div',{onClick:e=>e.stopPropagation(),onContextMenu:e=>e.stopPropagation(),
       style:{width:'min(940px,94vw)',height:'min(660px,90vh)',background:'var(--card-bg)',border:'1px solid var(--field-border)',

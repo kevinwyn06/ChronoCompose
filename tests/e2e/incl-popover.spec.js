@@ -9,10 +9,18 @@ const { bootPlan, task } = require('./_seed');
    a given state, but not that a real click on the glyph reaches it, that the menu paints above the
    grid, or that a click on the backdrop dismisses it without writing anything.
 
-   So this file asserts the *user-facing contract of the menu*: which actions each state offers, that
-   choosing one both commits and closes, and that dismissing commits nothing. It deliberately does not
-   assert popover geometry — the `uiPt`/zoom placement maths is unit-tested (`scaleFixedPt`), and
-   pinning pixel positions here would break on any layout change without describing a real regression. */
+   AMENDED 2026-08-12 (owner: "ticking a task from unincluded to included should not bring up a
+   confirmation popup"). The menu stays for every state that offers a CHOICE — pressed and snoozed both
+   do — but the unpressed state offered exactly one action, "Press into today", so it was a menu with
+   nothing to choose from: a confirmation dialog bolted to a checkbox. Clicking an unpressed glyph now
+   performs that single action directly. Track B's decision is intact; the degenerate case is not a
+   counter-example to it.
+
+   So this file asserts the *user-facing contract*: which actions each state offers, that choosing one
+   both commits and closes, that dismissing commits nothing, and that the one-outcome state acts
+   immediately. It deliberately does not assert popover geometry — the `uiPt`/zoom placement maths is
+   unit-tested (`scaleFixedPt`), and pinning pixel positions here would break on any layout change
+   without describing a real regression. */
 
 const glyph = (page, id) => page.locator(`[data-card-id="${id}"] span[title$="click to change"], ` +
   `[data-card-id="${id}"] span[title$="click to include"]`);
@@ -52,20 +60,43 @@ test.describe('inclusion popover', () => {
     await expect(menuItem(page, 'Take out of today')).toHaveCount(0);
   });
 
-  test('the menu re-reads state: an unpressed task is offered the way back IN', async ({ page }) => {
+  test('an unpressed task goes back IN with one click, and no menu appears', async ({ page }) => {
     await bootPlan(page, 'select', { tasks: pressed });
 
     await glyph(page, 'inc-1').click();
     await menuItem(page, 'Take out of today').click();
     await expect(cardIn(page, '[data-selcell$="-excluded"]', 'Popover task')).toHaveCount(1);
 
-    /* The standing tenet: the laziest path must never silently drop work. Whatever the excluded state
-       is called, the popover has to offer a route back — that is what is being pinned here. */
+    /* The standing tenet is unchanged and still what is pinned here: the laziest path must never
+       silently drop work, so the excluded state MUST offer a route back. Since 2026-08-12 that route is
+       the click itself rather than a one-item menu — strictly fewer steps, same destination. */
     await glyph(page, 'inc-1').click();
-    await expect(menuItem(page, 'Press into today')).toBeVisible();
-    await menuItem(page, 'Press into today').click();
-
     await expect(cardIn(page, '[data-selcell$="-included"]', 'Popover task')).toHaveCount(1);
+
+    /* And it really was direct: no menu was opened on the way, so nothing is left hanging over the
+       grid and no second click was required. */
+    await expect(menuItem(page, 'Press into today')).toHaveCount(0);
+    await expect(menuItem(page, 'Take out of today')).toHaveCount(0);
+  });
+
+  test('the round trip is repeatable: out, in, out again', async ({ page }) => {
+    /* Guards the asymmetry introduced above — one direction is a click, the other a menu. If the glyph
+       ever lost track of which state it is in, the second lap is where it would show. */
+    await bootPlan(page, 'select', { tasks: pressed });
+    const included = () => cardIn(page, '[data-selcell$="-included"]', 'Popover task');
+    const excluded = () => cardIn(page, '[data-selcell$="-excluded"]', 'Popover task');
+
+    await glyph(page, 'inc-1').click();
+    await menuItem(page, 'Take out of today').click();
+    await expect(excluded()).toHaveCount(1);
+
+    await glyph(page, 'inc-1').click();
+    await expect(included()).toHaveCount(1);
+
+    await glyph(page, 'inc-1').click();
+    await expect(menuItem(page, 'Take out of today')).toBeVisible();
+    await menuItem(page, 'Take out of today').click();
+    await expect(excluded()).toHaveCount(1);
   });
 
   test('clicking the backdrop dismisses without changing anything', async ({ page }) => {

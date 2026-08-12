@@ -209,6 +209,120 @@ test('ghostDrawSpan: before the scroller mounts (viewW 0) it falls back to the 1
   assert.strictEqual(d.end - d.start, DAY, 'no viewport ⇒ no fraction floor, never a divide-by-zero blowup');
 });
 
+// ---- A DATELESS REPEAT STILL DRAWS (owner 2026-08-12) ----
+// renderVals used to hand a recurring task with a missing date an explicitly EMPTY occurrence list, on
+// the reasoning that a repeat needs real dates to expand and a dateless one "shouldn't happen". It
+// happens on the laziest path there is — type a title, set Daily, never open the date picker — and the
+// task then showed its ↻ Daily chip in the sheet while drawing NOTHING on the chart, at any zoom,
+// forever. An empty list is indistinguishable from having no such task, which is exactly what the
+// standing tenet about unallocated work staying passively visible forbids.
+
+// NOTE on the clock: `recurGhostAnchor` takes `today` as an argument and is tested against the file's
+// fixed TODAY. The renderVals tests below CANNOT be — renderVals derives its anchor from the component's
+// own `startOfToday()`, and expandTask's `recurStartIndex` trims occurrences relative to that same real
+// clock. Mixing the two reads as a failure ~26 days wide (it did on first run). So these tests anchor on
+// `c.startOfToday()` and assert relative offsets from it, which is clock-independent.
+const recurOccs = (c, list) => { c.state.tasks = list; c.renderVals(); return c._occById; };
+
+test('recurGhostAnchor: only the ANCHOR is derived, and an occurrence is always one day', () => {
+  const c = make();
+  // No dates at all → anchor today, both edges ghost.
+  let a = c.recurGhostAnchor(mk(c), TODAY);
+  assert.strictEqual(a.start, TODAY);
+  assert.strictEqual(a.end - a.start, DAY);
+  assert.strictEqual(a.ghostStart, true);
+  assert.strictEqual(a.ghostEnd, true);
+
+  // Start set, no due → anchor the REAL start; the due edge is the ghost one.
+  a = c.recurGhostAnchor(mk(c, { start: TODAY - 30 * DAY }), TODAY);
+  assert.strictEqual(a.start, TODAY - 30 * DAY, 'a real start anchors the series');
+  assert.strictEqual(a.ghostStart, false);
+  assert.strictEqual(a.ghostEnd, true);
+  // The reason this does not just reuse ghostSpan: ghostSpan returns end = max(start,today)+DAY, which
+  // would give this series a 31-day occurrence duration and smear the whole row into one overlap.
+  assert.strictEqual(a.end - a.start, DAY, 'an occurrence is one day, never the gap back to today');
+
+  // Due set, no start → anchor the real due.
+  a = c.recurGhostAnchor(mk(c, { end: TODAY + 5 * DAY }), TODAY);
+  assert.strictEqual(a.start, TODAY + 5 * DAY);
+  assert.strictEqual(a.ghostStart, true);
+  assert.strictEqual(a.ghostEnd, false);
+});
+
+test('a dateless recurring task expands into ghost occurrences instead of an empty list', () => {
+  const c = make();
+  const daily = mk(c, { id: 'gre', name: 'GRE prep', recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const weekly = mk(c, { id: 'wk', name: 'Weekly thing', recur: { kind: 'week', n: 1, label: 'Weekly' } });
+  const plain = mk(c, { id: 'plain', name: 'Someday' });
+  const occ = recurOccs(c, [daily, weekly, plain]);
+
+  assert.ok(occ.gre.length > 10, 'the daily repeat draws many occurrences, not zero (was [])');
+  assert.ok(occ.wk.length > 2, 'so does the weekly one');
+  // The RULE drives the expansion — this is not just "some bars appeared".
+  assert.ok(occ.gre.length > occ.wk.length * 4,
+    'daily produces far more occurrences than weekly over the same horizon');
+
+  for (const o of occ.gre.slice(0, 5)) {
+    assert.strictEqual(o.ghost, true, 'every derived occurrence paints as a ghost');
+    assert.strictEqual(o.ghostStart, true);
+    assert.strictEqual(o.ghostEnd, true);
+    assert.strictEqual(o.end - o.start, DAY, 'each occurrence is one day');
+  }
+  // Indices still come from expandTask, so per-occurrence overrides keep lining up.
+  // The spread re-homes the container: `_load.js` runs index.html in a `vm`, so an array built in
+  // there carries that realm's Array.prototype and deepStrictEqual rejects it on prototype identity
+  // even when every element matches (the same dodge `calendar.gen.test.js` uses). Values untouched.
+  assert.deepStrictEqual([...occ.gre.slice(0, 3).map(o => o.idx)], [0, 1, 2]);
+
+  // The task's own dates are NOT written. This must stay a render-time derivation.
+  assert.strictEqual(daily.start, null, 'start stays null in data');
+  assert.strictEqual(daily.end, null, 'end stays null in data');
+
+  // The non-recurring dateless path is untouched: still exactly one ghost.
+  assert.strictEqual(occ.plain.length, 1);
+});
+
+test('a half-dated repeat anchors on the date it does have', () => {
+  const c = make();
+  const today = c.startOfToday();
+  const startOnly = mk(c, { id: 'so', start: today - 3 * DAY, recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const dueOnly = mk(c, { id: 'do', end: today + 5 * DAY, recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const occ = recurOccs(c, [startOnly, dueOnly]);
+
+  assert.strictEqual(occ.so[0].start, today - 3 * DAY, 'the real start anchors the series');
+  assert.strictEqual(occ.so[0].ghostStart, false, 'the committed edge is not a ghost edge');
+  assert.strictEqual(occ.so[0].ghostEnd, true);
+
+  assert.strictEqual(occ.do[0].start, today + 5 * DAY, 'the real due anchors the series');
+  assert.strictEqual(occ.do[0].ghostStart, true);
+  assert.strictEqual(occ.do[0].ghostEnd, false);
+
+  for (const o of occ.so.concat(occ.do)) {
+    assert.strictEqual(o.end - o.start, DAY, 'no occurrence smears across the gap to today');
+  }
+});
+
+test('a recurring ghost is never widened to the view floor, so a repeat cannot self-overlap', () => {
+  const c = make();
+  const daily = mk(c, { id: 'gre', recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const plain = mk(c, { id: 'plain' });
+  const occ = recurOccs(c, [daily, plain]);
+
+  // The trap: ghostDrawSpan floors a ghost's DRAWING at GHOST_VIEW_FRAC of the viewport so a lone
+  // dateless task stays grabbable when zoomed out. Applied per occurrence that would give a daily
+  // repeat ~100 bars each a fifth of the viewport wide, every one overlapping its neighbours.
+  const drawn = c.ghostDrawSpan(occ.gre[0], 42, 1200);
+  assert.strictEqual(drawn.end - drawn.start, DAY, 'a repeat occurrence draws at its true one-day width');
+
+  // Consecutive occurrences therefore tile rather than stack.
+  const a = c.ghostDrawSpan(occ.gre[0], 42, 1200), b = c.ghostDrawSpan(occ.gre[1], 42, 1200);
+  assert.ok(a.end <= b.start, 'occurrence 0 ends at or before occurrence 1 begins');
+
+  // …and the lone-ghost floor it exists for is untouched.
+  const lone = c.ghostDrawSpan(occ.plain[0], 42, 1200);
+  assert.ok(lone.end - lone.start > DAY, 'a single dateless task still gets its grabbable floor');
+});
+
 test('ghostDrawSpan widens only the DRAWING — ghostSpan itself stays 1 day, so zoom cannot move scheduling', () => {
   const c = make();
   const t = mk(c); // dateless

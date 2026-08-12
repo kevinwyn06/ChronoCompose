@@ -105,3 +105,121 @@ test('snoozeUntilText: false + no commit on unparseable text; commits on success
   assert.strictEqual(c.state.tasks[0].snoozeUntil, c.startOfDay(new Date(2026, 6, 24).getTime()));
   assert.strictEqual(c.state.tasks[0].included, true, 'snooze never touches included');
 });
+
+// ---- TICKING A ROW IN IS NOT A DIALOG (owner 2026-08-12) ----
+// Owner: "ticking a task from unincluded to included should not bring up a confirmation popup."
+// An unpressed row's inclusion popover held exactly ONE action, "Press into today" — a menu with no
+// choice in it, i.e. a confirmation dialog attached to a checkbox. The rule now: a click with one
+// possible outcome performs it; a click with several still opens the menu (snooze today, snooze
+// until…, take out of today), because there the destination is not implied by the glyph.
+function inclClick(c, t) {
+  const node = c.taskInclControl(t);
+  return node && node.props && node.props.onClick;
+}
+// `openInclPick` anchors the popover off the control's own rect, so the event needs a currentTarget
+// that can answer getBoundingClientRect.
+const fakeEvt = () => { let stopped = false;
+  return { stopPropagation() { stopped = true; }, get stopped() { return stopped; },
+    clientX: 10, clientY: 10,
+    currentTarget: { getBoundingClientRect: () => ({ left: 10, top: 10, right: 26, bottom: 26,
+      width: 16, height: 16, x: 10, y: 10 }) } }; };
+
+test('clicking an UNPRESSED row control includes it directly, opening no popover', () => {
+  const c = make();
+  const B = c.startOfToday();
+  // A window that does NOT straddle yesterday, so inheritance cannot press it back on its own and
+  // `unpressed` is genuinely the state under test.
+  const t = c.normalizeTask({ id: 'u1', name: 'undecided', type: 'Proportional',
+    start: B + 2 * DAY, end: B + 3 * DAY, included: null, priority: 4, deps: [], pct: 0, planned: 60 });
+  c.state.tasks = [t];
+  assert.strictEqual(c.inclState(t), 'unpressed', 'premise: the row is unpressed');
+
+  const before = c.history.length;
+  const e = fakeEvt();
+  inclClick(c, t)(e);
+
+  assert.strictEqual(c.state.tasks[0].included, true, 'the tick took effect immediately');
+  assert.ok(!c.state.inclPick, 'no popover was opened');
+  assert.strictEqual(c.history.length, before + 1, 'exactly one undoable commit, same as the menu path');
+  assert.ok(e.stopped, 'the click does not also fall through to the row (which would open details)');
+});
+
+test('a PRESSED row control still opens the menu, because there the click has several outcomes', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id: 'p1', start: B, end: B + DAY, included: true, planned: 60 });
+  c.state.tasks = [t];
+  assert.ok(['pressed', 'active'].includes(c.inclState(t)), 'premise: the row is pressed');
+
+  const before = c.history.length;
+  inclClick(c, t)(fakeEvt());
+  assert.ok(c.state.inclPick, 'the popover opened');
+  assert.strictEqual(c.state.tasks[0].included, true, 'and nothing was mutated by merely opening it');
+  assert.strictEqual(c.history.length, before, 'opening a menu is not an undoable step');
+
+  // The menu earns its place: it offers more than one action here.
+  const rows = c.inclActionRows(t, () => {});
+  assert.ok(rows.length > 1, 'a pressed row has several possible outcomes, so a menu is the right shape');
+});
+
+test('the two paths agree: the direct tick and the menu action write the same thing', () => {
+  // The contract that actually matters — a shortcut must not become a second, divergent mutator.
+  const mkUndecided = (c, id) => c.normalizeTask({ id, name: id, type: 'Proportional',
+    start: c.startOfToday() + 2 * DAY, end: c.startOfToday() + 3 * DAY, included: null,
+    priority: 4, deps: [], pct: 0, planned: 60 });
+
+  const viaClick = make();
+  const a = mkUndecided(viaClick, 'x');
+  viaClick.state.tasks = [a];
+  inclClick(viaClick, a)(fakeEvt());
+
+  const viaMenu = make();
+  const b = mkUndecided(viaMenu, 'x');
+  viaMenu.state.tasks = [b];
+  viaMenu.setIncludedTrue('x');
+
+  assert.deepStrictEqual(
+    { included: viaClick.state.tasks[0].included, snooze: viaClick.state.tasks[0].snoozeUntil },
+    { included: viaMenu.state.tasks[0].included, snooze: viaMenu.state.tasks[0].snoozeUntil },
+    'the shortcut and the menu action are the same mutation');
+});
+
+// ---- THE PRESSED DEPTH IS GONE (owner 2026-08-12) ----
+// Owner: "get rid of the pressed-in effect — it's the same thing as the inclusion check, but is super
+// annoying to work with." V2.1 made inclusion a depth channel and V2.9 §2 left it as "the only visual
+// the inclusion model has". On a real workspace most rows are included, so the inset meant to mark a
+// state became the background texture of the sheet. ACTIVE depth deliberately survives: it marks the
+// running timer, which is transient, single-row, and not what the checkbox is saying.
+const styleOf = n => (n && n.props && n.props.style) || {};
+
+test('an included row draws no pressed inset or tint; the ACTIVE ring survives', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const pressed = c.normalizeTask({ id: 'pr', name: 'pressed', type: 'Proportional',
+    start: B, end: B + DAY, included: true, priority: 4, deps: [], pct: 0, planned: 60 });
+  const plain = c.normalizeTask({ id: 'pl', name: 'plain', type: 'Proportional',
+    start: B + 2 * DAY, end: B + 3 * DAY, included: null, priority: 4, deps: [], pct: 0, planned: 60 });
+  c.state.tasks = [pressed, plain];
+  c.renderVals();
+
+  const rowOf = t => c.sheetRow(t, 0, c.state.cols || [], 400, c._byId || {});
+  const pS = styleOf(rowOf(pressed)), nS = styleOf(rowOf(plain));
+
+  assert.ok(!/inset 0 3px/.test(String(pS.boxShadow || '')), 'no pressed inset shadow');
+  // Same row index for both, so striping is identical — any difference would be the retired tint.
+  assert.strictEqual(String(pS.background), String(nS.background),
+    'an included row and an undecided one share the same background');
+
+  // The state is still legible, just as a glyph rather than as depth.
+  const glyph = c.taskInclControl(pressed);
+  // The mocked React collects children into an array.
+  assert.strictEqual([].concat(glyph.children).join(''), '☑',
+    'inclusion reads from the control, which is the point');
+
+  // ACTIVE is a different channel and must NOT have been removed with it.
+  const act = activeTask(c, { id: 'ac', start: B, end: B + DAY, included: true, planned: 60 });
+  c.state.tasks = [act]; c.renderVals();
+  c.startTimer(act.id);
+  const aS = styleOf(c.sheetRow(c.state.tasks[0], 0, c.state.cols || [], 400, c._byId || {}));
+  assert.match(String(aS.boxShadow || ''), /inset 0 0 0 2px/, 'the active ring is still drawn');
+});
