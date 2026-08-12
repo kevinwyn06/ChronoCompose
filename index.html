@@ -7242,6 +7242,8 @@ class Component extends DCLogic {
     /* PP-EXT V5 (block 27a): `list` = the task sheet, third surface of Overview's left pane. */
     list:    'M4 6h16M4 12h16M4 18h16',
     select:  'M3 4h18v16H3zM3 12h18M9 4v16M15 4v16',
+    /* PP-EXT V5 (block 32): `matrix` is parked, not live — the surface is retired (see renderMatrixView).
+       Kept so re-adding the surface needs no icon work; nothing else references this key. */
     matrix:  'M3 4h18v16H3zM3 12h18M12 4v16',
     planner: 'M4 5h16v15H4zM4 10h16M8 3v4M16 3v4M9 14l1.5 1.5L14 12',
     dashboard:'M4 4h7v7H4zM13 4h7v4h-7zM13 11h7v9h-7zM4 14h7v6H4z',
@@ -7326,11 +7328,16 @@ class Component extends DCLogic {
      `leftSurface` is the new pref. A returning user has none, so fall back to what they were last looking
      at: a V2-stamped `dashMode:'plan'` means they were ON the Plan tab, and `planTab` says which grid — put
      them back on it. Anyone else gets the task list, which is what Overview's left pane has always shown. */
-  LEFT_SURFACE_KEYS(){ return ['list','select','matrix']; }
+  /* PP-EXT V5 (block 32): 'matrix' RETIRED from this enum — see the retirement note at renderMatrixView.
+     The migration below must therefore land a persisted 'matrix' somewhere real: it maps to 'select', the
+     nearest surviving surface (both are triage card grids over the same list), NOT to the default 'list',
+     because an owner sitting on the Matrix should land on the other triage grid, not be bounced to the sheet. */
+  LEFT_SURFACE_KEYS(){ return ['list','select']; }
   migrateLeftSurface(pf){
     pf=pf||{};
+    if(pf.leftSurface==='matrix') return 'select';
     if(this.LEFT_SURFACE_KEYS().indexOf(pf.leftSurface)>=0) return pf.leftSurface;
-    if(pf.dashMode==='plan' && pf.dashModeV===2) return pf.planTab==='matrix'?'matrix':'select';
+    if(pf.dashMode==='plan' && pf.dashModeV===2) return 'select';
     return 'list';
   }
   migratePlanView(pf){
@@ -8811,7 +8818,9 @@ class Component extends DCLogic {
      Switching surfaces swaps the remembered split width too (see leftSplitKey): a triage grid and a
      four-column sheet want genuinely different amounts of the board, and neither should overwrite the
      other's remembered value. */
-  LEFT_SURFACES(){ return [['list','List'],['select','Selection'],['matrix','Matrix']]; }
+  /* PP-EXT V5 (block 32): 'Matrix' removed from the toggle — the toggle now reads List · Selection.
+     Re-adding the surface means editing THIS list and LEFT_SURFACE_KEYS (~line 7333); nothing else. */
+  LEFT_SURFACES(){ return [['list','List'],['select','Selection']]; }
   setLeftSurface(v){
     /* Bank the width being LEFT before loading the width being entered. Without this the round trip is
        lossy — you would come back to a computed default rather than to the board you were looking at —
@@ -9152,6 +9161,24 @@ class Component extends DCLogic {
   /* PP-EXT V2.9 §3: the Eisenhower matrix. The header states the asymmetry out loud — urgency is computed
      from your dates, importance is read from the priority you set — because a matrix that appears to guess
      both axes is a matrix nobody trusts, and the honesty is what makes the automation acceptable. */
+  /* ==== PP-EXT V5 (block 32): RETIRED — UNREACHABLE, NOT DEAD CODE. DO NOT SWEEP. ====
+     Owner ruling, 2026-08-11, verbatim: *"the matrix view is useless if users can't drag tasks BETWEEN the
+     sections, even more so when the sections don't lead to any actual scheduling changes or task
+     inclusion/exclusion. I suggest we actually just remove it or comment it out."*
+
+     The operative half of that ruling is the second clause. Vertical drags DO work (`setQuadrantImportance`
+     writes `priority`) and horizontal drags are inert BY DESIGN, because urgency is derived from dates and a
+     horizontal drag would have to silently reschedule to honour itself. What kills the surface is that no
+     quadrant ever touches inclusion or scheduling: it is a priority editor wearing a planning-tool costume.
+
+     Retired, not deleted. Still present and still unit-tested: `renderMatrixView`, `quadrantOf`,
+     `eisenhowerProjection`, `EISENHOWER_QUADRANTS`, `setQuadrantImportance`, `isImportant`,
+     `eisenhowerUrgentDays`, the `matrix` icon path (~line 7245), the `surface==='matrix'` branch in
+     `renderDashOverview`, and the `quad:` branch of the card-drop handler (~line 4461). That drop handler
+     ALSO serves Selection's `incl:` zones — removing it would break a live surface.
+
+     TO BRING IT BACK, edit exactly two lists: add 'matrix' to `LEFT_SURFACE_KEYS()` (~line 7333) and
+     ['matrix','Matrix'] to `LEFT_SURFACES()` (~line 8818). Everything below then works as it did. */
   renderMatrixView(tasks){
     const h=React.createElement;
     const now=this.startOfToday();
