@@ -62,7 +62,12 @@ test('isActiveToday: explicit pressed state plus V2.2 inheritance replace today-
   const B = Date.now(), today=c.startOfToday();
   assert.strictEqual(c.isActiveToday(activeTask(c)), true, 'new/default task is pressed');
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:null })), true, 'unfinished work scheduled yesterday inherits');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { start:today, end:today+DAY, included:null })), false, 'today window alone does not include');
+  /* V5 block 20 (F19): the today window alone now DOES include. Owner: "What? Of course it should be
+     auto included." A window opening today with nothing said about it is undecided work, not refused
+     work, and it used to resurface a day late as Overdue. A window that has not opened yet is still
+     decided by the press, which line below preserves. */
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:today, end:today+DAY, included:null })), true, 'a window opening today auto-includes');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:today+2*DAY, end:today+4*DAY, included:null })), false, 'an unopened window alone does not include');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), true, 'pressed future task is user discretion');
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:null, snoozeUntil: today+DAY })), false, 'excluded (V2.11: a snooze, not Off)');
   assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
@@ -70,7 +75,10 @@ test('isActiveToday: explicit pressed state plus V2.2 inheritance replace today-
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
 });
 
-test('dateless task: pressed joins today; unpressed/snoozed do not', () => {
+// V5 (F4): `packFromNow` now defaults TRUE, so a pool taken from the DEFAULT 07:00–23:00 window is
+// empty when the suite happens to run after 23:00. The clock is pinned (12:00) so this test keeps
+// asserting dateless semantics rather than the hour the suite was run at.
+test('dateless task: pressed joins today; unpressed/snoozed do not', () => withNow(() => {
   const c = make();
   const B = Date.now();
   c.state.nowTick = B;
@@ -101,7 +109,7 @@ test('dateless task: pressed joins today; unpressed/snoozed do not', () => {
   const map2 = c.computeAllotted(c.state.tasks, today);
   assert.strictEqual(map2[zeroPlanned.id].active, true, 'still active (in the pool)');
   assert.strictEqual(map2[zeroPlanned.id].allotted, c.DEFAULT_TASK_MINUTES);
-});
+}));
 
 test('isActiveOn: {dated,dateless} x {auto,forced-in,snoozed-active,snoozed-expired} x {today,other day}', () => {
   const c = make();
@@ -137,7 +145,14 @@ test('isOptedOut: unpressed/snoozed work is out unless V2.2 inherited it', () =>
   const t = () => activeTask(c, {start:today,end:today+DAY});
   // V2.11: the `included:false` case is gone with Off; unpressed (below) is what it collapsed into.
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil: today + DAY })), true, 'active snooze alone');
-  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), true, 'null is unpressed');
+  /* V5 block 20 (F19), owner verbatim: "What? Of course it should be auto included." `t()`'s window
+     OPENS today, and untouched work the calendar just surfaced is no longer filed as a refusal. The
+     original assertion is preserved below against a window that has not started yet — which is where
+     `included:null` still genuinely means unpressed. */
+  assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:null, snoozeUntil:null })), false,
+    'a window opening today auto-includes untouched work');
+  assert.strictEqual(c.isOptedOut(activeTask(c, { start:today+2*DAY, end:today+4*DAY, included:null, snoozeUntil:null })),
+    true, 'null is unpressed');
   assert.strictEqual(c.isOptedOut(activeTask(c,{included:null})), false, 'yesterday-scheduled null state is inherited');
   assert.strictEqual(c.isOptedOut(Object.assign(t(), { included:true, snoozeUntil: today })), false, 'expired snooze returns to pressed');
 });
@@ -455,7 +470,9 @@ test('togglePredictManual / setPredict', () => {
   assert.strictEqual(t.predictManual, true);
 });
 
-test('buildDayTimeline: meals present, chunks in-window & non-overlapping', () => {
+// V5 (F4): clock pinned at 12:00 — with `packFromNow` defaulting true the default 07:00–23:00 window
+// has no room left when the suite runs after 23:00. Both meals still lie ahead of the pinned now.
+test('buildDayTimeline: meals present, chunks in-window & non-overlapping', () => withNow(() => {
   const c = make();
   c.state.nowTick = Date.now();
   c.state.settings.freeTime = 0; // no evening reserve, so meals are the only busy blocks
@@ -478,7 +495,7 @@ test('buildDayTimeline: meals present, chunks in-window & non-overlapping', () =
   sched.forEach(x=> mealsFull.forEach(mm=>{
     assert.ok(x.end <= mm.start || x.start >= mm.end, 'no overlap with meal');
   }));
-});
+}));
 
 test('buildDayTimeline: overflow tasks become unscheduled', () => {
   const c = make();

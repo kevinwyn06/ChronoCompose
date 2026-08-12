@@ -22,8 +22,33 @@ const TYPES = {
   '.ico': 'image/x-icon',
 };
 
+/* PP-EXT (31): local disk sink for the alpha usage tracker. The app POSTs newline-delimited JSON here
+   and this appends it to `.telemetry/<session>.jsonl` at the repo root (git-ignored). Deliberately
+   dumb: append-only, no parsing, no interpretation, and a sanitized session name so a crafted request
+   cannot escape the directory. Only reachable over loopback, which is the only place it is useful —
+   on the deployed site this route does not exist and the app falls back to its manual export. */
+const TELEMETRY = path.join(ROOT, '.telemetry');
+const USAGE_PATH = '/__usage';
+function appendUsage(req, res) {
+  const s = (new URL(req.url, 'http://localhost').searchParams.get('s') || 'session')
+    .replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) || 'session';
+  let body = '';
+  req.on('data', c => { body += c; if (body.length > 4e6) req.destroy(); });
+  req.on('end', () => {
+    try {
+      fs.mkdirSync(TELEMETRY, { recursive: true });
+      fs.appendFileSync(path.join(TELEMETRY, s + '.jsonl'), body.endsWith('\n') ? body : body + '\n');
+      res.writeHead(204, { 'Access-Control-Allow-Origin': '*' }).end();
+    } catch (e) { res.writeHead(500).end('sink failed'); }
+  });
+}
+
 http.createServer((req, res) => {
   const rel = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  if (rel === USAGE_PATH) {
+    if (req.method === 'POST') { appendUsage(req, res); return; }
+    res.writeHead(405, { 'Allow': 'POST' }).end('POST only'); return;
+  }
   const file = path.join(ROOT, rel === '/' ? 'index.html' : rel);
   /* Never serve outside the repo root. */
   if (!file.startsWith(ROOT)) { res.writeHead(403).end('forbidden'); return; }

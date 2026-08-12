@@ -2,13 +2,19 @@
 // toggle into a Dashboard tab of their own, which renamed the old "Plan" tab to "Overview". Two persisted
 // strings changed meaning in the same release, so both migrations are pinned here: getting either wrong
 // drops a returning user on a surface they never chose, silently.
+//
+// V5 block 27a — the Plan TAB is retired. Selection and the Eisenhower matrix are surfaces of Overview's
+// LEFT pane now (owner: "merged into the overview tab ... the left one"). That makes 'plan' a dead
+// dashMode with TWO historical meanings, and adds a third persisted string (`leftSurface`). The migration
+// tests below are re-pointed rather than deleted: the failure mode they guard — a returning user landing
+// somewhere they never chose — is unchanged, only the destination moved.
 const test = require('node:test');
 const assert = require('node:assert');
 const { make, loadComponent } = require('./_load.js');
 
-test('the Dashboard tab order is Overview · Plan · Focus · Review', () => {
+test('the Dashboard tab order is Overview · Focus · Review — Plan is gone', () => {
   const c = make();
-  assert.deepEqual(c.DASH_MODES(), ['overview', 'plan', 'focus', 'review']);
+  assert.deepEqual(c.DASH_MODES(), ['overview', 'focus', 'review']);
 });
 
 test('the scheduling view toggle no longer offers Selection or Matrix', () => {
@@ -18,12 +24,12 @@ test('the scheduling view toggle no longer offers Selection or Matrix', () => {
   assert.deepEqual(keys, ['gantt', 'day4', 'week', 'month', 'schedule', 'today']);
 });
 
-test('the Plan tab offers exactly Selection and Matrix', () => {
+test("Overview's left pane offers List, Selection and Matrix", () => {
   const c = make();
-  assert.deepEqual(c.PLAN_TABS().map(v => v[0]), ['select', 'matrix']);
+  assert.deepEqual(c.LEFT_SURFACES().map(v => v[0]), ['list', 'select', 'matrix']);
 });
 
-// --- dashMode migration: 'plan' means two different tabs on either side of the rename ---
+// --- dashMode migration: 'plan' meant two different tabs, and now means neither ---
 
 test('legacy dashMode "plan" (the old scheduling board) migrates to Overview', () => {
   const c = make();
@@ -36,9 +42,9 @@ test('legacy dashMode focus/review are unaffected by the rename', () => {
   assert.equal(c.migrateDashMode({ dashMode: 'review' }), 'review');
 });
 
-test('a V2-stamped dashMode of "plan" means the NEW Plan tab and is trusted', () => {
+test('a V2-stamped dashMode of "plan" now lands on Overview too, not on a tab that no longer exists', () => {
   const c = make();
-  assert.equal(c.migrateDashMode({ dashMode: 'plan', dashModeV: 2 }), 'plan');
+  assert.equal(c.migrateDashMode({ dashMode: 'plan', dashModeV: 2 }), 'overview');
 });
 
 test('absent or unrecognised dashMode falls back to Overview', () => {
@@ -52,9 +58,37 @@ test('choosing a tab stamps dashModeV so the next boot does not remap it', () =>
   const props = { accent: '#3b82f6', showCriticalPath: true };
   const first = new Cls(props);
   first.setState = function (o) { Object.assign(this.state, o); };
-  first.renderDashModeTabs().children[0][1].props.onClick(); // the Plan tab
+  first.renderDashModeTabs().children[0][1].props.onClick(); // Focus, now the second tab
   const second = new Cls(props);
-  assert.equal(second.state.dashMode, 'plan', 'the new Plan tab survives a reboot as itself');
+  assert.equal(second.state.dashMode, 'focus', 'the chosen tab survives a reboot as itself');
+});
+
+// --- leftSurface migration (V5 block 27a): where a Plan-tab regular lands after the rehoming ---
+
+test('a user parked on the Plan tab reopens on the same grid, now in Overview left pane', () => {
+  const c = make();
+  assert.equal(c.migrateLeftSurface({ dashMode: 'plan', dashModeV: 2, planTab: 'select' }), 'select');
+  assert.equal(c.migrateLeftSurface({ dashMode: 'plan', dashModeV: 2, planTab: 'matrix' }), 'matrix');
+});
+
+test('everyone else opens on the task list, which is what the left pane always held', () => {
+  const c = make();
+  assert.equal(c.migrateLeftSurface({}), 'list');
+  assert.equal(c.migrateLeftSurface({ dashMode: 'focus' }), 'list');
+  // A LEGACY 'plan' meant the scheduling board — the sheet+Gantt split — not a grid.
+  assert.equal(c.migrateLeftSurface({ dashMode: 'plan', planTab: 'matrix' }), 'list');
+});
+
+test('an explicit leftSurface wins over any inference, and nonsense falls back to list', () => {
+  const c = make();
+  assert.equal(c.migrateLeftSurface({ leftSurface: 'matrix', dashMode: 'plan', dashModeV: 2, planTab: 'select' }), 'matrix');
+  assert.equal(c.migrateLeftSurface({ leftSurface: 'nonsense' }), 'list');
+});
+
+test('the migrated surface reaches state on boot', () => {
+  const Cls = loadComponent();
+  const c = new Cls({ accent: '#3b82f6', showCriticalPath: true });
+  assert.equal(c.state.leftSurface, 'list');
 });
 
 // --- planView migration: select/matrix are no longer scheduling views ---
@@ -71,12 +105,110 @@ test('a real saved planView is still respected', () => {
   assert.equal(c.migratePlanView({}), 'schedule');
 });
 
-// --- routing ---
+// --- routing: the surfaces still render, now from Overview's left pane ---
 
-test('the Plan tab renders Selection or Matrix, never the sheet+Gantt split', () => {
+test("Overview's left pane renders Selection or Matrix, and keeps the right pane", () => {
   const c = make();
-  c.state.planTab = 'select';
-  assert.ok(JSON.stringify(c.renderDashPlan([])).includes('data-dropzone'), 'Selection drop zones present');
-  c.state.planTab = 'matrix';
-  assert.ok(JSON.stringify(c.renderDashPlan([])).includes('data-quad'), 'Matrix quadrants present');
+  c.state.leftSurface = 'select';
+  const sel = JSON.stringify(c.renderDashOverview([]));
+  assert.ok(sel.includes('data-dropzone'), 'Selection drop zones present');
+  assert.ok(sel.includes('data-left-surface'), 'left pane stamped with its surface');
+
+  c.state.leftSurface = 'matrix';
+  assert.ok(JSON.stringify(c.renderDashOverview([])).includes('data-quad'), 'Matrix quadrants present');
+});
+
+// --- the left pane's width floor, re-derived (block 26 gave it one; 27a must not drop it) ---
+
+test('the list surface keeps block 26 sheet floor exactly', () => {
+  const c = make();
+  assert.equal(c.leftPaneMinWidth('list', 0), c.sheetPaneMinWidth());
+  assert.ok(/^min\(\d+px, 55%\)$/.test(c.leftPaneMinWidth('list', 0)), 'still a capped px floor');
+});
+
+test('a triage surface gets a floor of its own, per rendered column', () => {
+  const c = make();
+  const three = c.leftPaneMinWidth('select', 3);
+  const four = c.leftPaneMinWidth('select', 4);
+  assert.equal(three, 'min(' + (3 * c.TRIAGE_COL_MIN_PX + c.SHEET_COL_PAD_PX) + 'px, 55%)');
+  // A column added must widen the floor, or the extra column is simply crushed.
+  assert.ok(c.triageMinWidthPx(4) > c.triageMinWidthPx(3));
+  assert.ok(four !== three);
+  // Never zero: the floor is what block 26 said must not be deleted.
+  assert.ok(c.triageMinWidthPx(0) >= c.TRIAGE_COL_MIN_PX);
+});
+
+test('the matrix is always two columns wide, whatever is passed', () => {
+  const c = make();
+  assert.equal(c.leftPaneMinWidth('matrix', 4), c.leftPaneMinWidth('matrix', 1));
+  assert.equal(c.leftPaneMinWidth('matrix', 0), 'min(' + c.triageMinWidthPx(2) + 'px, 55%)');
+});
+
+test('the width floor and the renderer agree on which columns exist', () => {
+  const c = make();
+  // selectionCols is the ONE rule; a second copy in the floor is the drift being prevented.
+  const p = c.selectionProjection([]);
+  assert.deepEqual(c.selectionCols(p), ['existing', 'new']);
+  const sel = c.renderSelectionView([]);
+  const grid = sel.children.find(x => x && x.props && x.props.key === 'grid');
+  assert.equal(grid.children[0].length, c.selectionCols(p).length);
+});
+
+// --- split width: a triage grid and a four-column sheet want different amounts of the board ---
+
+test('switching to a triage surface swaps to the triage split key, and back again', () => {
+  const c = make();
+  c.state.mainView = 'dashboard'; c.state.dashMode = 'overview';
+  c.state.leftSurface = 'list'; c.state.planView = 'gantt';
+  assert.equal(c.leftSplitKey(), 'cal');
+  c.state.leftSurface = 'select';
+  assert.equal(c.leftSplitKey(), 'triage');
+  c.state.leftSurface = 'matrix';
+  assert.equal(c.leftSplitKey(), 'triage');
+});
+
+test('the triage default sits inside the splitter clamp the user could drag to', () => {
+  const c = make();
+  const d = c.splitDefault('triage');
+  assert.ok(d >= 28 && d <= 78, 'within the 28–78 clamp in onMouseMove');
+  assert.ok(d > c.splitDefault('cal'), 'card columns need more of the board than the Gantt split');
+});
+
+test('setLeftSurface banks the width it leaves and restores the one it enters', () => {
+  const c = make();
+  const saved = [];
+  c.savePrefs = (o) => saved.push(o);
+  c.setState = function (o) { Object.assign(this.state, o); };
+  c.state.mainView = 'dashboard'; c.state.dashMode = 'overview'; c.state.planView = 'gantt';
+  c.state.leftSurface = 'list';
+  c.state.splitPct = 41;
+  c.state.viewSplit = { triage: 70 };
+
+  c.setLeftSurface('select');
+  assert.equal(c.state.splitPct, 70, 'the triage width is restored');
+  assert.equal(c.state.viewSplit.cal, 41, 'and the sheet width was banked, not lost');
+
+  c.state.splitPct = 66; // as if the user dragged the splitter while on the grid
+  c.setLeftSurface('list');
+  assert.equal(c.state.splitPct, 41, 'the sheet comes back to exactly where it was');
+  assert.equal(c.state.viewSplit.triage, 66, 'and the grid kept the width it was dragged to');
+  assert.ok(saved.some(o => o.viewSplit), 'the banked widths persist');
+});
+
+test('switching between the two triage surfaces does not disturb the width', () => {
+  const c = make();
+  c.savePrefs = () => {};
+  c.setState = function (o) { Object.assign(this.state, o); };
+  c.state.mainView = 'dashboard'; c.state.dashMode = 'overview'; c.state.planView = 'gantt';
+  c.state.leftSurface = 'select'; c.state.splitPct = 70;
+  c.setLeftSurface('matrix');
+  assert.equal(c.state.splitPct, 70, 'select → matrix is the same pane, so the same width');
+});
+
+test('the left pane still renders the task sheet on the list surface', () => {
+  const c = make();
+  c.state.leftSurface = 'list';
+  const out = JSON.stringify(c.renderDashOverview([]));
+  assert.ok(!out.includes('data-dropzone'), 'no triage drop zones on the list surface');
+  assert.ok(!out.includes('data-quad'), 'no matrix quadrants on the list surface');
 });

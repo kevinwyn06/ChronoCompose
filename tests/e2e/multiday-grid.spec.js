@@ -174,10 +174,21 @@ test.describe('multi-day grid: locked vs auto-scheduled', () => {
 
     /* The distinction has to be legible, not merely encoded in an attribute. Two independent channels
        are asserted separately so that dropping either one fails here rather than quietly halving the
-       signal: auto blocks carry a hatch the locked one does not, and the locked one carries a solid
-       inset rail the auto ones do not share. */
-    expect(auto[0].bg, 'auto-scheduled blocks are hatched').toContain('repeating-linear-gradient');
-    expect(appt[0].bg, 'locked blocks are flat-filled').not.toContain('repeating-linear-gradient');
+       signal.
+
+       V5 block 25a REPLACED the first channel. It used to be "auto blocks carry a hatch the locked one
+       does not" — but the hatch marked the COMMON case (~90% of the week is auto-scheduled) and so said
+       nothing, and the owner deleted it. The signal is now inverted onto the rare case: the LOCKED block
+       carries a heavier border. Asserted as a strict width inequality plus an explicit "and nothing is
+       hatched any more", so neither the old texture creeping back nor the new border being dropped can
+       pass here. */
+    expect(auto[0].borderW, 'an app-placed block carries the thin border').toBeLessThan(appt[0].borderW);
+    /* A ratio, not an absolute px count: the whole app is drawn inside the `zoom:0.8` wrapper, so a
+       3px source border measures 2.5px here and a pixel threshold would be asserting the zoom. */
+    expect(appt[0].borderW / auto[0].borderW, 'and by a factor the eye can read, not a hairline')
+      .toBeGreaterThanOrEqual(2);
+    all.forEach((b) => expect(b.bg, `${b.title}: nothing on the grid is hatched any more`)
+      .not.toContain('repeating-linear-gradient'));
     expect(appt[0].rail, 'locked blocks carry an inset rail').toContain('inset');
     expect(appt[0].rail, 'in a colour the auto blocks do not use').not.toBe(auto[0].rail);
   });
@@ -213,9 +224,20 @@ test.describe('multi-day grid: dragging in a future column', () => {
 
     const after = await timelineBlocks(page);
     const pins = after.filter((b) => b.kind === 'pinned');
-    expect(pins, 'the drop created exactly one pin').toHaveLength(1);
-    expect(pins[0].day, 'and it belongs to the day whose column was dragged in').toBe(tomorrow);
-    expect(pins[0].title, 'it is the block that was grabbed').toContain('Every day');
+    /* V5 block 23: this used to read `toHaveLength(1)` on the BLOCKS. That was over-specified and it
+       started failing the moment the shell height fix made the columns taller — not because the drop
+       stopped working, but because the same pixel offsets now cover fewer minutes and the drop lands
+       across the column's appointment. `pinBlockAt` splits a drop around a blocking wall on purpose
+       (see index.html's "one drop → one or more records" note), so one PLACEMENT is legitimately
+       drawn as more than one block. What this test is actually about is WHICH DAY the pin landed on,
+       so it now asserts one pinned TASK and requires EVERY piece of it to be tomorrow's — which is
+       strictly stronger than checking a single block was. */
+    expect(pins.length, 'the drop created a pin').toBeGreaterThan(0);
+    expect([...new Set(pins.map((b) => b.taskId))], 'exactly one task became pinned').toHaveLength(1);
+    pins.forEach((p) => {
+      expect(p.day, 'every pinned piece belongs to the day whose column was dragged in').toBe(tomorrow);
+      expect(p.title, 'it is the block that was grabbed').toContain('Every day');
+    });
 
     /* Corroborate through the DOM as well: the pin is nested in tomorrow's column, not today's. */
     expect(has((await blocksInColumn(page, tomorrow)).filter((b) => b.kind === 'pinned'), 'Every day'),

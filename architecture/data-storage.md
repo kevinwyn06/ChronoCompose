@@ -90,9 +90,23 @@ full push (the sync fingerprint gained two fields). Downgrading is safe: an old 
 nor writes the new columns, and PostgREST leaves columns absent from an upsert payload untouched, so
 the server-side values survive an old client's writes.
 
-Global keys: `pp-theme`, `pp-sync`, `pp-workspace`, `pp-accounts`, and `pp-auth`. `pp-auth` is the
+Global keys: `pp-theme`, `pp-sync`, `pp-workspace`, `pp-accounts`, `pp-anon-promote`, and `pp-auth`. `pp-auth` is the
 one approved persisted account-session path. Google refresh tokens live only server-side in
 `public.gcal_tokens`; client secrets are Edge Function secrets.
 
 Account switching is a clean workspace switch. Anonymous or another account's local rows are never
 silently imported into a new account. Backup helpers round-trip `pp-*` data; Pomodoro is ephemeral.
+
+**Anon promotion (V5 block 17, F5).** "Never silently imported" is not the same as "unreachable".
+`syncBeginWorkspaceSwitch` now calls `anonPromotionOffer(uid)` *before* the reload — the one moment
+both namespaces are addressable — and the user chooses. Accepting runs `promoteAnonInto(uid)`, which
+is non-destructive on **both** sides: account rows are merged with, never replaced (tasks and habits
+appended, sections merged by name, journal days and the scratchpad concatenated, preference keys
+adopted only where the account has nothing), and the anon namespace is never cleared, so a wrong
+answer is recoverable by signing out. Declining says so in plain words. Promoted task ids are
+**regenerated** and `parentId`/`deps`/`sectionId` remapped, because `tasks.id` is a global PK on the
+backend — importing anon ids verbatim is the 2026-07-15 RLS collision. The per-account decision lives
+in the global `pp-anon-promote` ledger (`{uid:{choice,at}}`), which makes a second sign-in neither
+re-ask nor duplicate rows. `promoteAnonInto` writes storage for a workspace that is not yet mounted,
+so it is the one data path that cannot go through `commit()`; the reload re-hydrates it through the
+normal constructor path. The older `importAnonInto` remains for a future explicit Settings import.

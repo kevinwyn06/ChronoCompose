@@ -83,7 +83,10 @@ test('the inclusion control offers four states and never the retired Off', () =>
   const c = make();
   const B = c.startOfToday();
   const mk = over => c.normalizeTask(Object.assign({ id:'g'+Math.random().toString(36).slice(2,7),
-    name:'t', type:'Proportional', start:B, end:B+DAY, priority:4, deps:[], pct:0, planned:60, spent:0 }, over));
+    /* V5 block 20 (F19): a window that OPENS today now auto-includes, so `included:null` there renders
+       as pressed and could not exercise the unpressed glyph. A not-yet-open window keeps all four
+       states reachable, which is what this test is about. */
+    name:'t', type:'Proportional', start:B+2*DAY, end:B+4*DAY, priority:4, deps:[], pct:0, planned:60, spent:0 }, over));
   const glyph = t => { c.state.tasks=[t]; return c.taskInclControl(t).children[0]; };
   assert.strictEqual(glyph(mk({ included:true })), '☑', 'pressed');
   assert.strictEqual(glyph(mk({ included:null })), '☐', 'unpressed');

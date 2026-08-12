@@ -3,7 +3,7 @@
 // Expectations are derived by hand from the spec, not copied from the implementation.
 const test = require('node:test');
 const assert = require('node:assert');
-const { make, activeTask, cleanDay, DAY } = require('./_load.js');
+const { make, activeTask, cleanDay, DAY, withNow } = require('./_load.js');
 
 const MIN = 60000; // ms per minute
 const H = 3600000; // ms per hour
@@ -53,7 +53,9 @@ test('V2.1: latest running task is stronger pressed and pulled to now', () => {
 /* ============================ PART A — PACKER ============================ */
 
 // 1. Meals appear as 'meal' chunks; scheduled chunks stay in-window and never overlap a meal.
-test('packer: meals present as meal chunks; scheduled within window & clear of meals', () => {
+// V5 (F4): clock pinned at 12:00 — `packFromNow` now defaults true, so the DEFAULT 07:00–23:00 window
+// is empty when the suite runs after 23:00. This test is about meals, not about the run hour.
+test('packer: meals present as meal chunks; scheduled within window & clear of meals', () => withNow(() => {
   const c = make();
   c.state.nowTick = Date.now();
   c.state.settings.freeTime = 0; // keep default 07:00-23:00 window + default lunch/dinner
@@ -74,7 +76,7 @@ test('packer: meals present as meal chunks; scheduled within window & clear of m
   // scheduled chunks non-overlapping each other
   const ss = sched.slice().sort((a, b) => a.start - b.start);
   for (let i = 1; i < ss.length; i++) assert.ok(ss[i].start >= ss[i - 1].end, 'no self-overlap');
-});
+}));
 
 // 2. Priority ordering: a P1 task packs before a P4 task (earlier start) when both fit.
 test('packer: priority 1 scheduled before priority 4', () => {

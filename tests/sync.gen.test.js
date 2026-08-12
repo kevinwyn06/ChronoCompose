@@ -233,13 +233,16 @@ test('loadSyncTombstones: entries past the TTL are pruned on read', () => {
 // =======================================================================
 // commit() funnel + stampUpdated (integration through the public mutation path)
 // =======================================================================
-test('commit funnel: inert while sync is disabled (no queue, no clock stamp)', () => {
+// V5/F7 (block 16): the OUTBOUND funnel is gated by syncEnabled, but the LWW clock is NOT. A row
+// stamped only after sign-in carries updatedAt=0 for every pre-sign-in edit and loses every merge it
+// ever enters, so the whole pre-sign-in session is silently overwritten on first pull.
+test('commit funnel: no queue while sync is disabled, but the LWW clock is still stamped', () => {
   const c = make();
   c.state.settings.syncEnabled = false;
   c.state.tasks = [task(c, { updatedAt: null })];
   c.commit(tasks => { tasks[0].name = 'Edited'; });
   assert.deepEqual(c.loadSyncQueue(), []);
-  assert.equal(c.state.tasks[0].updatedAt, null); // stampUpdated gated off
+  assert.equal(typeof c.state.tasks[0].updatedAt, 'number');
 });
 
 test('commit funnel: with sync on, a mutation enqueues an update and stamps updatedAt', () => {
@@ -268,11 +271,13 @@ test('commit funnel: _syncApplying suppresses echo (a pulled snapshot does not r
 // B2 network-layer pure helpers (the network calls themselves aren't vm-testable, same as gcal —
 // only these IO-free pieces the flush relies on are).
 // =======================================================================
-test('syncRowForWrite: strips updatedAt (the DB owns updated_at) and never sends owner_id', () => {
+// V5/F7 (block 16): the write carries the EDIT clock as snake updated_at, so push and pull compare
+// the same basis. The camelCase local name is never a column; owner_id is always the server's.
+test('syncRowForWrite: renames updatedAt -> updated_at and never sends owner_id', () => {
   const c = make();
   const r = c.syncRowForWrite(c.syncRowOf(task(c, { updatedAt: 12345 })));
   assert.equal('updatedAt' in r, false);
-  assert.equal('updated_at' in r, false);
+  assert.equal(Date.parse(r.updated_at), 12345);
   assert.equal('owner_id' in r, false);
   assert.equal(r.name, 'Task'); // real columns survive
 });

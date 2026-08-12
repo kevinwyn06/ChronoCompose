@@ -23,15 +23,34 @@ function task(id, name, extra) {
 async function seed(page, data = {}) {
   const payload = {
     tasks: data.tasks || defaultTasks(),
-    settings: data.settings || {},
+    /* Block 31: the alpha usage tracker defaults ON in the app, which is right for the owner's own
+       sessions and wrong for a test run — every spec would POST to the local sink and litter
+       `.telemetry/`. Seed it OFF, and let the one spec that is ABOUT the tracker seed it back on. */
+    settings: Object.assign({ usageTracking: false }, data.settings || {}),
     /* firstRunSeen suppresses the one-time 3-step coach overlay, which otherwise sits over the
        surfaces under test. */
     prefs: Object.assign({ firstRunSeen: true }, data.prefs || {}),
     sections: data.sections || [],
+    /* Block 13: 'light' | 'dark'. `pp-theme` is a GLOBAL key read by the inline bootstrap at the very
+       top of index.html, before React exists — seeding it is the only way to pin a theme deterministically
+       (the fallback reads prefers-color-scheme, which a screenshot must not depend on). */
+    theme: (data.theme === 'light' || data.theme === 'dark') ? data.theme : null,
+    /* Block 13: running timers, as {taskId: minutesAlreadyRunning}. `startTimer` stamps
+       `startedAt = Date.now()` and `stopTimerAt` credits the wall-clock delta, so backdating `startedAt`
+       is how a journey gets a REALISTIC amount of accrued time (a tab left open over lunch) without the
+       spec sleeping for it. `timerHeartbeat` only refreshes `beat`; it never settles or truncates a run. */
+    run: data.run || null,
+    /* Block 13: seed the fixture ONCE. Playwright cannot remove an init script, so without this a
+       `page.reload()` would re-write `pp-tasks` from the fixture and silently erase everything the
+       journey just did — which is exactly what "spent time survives a reload" has to prove. The chrome
+       suppressors below are re-stamped on EVERY load regardless: they are not journey state, and the
+       morning-summary modal keys off the day it is currently being read on. */
+    once: !!data.seedOnce,
   };
   await page.addInitScript(([d, midnightExpr]) => {
     const midnight = eval(midnightExpr);
     const DAYMS = 86400000;
+    const already = d.once && localStorage.getItem('e2e-seeded') === '1';
     /* Relative day offsets in fixtures are resolved here so fixtures never go stale as the wall
        clock advances — the same fix the date-picker drag fixture needed. */
     /* '+2d' · '0d+4h' · '0d+2h30m' — a day offset, then an optional clock offset within that day.
@@ -40,7 +59,10 @@ async function seed(page, data = {}) {
     const OFF = /^([+-]?\d+)d(?:([+-]?\d+)h)?(?:([+-]?\d+)m)?$/;
     const resolve = (t) => {
       const o = Object.assign({}, t);
-      for (const k of ['start', 'end', 'due', 'snoozeUntil']) {
+      /* Block 30b added `completion` and `archivedAt`: the capacity readout's "all done" state is
+         defined by work FINISHED on a day, so a fixture has to be able to say when. Same relative
+         syntax, same reason — an absolute stamp would go stale as the wall clock advances. */
+      for (const k of ['start', 'end', 'due', 'snoozeUntil', 'completion', 'archivedAt']) {
         if (typeof o[k] !== 'string') continue;
         const m = OFF.exec(o[k]);
         if (!m) continue;
@@ -50,12 +72,25 @@ async function seed(page, data = {}) {
       }
       return o;
     };
-    localStorage.setItem('pp-tasks', JSON.stringify(d.tasks.map(resolve)));
-    localStorage.setItem('pp-settings', JSON.stringify(d.settings));
-    localStorage.setItem('pp-prefs', JSON.stringify(d.prefs));
-    localStorage.setItem('pp-sections', JSON.stringify(d.sections));
+    if (!already) {
+      localStorage.setItem('pp-tasks', JSON.stringify(d.tasks.map(resolve)));
+      localStorage.setItem('pp-settings', JSON.stringify(d.settings));
+      localStorage.setItem('pp-prefs', JSON.stringify(d.prefs));
+      localStorage.setItem('pp-sections', JSON.stringify(d.sections));
+      if (d.run) {
+        const now = Date.now(); const r = {};
+        Object.keys(d.run).forEach((id) => {
+          const startedAt = now - Math.max(0, +d.run[id] || 0) * 60000;
+          r[id] = { startedAt, beat: now };
+        });
+        localStorage.setItem('pp-run', JSON.stringify(r));
+      }
+      if (d.once) localStorage.setItem('e2e-seeded', '1');
+    }
+    if (d.theme) localStorage.setItem('pp-theme', d.theme);
     /* Mark today's morning summary as already raised. It is a centred modal that would otherwise sit
-       over every surface under test on the first tick of a new calendar day. */
+       over every surface under test on the first tick of a new calendar day. Re-stamped on every load,
+       including a seed-once reload, because the day it must suppress is the day being loaded. */
     localStorage.setItem('pp-notify', JSON.stringify({ fired: {}, summaryDay: midnight }));
     /* Mark every one-time migration done so a fixture is never silently rewritten on boot. */
     localStorage.setItem('pp-migrations', JSON.stringify({
@@ -83,12 +118,17 @@ async function boot(page, data) {
 }
 
 /**
- * Boot straight onto the Plan tab's Selection or Matrix grid.
+ * Boot straight onto the Selection or Matrix grid.
  *
- * `dashMode` alone is not enough: `migrateDashMode` only TRUSTS a stored 'plan' when `dashModeV===2`
- * is present too (a legacy 'plan' meant the scheduling board and is remapped to 'overview'). Seeding
- * both is what makes the first paint the grid under test, with no click-through to get there —
- * a click-through would make every one of these specs depend on the tab chrome as well.
+ * V5 block 27a RE-POINTED this helper and nothing else: the two grids moved out of a Dashboard tab of
+ * their own into Overview's LEFT pane, so the pref that puts them on screen is now `leftSurface` rather
+ * than `dashMode:'plan'` + `planTab`. Every spec that calls `bootPlan` keeps its assertions verbatim —
+ * which is the point of seeding the destination in one helper instead of clicking through tab chrome in
+ * each spec. (The old pref pair is still honoured, by `migrateLeftSurface`; that path is pinned in the
+ * unit layer, `tests/v2-plan-tab.test.js`, where it belongs.)
+ *
+ * Note this does NOT go through `boot`: `boot` waits for `[data-task-id]`, a task-sheet row, and on a
+ * triage surface the sheet is not the left pane's content. It waits on a card instead.
  *
  * @param {import('@playwright/test').Page} page
  * @param {'select'|'matrix'} tab
@@ -96,8 +136,10 @@ async function boot(page, data) {
  */
 async function bootPlan(page, tab, data) {
   const d = Object.assign({}, data || {});
-  d.prefs = Object.assign({ dashMode: 'plan', dashModeV: 2, planTab: tab === 'matrix' ? 'matrix' : 'select' }, d.prefs || {});
-  await boot(page, d);
+  d.prefs = Object.assign({ mainView: 'dashboard', dashMode: 'overview', dashModeV: 2,
+    leftSurface: tab === 'matrix' ? 'matrix' : 'select' }, d.prefs || {});
+  await seed(page, d);
+  await page.goto('/index.html');
   await page.locator('[data-card-id]').first().waitFor({ state: 'attached', timeout: 15000 });
 }
 
@@ -167,7 +209,7 @@ const BLOCK_SEL = '[data-tl-block]';
  * what makes "it landed on the right DAY" assertable on the 4-Day/Week grid.
  * `kind` is 'auto' | 'pinned' | 'fixed' | 'meal' — V4.1's locked-vs-auto-scheduled distinction.
  * `ov` is block 12's overlap-layout left fraction (0 = full width).
- * @returns {Promise<{title,tip,x,y,w,h,ov,pinned,day,kind,taskId,bg,rail}[]>}
+ * @returns {Promise<{title,tip,x,y,w,h,ov,pinned,day,kind,taskId,bg,rail,borderW,borderStyle,borderColor}[]>}
  */
 async function timelineBlocks(page) {
   const list = await page.$$eval(BLOCK_SEL, (els) => els.map((el) => {
@@ -187,6 +229,13 @@ async function timelineBlocks(page) {
       taskId: el.getAttribute('data-tl-task') || '',
       bg: cs.backgroundImage || '',
       rail: cs.boxShadow || '',
+      /* V5 block 25b: the lock signal is border WIDTH first (survives greyscale) and colour second.
+         Reported as three separate fields so a spec can assert the width channel on its own — a
+         "locked blocks look different" test that only compared colour would still pass if the heavy
+         border were replaced by a tint, which is exactly the failure this block has to make loud. */
+      borderW: parseFloat(cs.borderTopWidth) || 0,
+      borderStyle: cs.borderTopStyle || '',
+      borderColor: cs.borderTopColor || '',
       pinned: el.getAttribute('data-tl-kind') === 'pinned',
     };
   }));
@@ -252,7 +301,100 @@ async function dragBetween(page, fromLocator, toLocator) {
   await page.mouse.up();
 }
 
+/* ===== Block 13: cross-subsystem readers =====================================================
+   The journey spec asserts that two INDEPENDENT renderings of the same day agree — the allotment the
+   sheet prints per task, and the minutes the timeline actually draws. Both are read off the DOM, for
+   block 03's reason: there is no app handle on `window`, and reading state through a back door would
+   only prove the back door works. */
+
+/** `fmtDur`'s `h:mm` back to minutes. `'—'` (not included today) reads as null, never as 0. */
+function parseDur(s) {
+  const m = /^(\d+):(\d{2})$/.exec(String(s || '').trim());
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+/**
+ * Today's allotment per task, as the SHEET prints it — `taskFlowCell`'s `[title="Allotted today"]`
+ * span inside each `[data-task-id]` card. This is `computeAllotted`'s answer, rendered.
+ * Tasks not included today carry `title="Not included today"` and are absent from the map.
+ * @returns {Promise<Record<string, number>>}
+ */
+async function allottedByTask(page) {
+  const rows = await page.$$eval('[data-task-id]', (els) => els.map((el) => {
+    const span = el.querySelector('[title="Allotted today"]');
+    return { id: el.getAttribute('data-task-id'), txt: span ? (span.textContent || '') : null };
+  }));
+  const out = {};
+  rows.forEach((r) => { if (r.txt == null) return; const v = parseDur(r.txt); if (v != null) out[r.id] = v; });
+  return out;
+}
+
+/**
+ * The minutes the timeline DRAWS, per task, read back out of block heights.
+ *
+ * `renderDayColumn` lays a block out as `height = max(13, minutes*px - 2)` in the app's LOCAL space,
+ * which `getBoundingClientRect` then reports through the `zoom:0.8` wrapper at index.html:191. Both
+ * the scale and the −2 inset are therefore unknown at read time, and guessing either one biases every
+ * multi-chunk task by the number of chunks it has (a 3-chunk task read with an unscaled −2 comes back
+ * ~3 minutes light — measured, not theorised).
+ *
+ * So calibrate with TWO blocks of known duration and solve `h = a·m + b` outright: `a` absorbs the
+ * zoom and the pane scale, `b` absorbs the inset. Nothing about the app's internal units is assumed,
+ * which also means a future zoom change cannot silently skew these numbers.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {Array<{pick: (b: any) => boolean, minutes: number}>} cal exactly two, each matching one block
+ * @returns {Promise<{byTask: Record<string, number>, total: number, a: number, b: number}>}
+ */
+async function drawnMinutes(page, cal) {
+  const blocks = await timelineBlocks(page);
+  if (!Array.isArray(cal) || cal.length !== 2) throw new Error('drawnMinutes: needs exactly two calibrators');
+  const pts = cal.map((c, i) => {
+    const hit = blocks.filter(c.pick);
+    if (hit.length !== 1) throw new Error(`drawnMinutes: calibrator ${i} matched ${hit.length} blocks, expected 1`);
+    return { h: hit[0].h, m: c.minutes };
+  });
+  if (pts[0].m === pts[1].m) throw new Error('drawnMinutes: the two calibrators must differ in duration');
+  const a = (pts[1].h - pts[0].h) / (pts[1].m - pts[0].m);
+  const b = pts[0].h - a * pts[0].m;
+  /* `Math.max(13, …)` clamps very short blocks, and a clamped block cannot be inverted — it reports
+     the floor, not its duration. The fit already knows the scale: `b = −2·s`, so the floor in the
+     same measured units is `13·s = −6.5·b`. Refuse rather than quietly return a wrong number; a
+     fixture that produces slivers needs a bigger `minChunk`. */
+  const floorPx = -6.5 * b;
+  const byTask = {}; let total = 0; let clamped = 0;
+  blocks.forEach((bl) => {
+    /* 0.1px of slack: Chromium snaps layout to 1/64px, so a clamped block measures a hair over 13·s. */
+    if (bl.h <= floorPx + 0.1) { clamped++; return; }
+    if (bl.kind === 'meal' || !bl.taskId) return; /* meals are the day's furniture, not anyone's allotment */
+    byTask[bl.taskId] = (byTask[bl.taskId] || 0) + (bl.h - b) / a;
+    total += (bl.h - b) / a;
+  });
+  if (clamped) throw new Error(`drawnMinutes: ${clamped} block(s) hit the 13px height floor and cannot be measured`);
+  return { byTask, total, a, b };
+}
+
+/** Click one of the six main-view tabs by its label ('Gantt' | '4-Day' | 'Week' | 'Today' | …). */
+async function switchView(page, label) {
+  await page.locator(`[role="tab"][title="${label}"]`).click();
+}
+
+/**
+ * Switch Overview's LEFT pane between its three surfaces (V5 block 27a).
+ *
+ * Before the rehoming, "go from the triage grid to the board" was a Dashboard TAB change. It is now a
+ * pane change, because both live on Overview — so a spec that used to click the Overview tab to reach
+ * the sheet has to click here instead, or it stays on the grid it was already looking at.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {'list'|'select'|'matrix'} key
+ */
+async function switchLeftSurface(page, key) {
+  await page.locator(`[data-surface-btn="${key}"]`).click();
+}
+
 module.exports = {
   seed, boot, bootPlan, bootToday, bootDays, bootSurface, dragBetween, task, defaultTasks, DAY,
   cleanDaySettings, timelineBlocks, settleTimeline, BLOCK_SEL, dayColumns, blocksInColumn,
+  parseDur, allottedByTask, drawnMinutes, switchView, switchLeftSurface,
 };

@@ -93,7 +93,9 @@ test('V2.11 inclusion folds four states into two rows and keeps undecided distin
 
 test('V2.9 setInclusionRow writes through the existing mutators and adds no new fields', () => {
   const c=make(); const B=c.startOfToday();
-  const t=activeTask(c,{id:'t1',start:B,end:B+DAY,included:null,snoozeUntil:B+DAY});
+  /* V5 block 20 (F19): the window must NOT open today, or auto-inclusion would legitimately add the
+     snooze on the way out. A window that has not started yet is the case where a bare unpress suffices. */
+  const t=activeTask(c,{id:'t1',start:B+2*DAY,end:B+4*DAY,included:null,snoozeUntil:B+DAY});
   c.state.tasks=[t];
 
   c.setInclusionRow('t1','included');
@@ -103,8 +105,8 @@ test('V2.9 setInclusionRow writes through the existing mutators and adds no new 
 
   c.setInclusionRow('t1','excluded');
   got=c.state.tasks.find(x=>x.id==='t1');
-  /* V2.11: excluding UNPRESSES (null) rather than writing the retired `false`. This fixture's window
-     opens today, so V2.2 inheritance cannot pull it back and no snooze is needed. */
+  /* V2.11: excluding UNPRESSES (null) rather than writing the retired `false`. Nothing pulls this
+     fixture back into today — no inheritance, and no auto-inclusion — so no snooze is needed. */
   assert.strictEqual(got.included,null,'dropping into Excluded unpresses the task');
   assert.strictEqual(got.snoozeUntil,null,'nothing to suppress, so no snooze is added');
 });
@@ -133,7 +135,10 @@ test('V2.9 selectionProjection fills a 3x2 grid with per-column and per-row coun
     activeTask(c,{id:'o-in', start:B-3*DAY,end:B-DAY,included:true, pct:10}),  /* overdue · included */
     activeTask(c,{id:'e-in', start:B-2*DAY,end:B+2*DAY,included:true,pct:10}), /* existing · included */
     activeTask(c,{id:'n-in', start:B,       end:B+DAY,included:true}),          /* new · included */
-    activeTask(c,{id:'n-un', start:B,       end:B+DAY,included:null}),          /* new · undecided */
+    /* V5 block 20 (F19): a window OPENING today can no longer be undecided — it auto-includes, which is
+       the whole point of the block. Undecided work now shows up in Extra: a dateless someday pick that
+       the calendar never surfaced and the user never pressed. */
+    activeTask(c,{id:'x-un', start:null,    end:null, included:null}),          /* extra · undecided */
     activeTask(c,{id:'x-in', start:null,    end:null, included:true})           /* extra · included */
   ];
   c.state.tasks=tasks;
@@ -148,7 +153,7 @@ test('V2.9 selectionProjection fills a 3x2 grid with per-column and per-row coun
   assert.strictEqual(p.keys.reduce((n,k)=>n+p.colCount[k],0),tasks.length,'column counts are exhaustive');
 
   assert.ok(p.cells.new.included.some(t=>t.id==='n-in'));
-  assert.ok(p.cells.new.excluded.some(t=>t.id==='n-un'),'undecided sits in the Excluded row');
+  assert.ok(p.cells.extra.excluded.some(t=>t.id==='x-un'),'undecided sits in the Excluded row');
   assert.ok(p.cells.extra.included.some(t=>t.id==='x-in'));
 });
 
@@ -246,7 +251,9 @@ test('V2.9 a quadrant drag writes priority ONLY and never touches dates', () => 
 test('V2.9 inclusionProjection emits the same band shape sectionProjection does', () => {
   const c=make(); const B=c.startOfToday();
   const inTask=activeTask(c,{id:'in',start:B,end:B+DAY,included:true});
-  const outTask=activeTask(c,{id:'out',start:B,end:B+DAY,included:null}); /* V2.11: unpressed is the excluded state */
+  /* V2.11: unpressed is the excluded state. V5 block 20: the window must not open today, or the task
+     would be auto-included and there would be nothing in the Excluded band to assert on. */
+  const outTask=activeTask(c,{id:'out',start:B+2*DAY,end:B+4*DAY,included:null});
   c.state.tasks=[inTask,outTask];
   const bands=c.inclusionProjection(c.state.tasks);
 
@@ -275,8 +282,10 @@ test('V2.9 both bands render even when empty, and Excluded defaults to collapsed
 
 test('V2.9 a subtree follows its ROOT across the division, never tearing parent from child', () => {
   const c=make(); const B=c.startOfToday();
-  const root=activeTask(c,{id:'root',start:B,end:B+DAY,included:null});
-  const kid=activeTask(c,{id:'kid',parentId:'root',start:B,end:B+DAY,included:true});
+  /* V5 block 20: a not-yet-open window keeps the root genuinely undecided (auto-inclusion only fires on
+     the day a window opens), so the subtree rule is still being tested rather than the new default. */
+  const root=activeTask(c,{id:'root',start:B+2*DAY,end:B+4*DAY,included:null});
+  const kid=activeTask(c,{id:'kid',parentId:'root',start:B+2*DAY,end:B+4*DAY,included:true});
   c.state.tasks=[root,kid];
   const bands=c.inclusionProjection(c.state.tasks);
 

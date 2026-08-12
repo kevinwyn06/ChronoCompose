@@ -163,10 +163,24 @@ a column the hours are readable without labels: an alternating band per hour plu
 sixth hour, both `pointerEvents:none` so neither can intercept a block drag, with each band painted before
 its own hour line.
 
-Blocks distinguish **locked** from **auto-scheduled** by surface, not only by hue: a clock-fixed or
-hand-pinned block is flat-filled and carries a solid inset left rail, while an auto-scheduled one carries a
-diagonal hatch that reads as provisional. The 📌/📍 glyphs remain the non-colour channel, so the
-distinction survives greyscale and colour-blind reading. Every block carries `data-tl-block`,
+Blocks distinguish **locked** from **auto-scheduled** by marking the RARE case (V5 block 25b). A
+clock-fixed or hand-pinned block carries a `TL_LOCK_BORDER_PX` border in `--tl-lock-border` and a solid
+inset left rail; everything the app placed carries `TL_BLK_BORDER_PX`. The signal is border **width**
+first, so it survives greyscale, and the 📌/📍 glyphs remain the non-colour channel on top of that.
+V5 block 25a **deleted** the diagonal hatch that used to mark auto-scheduled blocks, along with
+`--tl-hatch`: nearly everything is auto-scheduled, so the texture covered ~90% of the week and carried no
+information — the same measurement that retired `ambientRowBackground` in V2.9.
+
+**Block colour has exactly one source** (V5 block 25c, `tlSurface()` — `TL_TYP()`'s four per-kind
+families are retired). A task block is filled with the task's own `PCOL[priority]`, the identical map the
+month calendar's chips, the sheet and the Gantt read, mixed into the near-neutral per-theme
+`--tl-fill-base`; the theme contributes tone only, which is why a block's hue is the same in both themes.
+There is deliberately no timeline-only palette, and `tests/e2e/block-colour.spec.js` proves the timeline
+and the month calendar agree on the hue for the same task. The `dayIntervals` clock windows (Lunch,
+Dinner, Free time) are settings rather than work and take no hue at all: `--tl-win-*` gives them a bare
+wash inside a dashed outline, no rail and no timer, so they read as the shape of the day.
+
+Every block carries `data-tl-block`,
 `data-tl-day` (the column's day), `data-tl-kind` (`auto` · `pinned` · `fixed` · `meal`) and `data-tl-task`.
 Those hooks are the supported way for tests to address a block — the e2e layer previously matched three
 tooltip **strings**, so a copy change read as a gesture regression.

@@ -22,8 +22,11 @@ test('setIncludedOff: unpresses (never writes false) and snoozes inherited work;
 test('setIncludedOff on work nothing would inherit leaves the snooze alone', () => {
   const c = make();
   const today = c.startOfToday();
-  // window opens today, so V2.2 has no yesterday slice to carry forward
-  const t = activeTask(c, { start: today, end: today + DAY, included: true });
+  // V5 block 20 (F19): a window OPENING today is no longer such a case — it now auto-includes, so
+  // unpressing it alone would be undone on the spot and the snooze is correct there. The premise
+  // survives with a window that has not started yet: nothing would bring this back into TODAY, so a
+  // bare unpress is enough and a phantom snooze would be noise.
+  const t = activeTask(c, { start: today + 2 * DAY, end: today + 4 * DAY, included: true });
   c.state.tasks = [t];
   c.setIncludedOff(t.id);
   assert.strictEqual(c.state.tasks[0].included, null);

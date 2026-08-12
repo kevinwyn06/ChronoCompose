@@ -41,3 +41,7 @@ supabase/.temp/
 
 # Orchestration process artifacts (block handoffs, queue state)
 .orchestration/
+
+# Alpha usage tracker output (block 31). The local sink in tools/static-server.mjs appends session
+# .jsonl files here. It is instrumentation of the owner's own sessions, not project data — never commit it.
+.telemetry/

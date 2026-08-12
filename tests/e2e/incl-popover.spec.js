@@ -20,10 +20,12 @@ const menuItem = (page, label) => page.getByText(label, { exact: true });
 const cardIn = (page, cellSel, name) =>
   page.locator(`${cellSel} [data-card-id]`).filter({ hasText: name });
 
-/* start today / end +2d means the window does NOT cover yesterday, so the task is not "inherited".
-   That matters: `setIncludedOff` snoozes an inherited task instead of unpressing it, and a fixture
-   that drifted into inheritance would silently change which branch these tests exercise. */
-const pressed = [task('inc-1', 'Popover task', { start: '0d', end: '+2d', included: true })];
+/* A window that has NOT OPENED yet, force-included: the task is pressed, but nothing would pull it
+   back into today on its own. That matters, because `setIncludedOff` snoozes rather than unpresses
+   whenever something WOULD pull the task back — V2.2 inheritance, and since V5 block 20 (F19) also
+   auto-inclusion on the day a window opens. A fixture that drifted into either would silently change
+   which branch these tests exercise: the take-out would land on `snoozed` instead of `unpressed`. */
+const pressed = [task('inc-1', 'Popover task', { start: '+2d', end: '+4d', included: true })];
 
 test.describe('inclusion popover', () => {
   test('the glyph opens a menu; a pressed task is offered snooze and take-out', async ({ page }) => {
