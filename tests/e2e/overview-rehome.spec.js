@@ -69,7 +69,8 @@ test.describe('Overview left pane: the rehoming', () => {
       'the Dashboard tab is retired').toHaveCount(0);
 
     /* Real pointer input on each surface button, and the pane content changes to match. */
-    for (const [key, marker] of [['select', '[data-dropzone]'], ['matrix', '[data-quad]'], ['list', '[data-task-id]']]) {
+    /* V5 block 32: 'matrix' dropped from this sweep — the surface is retired and its button is gone. */
+    for (const [key, marker] of [['select', '[data-dropzone]'], ['list', '[data-task-id]']]) {
       const btn = page.locator(`[data-surface-btn="${key}"]`);
       const b = await btn.boundingBox();
       /* Owner tenet: clickboxes are generous, and the glyph is not the hit box. 24 CSS px inside the
@@ -128,10 +129,17 @@ for (const theme of ['light', 'dark']) {
     await page.screenshot({ path: shot(`27-overview-select-${theme}.png`) });
   });
 
-  test(`SHOT: Overview with the Eisenhower matrix in the left pane (${theme})`, async ({ page }) => {
+  /* V5 block 32: the Matrix shot is replaced by its retirement proof — the toggle itself, cropped, so the
+     owner can read that it says List · Selection and that nothing is left where Matrix used to sit. */
+  test(`SHOT: the left-surface toggle reads List · Selection only (${theme})`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await bootPlan(page, 'matrix', { theme, tasks: busy() });
-    await expect(page.locator('[data-quad]').first()).toBeVisible();
-    await page.screenshot({ path: shot(`27-overview-matrix-${theme}.png`) });
+    await bootPlan(page, 'select', { theme, tasks: busy() });
+    const toggle = page.locator('[data-left-surface-toggle]');
+    await expect(toggle).toBeVisible();
+    await expect(toggle.locator('[data-surface-btn]')).toHaveCount(2);
+    await expect(toggle.locator('[data-surface-btn="matrix"]')).toHaveCount(0);
+    await expect(toggle).toHaveText(/^ListSelection$/);
+    await toggle.screenshot({ path: shot(`32-left-surface-toggle-${theme}.png`) });
+    await page.screenshot({ path: shot(`32-overview-toggle-context-${theme}.png`) });
   });
 }

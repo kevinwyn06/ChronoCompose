@@ -118,7 +118,11 @@ async function boot(page, data) {
 }
 
 /**
- * Boot straight onto the Selection or Matrix grid.
+ * Boot straight onto the Selection grid.
+ *
+ * V5 block 32: the Eisenhower matrix is RETIRED and unreachable, so this helper no longer has a second
+ * destination — `'matrix'` is rejected loudly rather than silently seeding a pref that
+ * `migrateLeftSurface` would rewrite to 'select', which would make a matrix spec look like it passed.
  *
  * V5 block 27a RE-POINTED this helper and nothing else: the two grids moved out of a Dashboard tab of
  * their own into Overview's LEFT pane, so the pref that puts them on screen is now `leftSurface` rather
@@ -131,13 +135,14 @@ async function boot(page, data) {
  * triage surface the sheet is not the left pane's content. It waits on a card instead.
  *
  * @param {import('@playwright/test').Page} page
- * @param {'select'|'matrix'} tab
+ * @param {'select'} tab
  * @param {object} [data] same shape as `boot`
  */
 async function bootPlan(page, tab, data) {
+  if (tab === 'matrix') throw new Error('bootPlan: the matrix surface was retired in block 32');
   const d = Object.assign({}, data || {});
   d.prefs = Object.assign({ mainView: 'dashboard', dashMode: 'overview', dashModeV: 2,
-    leftSurface: tab === 'matrix' ? 'matrix' : 'select' }, d.prefs || {});
+    leftSurface: 'select' }, d.prefs || {});
   await seed(page, d);
   await page.goto('/index.html');
   await page.locator('[data-card-id]').first().waitFor({ state: 'attached', timeout: 15000 });
@@ -387,7 +392,7 @@ async function switchView(page, label) {
  * the sheet has to click here instead, or it stays on the grid it was already looking at.
  *
  * @param {import('@playwright/test').Page} page
- * @param {'list'|'select'|'matrix'} key
+ * @param {'list'|'select'} key  (V5 block 32: 'matrix' retired — no such button exists)
  */
 async function switchLeftSurface(page, key) {
   await page.locator(`[data-surface-btn="${key}"]`).click();

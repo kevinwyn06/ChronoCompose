@@ -1,9 +1,9 @@
 const { test, expect } = require('@playwright/test');
 const { bootPlan, dragBetween, task } = require('./_seed');
 
-/* Card drag on the Plan tab — Selection and Matrix.
-   Both grids share ONE drag implementation (cardPointerDown → beginCardDrag → onMouseUp) and differ
-   only in what the drop writes, so both are covered here.
+/* Card drag on Overview's left pane — Selection. (Matrix was covered here too until block 32 retired it.)
+   The grids share ONE drag implementation (cardPointerDown → beginCardDrag → onMouseUp) and differ
+   only in what the drop writes.
 
    Why this belongs in the e2e layer and nowhere else: the gesture is defined by a 4px promotion
    threshold and by `elementFromPoint` hit-testing against the zone the cursor is actually over. A
@@ -80,31 +80,9 @@ test.describe('Selection: dragging a card across the Included/Excluded divider',
   });
 });
 
-test.describe('Matrix: dragging a card between the importance rows', () => {
-  /* priority 4 = not important (isImportant is `priority<=2`); due tomorrow = urgent inside the
-     default 2-day horizon. So it starts in Delegate/trim, and an upward drop must land it in Do. */
-  const tasks = [task('mx-1', 'Matrix task', { start: '0d', end: '+1d', priority: 4, included: true })];
-
-  test('a card dragged UP into the important row becomes important', async ({ page }) => {
-    await bootPlan(page, 'matrix', { tasks });
-
-    await expect(cardIn(page, '[data-quad="delegate"]', 'Matrix task')).toHaveCount(1);
-
-    await dragBetween(page, grip(page, 'mx-1', 'Matrix task'), page.locator('[data-quad="do"]'));
-
-    await expect(cardIn(page, '[data-quad="do"]', 'Matrix task')).toHaveCount(1);
-    await expect(cardIn(page, '[data-quad="delegate"]', 'Matrix task')).toHaveCount(0);
-  });
-
-  test('a SIDEWAYS drag changes nothing — urgency is not draggable', async ({ page }) => {
-    await bootPlan(page, 'matrix', { tasks });
-
-    /* Delegate (urgent) → Drop (not urgent). Same importance row, so the zone string is identical and
-       the drop is a documented no-op: "the only way to change urgency is to change the dates."
-       This is the rule most at risk from a drag rewrite, which is why it is pinned. */
-    await dragBetween(page, grip(page, 'mx-1', 'Matrix task'), page.locator('[data-quad="drop"]'));
-
-    await expect(cardIn(page, '[data-quad="delegate"]', 'Matrix task')).toHaveCount(1);
-    await expect(cardIn(page, '[data-quad="drop"]', 'Matrix task')).toHaveCount(0);
-  });
-});
+/* V5 block 32: the `Matrix: dragging a card between the importance rows` describe block is DELETED,
+   not skipped. The Eisenhower matrix is retired — unreachable from the UI — so `bootPlan(page,'matrix')`
+   can no longer reach it, and a test asserting a retired surface renders is not evidence of anything.
+   The drag machinery it shared is still covered above by the Selection block, which is the point:
+   ONE drag implementation, and the surviving surface exercises it. The pure matrix functions
+   (`eisenhowerProjection`, `setQuadrantImportance`, `quadrantOf`) remain unit-tested. */

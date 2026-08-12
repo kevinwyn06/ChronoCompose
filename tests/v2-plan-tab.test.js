@@ -24,9 +24,19 @@ test('the scheduling view toggle no longer offers Selection or Matrix', () => {
   assert.deepEqual(keys, ['gantt', 'day4', 'week', 'month', 'schedule', 'today']);
 });
 
-test("Overview's left pane offers List, Selection and Matrix", () => {
+// V5 block 32 — the Eisenhower matrix is RETIRED (owner: the quadrants never touch inclusion or
+// scheduling, so the surface was a priority editor wearing a planning-tool costume). Its pure functions
+// stay tested below; what is pinned here is that it is UNREACHABLE and that nobody boots into a blank pane.
+test("Overview's left pane offers List and Selection only — Matrix is retired", () => {
   const c = make();
-  assert.deepEqual(c.LEFT_SURFACES().map(v => v[0]), ['list', 'select', 'matrix']);
+  assert.deepEqual(c.LEFT_SURFACES().map(v => v[0]), ['list', 'select']);
+  assert.deepEqual(c.LEFT_SURFACE_KEYS(), ['list', 'select']);
+  assert.ok(c.LEFT_SURFACE_KEYS().indexOf('matrix') < 0, 'no code path can select the matrix surface');
+});
+
+test('an owner parked ON the retired matrix lands on Selection, not on a blank pane', () => {
+  const c = make();
+  assert.equal(c.migrateLeftSurface({ leftSurface: 'matrix' }), 'select');
 });
 
 // --- dashMode migration: 'plan' meant two different tabs, and now means neither ---
@@ -68,7 +78,8 @@ test('choosing a tab stamps dashModeV so the next boot does not remap it', () =>
 test('a user parked on the Plan tab reopens on the same grid, now in Overview left pane', () => {
   const c = make();
   assert.equal(c.migrateLeftSurface({ dashMode: 'plan', dashModeV: 2, planTab: 'select' }), 'select');
-  assert.equal(c.migrateLeftSurface({ dashMode: 'plan', dashModeV: 2, planTab: 'matrix' }), 'matrix');
+  // V5 block 32: the old Matrix half of that split now lands on Selection, the surviving triage grid.
+  assert.equal(c.migrateLeftSurface({ dashMode: 'plan', dashModeV: 2, planTab: 'matrix' }), 'select');
 });
 
 test('everyone else opens on the task list, which is what the left pane always held', () => {
@@ -81,7 +92,7 @@ test('everyone else opens on the task list, which is what the left pane always h
 
 test('an explicit leftSurface wins over any inference, and nonsense falls back to list', () => {
   const c = make();
-  assert.equal(c.migrateLeftSurface({ leftSurface: 'matrix', dashMode: 'plan', dashModeV: 2, planTab: 'select' }), 'matrix');
+  assert.equal(c.migrateLeftSurface({ leftSurface: 'select', dashMode: 'plan', dashModeV: 2, planTab: 'list' }), 'select');
   assert.equal(c.migrateLeftSurface({ leftSurface: 'nonsense' }), 'list');
 });
 
@@ -107,15 +118,19 @@ test('a real saved planView is still respected', () => {
 
 // --- routing: the surfaces still render, now from Overview's left pane ---
 
-test("Overview's left pane renders Selection or Matrix, and keeps the right pane", () => {
+test("Overview's left pane renders Selection, and keeps the right pane", () => {
   const c = make();
   c.state.leftSurface = 'select';
   const sel = JSON.stringify(c.renderDashOverview([]));
   assert.ok(sel.includes('data-dropzone'), 'Selection drop zones present');
   assert.ok(sel.includes('data-left-surface'), 'left pane stamped with its surface');
+});
 
-  c.state.leftSurface = 'matrix';
-  assert.ok(JSON.stringify(c.renderDashOverview([])).includes('data-quad'), 'Matrix quadrants present');
+// V5 block 32: the renderer is KEPT, just unreachable. Calling it directly must still work, so that
+// re-adding 'matrix' to the two surface lists is genuinely the whole job.
+test('the retired matrix renderer still builds its quadrants when called directly', () => {
+  const c = make();
+  assert.ok(JSON.stringify(c.renderMatrixView([])).includes('data-quad'), 'Matrix quadrants still build');
 });
 
 // --- the left pane's width floor, re-derived (block 26 gave it one; 27a must not drop it) ---
@@ -163,8 +178,8 @@ test('switching to a triage surface swaps to the triage split key, and back agai
   assert.equal(c.leftSplitKey(), 'cal');
   c.state.leftSurface = 'select';
   assert.equal(c.leftSplitKey(), 'triage');
-  c.state.leftSurface = 'matrix';
-  assert.equal(c.leftSplitKey(), 'triage');
+  c.state.leftSurface = 'list';
+  assert.equal(c.leftSplitKey(), 'cal');
 });
 
 test('the triage default sits inside the splitter clamp the user could drag to', () => {
@@ -195,15 +210,9 @@ test('setLeftSurface banks the width it leaves and restores the one it enters', 
   assert.ok(saved.some(o => o.viewSplit), 'the banked widths persist');
 });
 
-test('switching between the two triage surfaces does not disturb the width', () => {
-  const c = make();
-  c.savePrefs = () => {};
-  c.setState = function (o) { Object.assign(this.state, o); };
-  c.state.mainView = 'dashboard'; c.state.dashMode = 'overview'; c.state.planView = 'gantt';
-  c.state.leftSurface = 'select'; c.state.splitPct = 70;
-  c.setLeftSurface('matrix');
-  assert.equal(c.state.splitPct, 70, 'select → matrix is the same pane, so the same width');
-});
+// V5 block 32: the "switching between the two triage surfaces keeps the width" test is DELETED, not
+// skipped — with Matrix retired there is only one triage surface, so the round trip it guarded (banking
+// and restoring across `list` ↔ `select`) is already covered by the setLeftSurface test above.
 
 test('the left pane still renders the task sheet on the list surface', () => {
   const c = make();
