@@ -66,12 +66,20 @@ test.describe('Gantt bar: click vs drag vs right-click', () => {
     await expect(detail(page), 'a completed drag is not a click').toHaveCount(0);
   });
 
-  /* FINDING, 2026-08-12 — the third gesture in this owner item, *"right-click still opens the bar
-   * menu"*, does NOT hold under a trusted right-click. A real right-press on a bar opens the DETAIL
-   * PANEL instead: `startBarDrag` (index.html ~4180) is bound to `onMouseDown` with no `e.button`
-   * guard, so the right press begins a bar drag and the release is taken as a click, while
-   * `openBarMenu`'s state is lost. The bar-menu assertion is therefore not committed red — the e2e
-   * suite's "no test.fail() markers" invariant means a red run must always be a regression. The fix
-   * is a one-line button guard in `index.html`, which this lane may not edit; it is reported instead.
-   */
+  /* FIXED, 2026-08-12 — this file's FINDING note is now the fix's regression test. `startBarDrag`
+   * (index.html) was bound to `onMouseDown` with no `e.button` guard, so a right press began a bar drag
+   * and the zero-distance release was read as a click, opening the DETAIL PANEL and losing
+   * `openBarMenu`'s state. It now returns on any non-primary button — which also stops it swallowing
+   * the press through `preventDefault`, the reason the context menu never arrived. */
+  test('a right-click on a bar opens the bar menu, not the detail panel', async ({ page }) => {
+    await bootGantt(page);
+    const p = await barCentre(page);
+    await page.mouse.move(p.x, p.y);
+    await page.mouse.down({ button: 'right' });
+    await page.mouse.up({ button: 'right' });
+    /* 'Clear start → ghost' is unique to the BAR menu — the row menu and the detail panel have no such
+       entry — so it separates the two outcomes rather than merely proving something opened. */
+    await expect(page.getByText('Clear start → ghost')).toBeVisible();
+    await expect(detail(page), 'a right-press is not a click on the bar').toHaveCount(0);
+  });
 });

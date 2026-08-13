@@ -383,6 +383,15 @@ class Component extends DCLogic {
        (the %-done caret has only (rowH−barH)/2 px under the bar), the axis that carries the
        precision — horizontal, along the bar — still gets the full box. See product-vision.md. */
     this.HIT_MIN_PX = 24;            // minimum interactive target (local px, pre-zoom)
+    /* PP-EXT (2026-08-12): the row's double-click-to-activate gesture cannot use the browser's own
+       `dblclick`. The FIRST click opens the detail modal, whose full-screen scrim/card is then under
+       the cursor when the second press lands — a different event target, so Chromium resets the click
+       count and never synthesises `dblclick` on the row. (Proved with trusted `page.mouse` input; a
+       dispatched MouseEvent fires the handler and hides the defect, exactly as AGENTS.md warns.)
+       So the second half is recognised on the modal instead, by time and distance from the first.
+       These are the browser's own double-click tolerances, named rather than inlined. */
+    this.ROW_DBLCLICK_MS = 400;      // max gap between the two presses
+    this.ROW_DBLCLICK_PX = 6;        // max travel between them (viewport px)
     /* PP-EXT (V1.2 round2 — anchored ghosts): a half-ghost dissolves ALONG the bar, from the committed
        edge toward the derived one. Two mirrored ramps drive it: the fill fades colour OUT, the dotted
        outline mask fades dots IN, so "solid + no dots" and "no colour + dots" are the same axis read
@@ -3842,15 +3851,45 @@ class Component extends DCLogic {
       return;
     }
     /* /PP-EXT */
-    if(e.ctrlKey||e.metaKey){ e.preventDefault(); this.toggleSelect(id); } else { this._selAnchor=id; /* PP-EXT */ this.setState({selectedIds:[id], menu:null, detailId:id}); } }
+    if(e.ctrlKey||e.metaKey){ e.preventDefault(); this.toggleSelect(id); } else { this._selAnchor=id; /* PP-EXT */
+      /* PP-EXT (2026-08-12): remember WHERE and WHEN this click landed, so the modal this same click is
+         about to open can recognise the second half of a double-click. See ROW_DBLCLICK_MS. */
+      this._rowDblTag={id, t:Date.now(), x:e.clientX, y:e.clientY};
+      this.setState({selectedIds:[id], menu:null, detailId:id}); } }
   /* PP-EXT V2.4 (owner 2026-08-04): double-click a sheet row = make it the active task. Single click is
      select + open details and right-click is the context menu, so double-click was the one free gesture on
      the row. Milestones have no timer, so they fall through rather than starting one. */
   rowDblClick(e,id){
     e.preventDefault(); e.stopPropagation();
+    this._rowDblTag=null;
+    this.activateFromGesture(id);
+  }
+  /* PP-EXT (2026-08-12): the activation half of the gesture, shared by the browser's `dblclick` (which
+     still fires wherever the first click did NOT open the modal) and by the modal's own second-press
+     detection below. Milestones have no timer, so they fall through rather than starting one. */
+  activateFromGesture(id){
     const t=(this.state.tasks||[]).find(x=>x.id===id);
     if(!t || t.archivedAt || this.isMilestone(t)) return;
     this.activateTask(id);
+  }
+  /* PP-EXT (2026-08-12): DEFECT FIX — a trusted double-click on a sheet row never reached `rowDblClick`.
+     The first click opens the detail modal, so the second press lands on the modal's scrim or card
+     rather than on the row; the click target changes mid-sequence and the browser never synthesises
+     `dblclick`. Nothing in the unit layer could see this (a dispatched `dblclick` calls the handler
+     directly), and `tests/e2e/activate-dblclick.spec.js` is what caught it.
+     So the modal itself recognises the second press: same task, within ROW_DBLCLICK_MS and
+     ROW_DBLCLICK_PX of the click that opened it. The tag is one-shot. Returns true when it consumed
+     the press, so the caller does not also treat it as a backdrop dismiss. */
+  detailDblFollowUp(e){
+    const tag=this._rowDblTag;
+    if(!tag || e.button!==0) return false;
+    this._rowDblTag=null;
+    if(Date.now()-tag.t > this.ROW_DBLCLICK_MS) return false;
+    if(Math.abs(e.clientX-tag.x) > this.ROW_DBLCLICK_PX) return false;
+    if(Math.abs(e.clientY-tag.y) > this.ROW_DBLCLICK_PX) return false;
+    this.closeDetail();
+    this.activateFromGesture(tag.id);
+    return true;
   }
   rowMenu(e,id){
     e.preventDefault(); e.stopPropagation();
@@ -4247,6 +4286,12 @@ class Component extends DCLogic {
     return {start:origStart+deltaMs, end:origEnd+deltaMs}; /* move */
   }
   startBarDrag(e,task,occIdx,mode){
+    /* PP-EXT (2026-08-12): PRIMARY BUTTON ONLY. Without this guard a right-press started a bar drag,
+       and because `onMouseUp` reads a zero-distance drag as a click, releasing the right button opened
+       the DETAIL PANEL instead of the bar menu — the third gesture in the owner's Gantt item.
+       `rowPointerDown`/`headPointerDown` already guard the same way; this path did not.
+       Pinned by `tests/e2e/gantt-gestures.spec.js`. */
+    if(e.button!==0) return;
     e.preventDefault(); e.stopPropagation();
     this.dragMoved=false;
     const occ=(this._occById[task.id]||[]).find(o=>o.idx===occIdx) || {idx:occIdx,start:task.start,end:task.end};
@@ -4269,14 +4314,17 @@ class Component extends DCLogic {
     this.setState({selectedIds:[task.id]});
   }
   startLink(e,task,occIdx){
+    if(e.button!==0) return; /* PP-EXT (2026-08-12): primary button only — same guard as startBarDrag */
     e.preventDefault(); e.stopPropagation();
     const r=this.bodyEl.getBoundingClientRect();
     const lp=this.linkPt(e.clientX, e.clientY, r); /* PP-EXT (V1.2 round4 fix): local px — see linkPt */
     this.linkState={fromId:task.id, fromOcc:(task.recur?occIdx:null), x:lp.x, y:lp.y};
     this.forceUpdate();
   }
-  startSplit(e){ e.preventDefault(); this.splitDrag=true; }
-  startColDrag(e,key,w){ e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w}; }
+  /* PP-EXT (2026-08-12): primary button only — same guard as startBarDrag. A non-primary press here
+     began a drag AND swallowed the browser's context menu through preventDefault. */
+  startSplit(e){ if(e.button!==0) return; e.preventDefault(); this.splitDrag=true; }
+  startColDrag(e,key,w){ if(e.button!==0) return; e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w}; }
   /* PP-EXT V2.9 §1: called at DRAG BEGIN, not at mousedown — suppressing at mousedown would kill caret
      placement on the very click that also opens an inline editor. Two things happen here, and the second
      is the one that is easy to forget: `user-select:none` stops a selection GROWING but does not remove
@@ -11526,12 +11574,15 @@ class Component extends DCLogic {
       field('Actions',actionsCtl,{borderBottom:'none'}));
 
     const card=h('div',{onClick:e=>e.stopPropagation(),onContextMenu:e=>e.stopPropagation(),
+      /* PP-EXT (2026-08-12): the card covers most of the viewport, so the second press of a row
+         double-click usually lands HERE rather than on the scrim. See detailDblFollowUp. */
+      onMouseDown:e=>{ if(this.detailDblFollowUp(e)) e.stopPropagation(); },
       style:{width:'min(940px,94vw)',height:'min(660px,90vh)',background:'var(--card-bg)',border:'1px solid var(--field-border)',
         borderRadius:'14px',boxShadow:'0 24px 80px rgba(0,0,0,0.6)',display:'flex',flexDirection:'column',overflow:'hidden'}},
       header,
       h('div',{style:{display:'flex',flex:1,minHeight:0}}, main, sidebar));
 
-    return h('div',{onMouseDown:e=>{ if(e.target===e.currentTarget) this.closeDetail(); },
+    return h('div',{onMouseDown:e=>{ if(this.detailDblFollowUp(e)) return; if(e.target===e.currentTarget) this.closeDetail(); },
       style:{position:'fixed',inset:0,zIndex:2000,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center'}},
       card);
   }

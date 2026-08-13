@@ -18,19 +18,21 @@
 const { test, expect } = require('@playwright/test');
 const { boot } = require('./_seed');
 
-/* FINDING, 2026-08-12 — the gesture half of this item does NOT currently work, and no test in the
- * repo could have said so. A TRUSTED double-click on a sheet row never reaches `rowDblClick`: nothing
- * is written to `pp-run`. The handler IS wired — dispatching a synthetic `dblclick` at the same row
- * starts the timer immediately — which is exactly the gap AGENTS.md warns about: a synthetic
- * MouseEvent is not evidence for a gesture. The unit layer's coverage (`tests/core.test.js`,
- * "V2.4: activateTask switches active and stops only the prior active") tests the FUNCTION and is
- * green either way.
+/* FIXED, 2026-08-12 — this file's FINDING note is now the fix's regression test.
  *
- * The fix lives in `index.html`, which this lane may not edit, so the failing assertion is NOT
- * committed red — the e2e suite's "no test.fail() markers" invariant means a red run must always be a
- * regression. What ships here is the CONTROL half, which is genuinely provable today, plus this note.
- * The gesture assertion belongs in this file the moment the defect is fixed; the reference
- * implementation is in the PR body.
+ * The defect: a trusted double-click on a sheet row never reached `rowDblClick`, so nothing was ever
+ * written to `pp-run`. Root cause, established with trusted `page.mouse` input and a document-level
+ * event log: the FIRST click opens the detail modal, a `position:fixed; inset:0` scrim with a large
+ * centred card. By the time the second press lands, that overlay — not the row — is the element under
+ * the cursor, so the click sequence changes target mid-flight, Chromium resets its click count
+ * (`detail` stayed 1 on the second press) and NEVER synthesises `dblclick` on the row. Not the drag
+ * threshold, not `_suppressCardClick`, and not a re-render: the row node was verified identical and
+ * unmoved across the two clicks.
+ *
+ * That is precisely the class of defect a dispatched MouseEvent hides — it calls the handler directly,
+ * so `tests/core.test.js` and `tests/v2-card-parity.test.js` stayed green throughout. The fix makes the
+ * modal recognise the second press itself (`detailDblFollowUp`, index.html), so no test.fail() marker
+ * is needed here and a red run in this file is a real regression.
  */
 const rows = (page) => page.locator('[data-task-id]:not([data-card-id])');
 
@@ -48,5 +50,27 @@ test.describe('V2.4 — activation is a gesture on the row, not on a click', () 
     await rows(page).nth(0).click();
     await expect(page.getByRole('button', { name: 'Previous task' })).toBeVisible();
     expect(await running(page), 'a single click is not an activation').toEqual([]);
+  });
+
+  test('a trusted double-click on a row activates the task', async ({ page }) => {
+    await boot(page);
+    /* Real pointer input, not a dispatched `dblclick`: the whole defect lived in which element the
+       browser saw under the cursor for the SECOND press, which a synthetic event never asks. */
+    await rows(page).nth(0).dblclick();
+    await expect
+      .poll(() => running(page), { message: 'double-click starts the task\'s timer' })
+      .toEqual(['e2e-1']);
+  });
+
+  test('double-clicking another row switches which task is active', async ({ page }) => {
+    await boot(page);
+    await rows(page).nth(0).dblclick();
+    await expect.poll(() => running(page)).toEqual(['e2e-1']);
+    await rows(page).nth(1).dblclick();
+    /* V2.4's single-timer default: activating the second task stops the prior active one, so `pp-run`
+       holds exactly one id — the switch, not an accumulation. */
+    await expect
+      .poll(() => running(page), { message: 'the prior active task stops' })
+      .toEqual(['e2e-2']);
   });
 });

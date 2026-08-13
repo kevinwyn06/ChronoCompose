@@ -22,6 +22,23 @@ opens details anywhere** — bars and blocks route their no-drag click through t
 one gesture cannot both drag and open. The inclusion popover on the row status glyph is strictly
 inclusion/exclusion and carries no time-tracking action.
 
+Two mechanics that gesture map depends on, both fixed 2026-08-12 after the e2e layer caught them:
+
+- **The row's double-click does NOT come from the browser's `dblclick`.** The first click opens the
+  detail modal — a `position:fixed; inset:0` scrim with a large centred card — so the second press lands
+  on the overlay, not the row. The click target changes mid-sequence, Chromium resets its click count,
+  and `dblclick` is never synthesised on the row. So `rowClick` records `{id, t, x, y}` in `_rowDblTag`
+  and the modal's scrim AND card both run `detailDblFollowUp`, which consumes a one-shot press within
+  `ROW_DBLCLICK_MS` (400) and `ROW_DBLCLICK_PX` (6): it closes the detail and activates the task.
+  `rowDblClick` remains wired and still fires wherever no modal intervened; both routes share
+  `activateFromGesture`. Anything new that opens an overlay on a single click inherits this problem.
+- **Every drag starter is primary-button only.** `startBarDrag` had no `e.button` guard, so a right press
+  began a bar drag whose zero-distance release was read as a click: right-clicking a bar opened the
+  detail panel instead of the bar menu, and `preventDefault` swallowed the context menu. `startBarDrag`,
+  `startLink`, `startSplit` and `startColDrag` now return on any non-primary button, joining
+  `rowPointerDown`, `headPointerDown`, `secPointerDown`, `cardPointerDown`, `blockPointerDown` and
+  `edgePointerDown`, which already did. A mousedown handler that calls `preventDefault` must guard.
+
 Timer concurrency is one policy in one place (V2.4). `settings.multitask` defaults to **false**, and
 `startTimer` calls `stopOtherTimers` before starting, so every surface that starts a timer — sheet row,
 Focus row, timeline block, Pomodoro, shape-driven auto-start — inherits the strict single-timer rule
