@@ -318,7 +318,24 @@ class Component extends DCLogic {
        balance is only as good as this estimate — see selectionHalfFlex — so it is measured, not guessed.
        Constant per-half costs (the band label, the cell's padding) cancel between the two halves. */
     this.SEL_CARD_EST_PX = 94;  // nominal planCard height — only ever a RATIO input, never a layout px
-    this.SEL_HALF_MIN_PX = 72;  // a half never collapses below this: Excluded must stay a drop target
+    /* PP-EXT (owner 2026-08-13): 72 → 112, and the value is derived rather than picked. 72 was chosen when
+       the floor existed only in `selectionSplitHeights` and never reached the DOM (see the note in the
+       `half` renderer), so its size never had to mean anything. Now that it is a real CSS min-height it
+       has to be a USEFUL height: 72 is less than one 94px card, so the floor's own promise — "Excluded
+       must stay a drop target" — was being met with a sliver.
+       112 = SEL_CARD_EST_PX (94) + SEL_BAND_LABEL_PX (18): exactly one whole card plus the band label that
+       sits above it inside the half. Calibrating it UP from there is tempting and wrong — the floor
+       overrides the equal-scroll balance whenever it bites, so a floor larger than what the balance
+       naturally hands the smaller half would break the owner's other rule (equal overflow) in order to
+       satisfy this one. At 112 it bites only when the balance was about to hand a half less than a card. */
+    this.SEL_BAND_LABEL_PX = 18; // the "Included"/"Excluded" caption row inside each half
+    /* Normaliser that keeps both halves' flex-shrink factors >= 1 — see selectionHalfFlex for why a
+       sub-1 factor silently disables shrinking once the other half freezes on its min-height. Read as a
+       cards-per-half ceiling: a half holding this many cards gets shrink 1, and anything smaller gets
+       more. Only the RATIO between the two halves is meaningful, so the exact value is free; it just has
+       to exceed any realistic card count in one cell. */
+    this.SEL_SHRINK_CEIL = 1000;
+    this.SEL_HALF_MIN_PX = this.SEL_CARD_EST_PX + this.SEL_BAND_LABEL_PX; // = 112
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
     this.RECUR_BACKOFF = 3;     // occurrences to rewind when estimating the start index
@@ -340,6 +357,17 @@ class Component extends DCLogic {
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
     this.GCAL_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped
     this.GCAL_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-event ids kept this long to block re-import
+    /* PP-EXT (owner 2026-08-13): the app's OWN Google calendar. The name is RESERVED — gcalEnsureCalendar
+       adopts an existing calendar with exactly this summary rather than making a second one, so it was
+       already load-bearing while living as a bare string literal in two places. Named here per the
+       constants rule, and now also consulted by calTag: this calendar contributes NO @tag.
+       Owner: "the ChronoCompose calendar should be implicit. That name should be reserved, and pull into
+       the regular task pool without that calendar tag."
+       The reasoning is the same one that took the section tag away in the same session: a tag is a
+       user-authored attribute, and "@chronocompose" on a ChronoCompose task is not an attribute, it is the
+       app restating its own name on every row it owns. Every OTHER calendar keeps its tag, because there
+       the tag carries real information — which external calendar the event came from. */
+    this.GCAL_OWN_CAL_NAME = 'ChronoCompose';
     /* PP-EXT B1: offline-first Supabase sync — same shape as the gcal queue above (see computeSyncOps). */
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
@@ -805,7 +833,23 @@ class Component extends DCLogic {
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       /* PP-EXT (04): normalize the drag-pin object into the list shape. */
       if(!done['drag-pin-list']){ const n=this.migrateDragPinList(tasks); done['drag-pin-list']=1;
-        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); } }catch(e){}
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-13): "Sections should not be a tag." This is the RETROACTIVE half.
+         `migrateSectionsFromTags` now consumes the tag it promotes, but that migration is guarded by its
+         own once-flag and has already run in every existing workspace — including the owner's — so fixing
+         it there alone would fix nobody's actual data. This second flag re-sweeps a workspace that ran the
+         old version, and is a no-op for one created after it. Separate flag, not a bumped one, because
+         re-running `sections-from-primary-tag` would also re-promote tags in a workspace where the user has
+         since deleted those sections on purpose. */
+      if(!done['strip-section-tags']){ const n=this.stripSectionTags(tasks); done['strip-section-tags']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-13): the app's own calendar is IMPLICIT and no longer contributes a tag.
+         Import stamped "@chronocompose" onto every task it created, so the forward fix alone would leave
+         the existing ones wearing it forever. Same shape as strip-section-tags directly above, and the
+         same principle behind both: a container's name is not one of the user's tags. */
+      if(!done['implicit-own-calendar-tag']){ const n=this.stripOwnCalendarTag(tasks);
+        done['implicit-own-calendar-tag']=1; this.lsSet('pp-migrations', JSON.stringify(done));
+        if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
   /* PURE (mutates the array it is handed, returns the count) → unit-tested. Deliberately does NOT snooze
@@ -1922,15 +1966,29 @@ class Component extends DCLogic {
      measurement (no ResizeObserver, no re-render on resize, nothing twitchy):
        • flex-basis = content height  → with slack, flex-grow:1 each hands both halves the SAME absolute
          slack, so a column that fits never scrolls either half.
-       • flex-shrink = C / basis      → CSS multiplies shrink by basis, so both scaled factors equal C
+       • flex-shrink ∝ 1 / basis      → CSS multiplies shrink by basis, so both scaled factors are equal
          and a deficit is removed from each half EQUALLY IN PX. Equal deficit over equal-or-larger
-         content is exactly "the same amount of max scroll".
+         content is exactly "the same amount of max scroll". (The proportionality constant is
+         SEL_SHRINK_CEIL rather than SEL_CARD_EST_PX; both give the same ratio, but only the larger one
+         keeps every factor above 1 — see selectionHalfFlex for why that turned out to be load-bearing.)
      `selectionSplitHeights` resolves that same arithmetic in JS so it is assertable in the unit layer. */
   selectionHalfFlex(n){
     /* max(1, n): an EMPTY half still claims a card of space. You must be able to drag into an empty
        Excluded half, or the veto gesture has no target on the day it matters most. */
-    const basis=Math.max(1, Math.max(0, n|0))*this.SEL_CARD_EST_PX;
-    return {basis, grow:1, shrink:this.SEL_CARD_EST_PX/basis};
+    const cards=Math.max(1, Math.max(0, n|0));
+    const basis=cards*this.SEL_CARD_EST_PX;
+    /* PP-EXT (owner 2026-08-13): the shrink factor is normalised to stay >= 1, and this is load-bearing
+       rather than cosmetic. It used to be `SEL_CARD_EST_PX / basis`, which is below 1 for any half holding
+       more than one card. That is fine while BOTH halves are unfrozen — CSS multiplies shrink by basis, so
+       only the ratio matters and both scaled factors come out equal. It stops being fine the moment the
+       other half hits its min-height: flexbox freezes that item, and §9.7's "if the sum of the unfrozen
+       items' flex-shrink factors is less than one, multiply the free space by that sum" clamp then applies
+       to the lone survivor. Measured in Chromium: a 12-card Included half facing a 471px deficit shrank by
+       41px — 8.33% of it, exactly its own sub-1 shrink factor — and overflowed its column by 400px.
+       So the floor and the balance were in direct conflict, and the floor silently broke the balance.
+       Scaling every factor by the same constant leaves the ratio (and therefore the equal-absolute-shrink
+       property) identical while lifting both above 1, which makes the clamp unreachable. */
+    return {basis, grow:1, shrink:Math.max(1, this.SEL_SHRINK_CEIL/cards)};
   }
   /* PURE: what the flex rules above resolve to for a column of height `H`. Returns both halves' heights
      and their resulting max scroll. IO-free and count-driven → stable across a re-render by construction. */
@@ -1941,11 +1999,28 @@ class Component extends DCLogic {
     let h1, h2;
     if(B<=H){ const slack=(H-B)/2; h1=b1+slack; h2=b2+slack; }
     else { const half=(B-H)/2; h1=b1-half; h2=b2-half; }   /* equal absolute shrink — the mechanism */
-    /* Floor each half, paying for it out of the other. A floor can only bite when the column is far too
-       short for its content, and even then the loser is the half that was already scrolling. */
-    const floor=Math.min(MIN, H/2);
-    if(h1<floor){ h2-=(floor-h1); h1=floor; }
-    if(h2<floor){ h1-=(floor-h2); h2=floor; }
+    /* Floor each half, paying for it out of the other. Once the floor bites, "equal max scroll" is over —
+       it has to be, because a half with 3 cards of content cannot absorb the same px deficit as a half
+       with 12. The floor is the rule for that case, and it chooses VISIBILITY: the loser is the half that
+       was already scrolling anyway (owner, 2026-08-13: "I should ALWAYS be able to see both").
+       PP-EXT (owner 2026-08-13): a FLAT floor, matching the renderer's flat `min-height` exactly. An
+       earlier version scaled it by the column height so two floors could never overflow; the CSS could
+       not express that (see `half`), and a mirror that models something the layout does not do is how
+       this surface shipped a 0px band with a green test. When the column is too short for two floors the
+       browser clips, so this returns heights that sum past H — which is the truth, not an error. */
+    const floor=MIN;
+    /* Raise BOTH to the floor first, then pay for it out of whichever half has surplus above its own
+       floor — largest first, since that is the half already scrolling. The previous form applied the two
+       clamps in sequence and let each one bill the other unconditionally, so when BOTH halves were under
+       the floor (a column too short for two of them) the second clamp charged a half that had nothing to
+       give and drove it to 8px. Now that case ends with both at the floor and the sum over H, which is
+       exactly what the browser does: floor each item, then clip at the column's `overflow:hidden`. */
+    h1=Math.max(floor,h1); h2=Math.max(floor,h2);
+    let over=(h1+h2)-H;
+    if(over>0){
+      const takeFrom=(hv)=>{ const take=Math.min(over, Math.max(0, hv-floor)); over-=take; return hv-take; };
+      if(h1>=h2){ h1=takeFrom(h1); h2=takeFrom(h2); } else { h2=takeFrom(h2); h1=takeFrom(h1); }
+    }
     return {included:h1, excluded:h2,
       scrollIncluded:Math.max(0, Math.max(0,nIncl|0)*u - h1),
       scrollExcluded:Math.max(0, Math.max(0,nExcl|0)*u - h2)};
@@ -2804,8 +2879,14 @@ class Component extends DCLogic {
   }
   calNameOf(t){ /* human calendar label for sort/filter: the source calendar's summary, else its @tag, else '' */
     if(!t.calendarId) return '';
-    const c=(this.state.gcal&&this.state.gcal.calendars||[]).find(x=>x.id===t.calendarId);
+    const g=(this.state.gcal||{});
+    const c=(g.calendars||[]).find(x=>x.id===t.calendarId);
     if(c&&c.summary) return c.summary;
+    /* PP-EXT (owner 2026-08-13): our own calendar's tasks are untagged now, so when the calendar LIST has
+       not loaded yet (offline, signed out, or mid-restore) the tag fallback below no longer rescues them
+       and this used to degrade to a raw Google calendar id in the Calendar column. The reserved name is
+       knowable without the network, so use it. */
+    if(g.ccCalId && t.calendarId===g.ccCalId) return this.GCAL_OWN_CAL_NAME;
     const tag=(t.labels||[])[0]; return tag?('@'+tag):t.calendarId;
   }
   cmpTasks(a, b, key, dir){
@@ -3014,12 +3095,70 @@ class Component extends DCLogic {
     });
     this.closeMenu();
   }
+  /* PURE: may this task's labels have a section-name tag stripped from them? NO for calendar-linked tasks.
+     PP-EXT (owner 2026-08-13): a gcal-linked task's first label IS its calendar name — `mergeCalendarEvents`
+     re-adds it on every import, and `calTag` renders the calendar chip from it. Stripping it would start a
+     churn loop (strip → re-import → re-add) and break the chip, so the calendar owns that tag and the
+     section rule yields to it. This is the one place a section name and a tag may still coincide, and it is
+     because the tag is not describing the section — it is describing where the event came from. */
+  sectionTagStrippable(t){
+    if(!t) return false;
+    if(!t.calendarId) return true;
+    /* PP-EXT (owner 2026-08-13): our OWN calendar is the exception to the exception. The carve-out above
+       exists because an external calendar owns and re-adds its tag; our calendar contributes no tag at
+       all, so there is nothing for it to own and a section tag on one of its tasks is as redundant as on
+       a manual one. */
+    const own=this.state && this.state.gcal && this.state.gcal.ccCalId;
+    return !!own && t.calendarId===own;
+  }
+  /* PURE, idempotent: drop the reserved own-calendar tag wherever it appears. Returns tasks changed.
+     Applied to EVERY task, not only to ones currently linked to that calendar, because the name is
+     reserved — a task that was unlinked, imported before the rule existed, or hand-tagged would otherwise
+     keep displaying the app's own name as though the user had chosen it, which is the whole complaint. */
+  stripOwnCalendarTag(tasks){
+    const own=this.calTagFor(this.GCAL_OWN_CAL_NAME); let changed=0;
+    (tasks||[]).forEach(t=>{ if(!t || !t.labels || !t.labels.length) return;
+      const after=t.labels.filter(l=>this.normalizeTag(l)!==own);
+      if(after.length!==t.labels.length){ t.labels=after; changed++; } });
+    return changed;
+  }
+  /* The tag a calendar name WOULD produce, ignoring the own-calendar suppression in calTag — the one
+     thing the migration needs and the only caller that must see through it. */
+  calTagFor(summary){ return String(summary||'').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
+  /* PURE, idempotent: remove from each root task's `labels` the tag that merely restates its own section's
+     name. Returns the number of tasks changed.
+     PP-EXT (owner 2026-08-13): "Sections should not be a tag." Sections became a first-class entity in
+     V2.6, but that migration deliberately promoted a tag to a section and LEFT the tag on the task. The
+     structure was fixed and the surface was not: a task in section "Research" still carried an @research
+     chip on every row and card, so the app went on telling the user that a section is a kind of tag — which
+     is the exact mental model V2.6 existed to break, and the one that produced the 6-of-8-singleton density
+     complaint. A section is an exclusive container and a tag is a non-exclusive attribute; rendering one as
+     the other is not a cosmetic duplicate, it teaches the wrong model.
+     Matching is by NAME, normalized, so it also cleans up a tag the user later made redundant by renaming a
+     section onto it. It never touches non-root tasks (only roots carry sectionId) or calendar-linked ones. */
+  stripSectionTags(tasks, sections){
+    const list=tasks||[], secs=sections||this.loadSections()||[];
+    const nameById={}; secs.forEach(s=>{ if(s && s.id!=null) nameById[s.id]=this.normalizeTag(s.name); });
+    let changed=0;
+    list.forEach(t=>{
+      if(!t || t.sectionId==null || !this.sectionTagStrippable(t)) return;
+      const nm=nameById[t.sectionId]; if(!nm) return;
+      const before=(t.labels||[]); const after=before.filter(l=>this.normalizeTag(l)!==nm);
+      if(after.length!==before.length){ t.labels=after; changed++; }
+    });
+    return changed;
+  }
   /* One-time migration `sections-from-primary-tag` (spec §2.5). For each distinct FIRST label across ROOT
      tasks, in first-seen order, promote it to a section — but only at PROMOTION THRESHOLD 2, i.e. only when
      that tag is the first label of >=2 root tasks. Singletons land in No section, which fixes the density
-     complaint on first load instead of reproducing it. `labels` is left fully intact; this reads tags, it
-     never consumes them. The threshold is a one-time migration constant, NOT an ongoing rule: sections
-     created later may hold one task forever, which is correct, because the user chose to create them.
+     complaint on first load instead of reproducing it. The threshold is a one-time migration constant, NOT
+     an ongoing rule: sections created later may hold one task forever, which is correct, because the user
+     chose to create them.
+     PP-EXT (owner 2026-08-13): this migration now CONSUMES the tag it promotes (via stripSectionTags)
+     instead of leaving `labels` intact. Reading the tag and also keeping it produced a section and a chip
+     that say the same word, which is what the owner means by "sections should not be a tag". Only the
+     promoted tag goes; every other label on the task survives, and a singleton tag that was never promoted
+     is untouched because it is still doing a tag's job.
      Idempotent — returns {sections, changed}. */
   migrateSectionsFromTags(tasks, threshold){
     const th=(threshold==null?2:threshold), list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
@@ -3031,8 +3170,17 @@ class Component extends DCLogic {
     const sections=promoted.map((tag,i)=>this.normalizeSection({name:tag, order:i}));
     const idByTag={}; promoted.forEach((tag,i)=>idByTag[tag]=sections[i].id);
     let changed=0;
+    /* PP-EXT (owner 2026-08-13): only ever ASSIGN a section, never clear one. Previously this wrote
+       `sid` unconditionally, so a task whose tag was not promoted had its sectionId set to null. On a
+       first run that is a no-op (every sectionId is already null), but now that the migration consumes the
+       tags it reads, a second run would find no tags at all and null out every section it had just
+       created. The pp-migrations once-flag means that never happens in a real workspace — which is exactly
+       why it must not be the ONLY thing standing between the user and losing their sections. */
     list.forEach(t=>{ if(!isRoot(t)) return; const tag=this.normalizeTag(t.labels&&t.labels[0]);
-      const sid=(tag&&idByTag[tag])||null; if(t.sectionId!==sid){ t.sectionId=sid; changed++; } });
+      const sid=(tag&&idByTag[tag])||null; if(sid!=null && t.sectionId!==sid){ t.sectionId=sid; changed++; } });
+    /* Consume the promoted tag. Counted into `changed` so the caller still saves when the ONLY thing this
+       run did was strip a redundant label — otherwise a second load would find the tags back. */
+    changed += this.stripSectionTags(list, sections);
     return {sections, changed};
   }
   setGroupBy(mode){ const m=(mode==='none'||mode==='inclusion')?mode:'section'; /* PP-EXT V2.9 §6 */
@@ -6063,7 +6211,16 @@ class Component extends DCLogic {
     return n;
   }
   toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); this.gcalSyncSoon(); /* PP-EXT: sync on selection change */ }
-  calTag(cal){ return (cal&&cal.summary?cal.summary:'cal').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
+  /* PURE: is this the app's own reserved calendar? Matched on the SUMMARY, not on `gcal.ccCalId`, so it
+     still holds before ensureCalendar has ever run, on a second device that has not adopted the id yet,
+     and for a calendar the user created by hand with that name — all three are cases where the id is
+     absent but the calendar is unmistakably ours. */
+  isOwnCalendar(cal){ return !!cal && String(cal.summary||'').trim().toLowerCase()===this.GCAL_OWN_CAL_NAME.toLowerCase(); }
+  /* PP-EXT (owner 2026-08-13): returns '' for our own calendar — its tag is IMPLICIT. Callers already had
+     to handle a falsy tag (an unnamed calendar could normalize to an empty string), so this widens an
+     existing path rather than adding a new one; `mergeCalendarEvents` is the site that must not push it. */
+  calTag(cal){ if(this.isOwnCalendar(cal)) return '';
+    return this.calTagFor(cal&&cal.summary?cal.summary:'cal'); }
   /* Parse a Google RRULE array into our recurrence model (kind/n/days/until). Returns null if none. */
   rruleToRecur(recurrence){
     if(!recurrence||!recurrence.length) return null;
@@ -6916,10 +7073,33 @@ class Component extends DCLogic {
   clearTombstone(eid){ const t=this.loadTombstones(); if(t[eid]!=null){ delete t[eid]; this.saveTombstones(t); } }
   /* Outbound funnel (called by commit/undo/redo). Inert unless two-way is on; _gcalApplying suppresses
      echoes while an import is being committed. */
+  /* PURE: is this op a DELETION? Deletions escape the gcalTwoWay gate — see gcalSyncOut. */
+  isGcalDeleteOp(op){ return !!op && (op.op==='delete' || op.op==='deleteInstance' || op.op==='cancelInsert'); }
   gcalSyncOut(before, after){
-    if(!this.state.settings || !this.state.settings.gcalTwoWay || this._gcalApplying) return;
-    try{ const ops=this.computeOutboundOps(before, after); if(ops.length) this.gcalEnqueue(ops); }
-    catch(e){ this.gcalError(e); }
+    if(!this.state.settings || this._gcalApplying) return;
+    /* PP-EXT (owner 2026-08-13): DELETIONS ARE NOT GATED ON `gcalTwoWay`. Owner report: "I deleted two
+       tasks from the ChronoCompose calendar, and they came back after a few minutes."
+
+       That was exact, and the mechanism is worth naming because it made a destructive action silently
+       ineffective. `gcalTwoWay` defaults to FALSE, so this funnel returned before computing ANY op —
+       which meant a delete did two things it should never have skipped: it never queued the remote
+       DELETE, and (because the tombstone is written in gcalEnqueue) it never recorded that the event was
+       deleted locally. The next silent gcalImport therefore found a live Google event with no matching
+       local task and no tombstone, and did the only thing it could: re-created the task. A few minutes
+       later, exactly as reported. Turning two-way sync on would have masked it; the defect is that a
+       delete was treated as an ordinary outbound EDIT.
+
+       An edit is genuinely two-way-only — it is a continuous opinion about content, and pushing it
+       without consent would overwrite events ChronoCompose does not own. A delete is not that. The user
+       removed the task, the confirm dialog already promises "This also deletes its linked Google Calendar
+       event", and the alternative is a row that resurrects itself. So: with two-way OFF we compute the
+       full diff and enqueue ONLY the deletions; with it ON, everything, as before.
+       `gcalFlushQueue` carries the matching half of this rule. */
+    let ops;
+    try{ ops=this.computeOutboundOps(before, after); }
+    catch(e){ this.gcalError(e); return; }
+    if(!this.state.settings.gcalTwoWay) ops=ops.filter(op=>this.isGcalDeleteOp(op));
+    if(ops.length) this.gcalEnqueue(ops);
   }
   gcalEnqueue(ops){
     if(!ops || !ops.length) return;
@@ -6959,11 +7139,14 @@ class Component extends DCLogic {
   gcalEnsureCalendar(){
     const g=this.state.gcal;
     if(g.ccCalId) return Promise.resolve(g.ccCalId);
-    const found=(g.calendars||[]).find(c=>c.summary==='ChronoCompose');
+    /* PP-EXT (owner 2026-08-13): matched through isOwnCalendar so the RESERVED name has exactly one
+       definition. Adoption is now case/whitespace tolerant, which is the point of reserving a name — a
+       hand-made "chronocompose" must be recognised as ours rather than quietly duplicated beside it. */
+    const found=(g.calendars||[]).find(c=>this.isOwnCalendar(c));
     if(found){ this.saveGcal({ccCalId:found.id}); return Promise.resolve(found.id); }
     if(this._ccCalCreating) return this._ccCalCreating;
     this._ccCalCreating=this.gcalFetch('https://www.googleapis.com/calendar/v3/calendars',
-      {method:'POST', body:JSON.stringify({summary:'ChronoCompose'})})
+      {method:'POST', body:JSON.stringify({summary:this.GCAL_OWN_CAL_NAME})})
       .then(d=>{ this._ccCalCreating=null; this.saveGcal({ccCalId:d.id}); return d.id; })
       .catch(e=>{ this._ccCalCreating=null; throw e; });
     return this._ccCalCreating;
@@ -6979,7 +7162,12 @@ class Component extends DCLogic {
      local copy reconciles with what Google actually stored. */
   gcalFlushQueue(){
     if(this._gcalFlushing) return;
-    if(!this.state.settings.gcalTwoWay || !this._token) return;
+    /* PP-EXT (owner 2026-08-13): the flush half of the deletions-are-not-gated rule in gcalSyncOut.
+       Queueing a DELETE while two-way is off would be pointless if the flusher then refused to send it,
+       so the gate here is the token alone; `step()` skips any non-deletion op while two-way is off.
+       Belt and braces on purpose — a stale queue written under a previous two-way ON session must not
+       start pushing edits the moment the user turns two-way back off. */
+    if(!this._token) return;
     if(!this.loadQueue().length) return;
     this._gcalFlushing=true;
     const base='https://www.googleapis.com/calendar/v3/calendars/';
@@ -6989,6 +7177,10 @@ class Component extends DCLogic {
     const step=()=>{
       const q=this.loadQueue(); const op=q[0];
       if(!op){ finish(); return; }
+      /* PP-EXT (owner 2026-08-13): with two-way OFF, only deletions leave this queue. Dropped rather than
+         held, because an edit that waits for a two-way switch that may never flip is a write the user has
+         no way to see, cancel, or reason about — and by the time it flushed it would be arbitrarily stale. */
+      if(!this.state.settings.gcalTwoWay && !this.isGcalDeleteOp(op)){ this.shiftQueue(); step(); return; }
       let p;
       if(op.op==='insert'){
         p=this.gcalEnsureCalendar().then(cid=>
@@ -7039,7 +7231,10 @@ class Component extends DCLogic {
         if(t){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay;
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
           if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
-          if(!t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
+          /* PP-EXT (owner 2026-08-13): `tag` is '' for our own reserved calendar — never push an empty
+             label. This was the re-add half of the churn loop, so it has to be guarded here and not only
+             at first import below. */
+          if(tag && !t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
         else if(tombstones && tombstones[eid]){ /* PP-EXT: deleted locally — don't resurrect while the DELETE is in flight */ }
         else { const id='t'+Math.random().toString(36).slice(2,8);
           /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
@@ -7047,7 +7242,9 @@ class Component extends DCLogic {
           const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
           const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:'Proportional',
             start,end,allDay,priority:4,deps:[],pct:0,planned:evMins,spent:0,goal:'',
-            description:src.description||'',labels:[tag],recur:recur,completion:null,calendarId:cid,eventId:eid,
+            /* PP-EXT (owner 2026-08-13): our own calendar's events arrive UNTAGGED and land in the regular
+               task pool, indistinguishable from a task typed into the app — which is what they are. */
+            description:src.description||'',labels:tag?[tag]:[],recur:recur,completion:null,calendarId:cid,eventId:eid,
             /* PP-EXT (10): busy/free transparency seeds the blocking flag on FIRST import only. Re-import
                never overwrites it, exactly like planned/goal/description above — once the user has toggled
                it locally, that is the authority. Google omits `transparency` for Busy, so absent ⇒ null
@@ -9291,9 +9488,15 @@ class Component extends DCLogic {
     const snoozed=st==='snoozed';
     /* PP-EXT (owner 2026-08-12): the PRESSED depth is gone here too — the card and the sheet row share
        this channel by design (V2.11 card↔row parity), so dropping it on one surface only would put them
-       back out of step. ACTIVE depth stays on both. See the depthState note in sheetRow. */
+       back out of step.
+       PP-EXT (owner 2026-08-13): ACTIVE depth is now gone as well, on both surfaces, for the same reason
+       the pressed depth went — the state is already said explicitly elsewhere. Owner: "when a task has its
+       timer running, do not highlight that task, just let the pause/play indicator do the work." The ■/▶
+       control (taskTimerBtn) reads the same `isRunning`, is per-row, and is the thing you click; the ring
+       plus wash was a second, louder rendering of it that fought the striping and the selection ring.
+       `inclState` still returns 'active' — the bucket is load-bearing for the popover copy and for
+       scheduling — it simply no longer paints. */
     let bsh=dragging?'none':'var(--sh-1)';
-    if(st==='active') bsh='inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
     const chip=(el,key)=>el?h('span',{key,style:{display:'inline-flex',alignItems:'center',flex:'none'}},el):null;
     return h('div',{key:t.id,'data-card-id':t.id,'data-task-id':t.id,
       onMouseDown:e=>this.cardPointerDown(e,t.id,zone),
@@ -9408,8 +9611,30 @@ class Component extends DCLogic {
        re-render and across a window resize. */
     const half=(k,row,label)=>{
       const list=p.cells[k][row], f=this.selectionHalfFlex(list.length);
+      /* PP-EXT (owner 2026-08-13): `minHeight:0` here was the whole bug. Owner: "there are instances where
+         I'll have 12 included tasks in a column and I won't be able to even see the excluded tasks at all."
+
+         `selectionSplitHeights` applies a SEL_HALF_MIN_PX floor and is unit-tested, so the arithmetic
+         looked right and the tests stayed green — but that function is only a JS MIRROR of the layout. The
+         thing that actually renders is this flexbox, and it carried no floor at all. Worse, the explicit
+         `minHeight:0` disabled flexbox's own automatic min-content floor, which would otherwise have
+         saved it. So the equal-absolute-shrink rule ran unchecked: 12 included against 0-3 excluded
+         produces a deficit larger than the Excluded half's entire basis, and it shrank to literally 0px.
+
+         Equal max scroll is unachievable at that ratio in any case — a half holding 3 cards cannot absorb
+         a 600px deficit — so the floor is not a rounding detail, it is the rule that decides what happens
+         once "equal scroll" runs out. Visibility wins: SEL_HALF_MIN_PX is now a whole card plus its band
+         label, and `min(px, 45%)` mirrors selectionSplitHeights' `Math.min(MIN, H*0.45)` so the two halves
+         plus the column header can never total more than the column. */
       return h('div',{key:'half-'+row,'data-selhalf':k+'-'+row,
-        style:{display:'flex',flexDirection:'column',minHeight:0,
+        /* A PLAIN px floor, deliberately. The first attempt used `min(112px, 45%)` to stop two floors
+           plus the header overflowing a very short column — and measured in Chromium it applied NO floor
+           at all: the percentage resolves against the parent's height, the parent is a flex child with
+           `minHeight:0` and therefore an indefinite height, so the percentage drops out and takes the
+           whole `min()` with it. It looked more careful and did strictly less. The column now clips
+           (`overflow:hidden` on it) if it is ever too short for two floors, which is the same thing the
+           browser would do and is honest about — and `selectionSplitHeights` models exactly that. */
+        style:{display:'flex',flexDirection:'column',minHeight:this.SEL_HALF_MIN_PX+'px',
           flexGrow:f.grow, flexShrink:f.shrink, flexBasis:f.basis+'px',
           /* the per-column divider */
           borderTop:row==='excluded'?'2px solid '+this._accent:'none'}},
@@ -9429,7 +9654,10 @@ class Component extends DCLogic {
         'Columns are derived from your calendar — drag a card UP or DOWN to include or exclude it. '
         +'j/k move · space toggles. A dashed edge means not yet decided.'),
       h('div',{key:'grid',style:{flex:1,minHeight:0,display:'flex'}},
-        cols.map(k=>h('div',{key:k,style:{flex:1,minWidth:0,minHeight:0,display:'flex',flexDirection:'column',
+        /* PP-EXT (owner 2026-08-13): `overflow:hidden` is the other half of the plain-px floor on the two
+           halves — it is what makes a column too short for two floors CLIP rather than push the surface
+           past the viewport. See the note in `half`. */
+        cols.map(k=>h('div',{key:k,style:{flex:1,minWidth:0,minHeight:0,overflow:'hidden',display:'flex',flexDirection:'column',
             borderLeft:k===cols[0]?'none':'1px solid var(--divider)'}},
           colHead(k),
           half(k,'included','Included'),
@@ -9581,15 +9809,53 @@ class Component extends DCLogic {
           style:{height:this.HIT_MIN_PX+'px',minWidth:'38px',display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
             borderRadius:'var(--r-1)',fontSize:'9.5px',fontWeight:750,color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',flex:'none'}},'+'+this.FOCUS_ADD_MINUTES)); };
     const openN=planTasks.filter(t=>!taskDone(t)).length;
-    const planSections=this.sectionProjection(planTasks);
+    /* PP-EXT (owner 2026-08-13): Focus splits by INCLUSION first. Owner: "Focus mode should have a
+       separator between the tasks that are included for today and the ones that are not, with the included
+       ones at the top, and the excluded ones [collapsed] by default."
+
+       Focus is the do-it-now surface, so a list that mixes today's work with work you already decided is
+       not today's is a list you have to re-triage every time you look at it. `inclusionRow` is the shared
+       V2.9 §4 derivation — the same one Selection and the Overview inclusion band consume — so this
+       introduces no fifth opinion about what "in today" means.
+
+       Sections are kept for INCLUDED and deliberately dropped for EXCLUDED, rather than nesting sections
+       under both. That is V2.9 §6's rule, and the reason is the density failure that killed
+       sections-as-tags: a section holding both included and excluded work would print its header twice.
+       Excluded is a parked list you glance at, so flat-and-collapsed is the honest shape for it. */
+    const inclOf=t=>this.inclusionRow(t);
+    const inclTasks=planTasks.filter(t=>inclOf(t)==='included');
+    const exclTasks=planTasks.filter(t=>inclOf(t)!=='included');
+    const exclOpen=!!this.state.focusExclOpen;
+    const secHead=(txt,muted)=>h('div',{style:{display:'flex',alignItems:'center',gap:'7px',height:'20px',fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',
+        color:muted?'var(--text-faint)':'var(--tag-text)',textTransform:'uppercase'}},
+      h('span',{},txt),h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}}));
+    const inclSections=this.sectionProjection(inclTasks);
+    /* The separator itself: a real accent rule, not another uppercase caption, because it divides the
+       column into two different KINDS of list rather than two groups of the same kind. It is also the
+       collapse control — one affordance, so there is nothing to hunt for. */
+    const exclBand=exclTasks.length?h('div',{key:'focus-excl',style:{display:'flex',flexDirection:'column',gap:'5px',marginTop:'6px'}},
+      h('div',{onClick:()=>this.setState({focusExclOpen:!exclOpen}),
+        title:exclOpen?'Hide tasks that are not in today':'Show tasks that are not in today',
+        style:{display:'flex',alignItems:'center',gap:'7px',cursor:'pointer',userSelect:'none',
+          minHeight:this.HIT_MIN_PX+'px',borderTop:'2px solid '+this._accent,paddingTop:'7px',
+          fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-faint)'}},
+        h('span',{style:{fontSize:'10px',width:'10px',display:'inline-block'}}, exclOpen?'▾':'▸'),
+        h('span',{},'Not in today'),
+        h('span',{style:{fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}}, exclTasks.length),
+        h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}})),
+      /* Collapsed-but-COUNTED — the count above is always rendered. Hiding the rows is a display choice;
+         hiding the fact that they exist would be the "laziest path silently drops tasks" failure. */
+      ...(exclOpen?exclTasks.map(taskRow):[])):null;
     const taskCol=h('div',{style:{flex:'25 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'8px',padding:'16px',overflow:'auto'}},
       h('div',{style:{display:'flex',alignItems:'baseline',gap:'8px',flex:'none'}}, label('Tasks'),
         planTasks.length?h('span',{style:{fontSize:'11px',color:'var(--text-faint)',fontWeight:600}}, openN+' open'):null),
-      planTasks.length? planSections.map((sec,si)=>h('div',{key:'focus-sec-'+(sec.id||'nosection')+'-'+si,style:{display:'flex',flexDirection:'column',gap:'5px'}},
-        sec.flat?null:h('div',{style:{display:'flex',alignItems:'center',gap:'7px',height:'20px',fontSize:'9.5px',fontWeight:750,letterSpacing:'0.4px',
-          color:sec.id?'var(--tag-text)':'var(--text-faint)',textTransform:'uppercase'}},
-          h('span',{},sec.id?sec.name:'No section'),h('span',{style:{height:'1px',background:'var(--tag-border)',opacity:0.6,flex:1}})),
-        ...sec.tasks.map(taskRow))) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No tasks yet.'));
+      planTasks.length? inclSections.map((sec,si)=>h('div',{key:'focus-sec-'+(sec.id||'nosection')+'-'+si,style:{display:'flex',flexDirection:'column',gap:'5px'}},
+        sec.flat?null:secHead(sec.id?sec.name:'No section', !sec.id),
+        ...sec.tasks.map(taskRow))) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No tasks yet.'),
+      /* An empty INCLUDED half still says so — otherwise a day with everything excluded reads as an empty
+         app rather than as a day you have not chosen anything for yet. */
+      (planTasks.length && !inclTasks.length)?h('div',{key:'focus-none-in',style:{fontSize:'12.5px',color:'var(--text-faint)'}},'Nothing is in today yet.'):null,
+      exclBand);
     const B=this.startOfToday();
     const rightCol=h('div',{style:{flex:'20 1 0',minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',padding:'16px 16px 16px 0'}},
       this.renderDayColumn(B, {showLabels:true}));
@@ -10635,11 +10901,14 @@ class Component extends DCLogic {
        background texture of the whole sheet, and it was drawn on top of the row striping and the hover
        and selection washes it had to share the surface with. The state is not lost — `taskInclControl`
        renders it as an explicit ☑/☐ glyph per row, which is what the owner means by "the same thing".
-       ACTIVE depth stays: it is the running timer, a transient single-row state that the inclusion
-       control does NOT duplicate meaningfully, and it reads as an accent ring rather than a muddy inset. */
-    const depthState=this.inclState(t);
+       PP-EXT (owner 2026-08-13): ACTIVE depth is gone too. The 2026-08-12 note argued it "does NOT
+       duplicate meaningfully" because the inclusion checkbox does not say "running". That was the wrong
+       comparison: the row's OWN ■/▶ timer control says exactly that, on the same row, and it is the
+       control the user actually operates. Owner: "just let the pause/play indicator do the work."
+       So neither the accent ring nor the accent background wash is drawn any more, and an ordinary row is
+       plain striping in every state. `inclState`'s 'active' bucket is untouched — it still feeds the
+       popover copy and V2.1's scheduling seam; it is purely no longer a paint channel. */
     let bsh = crit?'inset 3px 0 0 var(--danger)':(sel?'inset 2px 0 0 '+(this._accent||'#3b82f6'):''); /* PP-EXT (B2): unify sel indicator on this._accent */
-    if(depthState==='active') bsh=(bsh?bsh+',':'')+'inset 0 0 0 2px '+this._accent+', inset 0 4px 9px rgba(0,0,0,0.22)';
     /* PP-EXT: calendar day-hover glow — hovering a day (Month/Week/4-Day/Schedule) sets _glowIds via renderVals;
        this is the NORMAL-row wash (the milestone + Gantt rows already had it; the plain rows were the missing case). */
     if(this._glowIds && this._glowIds.has(t.id)) bsh = (bsh?bsh+',':'')+'inset 0 0 0 9999px rgba(245,181,54,0.16)';
@@ -10665,11 +10934,10 @@ class Component extends DCLogic {
          separator lives on the inner cells row (fixed height → border-box absorbs it) / the desc panel instead. */
       style:{display:'flex',flexDirection:'column',minWidth:totalW+'px',cursor:'pointer',position:'relative',
         opacity:(rd&&rd.moveSet&&rd.moveSet[t.id])?0.4:(t.archivedAt?0.45:1)/* PP-EXT: the dragged subtree dims together (archived rows also dimmed) */,
-        /* PP-EXT V2.9 §2: ambient hatch/tint layers stripped. The PRESSED tint went with them on
-           2026-08-12 (see the depthState note above); only the ACTIVE wash remains, so an ordinary row
-           is plain striping again. */
-        background:(sel?'var(--sel)':(hov?'var(--hover)':(depthState==='active'?'color-mix(in srgb, '+this._accent+' 12%, var(--sheet-bg))':
-          (i%2?'var(--sheet-alt)':'var(--sheet-bg)')))),
+        /* PP-EXT V2.9 §2: ambient hatch/tint layers stripped. The PRESSED tint went 2026-08-12 and the
+           ACTIVE wash went 2026-08-13 (see the note above), so the only backgrounds left are selection,
+           hover, and the striping — every persistent task state is now read from an explicit control. */
+        background:(sel?'var(--sel)':(hov?'var(--hover)':(i%2?'var(--sheet-alt)':'var(--sheet-bg)'))),
         boxShadow: bsh||'none'}},
       h('div',{style:{display:'flex',height:this.rowH+'px',minWidth:totalW+'px',
         borderBottom:'1px solid var(--row-border)'}}/* PP-EXT: cells row — fixed height + global border-box absorbs the border, so no 1px/row drift; the panel (when open) stacks beneath and carries the bottom separator */,

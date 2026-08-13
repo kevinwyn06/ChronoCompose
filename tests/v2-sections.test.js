@@ -90,7 +90,12 @@ test('V2.6 section CRUD: append lands at the end, reorder renumbers densely, bot
   assert.equal(noop.length, 3, 'reordering an unknown id is a no-op, not a throw');
 });
 
-test('V2.6 migration promotes a tag only at threshold 2 and never consumes `labels`', () => {
+// PP-EXT (owner 2026-08-13): "Sections should not be a tag." The migration now CONSUMES the tag it
+// promotes. V2.6 read the tag and kept it, so a task in section "work" also wore an @work chip on every
+// row and card — the app went on presenting a section as a kind of tag, which is the exact model V2.6
+// existed to break. Only the promoted tag goes; every other label survives, and an unpromoted singleton
+// is untouched because it is still doing a tag's job.
+test('V2.6 migration promotes a tag only at threshold 2 and CONSUMES exactly that tag', () => {
   const c = make();
   const tasks = [
     activeTask(c, { id:'w1', labels:['work', 'deep'] }),
@@ -101,14 +106,44 @@ test('V2.6 migration promotes a tag only at threshold 2 and never consumes `labe
   const { sections, changed } = c.migrateSectionsFromTags(tasks);
 
   assert.deepEqual(sections.map(s => s.name), ['work'], 'only the >=2 tag is promoted');
-  assert.equal(changed, 2, 'only the two work tasks changed');
   const byId = Object.fromEntries(tasks.map(t => [t.id, t]));
   assert.equal(byId.w1.sectionId, sections[0].id);
   assert.equal(byId.w2.sectionId, sections[0].id);
   assert.equal(byId.solo.sectionId, null, 'a singleton tag lands in No section');
   assert.equal(byId.bare.sectionId, null);
-  assert.deepEqual(byId.w1.labels, ['work', 'deep'], 'labels are left fully intact');
-  assert.deepEqual(byId.solo.labels, ['reading']);
+  assert.deepEqual(byId.w1.labels, ['deep'],
+    'the promoted tag is consumed; the task\'s OTHER labels are untouched');
+  assert.deepEqual(byId.w2.labels, []);
+  assert.deepEqual(byId.solo.labels, ['reading'],
+    'an unpromoted singleton tag stays — it is still doing a tag\'s job');
+  assert.ok(changed >= 2, 'the strip is counted too, so the caller still saves');
+});
+
+test('a calendar-linked task keeps its tag — the calendar owns that label, not the section', () => {
+  const c = make();
+  // mergeCalendarEvents re-adds this tag on every import and calTag renders the chip from it, so
+  // stripping it would start a churn loop and break the calendar chip. The section rule yields.
+  const tasks = [
+    activeTask(c, { id:'g1', labels:['work'], calendarId:'cal-a', eventId:'e1' }),
+    activeTask(c, { id:'g2', labels:['work'], calendarId:'cal-a', eventId:'e2' }),
+  ];
+  const { sections } = c.migrateSectionsFromTags(tasks);
+  assert.deepEqual(sections.map(s => s.name), ['work']);
+  assert.deepEqual(tasks.map(t => t.labels), [['work'], ['work']], 'gcal tags survive');
+  assert.ok(tasks.every(t => t.sectionId != null), 'but they are still sectioned');
+});
+
+test('stripSectionTags is idempotent and matches a section by NAME, not by insertion order', () => {
+  const c = make();
+  const secs = [c.normalizeSection({ name:'research', order:0 })];
+  const tasks = [
+    activeTask(c, { id:'a', labels:['urgent', 'research'], sectionId: secs[0].id }),
+    activeTask(c, { id:'b', labels:['research'], sectionId: null }),  // no section -> untouched
+  ];
+  assert.equal(c.stripSectionTags(tasks, secs), 1, 'only the sectioned task changes');
+  assert.deepEqual(tasks[0].labels, ['urgent'], 'matched mid-list, not just at labels[0]');
+  assert.deepEqual(tasks[1].labels, ['research'], 'a task in No section keeps every label');
+  assert.equal(c.stripSectionTags(tasks, secs), 0, 're-running changes nothing');
 });
 
 test('V2.6 migration counts ROOT tasks only, so subtrees cannot inflate a tag past the threshold', () => {
@@ -129,17 +164,24 @@ test('V2.6 migration is idempotent on re-run', () => {
     activeTask(c, { id:'w2', labels:['work'] }),
   ];
   const first = c.migrateSectionsFromTags(tasks);
-  assert.equal(first.changed, 2);
   assert.equal(tasks.every(t => t.sectionId != null), true, 'both assigned');
+  assert.deepEqual(tasks.map(t => t.labels), [[], []], 'and the promoted tag consumed');
 
-  /* Re-running is STABLE in what it promotes and never orphans a task or eats a label. It is not
-     assignment-stable, because fresh section ids are minted each call — which is exactly why the real
-     guard is the pp-migrations flag in runOnceMigrations (asserted in the next test), not this function. */
+  /* Re-running is STABLE in what it promotes and never orphans a task. It is not assignment-stable,
+     because fresh section ids are minted each call — which is exactly why the real guard is the
+     pp-migrations flag in runOnceMigrations (asserted in the next test), not this function.
+     PP-EXT (owner 2026-08-13): the second run promotes NOTHING, because the first run consumed the tags
+     it read. That is the correct consequence of consuming rather than a regression — the once-flag is
+     what actually protects a real workspace, and this is the reason it has to. */
   const second = c.migrateSectionsFromTags(tasks);
-  assert.deepEqual(second.sections.map(s => s.name), first.sections.map(s => s.name),
-    'the same tag set is promoted every time');
-  assert.equal(tasks.every(t => t.sectionId != null), true, 'still assigned, never orphaned');
-  assert.deepEqual(tasks.map(t => t.labels), [['work'], ['work']], 'labels survive repeated runs');
+  assert.deepEqual(second.sections, [], 'nothing left to promote — the tags were consumed');
+  assert.equal(second.changed, 0, 'and a second run is a pure no-op');
+  assert.deepEqual(tasks.map(t => t.labels), [[], []], 'no further labels are eaten');
+  assert.equal(tasks.every(t => t.sectionId != null), true,
+    'and critically, still assigned — a re-run never CLEARS a section it can no longer re-derive');
+  assert.deepEqual(tasks.map(t => t.sectionId), first.sections.length
+    ? tasks.map(() => tasks[0].sectionId) : tasks.map(t => t.sectionId),
+    'both still share the one section from the first run');
 });
 
 test('V2.6 runOnceMigrations records the sections flag and does not re-run it', () => {

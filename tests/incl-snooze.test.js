@@ -216,10 +216,29 @@ test('an included row draws no pressed inset or tint; the ACTIVE ring survives',
   assert.strictEqual([].concat(glyph.children).join(''), '☑',
     'inclusion reads from the control, which is the point');
 
-  // ACTIVE is a different channel and must NOT have been removed with it.
+  // ACTIVE went the same way on 2026-08-13 — owner: "when a task has its timer running, do not highlight
+  // that task, just let the pause/play indicator do the work." Same argument as the pressed inset one
+  // release earlier, applied to the one channel that had been exempted from it: the row's own ■/▶ control
+  // already says "running", on the same row, and is the thing the user clicks.
   const act = activeTask(c, { id: 'ac', start: B, end: B + DAY, included: true, planned: 60 });
   c.state.tasks = [act]; c.renderVals();
   c.startTimer(act.id);
+  assert.equal(c.inclState(c.state.tasks[0]), 'active',
+    'the bucket itself is untouched — it still feeds the popover copy and the V2.1 scheduling seam');
   const aS = styleOf(c.sheetRow(c.state.tasks[0], 0, c.state.cols || [], 400, c._byId || {}));
-  assert.match(String(aS.boxShadow || ''), /inset 0 0 0 2px/, 'the active ring is still drawn');
+  assert.doesNotMatch(String(aS.boxShadow || ''), /inset 0 0 0 2px/, 'no active ring');
+  // The running row is now visually indistinguishable from any other row at the same stripe index.
+  const idle = c.normalizeTask({ id: 'id2', name: 'idle', type: 'Proportional',
+    start: B, end: B + DAY, included: true, priority: 4, deps: [], pct: 0, planned: 60 });
+  c.state.tasks = [c.state.tasks[0], idle]; c.renderVals();
+  const iS = styleOf(c.sheetRow(idle, 0, c.state.cols || [], 400, c._byId || {}));
+  const aS2 = styleOf(c.sheetRow(c.state.tasks[0], 0, c.state.cols || [], 400, c._byId || {}));
+  assert.strictEqual(String(aS2.background), String(iS.background),
+    'and no accent wash either — a running row is plain striping');
+
+  // The state is still legible, because the timer control is what carries it.
+  assert.equal(c.isRunning(c.state.tasks[0].id), true);
+  const btn = c.taskTimerBtn(c.state.tasks[0]);
+  assert.strictEqual([].concat(btn.children).join(''), '■',
+    'the pause/play indicator does the work, which is the point');
 });

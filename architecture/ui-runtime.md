@@ -85,10 +85,49 @@ and day-hover glow stay.
 channel and V2.9 left it as "the only visual the inclusion model has". On a real workspace most rows are
 included, so the inset shadow meant to mark a state became the sheet's background texture, competing with
 striping, hover and selection. Inclusion is now read from `taskInclControl`'s explicit ☑/☐/💤/▶ glyph.
-Active depth is kept deliberately: it marks the running timer — transient, single-row, and not something
-the inclusion glyph duplicates. The sheet row and `planCard` share this channel (V2.11 parity), so both
-changed together. The generalisation, which the hatch already demonstrated once: **an ambient channel can
-only encode a rare state; a state most rows hold needs an explicit per-row mark.**
+Active depth was kept at the time, on the argument that it marks the running timer — transient,
+single-row, and not something the inclusion glyph duplicates. The sheet row and `planCard` share this
+channel (V2.11 parity), so both changed together. The generalisation, which the hatch already
+demonstrated once: **an ambient channel can only encode a rare state; a state most rows hold needs an
+explicit per-row mark.**
+
+**2026-08-13 — ACTIVE depth is deleted as well, and the row now has no ambient state paint at all.**
+Owner: *"When a task has its timer running, do not highlight that task, just let the pause/play indicator
+do the work."* The 2026-08-12 exemption compared the wrong two things: it asked whether the *inclusion
+checkbox* duplicated "running" (it does not) instead of whether anything on the row did. `taskTimerBtn`
+does — same row, ■ while running and ▶ while stopped, and it is the control the user actually clicks. So
+the accent ring and the accent background wash are both gone from `sheetRow` and `planCard`, and a row's
+background is now only selection, hover, or striping. `inclState` still returns `'active'`: the bucket
+feeds the popover copy and V2.1's `orderingSeam`, and only stopped being a paint channel. The rule this
+settles: **a state that already has a dedicated per-row control does not also get an ambient channel** —
+the ambient one is the redundant copy, regardless of how rare the state is.
+
+### Gantt bar legend
+
+Five independent channels stack on one bar, which is the source of the owner's 2026-08-13 note that there
+is *"way too much visual information to decode intuitively"*. Recorded here because nothing else states
+them together, and because two of them collide.
+
+| Channel | Look | Meaning |
+|---|---|---|
+| Shape | Rounded rectangle | Ordinary task; width = start → due |
+| | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
+| | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px) |
+| Fill | Red (`--danger`) | On the critical path (only while CP display is on) |
+| | Green (`--success-strong`) | 100% done |
+| | Accent | Everything else. **Not** priority and **not** tag |
+| Progress | Lighter overlay from the left edge | % done |
+| Ghosting | Solid fill + border + shadow | Both dates are real |
+| | Colour dissolving to transparent with a **dotted outline** fading in | Half-ghost — one date only. The **solid bordered edge is the real one** |
+| | Flat grey, dotted all round, no shadow | Double-ghost — neither date set |
+| In today | **+45° gold hatch**, whole bar at `BAR_OPTED_OUT_OPACITY` | Not in today's plan |
+| | `☐` top-right | …because it is unpressed/undecided |
+| | `💤` top-right | …because it is snoozed |
+| Transient | 2px `--bar-ring` | Selected |
+| | Warm row wash | A day is hovered in a calendar view |
+
+**Known collision, not yet resolved:** the two hatches read alike at a glance and mean unrelated things —
+−45° accent = collapsed repeat, +45° gold = not in today. Logged in `tasks.md`.
 
 **Inclusion click rule (2026-08-12).** Clicking the glyph on an **unpressed** row includes it directly —
 that state's popover held exactly one action, making it a confirmation dialog attached to a checkbox. The
@@ -128,6 +167,41 @@ user on a surface they never chose, without erroring — hence the named helpers
 `priority`. Both render `planCard` and share one card-drag path; the drop zone string encodes only the
 target row/half, so sideways movement is structurally a no-op rather than a suppressed gesture.
 `unpressed` renders visibly distinct (dashed edge) so undecided work is never displayed as decided work.
+
+**Selection band sizing, and the two defects it took to get right (2026-08-13).** Each column carries its
+own divider, and its two halves are balanced by pure flexbox — `flex-basis` = content height,
+`flex-shrink` ∝ 1/basis — so the scaled shrink factors are equal, a deficit is removed from both halves
+equally in px, and "equal max scroll" falls out without any DOM measurement. `selectionSplitHeights`
+mirrors that arithmetic in JS for the unit layer. Owner report: *"12 included tasks in a column and I
+won't be able to even see the excluded tasks at all."*
+
+1. **The mirror was not the layout.** `selectionSplitHeights` applied a `SEL_HALF_MIN_PX` floor and was
+   unit-tested; the renderer set `minHeight:0`, which omitted the floor *and* disabled flexbox's own
+   automatic min-content floor. The mirror said 72px, the browser drew 0. The floor is now a real CSS
+   `min-height` using the same constant, and a **flat px value** — a first attempt at `min(112px, 45%)`
+   applied no floor at all, because the percentage resolves against a parent with `minHeight:0` and an
+   indefinite height and takes the whole `min()` with it. The column carries `overflow:hidden` so a
+   column too short for two floors clips, which is what `selectionSplitHeights` now models.
+2. **The floor then broke the balance, invisibly.** With Excluded frozen on its min-height, Included was
+   the only unfrozen item — and its `flex-shrink` was below 1, so CSS §9.7's *"if the sum of the unfrozen
+   items' flex-shrink factors is less than one, multiply the free space by that sum"* clamp applied and it
+   shrank by 8% of a 471px deficit, overflowing its column by 400px. Shrink factors are now normalised by
+   `SEL_SHRINK_CEIL` to stay ≥ 1, which preserves the ratio (and so the equal-shrink property) exactly.
+
+`SEL_HALF_MIN_PX` is derived, not picked: `SEL_CARD_EST_PX + SEL_BAND_LABEL_PX` = one whole card plus its
+band caption. Larger would be worse — the floor overrides the balance whenever it bites, so a floor above
+what the balance naturally hands the smaller half would trade the owner's equal-scroll rule for the
+visibility rule at ratios where both were already satisfiable.
+
+**Focus splits by inclusion (2026-08-13).** Owner: *"a separator between the tasks that are included for
+today and the ones that are not, with the included ones at the top, and the excluded ones [collapsed] by
+default."* The task column renders included work first (still grouped by `sectionProjection`), then an
+accent rule that doubles as the collapse control, then a flat `Not in today` list behind
+`state.focusExclOpen` (session-only, default collapsed, **always counted**). The division is
+`inclusionRow`, the shared V2.9 §4 derivation, so Focus adds no new opinion about what is in today.
+Sections are kept for Included and dropped for Excluded rather than nested under both — nesting would
+print a section holding both kinds twice, which is V2.9 §6's rule and the density failure that killed
+sections-as-tags.
 
 **V2.11 — the cards ARE the row.** Ten shared builders (`taskDisp`, `taskDoneCircle`, `taskDueRecurChip`,
 `taskInlineTags`, `taskDepChips`, `taskInclControl`, `taskFlowCell`, `taskTimerBtn`, `taskAddTimeBtn`,

@@ -110,3 +110,32 @@ in the global `pp-anon-promote` ledger (`{uid:{choice,at}}`), which makes a seco
 re-ask nor duplicate rows. `promoteAnonInto` writes storage for a workspace that is not yet mounted,
 so it is the one data path that cannot go through `commit()`; the reload re-hydrates it through the
 normal constructor path. The older `importAnonInto` remains for a future explicit Settings import.
+
+## One-time migrations (`pp-migrations`)
+
+`runOnceMigrations` is called once, from the constructor, against the LOCAL task list. Each entry is
+guarded by its own flag in `pp-migrations` and each writes that flag whether or not it changed anything,
+so a migration that becomes a no-op still stops running. **A test that exercises a migration must clear
+its flag first** — a fresh component already has every flag set, so calling `runOnceMigrations` again
+silently asserts against a no-op.
+
+Current flags, in execution order: `allday-planned-zero`, `schedule-pins-removed`,
+`sections-from-primary-tag`, `retire-off`, `drag-pin-list`, `strip-section-tags` (2026-08-13),
+`implicit-own-calendar-tag` (2026-08-13).
+
+**The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
+
+- **`strip-section-tags`.** Owner: *"Sections should not be a tag."* V2.6 made sections a first-class
+  entity but its migration deliberately read the primary `@tag` and **left it on the task**, so a task in
+  section "Research" also wore an `@research` chip and the app went on presenting a section as a kind of
+  tag — the exact model V2.6 existed to break. `migrateSectionsFromTags` now **consumes** the tag it
+  promotes, and this second flag re-sweeps workspaces that already ran the old version (which is all of
+  them, hence a separate flag: re-running `sections-from-primary-tag` would also re-promote tags in a
+  workspace where the user has since deleted those sections on purpose). Two consequences worth knowing:
+  the promotion pass now only ever **assigns** a `sectionId` and never clears one, because a second run
+  would otherwise find no tags and null out the sections it had just created; and `sectionTagStrippable`
+  exempts tasks linked to an **external** calendar, whose first label is owned and re-added by
+  `mergeCalendarEvents` — stripping it would start a churn loop and break the calendar chip.
+- **`implicit-own-calendar-tag`.** Strips the reserved `@chronocompose` tag wherever it appears. Applied
+  to every task rather than only currently-linked ones, because the name is reserved. See
+  `architecture/sync-integrations.md`.

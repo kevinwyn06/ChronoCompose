@@ -1,0 +1,471 @@
+// Owner session, 2026-08-13. Four reports from hands-on use of the production build, plus one
+// documentation answer that needed no code. Each block below states the report verbatim, because in three
+// of the four cases the defect was invisible to the existing suite for a reason worth keeping.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { make, activeTask, DAY } = require('./_load.js');
+
+const styleOf = n => (n && n.props && n.props.style) || {};
+
+// The component runs in a vm realm, so an array it CREATES is not `instanceof` this realm's Array and
+// assert.deepEqual fails on the prototype alone — the trap CURRENT.md records from the block that was cut
+// off mid-flight. Copy into a host array before comparing anything the component built.
+const host = a => [].concat(a == null ? [] : Array.prototype.slice.call(a));
+
+// runOnceMigrations already ran once inside the constructor (index.html line ~641), so every flag is
+// already set on a fresh `make()`. A migration test must clear the flag it means to exercise, or it
+// silently asserts against a no-op.
+const onlyFlags = (c, flags) => { try { c.lsSet('pp-migrations', JSON.stringify(flags || {})); } catch (e) {} };
+
+// Walk a rendered tree for the first node satisfying `pred`. The mocked React nests children as arrays.
+function find(node, pred) {
+  if (!node || typeof node !== 'object') return null;
+  if (Array.isArray(node)) { for (const n of node) { const r = find(n, pred); if (r) return r; } return null; }
+  if (pred(node)) return node;
+  return find(node.children, pred);
+}
+function findAll(node, pred, out) {
+  out = out || [];
+  if (!node || typeof node !== 'object') return out;
+  if (Array.isArray(node)) { node.forEach(n => findAll(n, pred, out)); return out; }
+  if (pred(node)) out.push(node);
+  return findAll(node.children, pred, out);
+}
+const attr = (n, k) => (n && n.props && n.props[k]);
+const text = n => [].concat((n && n.children) || []).filter(x => typeof x === 'string' || typeof x === 'number').join('');
+
+// ===========================================================================================
+// (2) "When a task is deleted from ChronoCompose, it should be deleted from the calendar too.
+//      I deleted two tasks from the ChronoCompose calendar, and it came back after a few minutes."
+//
+// Root cause: `gcalTwoWay` defaults to FALSE, and gcalSyncOut returned on that flag before computing any
+// op at all. So a delete queued no remote DELETE *and* — because the tombstone is written inside
+// gcalEnqueue — recorded nothing locally either. The next silent gcalImport found a live Google event
+// with no local task and no tombstone, and re-created it. A few minutes later, exactly as reported.
+//
+// Why the suite was blind: every existing outbound test sets gcalTwoWay:true first, because that is the
+// interesting case for edits. Nothing asserted what happens in the DEFAULT configuration, which is the
+// one every user is actually in.
+// ===========================================================================================
+
+function twoWay(c, on) {
+  c.state.settings = Object.assign({}, c.state.settings, { gcalTwoWay: !!on });
+}
+const linked = (c, over) => activeTask(c, Object.assign({ eventId: 'ev1', calendarId: 'cal1' }, over || {}));
+
+test('a DELETE reaches the queue with two-way sync OFF — the default every user is in', () => {
+  const c = make();
+  twoWay(c, false);
+  const t = linked(c, { id: 'd1', name: 'gone' });
+  c.gcalSyncOut([t], []);
+
+  const q = c.loadQueue();
+  assert.equal(q.length, 1, 'the delete is queued despite gcalTwoWay:false');
+  assert.equal(q[0].op, 'delete');
+  assert.equal(q[0].eventId, 'ev1');
+  assert.equal(q[0].calendarId, 'cal1');
+});
+
+test('and the TOMBSTONE is written, which is what actually stops the resurrection', () => {
+  const c = make();
+  twoWay(c, false);
+  const t = linked(c, { id: 'd2', name: 'gone' });
+  c.gcalSyncOut([t], []);
+
+  const tomb = c.loadTombstones();
+  assert.ok(tomb['ev1'] > 0, 'the deleted event id is tombstoned');
+
+  // The exact resurrection the owner saw: a silent import re-reads the still-live Google event.
+  const tasks = [];
+  const ev = { id: 'ev1', summary: 'gone', start: { dateTime: new Date(Date.now()).toISOString() },
+    end: { dateTime: new Date(Date.now() + 3600000).toISOString() } };
+  const r = c.mergeCalendarEvents(tasks, [{ cid: 'cal1', items: [ev] }], {}, { cal1: { id: 'cal1', summary: 'ChronoCompose' } }, tomb);
+  assert.equal(r.added, 0, 'the tombstone suppresses the re-import');
+  assert.equal(tasks.length, 0, 'the task stays deleted');
+
+  // Control: without the tombstone it comes straight back — proving the fixture reproduces the bug.
+  const tasks2 = [];
+  const r2 = c.mergeCalendarEvents(tasks2, [{ cid: 'cal1', items: [ev] }], {}, { cal1: { id: 'cal1', summary: 'ChronoCompose' } }, {});
+  assert.equal(r2.added, 1, 'with no tombstone the event resurrects — this is what the owner saw');
+});
+
+test('with two-way OFF, an EDIT still does NOT push — only deletions escape the gate', () => {
+  const c = make();
+  twoWay(c, false);
+  const before = linked(c, { id: 'e1', name: 'old' });
+  const after = Object.assign(JSON.parse(JSON.stringify(before)), { name: 'renamed', updatedAt: Date.now() + 1 });
+  c.gcalSyncOut([before], [after]);
+  assert.equal(c.loadQueue().length, 0,
+    'an edit is a continuous opinion about content and stays consent-gated; a delete is a single settled fact');
+});
+
+test('with two-way ON, edits push exactly as before — the gate is unchanged in that direction', () => {
+  const c = make();
+  twoWay(c, true);
+  const before = linked(c, { id: 'e2', name: 'old' });
+  const after = Object.assign(JSON.parse(JSON.stringify(before)), { name: 'renamed', updatedAt: Date.now() + 1 });
+  c.gcalSyncOut([before], [after]);
+  const q = c.loadQueue();
+  assert.equal(q.length, 1);
+  assert.equal(q[0].op, 'patch');
+});
+
+test('an UNLINKED task deleted with two-way off queues nothing and tombstones nothing', () => {
+  const c = make();
+  twoWay(c, false);
+  const t = activeTask(c, { id: 'manual', name: 'never synced' }); // no eventId
+  c.gcalSyncOut([t], []);
+  assert.equal(c.loadQueue().length, 0, 'cancelInsert drops the pending insert; nothing to send');
+  assert.deepEqual(c.loadTombstones(), {}, 'and nothing to tombstone — it never reached Google');
+});
+
+test('isGcalDeleteOp names the escaping set exactly, so the two gates cannot drift apart', () => {
+  const c = make();
+  ['delete', 'deleteInstance', 'cancelInsert'].forEach(op =>
+    assert.equal(c.isGcalDeleteOp({ op }), true, op + ' escapes the two-way gate'));
+  ['insert', 'patch', 'patchInstance'].forEach(op =>
+    assert.equal(c.isGcalDeleteOp({ op }), false, op + ' does not'));
+});
+
+// ===========================================================================================
+// (1) "When a task has its timer running, do not highlight that task, just let the pause/play
+//      indicator do the work."
+//
+// Same argument the pressed depth lost on 2026-08-12, applied to the channel that was exempted from it.
+// Asserted on BOTH surfaces because V2.11 card↔row parity means dropping it on one only would put them
+// back out of step — which is precisely how the 2026-08-12 change left this state behind.
+// ===========================================================================================
+
+test('a running task gets no ring and no wash on the sheet row OR the plan card', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const run = activeTask(c, { id: 'r1', name: 'running', start: B, end: B + DAY, included: true, planned: 60 });
+  const idle = activeTask(c, { id: 'r2', name: 'idle', start: B, end: B + DAY, included: true, planned: 60 });
+  c.state.tasks = [run, idle];
+  c.renderVals();
+  c.startTimer('r1');
+  const running = c.state.tasks.find(t => t.id === 'r1');
+
+  assert.equal(c.inclState(running), 'active', 'the bucket survives — only the paint is gone');
+
+  // Sheet row: same index for both, so the striping is identical and any difference is the retired paint.
+  const rs = styleOf(c.sheetRow(running, 0, c.state.cols || [], 400, c._byId || {}));
+  const is = styleOf(c.sheetRow(idle, 0, c.state.cols || [], 400, c._byId || {}));
+  assert.strictEqual(String(rs.background), String(is.background), 'row: no accent wash');
+  assert.strictEqual(String(rs.boxShadow || 'none'), String(is.boxShadow || 'none'), 'row: no accent ring');
+
+  // Plan card.
+  const rc = styleOf(c.planCard(running, 'incl:included'));
+  const ic = styleOf(c.planCard(idle, 'incl:included'));
+  assert.strictEqual(String(rc.boxShadow), String(ic.boxShadow), 'card: parity holds — no ring here either');
+});
+
+test('the running state is still fully legible, because the timer control carries it', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id: 'r3', start: B, end: B + DAY, included: true, planned: 60 });
+  c.state.tasks = [t]; c.renderVals();
+
+  assert.strictEqual([].concat(c.taskTimerBtn(c.state.tasks[0]).children).join(''), '▶', 'stopped reads play');
+  c.startTimer('r3');
+  assert.strictEqual([].concat(c.taskTimerBtn(c.state.tasks[0]).children).join(''), '■', 'running reads stop');
+});
+
+// ===========================================================================================
+// (5) "In the Overview page, there are instances where say I'll have 12 included tasks in a column.
+//      I won't be able to even see the excluded tasks at all. I should always be able to see both
+//      included and excluded, and they should be given about the same amount of scroll."
+//
+// THE DEFECT WAS NOT IN THE ARITHMETIC. `selectionSplitHeights` applied a SEL_HALF_MIN_PX floor and was
+// unit-tested, so it stayed green throughout. But that function is only a JS MIRROR of the layout — the
+// thing that renders is flexbox, and the `half` renderer carried `minHeight:0`, which not only omitted
+// the floor but also disabled flexbox's own automatic min-content floor. So the Excluded half shrank to
+// literally 0px on screen while the mirror said 72.
+//
+// The lesson is the repo's own recurring one (tasksByTagSection, the two _yTop call sites): a pure
+// function asserted in isolation proves nothing about the surface unless something also asserts that the
+// surface consumes it. Hence the first test here reads the RENDERED style.
+// ===========================================================================================
+
+function selHalves(c) {
+  const view = c.renderSelectionView(c.state.tasks);
+  return findAll(view, n => attr(n, 'data-selhalf'));
+}
+
+test('the rendered Excluded half carries a real CSS floor — the mirror is not the layout', () => {
+  const c = make();
+  const B = c.startOfToday();
+  // 12 included, 1 excluded: the owner's fixture. The deficit exceeds the Excluded half's whole basis.
+  c.state.tasks = [];
+  for (let i = 0; i < 12; i++) c.state.tasks.push(activeTask(c, { id: 'in' + i, name: 'in' + i, start: B, end: B + DAY, included: true, planned: 30 }));
+  c.state.tasks.push(activeTask(c, { id: 'out1', name: 'out', start: B, end: B + DAY, included: null, snoozeUntil: B + DAY, planned: 30 }));
+  c.renderVals();
+
+  const halves = selHalves(c);
+  assert.ok(halves.length >= 2, 'the surface renders halves at all');
+  halves.forEach(hf => {
+    const mh = String(styleOf(hf).minHeight || '');
+    assert.notEqual(mh, '0', attr(hf, 'data-selhalf') + ' must not re-disable the flexbox floor');
+    // A PLAIN px value. A `min(112px, 45%)` was tried first and applied no floor at all in Chromium —
+    // the percentage resolves against an indefinite parent height and takes the whole min() with it.
+    assert.equal(mh, c.SEL_HALF_MIN_PX + 'px',
+      'the same constant selectionSplitHeights uses, expressed the same way, so they cannot drift again');
+  });
+});
+
+test('12 included against 1 excluded: Excluded keeps a whole card, never 0', () => {
+  const c = make();
+  const H = 6 * c.SEL_CARD_EST_PX;
+  const r = c.selectionSplitHeights(12, 1, H);
+  assert.ok(r.excluded >= c.SEL_CARD_EST_PX,
+    'a full card stays visible (' + r.excluded + 'px) — "I should ALWAYS be able to see both"');
+  assert.ok(r.included > 0, 'and Included is not starved to pay for it');
+  assert.ok(Math.abs(r.included + r.excluded - H) < 0.001, 'the two halves still exactly fill the column');
+});
+
+test('the floor is one whole card plus its band label — derived, not picked', () => {
+  const c = make();
+  assert.equal(c.SEL_HALF_MIN_PX, c.SEL_CARD_EST_PX + c.SEL_BAND_LABEL_PX);
+});
+
+test('raising the floor did NOT cost the equal-scroll rule at ratios where it already worked', () => {
+  const c = make();
+  const H = 6 * c.SEL_CARD_EST_PX;
+  // The 24a fixture. The floor must not bite hard enough here to unbalance a split that was fine.
+  const r = c.selectionSplitHeights(7, 3, H);
+  assert.ok(Math.abs(r.scrollIncluded - r.scrollExcluded) <= 0.5 * c.SEL_CARD_EST_PX,
+    'still comparable max scroll (' + r.scrollIncluded + ' vs ' + r.scrollExcluded + ')');
+});
+
+test('the mirror models a too-short column the way the browser does: floor, then clip', () => {
+  const c = make();
+  // The floor is FLAT, matching the renderer's flat min-height. When the column cannot hold two floors
+  // the halves still get their floor and the column clips (it carries overflow:hidden) — so the mirror
+  // reporting a sum past H is the truth. A mirror that "helpfully" scaled the floor down instead is
+  // exactly how this surface shipped a 0px band with a green test.
+  for (const H of [120, 200, 320, 564, 1200]) {
+    const r = c.selectionSplitHeights(30, 30, H);
+    assert.ok(r.included >= c.SEL_HALF_MIN_PX, 'Included keeps its floor at H=' + H);
+    assert.ok(r.excluded >= c.SEL_HALF_MIN_PX, 'Excluded keeps its floor at H=' + H);
+  }
+  // And whenever the column CAN hold both, the halves fill it exactly and nothing is clipped.
+  for (const H of [400, 564, 900, 1200]) {
+    const r = c.selectionSplitHeights(12, 1, H);
+    assert.ok(Math.abs(r.included + r.excluded - H) < 0.001, 'halves fill the column exactly at H=' + H);
+  }
+});
+
+// ===========================================================================================
+// (4) "Focus mode should have a separator between the tasks that are included for today and the ones
+//      that are not, with the included ones at the top, and the excluded ones [collapsed] by default."
+// ===========================================================================================
+
+function focusCol(c) {
+  const view = c.renderDashFocus(c.state.tasks);
+  return find(view, n => find(n, x => attr(x, 'data-task-id')) || attr(n, 'data-task-id')) ? view : view;
+}
+const focusRowIds = c => findAll(c.renderDashFocus(c.state.tasks), n => attr(n, 'data-task-id')).map(n => attr(n, 'data-task-id'));
+
+function focusFixture(c) {
+  const B = c.startOfToday();
+  c.state.tasks = [
+    activeTask(c, { id: 'fi1', name: 'in one', start: B, end: B + DAY, included: true, planned: 30 }),
+    activeTask(c, { id: 'fi2', name: 'in two', start: B, end: B + DAY, included: true, planned: 30 }),
+    activeTask(c, { id: 'fo1', name: 'out one', start: B, end: B + DAY, included: null, snoozeUntil: B + DAY, planned: 30 }),
+  ];
+  c.renderVals();
+}
+
+test('Focus hides the not-in-today tasks by default, but always states how many there are', () => {
+  const c = make();
+  focusFixture(c);
+  const ids = focusRowIds(c);
+  assert.ok(ids.includes('fi1') && ids.includes('fi2'), 'included work is listed');
+  assert.equal(ids.includes('fo1'), false, 'excluded work is collapsed by default');
+
+  const band = find(c.renderDashFocus(c.state.tasks), n => /Not in today/.test(text(n) || '') || findAll(n, x => text(x) === 'Not in today').length > 0);
+  assert.ok(band, 'the separator band renders');
+  const labels = findAll(c.renderDashFocus(c.state.tasks), n => text(n) === 'Not in today');
+  assert.equal(labels.length, 1, 'exactly one separator, not one per section');
+});
+
+test('expanding the band reveals them, and included work always sorts above it', () => {
+  const c = make();
+  focusFixture(c);
+  c.setState({ focusExclOpen: true });
+  const ids = focusRowIds(c);
+  assert.ok(ids.includes('fo1'), 'excluded work appears when expanded');
+  assert.ok(ids.indexOf('fi1') < ids.indexOf('fo1'), 'included ones are at the top');
+  assert.ok(ids.indexOf('fi2') < ids.indexOf('fo1'));
+});
+
+test('the band disappears entirely when nothing is excluded — no empty divider', () => {
+  const c = make();
+  const B = c.startOfToday();
+  c.state.tasks = [activeTask(c, { id: 'only', start: B, end: B + DAY, included: true, planned: 30 })];
+  c.renderVals();
+  assert.equal(findAll(c.renderDashFocus(c.state.tasks), n => text(n) === 'Not in today').length, 0);
+});
+
+test('Focus reuses inclusionRow, so it cannot invent a fifth opinion about "in today"', () => {
+  const c = make();
+  focusFixture(c);
+  c.setState({ focusExclOpen: true });
+  const ids = focusRowIds(c);
+  const expectIn = c.state.tasks.filter(t => c.inclusionRow(t) === 'included').map(t => t.id);
+  const expectOut = c.state.tasks.filter(t => c.inclusionRow(t) !== 'included').map(t => t.id);
+  expectIn.forEach(id => assert.ok(ids.indexOf(id) >= 0));
+  // Every included id precedes every excluded id — the division IS inclusionRow's.
+  expectIn.forEach(i => expectOut.forEach(o => assert.ok(ids.indexOf(i) < ids.indexOf(o), i + ' before ' + o)));
+});
+
+test('sections survive for INCLUDED and are not duplicated under the excluded band', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const secs = [c.normalizeSection({ name: 'research', order: 0 })];
+  try { c.lsSet('pp-sections', JSON.stringify(secs)); } catch (e) {}
+  c.state.sections = secs;
+  c.state.tasks = [
+    activeTask(c, { id: 's1', name: 'in', start: B, end: B + DAY, included: true, planned: 30, sectionId: secs[0].id }),
+    activeTask(c, { id: 's2', name: 'out', start: B, end: B + DAY, included: null, snoozeUntil: B + DAY, planned: 30, sectionId: secs[0].id }),
+  ];
+  c.renderVals();
+  c.setState({ focusExclOpen: true, groupBy: 'section' });
+  const heads = findAll(c.renderDashFocus(c.state.tasks), n => text(n) === 'research');
+  assert.ok(heads.length <= 1,
+    'a section holding both included and excluded work must not print its header twice (V2.9 §6)');
+});
+
+// ===========================================================================================
+// (6) "Sections should not be a tag."  (retroactive half — the forward half is in v2-sections.test.js)
+// ===========================================================================================
+
+test('strip-section-tags re-sweeps a workspace that already ran the OLD V2.6 migration', () => {
+  const c = make();
+  const secs = [c.normalizeSection({ name: 'work', order: 0 })];
+  try { c.lsSet('pp-sections', JSON.stringify(secs)); } catch (e) {}
+  // Exactly the state the old migration left behind: sectioned AND still tagged.
+  const tasks = [
+    activeTask(c, { id: 'w1', labels: ['work', 'deep'], sectionId: secs[0].id }),
+    activeTask(c, { id: 'w2', labels: ['work'], sectionId: secs[0].id }),
+  ];
+  // Pretend the V2.6 flag is already set — which it is, in every real workspace.
+  onlyFlags(c, { 'sections-from-primary-tag': 1 });
+
+  c.runOnceMigrations(tasks);
+
+  assert.deepEqual(tasks[0].labels, ['deep'], 'the redundant section tag is gone, other labels stay');
+  assert.deepEqual(tasks[1].labels, []);
+  assert.ok(tasks.every(t => t.sectionId === secs[0].id), 'and the sections themselves are untouched');
+
+  const done = JSON.parse(c.lsGet('pp-migrations') || '{}');
+  assert.equal(done['strip-section-tags'], 1, 'the flag is recorded');
+  assert.equal(done['sections-from-primary-tag'], 1, 'and the old flag is NOT reset — sections the user deleted stay deleted');
+});
+
+// ===========================================================================================
+// (7) "The ChronoCompose calendar should be implicit. Like that name should be reserved, and pull into
+//      the regular task pool without that calendar tag."
+//
+// Same principle as (6) one report later: a container's name is not one of the user's tags. An external
+// calendar's tag carries real information — which calendar this came from — so those keep theirs. Ours
+// carries none: every task in it is a ChronoCompose task by definition.
+// ===========================================================================================
+
+const CC = { id: 'cc1', summary: 'ChronoCompose' };
+const EXT = { id: 'x1', summary: 'Team Standups' };
+const evAt = (id, ms) => ({ id, summary: id, start: { dateTime: new Date(ms).toISOString() },
+  end: { dateTime: new Date(ms + 3600000).toISOString() } });
+
+test('the reserved name yields NO tag, while every other calendar keeps its own', () => {
+  const c = make();
+  assert.equal(c.calTag(CC), '', 'ours is implicit');
+  assert.equal(c.calTag(EXT), 'team-standups', 'external calendars are unchanged');
+  assert.equal(c.calTag({ summary: '  chronocompose ' }), '',
+    'reserved means reserved — case and whitespace do not create a second one');
+  assert.equal(c.isOwnCalendar(EXT), false);
+});
+
+test('importing from our own calendar lands an UNTAGGED task in the regular pool', () => {
+  const c = make();
+  c.state.gcal = Object.assign({}, c.state.gcal, { calendars: [CC], ccCalId: 'cc1' });
+  const tasks = [];
+  const now = c.startOfToday() + 9 * 3600000;
+  c.mergeCalendarEvents(tasks, [{ cid: 'cc1', items: [evAt('e1', now)] }], {}, { cc1: CC }, {});
+  assert.equal(tasks.length, 1);
+  assert.deepEqual(host(tasks[0].labels), [], 'no @chronocompose');
+  assert.equal(tasks[0].calendarId, 'cc1', 'but the link itself is intact, so sync still works');
+  assert.equal(c.calNameOf(tasks[0]), 'ChronoCompose',
+    'and it still sorts/filters by calendar — only the TAG is implicit, not the provenance');
+});
+
+test('the Calendar column names our calendar even before the calendar LIST has loaded', () => {
+  const c = make();
+  // Offline / signed out / mid-restore: no `calendars`, but ccCalId is persisted. Before this session the
+  // @chronocompose tag was what rescued this fallback; removing the tag exposed a raw Google id here.
+  c.state.gcal = Object.assign({}, c.state.gcal, { calendars: [], ccCalId: 'cc1' });
+  const t = activeTask(c, { id: 'n1', labels: [], calendarId: 'cc1', eventId: 'e1' });
+  assert.equal(c.calNameOf(t), 'ChronoCompose', 'the reserved name is knowable without the network');
+  const x = activeTask(c, { id: 'n2', labels: [], calendarId: 'zz', eventId: 'e2' });
+  assert.equal(c.calNameOf(x), 'zz', 'an unknown external calendar is unchanged — still its id');
+});
+
+test('a RE-import never re-adds the tag — this is the churn loop the guard exists to stop', () => {
+  const c = make();
+  const now = c.startOfToday() + 9 * 3600000;
+  const tasks = [];
+  c.mergeCalendarEvents(tasks, [{ cid: 'cc1', items: [evAt('e1', now)] }], {}, { cc1: CC }, {});
+  c.mergeCalendarEvents(tasks, [{ cid: 'cc1', items: [evAt('e1', now)] }], {}, { cc1: CC }, {});
+  assert.equal(tasks.length, 1, 'still one task');
+  assert.deepEqual(host(tasks[0].labels), [], 'still untagged after a second import');
+});
+
+test('an external calendar still tags on first import AND on re-import', () => {
+  const c = make();
+  const now = c.startOfToday() + 9 * 3600000;
+  const tasks = [];
+  c.mergeCalendarEvents(tasks, [{ cid: 'x1', items: [evAt('e9', now)] }], {}, { x1: EXT }, {});
+  assert.deepEqual(host(tasks[0].labels), ['team-standups'], 'external provenance is real information');
+  tasks[0].labels = [];
+  c.mergeCalendarEvents(tasks, [{ cid: 'x1', items: [evAt('e9', now)] }], {}, { x1: EXT }, {});
+  assert.deepEqual(host(tasks[0].labels), ['team-standups'], 'and it is restored on re-import, as before');
+});
+
+test('implicit-own-calendar-tag migration strips the tag every past import stamped on', () => {
+  const c = make();
+  const tasks = [
+    activeTask(c, { id: 'o1', labels: ['chronocompose', 'urgent'], calendarId: 'cc1', eventId: 'e1' }),
+    activeTask(c, { id: 'o2', labels: ['chronocompose'], calendarId: 'cc1', eventId: 'e2' }),
+    activeTask(c, { id: 'o3', labels: ['team-standups'], calendarId: 'x1', eventId: 'e3' }),
+  ];
+  onlyFlags(c, {});
+  c.runOnceMigrations(tasks);
+  assert.deepEqual(tasks[0].labels, ['urgent'], 'the reserved tag goes, real tags stay');
+  assert.deepEqual(tasks[1].labels, []);
+  assert.deepEqual(tasks[2].labels, ['team-standups'], 'another calendar\'s tag is untouched');
+  assert.equal(JSON.parse(c.lsGet('pp-migrations') || '{}')['implicit-own-calendar-tag'], 1);
+  assert.equal(c.stripOwnCalendarTag(tasks), 0, 'and it is idempotent');
+});
+
+test('the reserved name has ONE definition — the constant, not a string literal', () => {
+  const c = make();
+  assert.equal(c.GCAL_OWN_CAL_NAME, 'ChronoCompose');
+  assert.equal(c.calTagFor(c.GCAL_OWN_CAL_NAME), 'chronocompose',
+    'calTagFor sees through the suppression, which is what the migration matches on');
+  assert.equal(c.calTag({ summary: c.GCAL_OWN_CAL_NAME }), '', 'while calTag applies it');
+});
+
+test('the strip is a separate flag, so it never re-promotes tags into sections', () => {
+  const c = make();
+  try { c.lsSet('pp-sections', JSON.stringify([])); } catch (e) {}
+  onlyFlags(c, { 'sections-from-primary-tag': 1 });
+  // A user who ran V2.6, then deliberately deleted every section. Their tags must NOT rebuild them.
+  const tasks = [
+    activeTask(c, { id: 'a', labels: ['work'], sectionId: null }),
+    activeTask(c, { id: 'b', labels: ['work'], sectionId: null }),
+  ];
+  c.runOnceMigrations(tasks);
+  assert.deepEqual(tasks.map(t => t.labels), [['work'], ['work']],
+    'no section means no redundancy — the tags are still doing a tag\'s job');
+  assert.deepEqual(JSON.parse(c.lsGet('pp-sections') || '[]'), [], 'and no section is resurrected');
+});
