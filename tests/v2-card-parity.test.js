@@ -95,6 +95,45 @@ test('the inclusion control offers four states and never the retired Off', () =>
   [true, null].forEach(v => assert.notStrictEqual(glyph(mk({ included:v })), '⊘'));
 });
 
+// Owner, 2026-08-12: *"shouldn't the active task timer just be toggled by the pause/play button? Why in
+// the world would the checkbox also become a play button?"* The 'active' state used to render ▶ in the
+// inclusion slot, so a running task showed a play triangle beside taskTimerBtn's ■ (stop) — two controls
+// that appeared to contradict each other, and the play-shaped one opened the inclusion popover instead of
+// touching the timer. 'active' is a strictly stronger form of 'pressed' and must stay in the checkbox
+// family; the accent colour and the active ring/wash are the only distinction.
+test('the active-state inclusion glyph is a checkbox, never a play triangle', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id:'ac', start:B, end:B+DAY, included:true, planned:60 });
+  c.state.tasks = [t]; c.renderVals();
+  c.startTimer('ac');
+  const live = c.state.tasks.find(x => x.id === 'ac');
+  assert.strictEqual(c.inclState(live), 'active', 'premise: a running task reads as active');
+
+  const glyphOf = x => { c.state.tasks = [x]; return [].concat(c.taskInclControl(x).children).join(''); };
+  const activeGlyph = glyphOf(live);
+  assert.notStrictEqual(activeGlyph, '▶', 'the inclusion control is not a timer control');
+
+  // Parity with pressed is the actual contract: same mark, differing only in colour.
+  const pressed = c.normalizeTask({ id:'pr', name:'p', type:'Proportional',
+    start:B+2*DAY, end:B+4*DAY, priority:4, deps:[], pct:0, planned:60, spent:0, included:true });
+  assert.strictEqual(activeGlyph, glyphOf(pressed), 'active renders the pressed mark');
+  assert.strictEqual(activeGlyph, '☑');
+
+  // The colour channel still separates them, so nothing was flattened away.
+  c.state.tasks = [live];
+  const aColor = String(c.taskInclControl(live).props.style.color);
+  c.state.tasks = [pressed];
+  const pColor = String(c.taskInclControl(pressed).props.style.color);
+  assert.notStrictEqual(aColor, pColor, 'active is distinguished by accent colour, not by a new shape');
+
+  // ...and the title no longer advertises the depth channel V2.9 §2 removed.
+  c.state.tasks = [live];
+  const title = String(c.taskInclControl(live).props.title);
+  assert.ok(!/stronger pressed/.test(title), 'the stale depth wording is gone');
+  assert.match(title, /timer running/);
+});
+
 test('rescheduleToToday moves the due date to today and presses the task in', () => {
   const c = make();
   const B = c.startOfToday();

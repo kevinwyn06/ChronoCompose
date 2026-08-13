@@ -9159,11 +9159,17 @@ class Component extends DCLogic {
     const h=React.createElement;
     if(this.isMilestone(t)) return h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—');
     const st=this.inclState(t);
-    const glyph = st==='snoozed' ? '💤' : st==='active' ? '▶' : st==='pressed' ? '☑' : '☐';
+    /* PP-EXT (owner 2026-08-12): 'active' renders the SAME ☑ as 'pressed'. It used to render ▶, which put
+       a play triangle in the checkbox slot right beside taskTimerBtn's ■ (stop) on a running task — two
+       controls that read as contradicting each other, and the one shaped like a play button was not a timer
+       control at all (it opens the inclusion popover). 'active' is a strictly stronger form of 'pressed',
+       so it stays in the checkbox family and is distinguished only by the accent colour below plus the
+       existing active ring/wash. The timer is toggled by taskTimerBtn and nothing else. */
+    const glyph = st==='snoozed' ? '💤' : (st==='active'||st==='pressed') ? '☑' : '☐';
     const color = st==='snoozed' ? 'var(--warn)' : st==='active' ? this._accent
       : st==='pressed' ? 'var(--success)' : 'var(--text-faint2)';
     const title = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString()+' · click to change')
-      : st==='active' ? 'Active now · stronger pressed state'
+      : st==='active' ? 'Pressed into today · timer running · click to change inclusion'
       : st==='pressed' ? 'Pressed into today · click to change'
       : 'Not pressed today · click to include';
     /* PP-EXT (owner 2026-08-12): "ticking a task from unincluded to included should not bring up a
@@ -11366,7 +11372,8 @@ class Component extends DCLogic {
       ? h('span',{style:{fontSize:'13px',color:'var(--text-faint2)'}},'— (milestone)')
       : (()=>{ const st=this.inclState(t);
           const statusTxt = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))
-            : st==='active' ? 'Active now · stronger pressed'
+            : st==='active' ? 'Pressed into today · timer running' /* PP-EXT (owner 2026-08-12): the depth
+                channel this described was removed for pressed; say what is actually true. */
             : st==='pressed' ? 'Pressed into today'
             : 'Not pressed today';
           const statusColor = st==='active' ? this._accent : st==='pressed' ? 'var(--success)'
