@@ -481,6 +481,11 @@ class Component extends DCLogic {
     ];
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
     this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
+    /* PP-EXT: the deliberate down-right nudge of the floating row-drag chip, in the OVERLAY'S OWN px
+       (the chip is position:fixed inside the zoom wrapper), so the cursor point must reach it through
+       uiPt — see renderRowDragGhost. */
+    this.ROW_GHOST_DX = 14;
+    this.ROW_GHOST_DY = 10;
     this.TAG_SECTION_H = 24;     // PP-EXT V2.3: shared sheet/Gantt height for @tag section rails
     this.FOCUS_ADD_MINUTES = 15; // PP-EXT V2.3: one-tap manual time increment in Focus rows
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
@@ -10557,7 +10562,8 @@ class Component extends DCLogic {
       /* PP-EXT: left icon-rail nav + the section body share a flex row; overlays stay siblings above it. */
       /* PP-EXT (V1.4): this row is the overlays' zoomed ancestor made measurable — uiScale() reads its
          rendered-vs-local width to convert cursor points into overlay space (see scaleFixedPt). */
-      h('div',{ref:el=>{this._uiRootEl=el;},style:{display:'flex',flex:1,minWidth:0,minHeight:0}}, this.renderSidebar(), body),
+      h('div',{ref:el=>{this._uiRootEl=el;},'data-ui-root':'1',/* PP-EXT: same node uiScale() measures, addressable from e2e */
+        style:{display:'flex',flex:1,minWidth:0,minHeight:0}}, this.renderSidebar(), body),
       this.state.menu ? this.renderMenu() : null,
       this.state.barMenu ? this.renderBarMenu() : null, /* PP-EXT V1.4: right-click-a-bar field editor */
       this.state.colMenu ? this.renderColMenu() : null,
@@ -10918,7 +10924,15 @@ class Component extends DCLogic {
     const changed=(rd.dropParentId!==undefined) && (rd.dropParentId!==orig);
     const par=(rd.dropParentId!=null)?byId[rd.dropParentId]:null;
     const sub=changed ? (par ? ('↳ into '+(par.name||'untitled')) : '↳ to top level') : null;
-    return h('div',{style:{position:'fixed',left:((rd.x||0)+14)+'px',top:((rd.y||0)+10)+'px',zIndex:4000,pointerEvents:'none',
+    /* PP-EXT: `rd.x/rd.y` are RAW client px (onMouseMove stores the cursor unconverted, because the
+       nest-deadzone maths that also reads them is a pure delta and is scale-free). This node is
+       position:fixed INSIDE the zoom:0.8 wrapper, so its left/top are the overlay's own px — feeding
+       it the raw client point painted the chip at 0.8× the cursor's distance from the viewport
+       origin, an error that GREW across the screen ("not consistently close"). Same conversion every
+       other cursor-anchored overlay already does; NOT a zoom re-tune. */
+    const gp=this.uiPt(rd.x||0, rd.y||0);
+    return h('div',{'data-row-drag-ghost':'1',
+      style:{position:'fixed',left:(gp.x+this.ROW_GHOST_DX)+'px',top:(gp.y+this.ROW_GHOST_DY)+'px',zIndex:4000,pointerEvents:'none',
         padding:'7px 11px',borderRadius:'8px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
         boxShadow:'0 10px 26px rgba(0,0,0,0.30), 0 2px 6px rgba(0,0,0,0.18)',transform:'rotate(-1.3deg)',opacity:0.96,
         display:'flex',flexDirection:'column',gap:'2px'}},
