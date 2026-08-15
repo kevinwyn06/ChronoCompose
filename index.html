@@ -736,6 +736,12 @@ class Component extends DCLogic {
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
     multitask:false, /* PP-EXT V2.4: OFF = strict single timer (starting one stops every other). ON restores the legacy concurrent-timer behavior. Switching the ACTIVE task stops only the prior active either way. */
     eisenhowerUrgentDays:2, /* PP-EXT V2.9 §3: a task due within this many days counts as URGENT in the Eisenhower matrix (overdue and today-in-window are always urgent). The urgency axis is derived; importance comes from `priority`. */
+    criticalPath:false, /* PP-EXT (2026-08-13b): critical-path highlighting is OPT-IN. Owner: "I don't think
+       critical paths are going to be helpful to the average user", and the Gantt bar already stacks five
+       paint channels. This owned key is one of TWO sources gating `_showCP` — the other is the Design prop
+       `showCriticalPath` (default true, declared in the data-props JSON). BOTH must be on to paint. The
+       default cannot live in the props JSON: that is Design-owned and a Direction B pull would clobber it.
+       See architecture/ui-runtime.md § "Gantt bar legend". */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
     notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true, pomodoro:true }, /* PP-EXT Phase 8/10: per-trigger toggles; only fire once OS permission is granted (opt-in) */
@@ -5591,12 +5597,40 @@ class Component extends DCLogic {
     const d1=Math.min(tl.days,Math.ceil((el.scrollLeft+el.clientWidth)/dayW)+buf);
     return {d0,d1};
   }
+  /* PP-EXT (2026-08-13b): TWO-SOURCE GATE for critical-path PAINT. Owner: "I don't think critical paths
+     are going to be helpful to the average user", so the channel is opt-in and the default Gantt bar
+     carries four paint channels instead of five.
+
+     Both sources must agree before anything is painted red:
+       1. `settings.criticalPath` — the OWNED DEFAULT_SETTINGS key, default FALSE. This is the user toggle
+          (Settings › General › "Highlight critical path").
+       2. `props.showCriticalPath` — the DESIGN prop from the data-dc-script data-props JSON, default true.
+          It stays the Design-side kill switch.
+
+     DO NOT collapse this into one flag, and DO NOT move the owner's default into the props JSON instead:
+     that JSON is Design-owned, so the next Direction B pull (DESIGN_WORKFLOW.md) would restore
+     `default:true` and silently turn the channel back on for every user.
+
+     Only DRAWING is gated. `computeCPM` still runs and `_cpm` is still built, so slack, ordering and
+     scheduling are untouched. Consumers: the bar fill, the sheet row's left inset, the milestone diamond
+     colour, and the dependency-arrow accent — all read `_showCP`. */
+  cpDisplayOn(){
+    if(this.props && this.props.showCriticalPath===false) return false;
+    return !!(this.state && this.state.settings && this.state.settings.criticalPath);
+  }
   /* /PP-EXT */
 
   /* ================= RENDER ================= */
   renderVals(){
     const accent = this.props.accent || '#3b82f6';
-    const showCP = this.props.showCriticalPath !== false;
+    /* PP-EXT (2026-08-13b): TWO-SOURCE GATE — critical-path paint requires BOTH the owned user setting
+       (`settings.criticalPath`, DEFAULT_SETTINGS default false) AND the Design prop not being explicitly
+       disabled. Do NOT collapse this into one flag and do NOT flip the props-JSON default instead: the
+       props JSON is Design-owned and the next Direction B pull would restore `default:true`, silently
+       turning the channel back on for everyone. The prop stays the Design-side kill switch; the setting is
+       the user's opt-in. Only DRAWING is gated — computeCPM/_cpm still run, so slack and ordering are
+       unaffected. See architecture/ui-runtime.md § "Gantt bar legend". */
+    const showCP = this.cpDisplayOn();
     this.rowH = this.ROWH[this.state.rowMode] || 40;
     this._accent = accent; this._showCP = showCP;
     /* PP-EXT: archived tasks are ALWAYS hidden from the board (they live on the Archive page). The filtered
@@ -7683,6 +7717,11 @@ class Component extends DCLogic {
     const paneGeneral=tab!=='general'?null:h(React.Fragment,{},
       row('Show years in dates', toggle(this.state.showYears,()=>this.setState(s2=>({showYears:!s2.showYears})))),
       row('Light mode', toggle(this.state.theme==='light',()=>this.toggleTheme())),
+      /* PP-EXT (2026-08-13b): critical-path paint is opt-in (default off). Sits with the other display
+         switches because it changes only what is drawn, never what is scheduled. */
+      row(h('span',{style:{display:'flex',alignItems:'center'}},'Highlight critical path',
+          this.infoNote('Off (default): Gantt bars use their normal colour. On: tasks whose dependency chain drives the project end date are painted red, and their dependency arrows are accented. Display only — it never changes scheduling, slack, or ordering.')),
+        toggle(!!s.criticalPath,()=>this.saveSettings({criticalPath:!s.criticalPath}))),
       h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'12px 0',borderBottom:'1px solid var(--modal-border)'}},
         h('span',{style:{fontSize:'13px',color:'var(--text-2)'}},'Row density'),
         h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'8px',padding:'2px'}},

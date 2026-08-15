@@ -123,7 +123,7 @@ them together, and because two of them collide.
 | Shape | Rounded rectangle | Ordinary task; width = start → due |
 | | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
 | | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px) |
-| Fill | Red (`--danger`) | On the critical path (only while CP display is on) |
+| Fill | Red (`--danger`) | On the critical path — **off by default**, see below |
 | | Green (`--success-strong`) | 100% done |
 | | Accent | Everything else. **Not** priority and **not** tag |
 | Progress | Lighter overlay from the left edge | % done |
@@ -135,6 +135,34 @@ them together, and because two of them collide.
 | | `💤` top-right | …because it is snoozed |
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
+
+**Critical path is a toggle, default OFF (2026-08-13b).** Owner instruction — *"I don't think critical
+paths are going to be helpful to the average user"* — and the direct answer to the "too much visual
+information" note above: one of the five channels is now opt-in, so the default bar carries four.
+`_showCP` comes from `cpDisplayOn()`, which is gated on **two** sources and requires **both**:
+
+- `settings.criticalPath` — the owned `DEFAULT_SETTINGS` key, default `false`, surfaced as *Highlight
+  critical path* in Settings › General beside the other display switches.
+- `props.showCriticalPath` — the **Design** prop declared in the `data-dc-script data-props` JSON, whose
+  default is `true` and which stays the Design-side kill switch (an explicit `false` vetoes the setting).
+
+**Do not collapse these into one flag**, and do not "simplify" the owner's default into the props JSON
+instead. That JSON is Design-owned, so the next Direction B pull (`DESIGN_WORKFLOW.md`) would restore
+`default:true` and silently turn the channel back on for every user. The two flags answer different
+questions: the prop asks *may this app draw critical paths at all*, the setting asks *does this user want
+them*.
+
+The toggle changes only what is **drawn** — `computeCPM` still runs and `_cpm` is still built, so nothing
+about scheduling, slack or ordering depends on it. The channel it gates is not just the bar fill: the
+sheet row's left inset, the milestone diamond colour, and the dependency-arrow accent all read `_showCP`.
+The detail panel's "critical path / Xd slack" readout is deliberately **not** gated — it is a labelled
+text field the user opened on purpose, not ambient paint.
+
+Pinned by `tests/critical-path-toggle.test.js` (the gate's truth table, and that `computeCPM` is
+identical either way) and `tests/e2e/critical-path-toggle.spec.js` (the paint, on a real mount). Note for
+future test authors: `tests/_load.js`'s `make()` passes `showCriticalPath:true`, which used to be enough
+to paint and no longer is — a test that wants CP paint must **opt in explicitly** with
+`c.state.settings.criticalPath = true` rather than weakening the gate.
 
 **Known collision, not yet resolved:** the two hatches read alike at a glance and mean unrelated things —
 −45° accent = collapsed repeat, +45° gold = not in today. Logged in `tasks.md`.
