@@ -114,32 +114,31 @@ the ambient one is the redundant copy, regardless of how rare the state is.
 
 ### Gantt bar legend
 
-Six independent channels stack on one bar, which is the source of the owner's 2026-08-13 note that there
-is *"way too much visual information to decode intuitively"*. Recorded here because nothing else states
-them together, and because two of them collide.
+**Five** independent channels stack on one bar. The owner's 2026-08-13 note that there is *"way too much
+visual information to decode intuitively"* has been answered twice since: critical path became a
+default-off toggle, and the whole **in-today** channel was deleted outright (see below). One channel was
+added back on 2026-08-14 for the reason given next. Recorded here because nothing else states them
+together — and the two 45° hatches no longer collide, because there is only one hatch left.
 
-**Why a sixth was added on 2026-08-14, against that note.** Dependency scheduling now propagates from a
+**Why one was added on 2026-08-14, against that note.** Dependency scheduling now propagates from a
 task's *effective* end, so a bar can move **on its own** as days pass with its predecessor unfinished (see
 `scheduling.md`). Unmarked, that is a silent background rewrite of the user's plan — strictly worse than
 one more channel. The treatment is deliberately a **shape no other channel uses**: it draws *below* the
-bar, where nothing else draws, so it cannot be confused with the two 45° hatches that already collide with
-each other, and it is on the one axis (vertical position relative to the bar) the legend had left free.
+bar, where nothing else draws, so it cannot be confused with the remaining −45° recurrence hatch, and it is
+on the one axis (vertical position relative to the bar) the legend had left free.
 
 | Channel | Look | Meaning |
 |---|---|---|
 | Shape | Rounded rectangle | Ordinary task; width = start → due |
 | | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
-| | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px) |
+| | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px). Now the **only** hatch on the chart |
 | Fill | Red (`--danger`) | On the critical path — **off by default**, see below |
 | | Green (`--success-strong`) | 100% done |
 | | Accent | Everything else. **Not** priority and **not** tag |
 | Progress | Lighter overlay from the left edge | % done |
 | Ghosting | Solid fill + border + shadow | Both dates are real |
 | | Colour dissolving to transparent with a **dotted outline** fading in | Half-ghost — one date only. The **solid bordered edge is the real one** |
-| | Flat grey, dotted all round, no shadow | Double-ghost — neither date set |
-| In today | **+45° gold hatch**, whole bar at `BAR_OPTED_OUT_OPACITY` | Not in today's plan |
-| | `☐` top-right | …because it is unpressed/undecided |
-| | `💤` top-right | …because it is snoozed |
+| | **Symmetric fade** — transparent → `--ghost-core` at the centre → transparent — dotted all round, no shadow | Double-ghost — neither date set. Neither edge is committed, so neither may look it |
 | Displaced | **Dashed `--warn` rule under the bar's full width** + a `»` glyph at its left | `autoSchedule` moved this bar forward because a predecessor is **overdue and unfinished** — not because the user dragged it. Tooltip names the amount: *"pushed Nd by an overdue predecessor"*. Driven by `_schedDisplaced` |
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
@@ -147,7 +146,7 @@ each other, and it is on the one axis (vertical position relative to the bar) th
 
 **Critical path is a toggle, default OFF (2026-08-13b).** Owner instruction — *"I don't think critical
 paths are going to be helpful to the average user"* — and the direct answer to the "too much visual
-information" note above: one of the five channels is now opt-in, so the default bar carries four.
+information" note above: one of the channels is now opt-in, so the default bar carries one fewer.
 `_showCP` comes from `cpDisplayOn()`, which is gated on **two** sources and requires **both**:
 
 - `settings.criticalPath` — the owned `DEFAULT_SETTINGS` key, default `false`, surfaced as *Highlight
@@ -173,8 +172,39 @@ future test authors: `tests/_load.js`'s `make()` passes `showCriticalPath:true`,
 to paint and no longer is — a test that wants CP paint must **opt in explicitly** with
 `c.state.settings.criticalPath = true` rather than weakening the gate.
 
-**Known collision, not yet resolved:** the two hatches read alike at a glance and mean unrelated things —
-−45° accent = collapsed repeat, +45° gold = not in today. Logged in `tasks.md`.
+**The double-ghost is a symmetric gradient (2026-08-13).** It used to be flat grey. Grey said "inert";
+what it needs to say is *"we don't know either end"* — so the fill now enters from transparent at the left
+edge, reaches an accent core across the middle (`GHOST_BOTH_LO` → `GHOST_BOTH_HI`, mirrored about 50% by
+construction: `HI = 100 − LO`), and leaves to transparent at the right. The dotted outline is retained,
+unmasked, all round: it is still what marks the bar as derived rather than committed. This reads *against*
+the half-ghost deliberately — a half-ghost holds colour and a solid 1.5px border at one edge, and **that
+edge is the real date**; a double-ghost has no such edge anywhere, and its symmetry is the tell.
+
+The centre colour is `--ghost-core`, **per theme** (`rgba(91,155,240,0.52)` dark, `rgba(37,99,214,0.50)`
+light), replacing the retired `--ghost-flat`. It is a token and deliberately **not** the task's `base`
+colour: `base` encodes committed state (critical red, done green), and a bar with no dates has no such
+state to report. The per-theme split is not optional — a single rgba tuned against `#1a1a1b` washes out on
+`#fcfcfb`, which is the 2026-08-12 defect this whole area exists to prevent.
+`tests/e2e/ghost-contrast.spec.js` composites each token over `--gantt-bg` and measures the WCAG ratio in
+both themes (measured: core **dark 2.59:1 / light 2.14:1**; dots **dark 7.24:1 / light 3.70:1**; floor
+1.6:1), and rasterises the *live* bar's computed gradient to assert the two edge alphas are equal to each
+other and the centre is not.
+
+**The in-today channel is deleted from Gantt bars (2026-08-13).** The +45° gold hatch, the whole-bar
+`BAR_OPTED_OUT_OPACITY` mute, and the `☐`/`💤` top-right glyphs are all gone, along with the constant. This
+is the third application of the same rule, after V2.9 §2 and the ACTIVE-depth removal above: **a state that
+already has a dedicated per-row control does not also get an ambient channel.** `taskInclControl` sits on
+the row and says exactly this, so the bar paint was the redundant copy.
+
+Only the *paint* went. The predicates are load-bearing and untouched — `isOptedOut` and `inclState` still
+drive the inclusion popover's copy, V2.1's `orderingSeam`, and `taskInclControl` itself. The month
+calendar's day chips keep their own muted-chip treatment; that is a different surface, with no per-chip
+control on it to be redundant with.
+
+**The hatch collision logged in `tasks.md` is resolved by this deletion.** The two hatches read alike at a
+glance and meant unrelated things — −45° accent = collapsed repeat, +45° gold = not in today. Deleting the
+gold one leaves exactly one hatch on the chart, so there is nothing left to confuse it with, and neither
+hatch had to be retuned.
 
 **Inclusion click rule (2026-08-12).** Clicking the glyph on an **unpressed** row includes it directly —
 that state's popover held exactly one action, making it a confirmation dialog attached to a checkbox. The

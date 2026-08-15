@@ -47,7 +47,12 @@
      used unchanged in BOTH themes — which is why the owner read it as washed out in each ("greyish and
      just hard on the eyes whether in light or dark mode"). Now a token per theme, and considerably more
      opaque: a derived date is meant to look derived, not to look absent. */
-  --ghost-flat:rgba(160,174,192,0.34);--ghost-dots:rgba(198,208,222,0.78);
+  /* PP-EXT (owner 2026-08-13): `--ghost-flat` is retired and replaced by `--ghost-core`, the CENTRE
+     colour of the double-ghost's symmetric gradient (transparent → core → transparent). Flat grey said
+     "inert"; an accent core that fades out on BOTH sides says "we don't know either end", which is the
+     actual meaning, and keeps the half-ghost's rule intact — a solid bordered edge is the real one, and
+     a double-ghost has neither. Per theme, never one rgba: see the note this replaces. */
+  --ghost-core:rgba(91,155,240,0.52);--ghost-dots:rgba(198,208,222,0.78);
   /* PP-EXT (owner 2026-08-13b): section-header band. It used to paint --top-bg, which is four units from
      --sheet-bg here, so the band was carried entirely by a hairline rule instead of by a surface. Per
      theme, deliberately NOT one shared rgba — that is exactly the 2026-08-12 ghost-contrast defect. */
@@ -76,7 +81,9 @@
   --bar-ring:rgba(0,0,0,0.5);
   /* PP-EXT (owner 2026-08-12): see the dark-theme note. A grey that reads on #191919 disappears on
      white, so the light values are DARKER rather than the same rgba at a different alpha. */
-  --ghost-flat:rgba(90,105,130,0.44);--ghost-dots:rgba(71,85,105,0.72);
+  /* PP-EXT (owner 2026-08-13): `--ghost-core` — same role as the dark-theme note, deeper blue because
+     a mid blue at 50% alpha over #fcfcfb is a pastel. */
+  --ghost-core:rgba(37,99,214,0.50);--ghost-dots:rgba(71,85,105,0.72);
   /* PP-EXT (owner 2026-08-13b): see the dark-theme note. Sheet rows are white here, so the band goes
      DARKER; the dark theme's lighter grey would be invisible against white. */
   --sec-head-bg:#eeedea;--sec-head-border:#dcdbd6;
@@ -449,10 +456,15 @@ class Component extends DCLogic {
     this.GHOST_DOTS_HOLD = 40;       // % nearest the committed edge where the dotted outline is fully hidden
     this.GHOST_DOTS_FADE = 85;       // % where the dotted outline reaches full opacity
     /* Theme tokens, not a literal: one hardcoded rgba cannot serve a #191919 and a #ffffff chart. */
-    this.GHOST_FLAT = 'var(--ghost-flat)'; // double-ghost fill: nothing is committed, so nothing is anchored
-    /* Whole-bar mute for work that is not in today. Named because it MULTIPLIES with the ghost fade
-       above — the two were tuned independently and compounded on the bars the owner flagged. */
-    this.BAR_OPTED_OUT_OPACITY = 0.75;
+    /* PP-EXT (owner 2026-08-13): the double-ghost is a SYMMETRIC gradient — transparent at both edges,
+       accent core in the middle — replacing the old flat grey. The half-ghost ramp above encodes "the
+       solid bordered edge is the real one"; a double-ghost has no real edge, so neither side may look
+       committed, and a symmetric fade is the only shape that says that. Stops are percentages of bar
+       width and are mirrored about 50% by construction (HI = 100 − LO). The dotted outline stays
+       unmasked, all round, at full opacity — it is what still marks the bar as derived. */
+    this.GHOST_BOTH_CORE = 'var(--ghost-core)'; // centre colour; per-theme token, never a literal
+    this.GHOST_BOTH_LO = 38;         // % where the core reaches full opacity coming in from the left
+    this.GHOST_BOTH_HI = 62;         // % where it starts fading back out to the right (= 100 − LO)
     /* PP-EXT (V1.2 round3): a ghost's derived extent is ALWAYS 1 day in data (ghostSpan is pure and now feeds
        scheduling — making it zoom-dependent would mean zooming the chart changes what gets allotted). But 1 day
        at year zoom is a sliver, so the DRAWING gets a floor of `max(1 day, GHOST_VIEW_FRAC × visible width)`.
@@ -1750,9 +1762,13 @@ class Component extends DCLogic {
   isMilestone(t){ return t.type==='Milestone'; } /* PP-EXT: internal milestone marker (created via gantt-header click / quick-add; no longer a user-selectable mode) */
   /* PP-EXT V2.1: a non-active task is opted out of TODAY when it is unpressed or an active snooze covers
      today. This predicate is shared by scheduling and render surfaces — table icon, detail-panel
-     status, Gantt-bar mute, and month-chip mute — so they can never
+     status, and month-chip mute — so they can never
      disagree about what "opted out" means (design doc §3). Snoozing is a today-only concept — it never
-     factors into isActiveOn's "other day" branch. */
+     factors into isActiveOn's "other day" branch.
+     PP-EXT (owner 2026-08-13): the GANTT-BAR mute has left that list. The whole not-in-today paint
+     channel (gold hatch, whole-bar opacity, ☐/💤 glyph) was deleted from the bar because
+     `taskInclControl` on the row already reports this state. The PREDICATE is unchanged and still
+     load-bearing — scheduling, the inclusion popover, and `orderingSeam` all read it. */
   isOptedOut(t){
     if(this.isActiveTask(t)) return false;
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
@@ -2502,7 +2518,11 @@ class Component extends DCLogic {
   ganttViewW(){ const el=this.ganttScrollEl; return (el && el.clientWidth) || 0; }
   ghostPaint(o, base){
     if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return null;
-    if(o.ghostStart && o.ghostEnd) return {anchor:null, fill:this.GHOST_FLAT, mask:null};
+    /* PP-EXT (owner 2026-08-13): double-ghost = symmetric fade. `anchor:null` and `mask:null` are
+       unchanged — no edge is bordered, and the dots stay unmasked all round — only the fill differs. */
+    if(o.ghostStart && o.ghostEnd) return {anchor:null, mask:null,
+      fill:'linear-gradient(to right, transparent 0%, '+this.GHOST_BOTH_CORE+' '+this.GHOST_BOTH_LO+'%, '
+        +this.GHOST_BOTH_CORE+' '+this.GHOST_BOTH_HI+'%, transparent 100%)'};
     const dir = o.ghostEnd ? 'to right' : 'to left';   /* dissolve AWAY from the committed edge */
     return {
       anchor: o.ghostEnd ? 'l' : 'r',
@@ -11582,14 +11602,14 @@ class Component extends DCLogic {
     const displaced = !t.recur && dispMs>0;
     const dispDays = displaced ? Math.max(1, Math.round(dispMs/this.DAY)) : 0;
     const displacedTitle = displaced ? (' · pushed '+dispDays+'d by an overdue predecessor') : '';
-    /* PP-EXT Track B: whole-bar mute — composes with ghost styling rather than replacing it (a dateless
-       task can now also be opted out under the unified model). Computed live per render (like the
-       existing overdue-red check), not baked into the cached _occById structural block, so it reacts
-       instantly to a popover action without a full structural recompute. */
-    const optedOut = !this.isMilestone(t) && this.isOptedOut(t);
-    /* PP-EXT V2.11: was ⊘ ("off"). Opted-out-but-not-snoozed is now simply unpressed, and ⊘ overstated it. */
-    const optedOutGlyph = optedOut ? (this.inclState(t)==='snoozed' ? '💤' : '☐') : null;
-    const optedOutHatch = 'repeating-linear-gradient(45deg, rgba(184,134,11,0.35) 0 3px, transparent 3px 9px)';
+    /* PP-EXT (owner 2026-08-13): the NOT-IN-TODAY channel is deleted from the Gantt bar entirely — the
+       +45° gold hatch, the whole-bar BAR_OPTED_OUT_OPACITY mute, and the ☐/💤 top-right glyphs all go.
+       Same shape as V2.9 §2 and the 2026-08-13 ACTIVE-depth removal: a state that already has a
+       dedicated per-row control (`taskInclControl`) does not also get an ambient channel. The
+       PREDICATES stay — `isOptedOut`/`inclState` still feed the popover copy, V2.1's `orderingSeam`,
+       and the row control itself; only the paint is gone. Side effect worth naming: the gold +45° hatch
+       was the other half of the hatch collision logged in `tasks.md` (−45° accent = collapsed repeat),
+       so that collision is resolved by deletion rather than by retuning either hatch. */
     const key='bk'+t.id+'_'+o.idx;
     const recurring=!!t.recur;
     const md=(mode)=>e=>this.startBarDrag(e,t,o.idx,mode);
@@ -11654,21 +11674,18 @@ class Component extends DCLogic {
     /* PP-EXT (V1.2 round2 — anchored ghosts): a derived span no longer greys out WHOLESALE. The committed
        edge keeps the task's real colour and a solid border; the bar dissolves toward the derived edge while
        a dotted outline fades in over the same ramp (see ghostPaint). A double-ghost has no committed edge,
-       so it stays flat grey, dotted all round. Data stays null either way; dragging an edge writes a real
-       date via the existing bar-drag machinery (de-ghosts that edge). */
+       so it gets a SYMMETRIC fade — transparent → accent core → transparent — dotted all round. Data stays
+       null either way; dragging an edge writes a real date via the existing bar-drag machinery. */
     const gp=ghost?this.ghostPaint(o, base):null;
     const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
-    const optedOutTitle = optedOut ? (' · '+(this.inclState(t)==='snoozed'?'snoozed':'not in today')) : '';
-    /* PP-EXT (owner 2026-08-12, contrast): 0.55 → BAR_OPTED_OUT_OPACITY. This multiplies with the ghost
-       fade rather than replacing it, so a not-in-today ghost — which is most of what the owner was
-       looking at — was being dulled twice over. Opted-out still reads as recessive; it no longer
-       compounds into illegibility. */
-    return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
-        opacity:optedOut?this.BAR_OPTED_OUT_OPACITY:1}}),
+    return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5}}),
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,
-        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+optedOutTitle+displacedTitle,
+        /* PP-EXT (owner 2026-08-13): `optedOutTitle` dropped with the rest of the not-in-today channel;
+           `displacedTitle` stays — displacement is an unattributed background rewrite, not a user state
+           already reported by a row control. */
+        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+displacedTitle,
         style:{position:'absolute',inset:0,
-          background: optedOut ? (optedOutHatch+', '+(gp?gp.fill:base)) : (gp?gp.fill:base),
+          background: gp?gp.fill:base,
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
           /* PP-EXT (V1.2 round2): ONLY the committed edge is bordered here, in the task's own colour — the
              derived edges are drawn by the masked dotted outline below, so no border runs full-width. */
@@ -11682,8 +11699,7 @@ class Component extends DCLogic {
            exactly as the colour fades out. Unmasked on a double-ghost — dotted all round at full opacity. */
         gp?h('div',{style:{position:'absolute',inset:0,borderRadius:'var(--r-1)',boxSizing:'border-box',
           border:'2px dotted var(--ghost-dots)',pointerEvents:'none',
-          WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null,
-        optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
+          WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null),
       /* PP-EXT (deps gap 1): the barrier. Full row height so it reads as a WALL the bar is against,
          not as part of the bar; `--danger` because it is a refusal, and transient because it only exists
          while the pointer is pushing into it. */

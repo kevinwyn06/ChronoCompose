@@ -102,13 +102,27 @@ test('ghostPaint: a solid bar gets no ghost paint at all', () => {
   assert.strictEqual(c.ghostPaint(null, BASE), null);
 });
 
-test('ghostPaint: a double-ghost is flat grey with an unmasked (full-opacity) dotted outline', () => {
+/* Owner 2026-08-13: the double-ghost was flat grey; it is now a SYMMETRIC gradient — transparent at both
+   edges, accent core in the middle. The old contract ("must not fake an anchor with a ramp") is retired,
+   not weakened: a ramp is now the point. What replaces it is the symmetry assertion, which is the property
+   that actually distinguishes a double-ghost from a half-ghost — a half-ghost's ramp is one-directional and
+   holds colour AT an edge, so it can never be mistaken for this one. */
+test('ghostPaint: a double-ghost fades in from both edges to an accent core, dots unmasked', () => {
   const c = make();
   const p = c.ghostPaint(occ(true, true), BASE);
   assert.strictEqual(p.anchor, null, 'nothing is committed, so no edge is anchored');
-  assert.strictEqual(p.fill, c.GHOST_FLAT);
   assert.strictEqual(p.mask, null, 'no mask ⇒ dotted all round at full opacity');
-  assert.ok(!/linear-gradient/.test(p.fill), 'a double-ghost must not fake an anchor with a ramp');
+  assert.ok(/^linear-gradient\(to right,/.test(p.fill), 'a single horizontal ramp');
+  assert.strictEqual(c.GHOST_BOTH_HI, 100 - c.GHOST_BOTH_LO, 'the stops are mirrored about the centre');
+  assert.ok(c.GHOST_BOTH_LO < 50, 'the core plateau straddles the middle rather than sitting off to a side');
+  assert.ok(/transparent 0%/.test(p.fill) && /transparent 100%\)$/.test(p.fill),
+    'BOTH edges are fully transparent — neither end may read as committed');
+  assert.ok(p.fill.indexOf(c.GHOST_BOTH_CORE + ' ' + c.GHOST_BOTH_LO + '%') > -1
+    && p.fill.indexOf(c.GHOST_BOTH_CORE + ' ' + c.GHOST_BOTH_HI + '%') > -1,
+    'the core is held across the middle, from LO to HI');
+  assert.ok(p.fill.indexOf(BASE) === -1,
+    'the core is the theme token, not the task colour: a double-ghost has no committed state to colour');
+  assert.ok(/^var\(--/.test(c.GHOST_BOTH_CORE), 'per-theme token, never one rgba for both themes');
 });
 
 test('ghostPaint: a half-ghost (start set) anchors LEFT and dissolves to the right', () => {
