@@ -32,7 +32,41 @@ flagged ghost. `t.start`/`t.end` stay null — dragging an edge commits a real d
 bar-drag path. `ghostDrawSpan` skips its view-fraction floor for any occurrence carrying `occ`, since a
 series tiles and does not need any one member enlarged.
 
-`autoSchedule` and `computeCPM`/`computeSlack` handle dependency-driven scheduling and critical path.
+**Dependency scheduling** (2026-08-14). `autoSchedule` pushes each task's dates so a finish-to-start edge
+is never violated, and the rule is `Math.max(t.start, floor)` — strictly monotone, so a predecessor moved
+*earlier* never drags a successor back, and slack absorbs a later move until it reaches 0. Propagation
+walks successors only, so dragging a successor never moves its predecessor. Two things were added on
+2026-08-14 and both are pure:
+
+- **Propagation runs from the EFFECTIVE end, not the planned one.** `effectiveEndOf(t, now)` is the end a
+  successor is actually anchored to: for an **unfinished, non-recurring** task whose planned end is already
+  in the past, it is at least the start of today, because the work has not happened and the old date is
+  fiction. The difference between `plannedEndOf` and `effectiveEndOf` is the **overrun**, and it absorbs
+  slack and pushes successors exactly as a later drag does. Three cases deliberately keep the planned end:
+  a **finished** task (`doneOn` — it really did end there), a **recurring** task (its `currentOcc(t).end` is
+  rule-driven, and the carve-out that a series is never itself moved is unchanged), and anything
+  unscheduled. `now` is an argument, so every rung is unit-testable without clock games.
+- **A drag-time clamp.** `depFloorFor(id, tasks, now, skip)` is the earliest start the dependencies permit,
+  and it is the **single source** the clamp and `autoSchedule` both read. `startBarDrag` captures the floor
+  once at pointer-down (skipping the dragged subtree, which moves with the pointer); `clampBarToDeps(mode,
+  r, floor)` applies it per mousemove. The clamp is an **affordance, not a second source of truth** —
+  `autoSchedule` inside `commit()` remains the authority, and because both compute the same floor it has
+  nothing left to correct on a clamped drop, so there is no rubber-band jump on release. An `end`-edge drag
+  is never clamped (it does not move the start), and a `start`-edge drag that would invert the bar is left
+  alone rather than emitting a bad span.
+
+**Named consequence, handled rather than hidden:** with the effective end in play, a successor's dates move
+*on their own* as days pass with its predecessor unfinished — a background rewrite of the user's plan.
+`autoSchedule` therefore publishes `this._schedDisplaced` (`{taskId: displacementMs}`), the credit carried
+down the topo order so a task three links from the overdue one still knows why it moved, and `ganttBlock`
+gives a displaced bar its own visual channel so the movement is attributable. See the Gantt bar legend in
+`ui-runtime.md`.
+
+`computeCPM`/`computeSlack` handle the critical path and float. **They disagree with each other and always
+have:** `computeCPM` builds its network from *durations starting at time zero* and ignores actual dates,
+while `computeSlack` works from real timestamps — so the red critical-path paint and the panel's "Xd slack"
+readout can contradict each other on the same task. Out of scope for the 2026-08-14 pass; logged rather
+than silently widened.
 Scheduling shapes are derived from dates, planned duration, and whether each edge has a user-entered clock.
 The unrelated manual drag-pin remains, now as a LIST on `pin`: `[{day, start, dur, partial?}]`. The drag unit
 is the timeline CHUNK, not the task, so a task that packs into several chunks (interrupted by an appointment,

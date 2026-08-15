@@ -4409,7 +4409,55 @@ class Component extends DCLogic {
      successors forward — while a predecessor moved earlier never drags a successor back. Runs in `commit` and
      on drag-finalize, so scheduling is automatic and undoable. Recurring tasks anchor their successors (via the
      current occurrence's end) but are not themselves moved — their dates are rule-driven. Mutates `tasks`. */
-  autoSchedule(tasks){
+  /* PP-EXT (deps gap 2): PURE. The PLANNED anchor — the end a successor would be held to if nothing had
+     overrun. Recurring tasks anchor through the current occurrence, exactly as before. */
+  plannedEndOf(t){ if(!t || !this.isScheduled(t)) return null; return t.recur ? this.currentOcc(t).end : t.end; }
+  /* PP-EXT (deps gap 2): PURE. The EFFECTIVE / PROJECTED end — what a successor is actually anchored to.
+     An unfinished task whose planned end is already in the past has not ended: the plan is fiction, and
+     the gap between its planned end and today is an OVERRUN the successors have to absorb. So the
+     projected end of unfinished, overdue work is at least the start of today; the difference is what
+     propagates. Three things deliberately keep their planned end:
+       · a FINISHED task (`doneOn`) — it really did end there;
+       · a RECURRING task — its dates are rule-driven and the V1 carve-out that it is never moved stands;
+       · anything unscheduled — no end to project.
+     `now` is injectable so every rung of this is unit-testable without clock games. */
+  effectiveEndOf(t, now){
+    if(!t || !this.isScheduled(t)) return null;
+    if(t.recur) return this.currentOcc(t).end;
+    if(t.end==null) return null;
+    const today=this.startOfDay(now==null?Date.now():now);
+    if(this.doneOn(t, today)) return t.end;
+    return t.end<today ? today : t.end;
+  }
+  /* PP-EXT (deps gap 1): PURE. The earliest start a finish-to-start dependency permits for `id`, or null
+     when it has no scheduled predecessors. THIS IS THE SINGLE SOURCE the drag-time clamp and
+     `autoSchedule` both read, so the affordance and the authority cannot disagree — the clamp is UI, the
+     post-commit `autoSchedule` remains the authority, and they compute the same number from the same
+     helper. `skip` ids are ignored: a dragged subtree moves with the pointer and must not be its own floor. */
+  depFloorFor(id, tasks, now, skip){
+    const byId={}; tasks.forEach(t=>byId[t.id]=t);
+    const t=byId[id]; if(!t) return null;
+    let lb=-Infinity;
+    (t.deps||[]).forEach(d=>{ const p=this.depId(d);
+      if(p===id || !byId[p] || (skip && skip.indexOf(p)>=0)) return;
+      const e=this.effectiveEndOf(byId[p], now); if(e!=null) lb=Math.max(lb, e); });
+    return isFinite(lb) ? lb : null;
+  }
+  /* PP-EXT (deps gap 1): PURE. Clamp a proposed bar-drag result so the dragged task cannot cross its
+     dependency floor mid-gesture. `mode:'end'` never moves the start, so it is never clamped. A 'start'
+     drag that would invert the bar is left alone (nothing to clamp toward); a 'move' carries the whole
+     span by the reduced delta. Returns `clamped` so the render can show the barrier at the moment it bites. */
+  clampBarToDeps(mode, r, floor){
+    const out={start:r.start, end:r.end, clamped:false};
+    if(floor==null || mode==='end' || r.start==null || !(r.start<floor)) return out;
+    if(mode==='start'){
+      if(r.end==null || floor > r.end-this.DAY) return out;
+      return {start:floor, end:r.end, clamped:true};
+    }
+    const d=floor-r.start;
+    return {start:floor, end:(r.end==null?null:r.end+d), clamped:true};
+  }
+  autoSchedule(tasks, now){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
     const predsOf=id=>((byId[id].deps||[]).map(d=>this.depId(d)).filter(p=>byId[p] && p!==id));
     const indeg={}, succ={};
@@ -4419,15 +4467,35 @@ class Component extends DCLogic {
     const order=[];
     while(q.length){ const id=q.shift(); order.push(id); (succ[id]||[]).forEach(s=>{ if(--indeg[s]===0) q.push(s); }); }
     this._schedWarn = order.length!==tasks.length; // leftover nodes ⇒ a dependency cycle (left unscheduled)
-    const endOf=t=>{ if(!this.isScheduled(t)) return null; return t.recur ? this.currentOcc(t).end : t.end; };
+    /* PP-EXT (deps gap 2): `over[id]` is how much of a task's anchoring end is attributable to an overrun
+       — its own (unfinished and past due) or one inherited from upstream. Carrying it down the topo order
+       is what lets a task three links from the overdue one still say "I moved 3 days because of that",
+       instead of the credit evaporating at the first hop (where the predecessor's mutated end already
+       equals its projected end). */
+    const over={};
+    const ownOver=t=>{ const e=this.effectiveEndOf(t,now), p=this.plannedEndOf(t);
+      return (e!=null && p!=null) ? Math.max(0, e-p) : 0; };
+    const overOf=id=>(over[id]!=null ? over[id] : ownOver(byId[id]));
+    const displaced={};
     order.forEach(id=>{
       const t=byId[id]; if(!this.isScheduled(t) || t.recur) return; // recurring: rule-driven, don't move
       const ps=predsOf(id); if(!ps.length) return;
-      let lb=-Infinity; ps.forEach(p=>{ const e=endOf(byId[p]); if(e!=null) lb=Math.max(lb,e); });
-      if(!isFinite(lb)) return;
-      const dur=Math.max(0, t.end-t.start), ns=Math.max(t.start, lb);
+      let lbE=-Infinity, lbP=-Infinity;
+      ps.forEach(p=>{ const e=this.effectiveEndOf(byId[p], now); if(e==null) return;
+        lbE=Math.max(lbE, e); lbP=Math.max(lbP, e-overOf(p)); });
+      if(!isFinite(lbE)) return;
+      const dur=Math.max(0, t.end-t.start), ns=Math.max(t.start, lbE);
+      const nsP=Math.max(t.start, isFinite(lbP)?lbP:t.start);
       if(ns!==t.start){ t.start=ns; t.end=ns+dur; }
+      const disp=ns-nsP;
+      if(disp>0) displaced[id]=disp;
+      over[id] = disp>0 ? disp : ownOver(t);
     });
+    /* PP-EXT (deps gap 2, named consequence): B's dates now move on their own as days pass with A
+       unfinished. That is a background rewrite of the user's plan, so it is ATTRIBUTED rather than
+       silent — this map drives the displaced-bar treatment in `ganttBlock` (see the Gantt bar legend in
+       architecture/ui-runtime.md). Keyed by task id, value = ms of displacement. */
+    this._schedDisplaced=displaced;
   }
   /* Total float from the ACTUAL dates: latest a task can start without pushing the project's end (max end),
      minus its real start, in days. ~0 ⇒ on the critical chain. Read by the detail panel. Cycle-guarded. */
@@ -4551,6 +4619,14 @@ class Component extends DCLogic {
     const oStart = (occ.ghost && occ.ghostStart) ? dw.start : occ.start;
     const oEnd   = (occ.ghost && occ.ghostEnd)   ? dw.end   : occ.end;
     this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:oStart,origEnd:oEnd,dataStart:task.start,dataEnd:task.end,subs};
+    /* PP-EXT (deps gap 1): capture the dependency floor ONCE, at pointer-down, from the same
+       `depFloorFor` the post-commit `autoSchedule` uses — so the drag-time clamp and the authority cannot
+       produce different numbers. Predecessors do not move during this gesture; the dragged subtree does,
+       so it is skipped (a child predecessor must not become its own floor). Recurring bars are never
+       moved by `autoSchedule`, so clamping one would be a constraint nothing enforces: skipped. */
+    this.dragState.depFloor = task.recur ? null
+      : this.depFloorFor(task.id, this.state.tasks, null, [task.id].concat(subs?Object.keys(subs):[]));
+    this.dragState.clamped=false;
     if(!task.recur) this.snapshot();
     this.setState({selectedIds:[task.id]});
   }
@@ -4920,14 +4996,25 @@ class Component extends DCLogic {
       if(dm!==0) this.dragMoved=true;
       d.deltaMs=dm;
       if(d.recurring){ this.forceUpdate(); return; }
+      /* PP-EXT (V1.3): ghost-aware — an untouched ghost edge stays null; only the dragged edge de-ghosts. */
+      const r=this.barDragEdit(d.mode, dm, d.origStart, d.origEnd, d.dataStart, d.dataEnd);
+      /* PP-EXT (deps gap 1): CLAMP DURING THE DRAG. Before this, a successor could be dragged straight
+         through its predecessor and was only rubber-banded back by `autoSchedule` on drop — the end state
+         was right but the interaction was an unexplained jump with no feedback at the moment the
+         constraint bit. The bar now stops at the floor and says so (`d.clamped` → the barrier in
+         `ganttBlock`). This is an AFFORDANCE, not a second source of truth: the floor comes from
+         `depFloorFor`, the same helper `autoSchedule` reads, and `autoSchedule` still runs on drop. */
+      const cl=this.clampBarToDeps(d.mode, r, d.depFloor);
+      d.clamped=cl.clamped;
+      /* The subtree must travel the CLAMPED delta, not the raw one, or a clamped parent drag would tear
+         its children off the parent's span. */
+      const sdm=(cl.clamped && r.start!=null && cl.start!=null) ? dm+(cl.start-r.start) : dm;
       const tasks=this.state.tasks.map(t=>{
         if(t.id!==d.id){
-          if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+dm,end:d.subs[t.id].e+dm}; /* PP-EXT: subtree follows */
+          if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+sdm,end:d.subs[t.id].e+sdm}; /* PP-EXT: subtree follows */
           return t;
         }
-        /* PP-EXT (V1.3): ghost-aware — an untouched ghost edge stays null; only the dragged edge de-ghosts. */
-        const r=this.barDragEdit(d.mode, dm, d.origStart, d.origEnd, d.dataStart, d.dataEnd);
-        return {...t,start:r.start,end:r.end};
+        return {...t,start:cl.start,end:cl.end};
       });
       this.setState({tasks});
     } else if(this.linkState && this.bodyEl){
@@ -11479,6 +11566,22 @@ class Component extends DCLogic {
     const pctDragging = !!(this.pctDrag && this.pctDrag.moved && this.pctDrag.id===t.id && this.pctDrag.occIdx===o.idx);
     const pct=pctDragging?this.pctDrag.pct:this.occPct(t,o.idx); const done=pct>=100;
     const base = crit ? 'var(--danger)' : (done ? 'var(--success-strong)' : (this._accent||'#3f7bd6'));
+    /* PP-EXT (deps gap 1): the drag-time dependency BARRIER. Transient, and only ever on the bar the
+       pointer is holding: while the drag is pressed against its predecessor's end, a full-row-height red
+       stop rule is drawn at the bar's left edge, so the constraint is legible at the moment it bites
+       rather than being explained after the fact by a jump on release. */
+    const depClamped = !!(this.dragState && !this.dragState.recurring && this.dragState.id===t.id
+      && this.dragState.clamped && this.dragState.mode!=='end');
+    /* PP-EXT (deps gap 2, named consequence): the DISPLACED treatment. `autoSchedule` may now move this
+       bar on its own, as days pass, because a predecessor is overdue and unfinished — a background
+       rewrite of the user's plan. A displaced bar is therefore marked so the movement is attributable:
+       a dashed amber rule under the bar's full width plus a `»` push glyph, a shape no other channel
+       uses (nothing else draws below the bar). Documented in the Gantt bar legend in
+       architecture/ui-runtime.md. Recurring bars are never moved, so they are never displaced. */
+    const dispMs = (this._schedDisplaced||{})[t.id]||0;
+    const displaced = !t.recur && dispMs>0;
+    const dispDays = displaced ? Math.max(1, Math.round(dispMs/this.DAY)) : 0;
+    const displacedTitle = displaced ? (' · pushed '+dispDays+'d by an overdue predecessor') : '';
     /* PP-EXT Track B: whole-bar mute — composes with ghost styling rather than replacing it (a dateless
        task can now also be opted out under the unified model). Computed live per render (like the
        existing overdue-red check), not baked into the cached _occById structural block, so it reacts
@@ -11563,7 +11666,7 @@ class Component extends DCLogic {
     return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5,
         opacity:optedOut?this.BAR_OPTED_OUT_OPACITY:1}}),
       h('div',{onMouseDown:md('move'),onContextMenu:ctx,
-        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+optedOutTitle,
+        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+optedOutTitle+displacedTitle,
         style:{position:'absolute',inset:0,
           background: optedOut ? (optedOutHatch+', '+(gp?gp.fill:base)) : (gp?gp.fill:base),
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
@@ -11581,6 +11684,17 @@ class Component extends DCLogic {
           border:'2px dotted var(--ghost-dots)',pointerEvents:'none',
           WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null,
         optedOutGlyph?h('div',{style:{position:'absolute',top:'1px',right:'3px',fontSize:'9px',lineHeight:1,pointerEvents:'none'}},optedOutGlyph):null),
+      /* PP-EXT (deps gap 1): the barrier. Full row height so it reads as a WALL the bar is against,
+         not as part of the bar; `--danger` because it is a refusal, and transient because it only exists
+         while the pointer is pushing into it. */
+      depClamped?h('div',{key:'depwall','data-dep-barrier':t.id,style:{position:'absolute',left:'-3px',
+        top:(-(this.rowH-this.barH)/2)+'px',width:'3px',height:this.rowH+'px',
+        background:'var(--danger)',borderRadius:'2px',pointerEvents:'none',zIndex:8}}):null,
+      /* PP-EXT (deps gap 2): the displaced marker — see the constants above and the legend. */
+      displaced?h('div',{key:'dispd','data-displaced':String(dispMs),style:{position:'absolute',left:0,right:0,
+        top:this.barH+'px',height:0,borderTop:'2px dashed var(--warn)',pointerEvents:'none',zIndex:6}}):null,
+      displaced?h('div',{key:'dispg',style:{position:'absolute',left:'-9px',top:'50%',transform:'translateY(-50%)',
+        fontSize:'10px',lineHeight:1,color:'var(--warn)',pointerEvents:'none',zIndex:6}},'»'):null,
       grip('l'), grip('r'), linkDot,
       /* PP-EXT (V1.5, owner 2026-07-26): the %-done handle moved OUT of the bar and UNDER it. It used to
          be a ringed disc sitting ON the fill at the progress boundary — at low % that put it near the

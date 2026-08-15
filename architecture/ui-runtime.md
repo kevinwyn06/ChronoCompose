@@ -114,9 +114,16 @@ the ambient one is the redundant copy, regardless of how rare the state is.
 
 ### Gantt bar legend
 
-Five independent channels stack on one bar, which is the source of the owner's 2026-08-13 note that there
+Six independent channels stack on one bar, which is the source of the owner's 2026-08-13 note that there
 is *"way too much visual information to decode intuitively"*. Recorded here because nothing else states
 them together, and because two of them collide.
+
+**Why a sixth was added on 2026-08-14, against that note.** Dependency scheduling now propagates from a
+task's *effective* end, so a bar can move **on its own** as days pass with its predecessor unfinished (see
+`scheduling.md`). Unmarked, that is a silent background rewrite of the user's plan — strictly worse than
+one more channel. The treatment is deliberately a **shape no other channel uses**: it draws *below* the
+bar, where nothing else draws, so it cannot be confused with the two 45° hatches that already collide with
+each other, and it is on the one axis (vertical position relative to the bar) the legend had left free.
 
 | Channel | Look | Meaning |
 |---|---|---|
@@ -133,8 +140,10 @@ them together, and because two of them collide.
 | In today | **+45° gold hatch**, whole bar at `BAR_OPTED_OUT_OPACITY` | Not in today's plan |
 | | `☐` top-right | …because it is unpressed/undecided |
 | | `💤` top-right | …because it is snoozed |
+| Displaced | **Dashed `--warn` rule under the bar's full width** + a `»` glyph at its left | `autoSchedule` moved this bar forward because a predecessor is **overdue and unfinished** — not because the user dragged it. Tooltip names the amount: *"pushed Nd by an overdue predecessor"*. Driven by `_schedDisplaced` |
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
+| | **3px `--danger` rule at the bar's left edge, full ROW height** | Dependency barrier: this drag is pressed against the predecessor's end and will go no further. Exists only while the button is held |
 
 **Critical path is a toggle, default OFF (2026-08-13b).** Owner instruction — *"I don't think critical
 paths are going to be helpful to the average user"* — and the direct answer to the "too much visual
