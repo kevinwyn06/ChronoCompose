@@ -108,7 +108,7 @@ test.describe('Gantt %-done control vs bar drag', () => {
     await page.mouse.down();
     await page.mouse.move(p.x + 2, p.y + 1); /* under the 4px threshold on both axes */
     await page.mouse.up();
-    await expect(page.getByText('% DONE'), 'the popover is still reachable by clicking').toBeVisible();
+    await expect(page.getByText('% DONE', { exact: true }), 'the popover is still reachable by clicking').toBeVisible();
   });
 
   /* ------------------------------------------------------------------------------------------------

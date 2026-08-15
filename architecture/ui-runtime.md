@@ -133,9 +133,8 @@ on the one axis (vertical position relative to the bar) the legend had left free
 | | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
 | | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px). Now the **only** hatch on the chart |
 | Fill | Red (`--danger`) | On the critical path — **off by default**, see below |
-| | Green (`--success-strong`) | 100% done |
-| | Accent | Everything else. **Not** priority and **not** tag |
-| Progress | Lighter overlay from the left edge | % done |
+| | **Green (`--success-strong`) from the left edge to `pct%`** | % done. A 100% bar is green edge to edge; a 0% bar has no green at all |
+| | Accent | The remainder. **Not** priority and **not** tag |
 | Ghosting | Solid fill + border + shadow | Both dates are real |
 | | Colour dissolving to transparent with a **dotted outline** fading in | Half-ghost — one date only. The **solid bordered edge is the real one** |
 | | **Symmetric fade** — transparent → `--ghost-core` at the centre → transparent — dotted all round, no shadow | Double-ghost — neither date set. Neither edge is committed, so neither may look it |
@@ -143,6 +142,59 @@ on the one axis (vertical position relative to the bar) the legend had left free
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
 | | **3px `--danger` rule at the bar's left edge, full ROW height** | Dependency barrier: this drag is pressed against the predecessor's end and will go no further. Exists only while the button is held |
+
+**Progress is a Fill value, not a separate channel (2026-08-15).** It used to be its own row — a flat
+`rgba(255,255,255,0.28)` veil over the bar body — and the owner could not read it: *"the contrast is not
+high enough on the left and right of the percent complete bar, especially for ghost bars which already
+have a gradient."* Two independent reasons it failed. A ghost's base is already dissolving to transparent,
+so a translucent white laid over it has almost nothing to lighten and the two halves of the bar converge;
+and the `rgba` was hardcoded, so light mode inherited a value tuned in dark.
+
+The done portion is now `--success-strong` and the remainder is the task's base colour, which **removes a
+channel rather than adding one**: green already meant "100% done" as a Fill value, and under this rule a
+100% bar is entirely green by construction, so the special case and its legend row both disappear. Both
+extremes coincide with a bar edge — the highest-contrast line on the chart — so neither needs a special
+case. What it costs, stated plainly: a green bar no longer means *finished* unless it is green edge to
+edge.
+
+`pctFillPaint(o, pct, base)` is pure — occurrence + pct + base in, `{width, background, mask, maskSize}`
+or `null` out — so the ghost × pct matrix is provable in the unit layer. **A ghost keeps its gradient
+exactly as it was**: the green receives the same ramp as the base beneath it, expressed as an alpha mask
+so `ghostPaint` remains the single definition of the shape. The mask is authored in *bar* percentages and
+painted on an element only `pct%` of the bar wide, so `maskSize` rescales it by `100/pct` — without that,
+the whole ramp compresses into the filled part and every stop lands on the wrong pixel. The V1.2 round-2
+anchor semantics are untouched: colour still sits at the committed edge and dissolves toward the derived
+one.
+
+The in-bar `n%` readout is unchanged (white with a text shadow, its own contrast rather than either
+fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, and `PCT_GRAB_PX` /
+`BAR_GRIP_PX` / `PCT_LABEL_MIN_W`.
+
+### The `% Done` column
+
+Owner, same report: *"I would prefer to add percent complete back as a column which then updates the gantt
+bars."* `colDefs()` carries `{k:'pct', w:96, l:'% Done'}`, visible by default, after `Planned → Allotted`
+and before `actions`. It hides, reorders, resizes and resets for free, because all of that machinery reads
+`colDefs()`.
+
+The cell draws a slim track under the same green-done / base-remainder rule, with the numeral on it. Two
+gestures, and the split is about what a *zero-distance* press means:
+
+- **press the track** — drag to set, and a click is the same path at zero distance. `startPctDrag(…,
+  'set')`; the drag surface is the full row height and the full cell width, so the numeral is drawn
+  *inside* the hit box rather than being a second small target (`HIT_MIN_PX` tenet).
+- **press the numeral** — `openPctPop`, for an exact typed value. It sits at the right end of the track,
+  which keeps the centre of the cell — the most natural place to click a value — on the drag path.
+
+Both write through **`setPct`**, which is occurrence-aware for repeats and funnels through one `commit()`.
+The Gantt reads the same state, so the bar updates on the same commit: there is no second write path and
+nothing to keep synchronised. Recurring tasks show `occPct(t, currentOccIdx(t))` — the same value the bar
+and the popover show, so all three agree. `mode` on `pctDrag` is the *only* difference between the two
+surfaces: `'pop'` (the Gantt band and caret) opens the popover on a click, `'set'` (the cell) resolves it
+as a value.
+
+Nothing new is persisted — `pct` is an existing field, already in `SYNC_FIELDS` — so this carries no
+fingerprint change and no migration.
 
 **Critical path is a toggle, default OFF (2026-08-13b).** Owner instruction — *"I don't think critical
 paths are going to be helpful to the average user"* — and the direct answer to the "too much visual

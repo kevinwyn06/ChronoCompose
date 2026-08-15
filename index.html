@@ -415,7 +415,7 @@ class Component extends DCLogic {
     this._syncKvSending = false;               // PP-EXT B3a: in-flight guard for the habits/journal blob flush
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
-    /* PP-EXT (V5 F13, block 26): the task sheet's own width floor. `colDefs()` totals 634px and the
+    /* PP-EXT (V5 F13, block 26): the task sheet's own width floor. `colDefs()` totals 730px (634px before `% Done`) and the
        'agenda' split defaulted to 20% (~250px at 1280) — so `Planned → Allotted`, the motto rendered
        as UI, plus every row action, sat outside the pane on first run. A percentage default cannot fix
        that, because the same percentage is too small at one window width and wasteful at another; the
@@ -1290,6 +1290,11 @@ class Component extends DCLogic {
     return [
       {k:'check',w:50,lock:true},{k:'name',w:354,l:'Task'},
       {k:'planned',w:126,l:'Planned → Allotted'},
+      /* PP-EXT (owner 2026-08-15): "I would prefer to add percent complete back as a column which then
+         updates the gantt bars." Visible by default. It needs no special handling anywhere else — hide,
+         reorder, resize and reset all read `colDefs()` — and it writes through `setPct`, the same single
+         mutator the Gantt band uses, so the two surfaces cannot drift. */
+      {k:'pct',w:96,l:'% Done'},
       {k:'actions',w:104,l:'Actions',lock:true}
     ];
   }
@@ -2609,6 +2614,47 @@ class Component extends DCLogic {
       mask: 'linear-gradient('+dir+', transparent '+this.GHOST_DOTS_HOLD+'%, #000 '+this.GHOST_DOTS_FADE+'%)'
     };
   }
+  /* PP-EXT (owner 2026-08-15): the %-done FILL. Replaces the flat `rgba(255,255,255,0.28)` veil, which was
+     a translucent white over one accent — readable only as a change in tint, and on a ghost (whose base is
+     already dissolving to transparent) there was almost nothing left to lighten, so the two halves of the
+     bar converged. Owner: "the contrast is not high enough on the left and right of the percent complete
+     bar, especially for ghost bars which already have a gradient."
+
+     The rule is now one colour, not an overlay: the done portion is `--success-strong`, the rest keeps the
+     task's base colour. This REMOVES a channel rather than adding one — green already meant "100% done"
+     as a fill value, and under this rule a 100% bar is entirely green by construction, so the special case
+     and its legend row both disappear.
+
+     A ghost keeps its gradient exactly as it is: the green receives the SAME ramp as the base beneath it,
+     expressed as an alpha mask so ghostPaint stays the single definition of the shape. The mask is written
+     in BAR percentages, so `maskSize` scales it back up — the overlay is only `pct%` of the bar wide, and a
+     gradient laid on it directly would compress the whole ramp into the filled part.
+
+     PURE: occurrence + pct + base in, {width, background, mask, maskSize} or null out, so the ghost × pct
+     matrix is provable in the unit layer rather than by eye on a chart (the `ghostPaint`/`pctGrabZone`
+     precedent). `base` is accepted but unused by the fill itself — it is the caller's job to paint the
+     remainder — and is kept in the signature because the ramp shape is derived from the same occurrence
+     the base is painted from. */
+  pctFillPaint(o, pct, base){
+    const p=Math.max(0,Math.min(100,+pct||0));
+    if(p<=0) return null;
+    const green='var(--success-strong)';
+    const out={width:p+'%', background:green, mask:null, maskSize:null};
+    if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return out;
+    /* Same ramps as ghostPaint, with the colour stops replaced by alpha stops. */
+    if(o.ghostStart && o.ghostEnd){
+      out.mask='linear-gradient(to right, transparent 0%, #000 '+this.GHOST_BOTH_LO+'%, '
+        +'#000 '+this.GHOST_BOTH_HI+'%, transparent 100%)';
+    }else{
+      const dir=o.ghostEnd?'to right':'to left';
+      out.mask='linear-gradient('+dir+', #000 0%, #000 '+this.GHOST_FILL_HOLD+'%, transparent '+this.GHOST_FILL_FADE+'%)';
+    }
+    /* The ramp is authored across the whole bar; the overlay is p% of it. Scaling the mask by 100/p and
+       anchoring it left puts every stop back on the bar pixel it names. */
+    out.maskSize=(10000/p)+'% 100%';
+    return out;
+  }
+  /* /PP-EXT */
   /* PP-EXT: the occurrence relevant to day B (multi-day timelines). For today (or B omitted) this is the exact
      current-occurrence behaviour (occOf); for another day it's the occurrence overlapping [B, B+DAY), so a Week
      column schedules that day's own instance of a repeating task. Non-recurring tasks have a single occurrence. */
@@ -4859,13 +4905,19 @@ class Component extends DCLogic {
     left=Math.max(lo, Math.min(hi-bw, left)); /* shift inward, never clip */
     return {left, width:bw, centre};
   }
-  startPctDrag(e,task,occIdx,barEl){
+  /* `mode` decides what a ZERO-DISTANCE press means on release, and nothing else:
+       'pop' (default, the Gantt band and caret) — a click opens the type-a-number popover, because on a
+             bar the press point is a grab handle centred on the fill edge, not a value;
+       'set' (the sheet's % Done cell) — a click IS the value at the pointer's x, the degenerate
+             zero-distance case of the drag, so one code path serves both gestures on that cell. */
+  startPctDrag(e,task,occIdx,barEl,mode){
     if(e.button!==0) return; /* primary button only — same guard as startBarDrag */
     e.preventDefault(); e.stopPropagation();
     const r=barEl&&barEl.getBoundingClientRect?barEl.getBoundingClientRect():null;
     if(!r||!r.width) return;
     const cur=task.recur?this.occPct(task,occIdx):(+task.pct||0);
-    this.pctDrag={id:task.id,occIdx,startX:e.clientX,left:r.left,width:r.width,startPct:cur,pct:cur,moved:false};
+    this.pctDrag={id:task.id,occIdx,startX:e.clientX,left:r.left,width:r.width,startPct:cur,pct:cur,moved:false,
+      mode:mode||'pop'};
   }
   /* The pct a given pointer x means, on the bar this drag started from. Snapped to PCT_STEP so the
      preview shows exactly the value the release will store (setPct snaps identically). */
@@ -5273,7 +5325,9 @@ class Component extends DCLogic {
        nothing; otherwise `setPct` does the single `commit()`. */
     if(this.pctDrag){
       const p=this.pctDrag; this.pctDrag=null;
-      if(!p.moved) this.openPctPop(p.id, e.clientX, e.clientY);
+      if(!p.moved && p.mode==='set'){ this.pctDrag=p; const v=this.pctDragValue(e.clientX); this.pctDrag=null;
+        if(v!==p.startPct) this.setPct(p.id, v); else this.forceUpdate(); }
+      else if(!p.moved) this.openPctPop(p.id, e.clientX, e.clientY);
       else if(p.pct!==p.startPct) this.setPct(p.id, p.pct);
       else this.forceUpdate();
       return;
@@ -11475,7 +11529,10 @@ class Component extends DCLogic {
     const hov=this.state.hoverId===t.id;
     const curOcc = t.recur ? this.currentOcc(t) : null; /* PP-EXT: dates/progress track the current instance */
     const recIdx = curOcc ? curOcc.idx : 0;
-    const dispPct = t.recur ? this.occPct(t,recIdx) : t.pct;
+    /* PP-EXT (owner 2026-08-15): a live %-drag previews here as well as on the bar — the cell is one of the
+       two surfaces the gesture can start from, and both read the same in-flight value. */
+    const pctLive = (this.pctDrag && this.pctDrag.moved && this.pctDrag.id===t.id) ? this.pctDrag.pct : null;
+    const dispPct = pctLive!=null ? pctLive : (t.recur ? this.occPct(t,recIdx) : t.pct);
     const dispEnd = curOcc ? curOcc.end : t.end;       /* PP-EXT */
     const done=dispPct>=100;
     const pcol=this.PCOL[t.priority]||'var(--pri-default)';
@@ -11576,9 +11633,48 @@ class Component extends DCLogic {
     const timerBtn=this.taskTimerBtn(t);
     const addTimeBtn=this.taskAddTimeBtn(t);
     const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,timerBtn,addTimeBtn);
+    /* PP-EXT (owner 2026-08-15): the % Done cell. A slim bar carrying the same green-done / base-remainder
+       rule as the Gantt, with the numeral drawn ON it rather than beside it — so the whole row height and
+       the whole cell width are one hit target, satisfying the HIT_MIN_PX tenet without a small control.
+         - press anywhere on the track: drag to set, and a plain click is the same path at zero distance
+           (`startPctDrag(..., 'set')`);
+         - press the numeral: the exact-value popover, the same `openPctPop` the bar menu opens.
+       Both write through `setPct`, which is occurrence-aware and funnels through one `commit()`, so the
+       Gantt bar redraws off the same state on the same commit — no second write path to keep in step.
+       `onClick` is stopped because `startPctDrag` only stops the mousedown; without it the release would
+       still bubble to `rowClick` and open the detail sheet on every value change. */
+    const pctNum=Math.max(0,Math.min(100,Math.round(+dispPct||0)));
+    const pctFill=this.pctFillPaint(null, pctNum, null);
+    const pctCell=h('div',{'data-pct-cell':t.id,
+      onMouseDown:e=>this.startPctDrag(e,t,recIdx,e.currentTarget,'set'),
+      onClick:e=>e.stopPropagation(), onDoubleClick:e=>e.stopPropagation(),
+      /* Deliberately NOT the bar's `% done: …` prefix: that string is the Gantt band's and caret's shared
+         identity in `tests/e2e/pct-drag.spec.js`, and a second node answering to it made the sheet cell —
+         which is earlier in the DOM — win every `.first()` in that file. */
+      title:'% Done · '+pctNum+'% — click or drag to set, click the number to type one',
+      /* The DRAG SURFACE is the full row height and the full cell width; the 18px track is only the
+         drawing inside it. Anchoring the drag off this element (not the track) is what keeps the two
+         the same width, so a pointer x means the same value wherever in the row it lands. */
+      style:{position:'relative',width:'100%',height:'100%',cursor:'ew-resize',
+        display:'flex',alignItems:'center'}},
+      h('div',{key:'track',style:{position:'relative',width:'100%',height:'18px',borderRadius:'9px',
+        background:'var(--btn-bg)',border:'1px solid var(--divider)',boxSizing:'border-box',overflow:'hidden',
+        /* The numeral sits at the RIGHT end, as it does inside a Gantt bar, and for the same reason twice
+           over: the fill grows from the left so the two never collide until 100%, and it leaves the
+           centre of the track — the most natural place to click a value — on the drag path rather than
+           on the type-a-number target. */
+        display:'flex',alignItems:'center',justifyContent:'flex-end',pointerEvents:'none'}},
+        pctFill?h('div',{key:'f',style:{position:'absolute',top:0,left:0,bottom:0,width:pctFill.width,
+          background:pctFill.background}}):null,
+        h('span',{key:'n',onMouseDown:e=>{e.preventDefault();e.stopPropagation();this.openPctPop(t.id,e.clientX,e.clientY);},
+          title:'Type an exact % done',
+          style:{position:'relative',fontSize:'10.5px',fontWeight:600,lineHeight:1,cursor:'text',
+            fontVariantNumeric:'tabular-nums',padding:'0 6px',pointerEvents:'auto',
+            color:pctNum>=50?'#fff':'var(--text)',textShadow:pctNum>=50?'0 1px 2px rgba(0,0,0,0.55)':'none'}},
+          pctNum+'%')));
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
-      name:nameBlock, planned:flowCell, actions:actionsCell,
+      name:nameBlock, planned:flowCell, pct:pctCell, actions:actionsCell,
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
@@ -11990,7 +12086,14 @@ class Component extends DCLogic {
           borderRight: (gp&&gp.anchor==='r')?('1.5px solid '+base):undefined,
           boxSizing:'border-box',
           boxShadow:sel?'0 0 0 2px var(--bar-ring)':(ghost?'none':'0 1px 2px rgba(0,0,0,0.4)')}},
-        h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:pct+'%',background:'rgba(255,255,255,0.28)'}}),
+        /* PP-EXT (owner 2026-08-15): green done-fill, base-colour remainder — see `pctFillPaint`. */
+        (function(){ const f=this.pctFillPaint(o,pct,base); if(!f) return null;
+          return h('div',{key:'pctfill','data-pct-fill':String(pct),
+            style:{position:'absolute',top:0,left:0,bottom:0,width:f.width,background:f.background,
+              WebkitMaskImage:f.mask||undefined, maskImage:f.mask||undefined,
+              WebkitMaskSize:f.maskSize||undefined, maskSize:f.maskSize||undefined,
+              WebkitMaskRepeat:'no-repeat', maskRepeat:'no-repeat',
+              pointerEvents:'none'}}); }).call(this),
         /* PP-EXT (owner 2026-08-15): "Make % complete overlaid in small text in the bar." The readout was
            in `ganttSideRow`, OUTSIDE the bar to its right, where it competed with the label row and told
            you nothing about which pixel the boundary was on. Inside the bar it sits directly against the
@@ -12002,7 +12105,7 @@ class Component extends DCLogic {
         (w>=this.PCT_LABEL_MIN_W && pct>0) ? h('div',{key:'pctlbl','data-pct-label':String(pct),
           style:{position:'absolute',right:'4px',top:'50%',transform:'translateY(-50%)',
             fontSize:'9px',lineHeight:1,fontWeight:600,letterSpacing:'0.02em',
-            /* On the white-veil fill AND on the base colour, so it is given its own contrast rather than
+            /* On the green done-fill AND on the base colour, so it is given its own contrast rather than
                inheriting either: white text with a dark shadow reads on both without a second token. */
             color:'#fff',textShadow:'0 1px 2px rgba(0,0,0,0.55)',
             pointerEvents:'none',whiteSpace:'nowrap'}}, pct+'%') : null,

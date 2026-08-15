@@ -8,7 +8,10 @@ test('V1.5 sheet schema drops the fields edited on the Gantt bar', () => {
 
   assert.equal(keys.includes('start'), false, 'Start is edited from the bar');
   assert.equal(keys.includes('end'), false, 'Due is edited from the bar');
-  assert.equal(keys.includes('pct'), false, '% Done is edited from the bar');
+  /* Owner 2026-08-15 reversed the % Done half of this rule: "I would prefer to add percent complete back
+     as a column which then updates the gantt bars." Dates stay bar-only — they are a two-ended span and a
+     column would need two cells — but a percentage is one scalar, so it earns a cell. */
+  assert.ok(keys.includes('pct'), '% Done is a column again (owner 2026-08-15)');
   assert.ok(keys.includes('name'), 'task name remains');
   assert.ok(keys.includes('planned'), 'planned → allotted remains as one composite readout');
   assert.equal(keys.includes('predicted'), false, 'allotted is no longer a spreadsheet column');
