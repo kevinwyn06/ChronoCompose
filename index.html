@@ -152,6 +152,23 @@
   --tl-weekend:rgba(0,0,0,0.05);
 }
 /* /PP-EXT */
+/* PP-EXT (owner 2026-08-14): "drop INTO this section" is a SHAPE, not a shade. The old treatment tinted
+   the section header with --menu-hover, which is also the ordinary hover colour, so it said "the cursor is
+   over this header" and nothing more — indistinguishable from the thin insertion rule that means "between
+   these two rows". The into-section case now draws a claim on the section's WHOLE band (header + every row
+   it holds): an accent outline plus a wash. Per theme, deliberately: a single rgba tuned in one theme is
+   the exact defect this repo shipped with the ghost bars on 2026-08-12.
+   --drop-band-bg is the interior wash; --drop-band-halo is the soft outer ring that lifts the outline off
+   the sheet background so the enclosure reads at a glance rather than on inspection. */
+:root,:root[data-theme="dark"]{
+  --drop-band-bg:rgba(122,178,255,0.10);
+  --drop-band-halo:rgba(122,178,255,0.22);
+}
+:root[data-theme="light"]{
+  --drop-band-bg:rgba(26,115,232,0.09);
+  --drop-band-halo:rgba(26,115,232,0.18);
+}
+/* /PP-EXT */
 /* PP-EXT: design-token scales (B0 — foundation). Type/spacing/radius/shadow/motion. Theme-agnostic
    (values, not colors) except shadows, which need separate light/dark alpha tuning below. No new
    magic literals should be introduced outside this block — extend the scale instead. */
@@ -4795,6 +4812,27 @@ class Component extends DCLogic {
     const L=layout||[]; if(!L.length) return null;
     for(let i=0;i<L.length;i++) if(y>=L[i].top && y<L[i].bottom) return {id:L[i].id, pos:i};
     return y<L[0].top ? {id:L[0].id, pos:0} : {id:L[L.length-1].id, pos:L.length-1};
+  }
+  /* PP-EXT (owner 2026-08-14): PURE — which section band, if any, the CURRENT row drag would drop INTO.
+     Deliberately a function of the RESOLVED drop target (`rd.dropSectionId` / `rd.dropInclusion`, which
+     `resolveRowInsert` decides in one pass alongside `index`/`atEnd`) and the painted geometry
+     (`_secLayout`), never of the raw cursor: whatever slots the resolver grows — including the
+     bottom-most-in-section slot `atEnd` names — the indicator renders them correctly with no change here,
+     and the outline can never claim a band the drop would not actually hit.
+     Returns null unless the drop would CHANGE the band, so picking a row up inside its own section lights
+     nothing. IO-free → unit-tested. */
+  sectionDropBand(layout, rd, inclMode){
+    if(!rd || !layout || !layout.length) return null;
+    let targetId;
+    if(inclMode){
+      if(rd.dropInclusion===undefined || rd.dropInclusion===rd.origInclusion) return null;
+      targetId = (rd.dropInclusion==='included') ? this.INCL_BAND_IN() : this.INCL_BAND_OUT();
+    }else{
+      if(rd.dropSectionId===undefined || rd.dropSectionId===rd.origSectionId) return null;
+      targetId = rd.dropSectionId;
+    }
+    for(let i=0;i<layout.length;i++) if(layout[i].id===targetId) return layout[i];
+    return null;
   }
   /* PP-EXT: PURE — resolve a row drop in ONE pass: which gap, which section band, and whether the gap is
      "after the LAST row of this band" rather than "before the first row of the next one".
@@ -10917,7 +10955,10 @@ class Component extends DCLogic {
 
     /* PP-EXT: archived tasks no longer show inline — they live on the Archive page (top-bar nav group). */
     const inner = h('div',{onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
-      style:{minWidth:totalW+'px'}}, header, ...rows, addRow);
+      /* PP-EXT (owner 2026-08-14): position:relative so the full-band drop outline can be absolutely placed
+         in the SAME coordinate space _secLayout is computed in (content Y, below the sticky header). */
+      style:{minWidth:totalW+'px',position:'relative'}}, header, ...rows, addRow,
+      this.renderSectionDropBand());
 
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
@@ -10971,17 +11012,15 @@ class Component extends DCLogic {
           isIncl?sec.name:(sec.id==null?'No section':sec.name));
 
     /* PP-EXT V2.6b: drag feedback. A section being dragged dims; the slot it would land in gets an accent
-       top rule. A ROW drag over this band tints it, which is the only feedback an EMPTY section can give —
-       it has no rows for an insertion line to sit between. */
-    const sd=this.state.secDrag, rd=this.state.rowDrag;
+       top rule.
+       PP-EXT (owner 2026-08-14): a ROW drag over this band no longer tints the header. That tint was
+       `--menu-hover`, which is the ordinary hover colour, so it read as "the cursor is over this header"
+       rather than "the task lands in this section" — and against the thin insertion rule it was a
+       different SHADE where the owner needed a different SHAPE. The into-section case is now drawn by
+       renderSectionDropBand as an outline around the section's whole band, header included. */
+    const sd=this.state.secDrag;
     const beingDragged = sd && sd.id===sec.id;
     const isSecTarget = sd && !beingDragged && sd.overPos===pos && !isNone;
-    const isRowTarget = rd && !sd && this.rowDragMoved && (
-      (rd.dropSectionId!==undefined && rd.dropSectionId===sec.id && rd.dropSectionId!==rd.origSectionId)
-      /* PP-EXT V2.9 §6: the same tint is the only feedback the inclusion bands can give either — an empty
-         or collapsed band has no rows for an insertion line to sit between. */
-      || (isIncl && rd.dropInclusion!==undefined && rd.dropInclusion!==rd.origInclusion
-          && sec.id===(rd.dropInclusion==='included'?this.INCL_BAND_IN():this.INCL_BAND_OUT())));
 
     return h('div',{key:'section-'+(sec.id||'nosection')+'-'+si,'data-section-id':sec.id||'',
       onMouseEnter:()=>this.setState({hoverSection:this.secKey(sec.id)}),
@@ -10991,8 +11030,14 @@ class Component extends DCLogic {
       style:{display:'flex',alignItems:'center',gap:'2px',height:this.TAG_SECTION_H+'px',minWidth:totalW+'px',padding:'0 8px 0 4px',
         cursor:isNone?'default':(beingDragged?'grabbing':'grab'), opacity:beingDragged?0.45:1,
         /* PP-EXT (owner 2026-08-13b): the band is a real surface now (--sec-head-bg, per theme), so a
-           header is distinguishable from a task row at a glance without leaning on a hairline. */
-        background:isRowTarget?'var(--menu-hover)':'var(--sec-head-bg)',
+           header is distinguishable from a task row at a glance without leaning on a hairline.
+           PP-EXT (owner 2026-08-14): and it is now UNCONDITIONAL — the `--menu-hover` row-drag tint that
+           used to override it is gone. Two reasons it had to go rather than stack: `--menu-hover` is the
+           ordinary hover colour, so it said "the cursor is over this header" rather than "the task lands
+           in this section"; and now that the header has a real surface of its own, a second shade on top
+           of it is the least legible signal available. renderSectionDropBand outlines the whole band
+           instead — a different SHAPE, which is what the owner asked for. */
+        background:'var(--sec-head-bg)',
         /* PP-EXT V2.9 §6: the inclusion division reads HEAVIER than a section header — it is a higher-order
            split, and if it looked the same the two structures would be indistinguishable at a glance.
            Height stays TAG_SECTION_H regardless, because sectionGeometry reserves exactly that and row
@@ -11134,7 +11179,9 @@ class Component extends DCLogic {
     const acc=this._accent;
     const indent = 8 + (rd.depth||0)*16; /* PP-EXT: align the bar with the name indent (depth*16) */
     /* PP-EXT: `data-drop-rule` is the e2e hook — WHERE this rule is painted is the whole user-visible half
-       of the bottom-of-section fix, and it has no other addressable identity. */
+       of the bottom-of-section fix, and it has no other addressable identity.
+       PP-EXT (owner 2026-08-14): it also names the between-two-rows MODE, against `data-drop-band` for the
+       into-a-section mode, so the two treatments are assertable as distinct rather than by colour alone. */
     const mkBar=(edge)=>h('div',{key:'ppdrop','data-drop-rule':'1',style:Object.assign({position:'absolute',left:indent+'px',right:'6px',height:'2px',
         background:acc,borderRadius:'2px',zIndex:7,pointerEvents:'none',boxShadow:'0 0 0 1.5px var(--sheet-bg)'}, edge)},
       h('div',{style:{position:'absolute',left:'-3px',top:'-2px',width:'6px',height:'6px',borderRadius:'50%',background:acc}}));
@@ -11151,6 +11198,24 @@ class Component extends DCLogic {
     const nesting = rd.dropParentId!=null && rd.dropParentId===t.id && !(rd.moveSet&&rd.moveSet[t.id]);
     const glow = nesting ? (',inset 0 0 0 1.5px '+acc) : '';
     return {bar, glow};
+  }
+  /* PP-EXT (owner 2026-08-14): the "drop INTO this section" indicator. The between-two-rows case is a 2px
+     horizontal rule (rowDropDeco); this is a 2px accent OUTLINE plus a --drop-band-bg wash around the
+     section's whole band, header and every row it holds. The distinction the owner asked for is therefore
+     one of SHAPE — a line versus an enclosure — which survives at a glance, at any zoom, and in both
+     themes; a second shade of the same line would not. Geometry comes from `_secLayout`, the same
+     sectionGeometry output the drop resolution reads, so the outline cannot claim a band the drop misses.
+     pointer-events:none so it never intercepts the drag it is describing. */
+  renderSectionDropBand(){
+    const rd=this.state.rowDrag; if(!rd || !this.rowDragMoved) return null;
+    const band=this.sectionDropBand(this._secLayout, rd, this.state.groupBy==='inclusion');
+    if(!band) return null;
+    const h=React.createElement; const acc=this._accent;
+    return h('div',{key:'ppdropband','data-drop-band':String(band.id==null?'':band.id),
+      style:{position:'absolute',left:0,right:0,top:(this.headH+band.top)+'px',
+        height:Math.max(0,band.bottom-band.top)+'px',
+        border:'2px solid '+acc,borderRadius:'var(--r-2)',background:'var(--drop-band-bg)',
+        boxShadow:'0 0 0 3px var(--drop-band-halo)',zIndex:8,pointerEvents:'none'}});
   }
   /* PP-EXT: drag-to-nest — the floating "lifted" card that follows the cursor while a row is dragged. Shows the
      primary task name, a +N badge for multi-row drags, and a live "into <parent>" / "to top level" hint when the
