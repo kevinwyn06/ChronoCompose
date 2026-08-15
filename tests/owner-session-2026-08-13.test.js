@@ -377,11 +377,14 @@ const EXT = { id: 'x1', summary: 'Team Standups' };
 const evAt = (id, ms) => ({ id, summary: id, start: { dateTime: new Date(ms).toISOString() },
   end: { dateTime: new Date(ms + 3600000).toISOString() } });
 
-test('the reserved name yields NO tag, while every other calendar keeps its own', () => {
+// SUPERSEDED 2026-08-14: this test's second half ("every other calendar keeps its own") is the exact claim
+// the owner withdrew — see tests/owner-session-2026-08-14.test.js, which now owns the calTag contract.
+// Kept here only for `isOwnCalendar`, which is still live and still matches case/whitespace-insensitively
+// because `gcalEnsureCalendar` adopts by summary.
+test('isOwnCalendar still recognises the reserved name, case and whitespace insensitively', () => {
   const c = make();
-  assert.equal(c.calTag(CC), '', 'ours is implicit');
-  assert.equal(c.calTag(EXT), 'team-standups', 'external calendars are unchanged');
-  assert.equal(c.calTag({ summary: '  chronocompose ' }), '',
+  assert.equal(c.isOwnCalendar(CC), true);
+  assert.equal(c.isOwnCalendar({ summary: '  chronocompose ' }), true,
     'reserved means reserved — case and whitespace do not create a second one');
   assert.equal(c.isOwnCalendar(EXT), false);
 });
@@ -420,15 +423,20 @@ test('a RE-import never re-adds the tag — this is the churn loop the guard exi
   assert.deepEqual(host(tasks[0].labels), [], 'still untagged after a second import');
 });
 
-test('an external calendar still tags on first import AND on re-import', () => {
+// RETIRED CONTRACT (owner 2026-08-14, "get rid of the calendar tags"): "external provenance is real
+// information" was the 2026-08-13 argument for keeping external tags, and the owner withdrew it —
+// provenance is not the user's vocabulary and is fully recoverable from `t.calendarId`. The replacement
+// assertion is its exact inverse, and it lives here rather than being deleted so the reversal is legible.
+test('an external calendar tags on NEITHER first import nor re-import', () => {
   const c = make();
   const now = c.startOfToday() + 9 * 3600000;
   const tasks = [];
   c.mergeCalendarEvents(tasks, [{ cid: 'x1', items: [evAt('e9', now)] }], {}, { x1: EXT }, {});
-  assert.deepEqual(host(tasks[0].labels), ['team-standups'], 'external provenance is real information');
-  tasks[0].labels = [];
+  assert.deepEqual(host(tasks[0].labels), [], 'no tag on first import');
   c.mergeCalendarEvents(tasks, [{ cid: 'x1', items: [evAt('e9', now)] }], {}, { x1: EXT }, {});
-  assert.deepEqual(host(tasks[0].labels), ['team-standups'], 'and it is restored on re-import, as before');
+  assert.deepEqual(host(tasks[0].labels), [], 'and none re-added — there is no re-add half any more');
+  assert.equal(c.calNameOf(tasks[0]), 'x1',
+    'provenance survives on calendarId, which is what calNameOf reads');
 });
 
 test('implicit-own-calendar-tag migration strips the tag every past import stamped on', () => {
@@ -452,7 +460,7 @@ test('the reserved name has ONE definition — the constant, not a string litera
   assert.equal(c.GCAL_OWN_CAL_NAME, 'ChronoCompose');
   assert.equal(c.calTagFor(c.GCAL_OWN_CAL_NAME), 'chronocompose',
     'calTagFor sees through the suppression, which is what the migration matches on');
-  assert.equal(c.calTag({ summary: c.GCAL_OWN_CAL_NAME }), '', 'while calTag applies it');
+  assert.equal(c.calTag({ summary: c.GCAL_OWN_CAL_NAME }), '', 'while calTag suppresses it — as it now does for every calendar');
 });
 
 test('the strip is a separate flag, so it never re-promotes tags into sections', () => {

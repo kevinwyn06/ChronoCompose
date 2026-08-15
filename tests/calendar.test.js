@@ -24,11 +24,17 @@ test('rruleToRecur maps Google RRULE to recur model', () => {
   assert.strictEqual(c.rruleToRecur(['EXDATE:20260101T000000Z']), null);
 });
 
-test('calTag slugifies calendar summary', () => {
+// RETIRED CONTRACT (owner 2026-08-14, "get rid of the calendar tags"): calTag no longer slugifies
+// anything for anyone. The slugifier itself did not go away — it is `calTagFor`, which the
+// `no-calendar-tags` migration needs in order to RECOGNISE the old tags — so the original assertions are
+// re-pointed at it rather than deleted, and calTag gets the one assertion it now owns.
+test('calTag returns no tag for any calendar; calTagFor still slugifies for the migration', () => {
   const c = make();
-  assert.strictEqual(c.calTag({ summary:'Work Cal' }), 'work-cal');
-  assert.strictEqual(c.calTag(undefined), 'cal');
-  assert.strictEqual(c.calTag({}), 'cal');
+  assert.strictEqual(c.calTag({ summary:'Work Cal' }), '', 'external calendars are no longer tagged either');
+  assert.strictEqual(c.calTag({ summary:'ChronoCompose' }), '');
+  assert.strictEqual(c.calTag(undefined), '');
+  assert.strictEqual(c.calTag({}), '');
+  assert.strictEqual(c.calTagFor('Work Cal'), 'work-cal', 'the slug rule survives where the migration reads it');
 });
 
 function calFixtures(){
@@ -56,7 +62,7 @@ test('mergeCalendarEvents: recurring collapses to one task with recur + master i
   assert.ok(standup);
   assert.strictEqual(standup.eventId, 'm1', 'keyed by master id');
   assert.strictEqual(standup.recur.kind, 'day');
-  assert.ok(standup.labels.includes('work-cal'));
+  assert.ok(!standup.labels.includes('work-cal'), 'import stamps no calendar tag (owner 2026-08-14)');
   assert.strictEqual(r.added, 3);
 });
 
@@ -116,7 +122,10 @@ test('pruneDeletedEvents: a calendar excluded from selectedIds (404/removed) kee
   assert.deepEqual(tasks.map(t=>t.id).sort(), ['G','L'], 'gone-calendar task preserved');
 });
 
-test('gcalDropGone: deselects a removed calendar and unlinks its tasks (strips @tag + calendarId/eventId)', () => {
+// CONTRACT CHANGED (owner 2026-08-14): the @tag strip is gone. There are no calendar tags to strip, and a
+// 404 from Google is not evidence about what the user's own labels mean — so unlinking clears the LINK
+// and leaves every label alone.
+test('gcalDropGone: deselects a removed calendar and unlinks its tasks, keeping every label', () => {
   const c = make();
   c.state.gcal = { connected:true, selected:{ calGone:true, cal1:true }, calendars:[], window:30 };
   const gone = c.normalizeTask({ id:'G', name:'Todoist task', calendarId:'calGone', eventId:'e_g', labels:['todoist','work'] });
@@ -130,12 +139,16 @@ test('gcalDropGone: deselects a removed calendar and unlinks its tasks (strips @
   assert.ok(g, 'task kept, not deleted');
   assert.strictEqual(g.calendarId, null, 'calendarId cleared');
   assert.strictEqual(g.eventId, null, 'eventId cleared');
-  assert.deepEqual(g.labels, ['work'], 'only the calendar @tag stripped; user labels kept');
+  assert.deepEqual(g.labels, ['todoist','work'], 'labels are NOT touched — losing the link is not licence to lose the tags');
   const k = c.state.tasks.find(t=>t.id==='K');
   assert.strictEqual(k.calendarId, 'cal1', 'unrelated linked task untouched');
 });
 
-test('gcalReconcileLinks: unlinks tasks whose calendar is absent from a fresh list; strips the shared @tag', () => {
+// CONTRACT CHANGED (owner 2026-08-14): the "strip the label common to ALL tasks of the gone calendar"
+// intersection heuristic is DELETED. It was a sound inference only while import guaranteed a calendar tag
+// existed; with no calendar tags, that intersection is just a label the user applied to all of them, and
+// deleting it because calendar ACCESS lapsed destroys real data.
+test('gcalReconcileLinks: unlinks tasks whose calendar is absent from a fresh list; labels survive intact', () => {
   const c = make();
   c.state.gcal = { connected:true, selected:{}, calendars:[], window:30, ccCalId:'ccCal' };
   // Two tasks from a now-removed "todoist" calendar (tag on both), plus a per-task user label on one.
@@ -149,8 +162,8 @@ test('gcalReconcileLinks: unlinks tasks whose calendar is absent from a fresh li
   assert.strictEqual(n, 2, 'both todoist tasks unlinked');
   const A = c.state.tasks.find(t=>t.id==='A'), B = c.state.tasks.find(t=>t.id==='B');
   assert.strictEqual(A.calendarId, null); assert.strictEqual(A.eventId, null);
-  assert.deepEqual(A.labels, ['errand'], 'shared @todoist stripped, per-task @errand kept');
-  assert.deepEqual(B.labels, [], '@todoist stripped');
+  assert.deepEqual(A.labels, ['todoist','errand'], 'the shared label is a USER label now — it stays');
+  assert.deepEqual(B.labels, ['todoist'], 'nothing is inferred away from an intersection');
   assert.strictEqual(c.state.tasks.find(t=>t.id==='L').calendarId, 'cal1', 'live-calendar task untouched');
   assert.strictEqual(c.state.tasks.find(t=>t.id==='O').calendarId, 'ccCal', 'ChronoCompose-calendar task untouched');
   assert.strictEqual(c.gcalReconcileLinks([{ id:'cal1', summary:'Work' }]), 0, 'idempotent: nothing left to unlink');

@@ -119,18 +119,23 @@ test('V2.6 migration promotes a tag only at threshold 2 and CONSUMES exactly tha
   assert.ok(changed >= 2, 'the strip is counted too, so the caller still saves');
 });
 
-test('a calendar-linked task keeps its tag — the calendar owns that label, not the section', () => {
+// RETIRED CONTRACT (owner 2026-08-14): `sectionTagStrippable` is gone, and with it the calendar carve-out.
+// That exemption existed for exactly one reason — mergeCalendarEvents re-added the calendar tag on every
+// import, so stripping a coinciding section tag would have churned (strip → re-import → re-add). With no
+// calendar tags there is no re-add and no loop, so a calendar-linked task's labels are ordinary user
+// labels and the section rule applies to them like anything else. The replacement asserts the inverse.
+test('a calendar-linked task is no longer exempt from the section-tag strip', () => {
   const c = make();
-  // mergeCalendarEvents re-adds this tag on every import and calTag renders the chip from it, so
-  // stripping it would start a churn loop and break the calendar chip. The section rule yields.
   const tasks = [
     activeTask(c, { id:'g1', labels:['work'], calendarId:'cal-a', eventId:'e1' }),
     activeTask(c, { id:'g2', labels:['work'], calendarId:'cal-a', eventId:'e2' }),
   ];
   const { sections } = c.migrateSectionsFromTags(tasks);
   assert.deepEqual(sections.map(s => s.name), ['work']);
-  assert.deepEqual(tasks.map(t => t.labels), [['work'], ['work']], 'gcal tags survive');
-  assert.ok(tasks.every(t => t.sectionId != null), 'but they are still sectioned');
+  assert.deepEqual(tasks.map(t => t.labels), [[], []],
+    'the promoted tag is consumed here too — no churn loop is left to protect against');
+  assert.ok(tasks.every(t => t.sectionId != null), 'and they are still sectioned');
+  assert.equal(typeof c.sectionTagStrippable, 'undefined', 'the carve-out predicate is deleted, not weakened');
 });
 
 test('stripSectionTags is idempotent and matches a section by NAME, not by insertion order', () => {

@@ -360,13 +360,18 @@ class Component extends DCLogic {
     /* PP-EXT (owner 2026-08-13): the app's OWN Google calendar. The name is RESERVED — gcalEnsureCalendar
        adopts an existing calendar with exactly this summary rather than making a second one, so it was
        already load-bearing while living as a bare string literal in two places. Named here per the
-       constants rule, and now also consulted by calTag: this calendar contributes NO @tag.
+       constants rule.
        Owner: "the ChronoCompose calendar should be implicit. That name should be reserved, and pull into
        the regular task pool without that calendar tag."
        The reasoning is the same one that took the section tag away in the same session: a tag is a
        user-authored attribute, and "@chronocompose" on a ChronoCompose task is not an attribute, it is the
-       app restating its own name on every row it owns. Every OTHER calendar keeps its tag, because there
-       the tag carries real information — which external calendar the event came from. */
+       app restating its own name on every row it owns.
+       PP-EXT (owner 2026-08-14): the 2026-08-13 carve-out — "every OTHER calendar keeps its tag, because
+       there the tag carries real information" — is WITHDRAWN. Owner: "get rid of the calendar tags."
+       Provenance is not the user's vocabulary, and it is fully recoverable from `t.calendarId` without
+       spending a label on it. `calTag` now returns '' for every calendar, and this constant is back to
+       being only what it started as: the reserved summary that `gcalEnsureCalendar` adopts and that
+       `calNameOf` can name offline. */
     this.GCAL_OWN_CAL_NAME = 'ChronoCompose';
     /* PP-EXT B1: offline-first Supabase sync — same shape as the gcal queue above (see computeSyncOps). */
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
@@ -854,6 +859,25 @@ class Component extends DCLogic {
          same principle behind both: a container's name is not one of the user's tags. */
       if(!done['implicit-own-calendar-tag']){ const n=this.stripOwnCalendarTag(tasks);
         done['implicit-own-calendar-tag']=1; this.lsSet('pp-migrations', JSON.stringify(done));
+        if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-14): "get rid of the calendar tags" — the retroactive half for EVERY
+         calendar, not just the reserved one.
+         This is the ONE flag in `runOnceMigrations` that is deliberately NOT recorded unconditionally, and
+         the reason is a real trap: `stripCalendarTags` needs the calendar SUMMARIES to know which label to
+         remove, but `loadGcal` rebuilds `calendars: []` on every boot and only refills it after a network
+         round trip. Stamping the flag here at constructor time would therefore claim the sweep was done in
+         the overwhelmingly common case where it could not possibly have run — permanently skipping it.
+         So the flag is written only once a real calendar list exists. Until then the sweep re-runs on each
+         boot, which is free: it is pure and idempotent. `mergeCalendarEvents` sheds the tag per task on
+         import as well, and it ALWAYS has the summaries, so a workspace that syncs is cleaned either way.
+         NOTE ON `this.state`: it does not exist yet at this call site (the constructor assigns it from the
+         seed this method returns), so the list is read through `loadGcal`. In practice that returns an
+         empty `calendars`, which is precisely why the flag must stay unrecorded here and why
+         `gcalListCalendars` carries the second half of this migration — see `sweepCalendarTags`. */
+      if(!done['no-calendar-tags']){
+        let cals=[]; try{ cals=(this.loadGcal()||{}).calendars||[]; }catch(_){}
+        const n=this.stripCalendarTags(tasks, cals);
+        if(cals.length){ done['no-calendar-tags']=1; this.lsSet('pp-migrations', JSON.stringify(done)); }
         if(n) this.saveTasks(tasks); } }catch(e){}
     return tasks;
   }
@@ -2900,17 +2924,20 @@ class Component extends DCLogic {
       default:          return null;
     }
   }
-  calNameOf(t){ /* human calendar label for sort/filter: the source calendar's summary, else its @tag, else '' */
+  calNameOf(t){ /* human calendar label for sort/filter: the source calendar's summary, else its id, else '' */
     if(!t.calendarId) return '';
     const g=(this.state.gcal||{});
     const c=(g.calendars||[]).find(x=>x.id===t.calendarId);
     if(c&&c.summary) return c.summary;
-    /* PP-EXT (owner 2026-08-13): our own calendar's tasks are untagged now, so when the calendar LIST has
-       not loaded yet (offline, signed out, or mid-restore) the tag fallback below no longer rescues them
-       and this used to degrade to a raw Google calendar id in the Calendar column. The reserved name is
-       knowable without the network, so use it. */
+    /* PP-EXT (owner 2026-08-13): when the calendar LIST has not loaded yet (offline, signed out, or
+       mid-restore) this degrades to a raw Google calendar id. Our own calendar's reserved name is knowable
+       without the network, so use it. */
     if(g.ccCalId && t.calendarId===g.ccCalId) return this.GCAL_OWN_CAL_NAME;
-    const tag=(t.labels||[])[0]; return tag?('@'+tag):t.calendarId;
+    /* PP-EXT (owner 2026-08-14): the `'@'+labels[0]` fallback that used to sit here is DELETED. It was
+       only ever correct while import stamped a calendar tag as the first label; with no calendar tags it
+       would print whatever tag the user happened to put first and call it a calendar name — a confident
+       wrong answer, which is worse than the opaque id. Provenance now routes through `calendarId` only. */
+    return t.calendarId;
   }
   cmpTasks(a, b, key, dir){
     const mul=dir==='desc'?-1:1;
@@ -3118,22 +3145,11 @@ class Component extends DCLogic {
     });
     this.closeMenu();
   }
-  /* PURE: may this task's labels have a section-name tag stripped from them? NO for calendar-linked tasks.
-     PP-EXT (owner 2026-08-13): a gcal-linked task's first label IS its calendar name — `mergeCalendarEvents`
-     re-adds it on every import, and `calTag` renders the calendar chip from it. Stripping it would start a
-     churn loop (strip → re-import → re-add) and break the chip, so the calendar owns that tag and the
-     section rule yields to it. This is the one place a section name and a tag may still coincide, and it is
-     because the tag is not describing the section — it is describing where the event came from. */
-  sectionTagStrippable(t){
-    if(!t) return false;
-    if(!t.calendarId) return true;
-    /* PP-EXT (owner 2026-08-13): our OWN calendar is the exception to the exception. The carve-out above
-       exists because an external calendar owns and re-adds its tag; our calendar contributes no tag at
-       all, so there is nothing for it to own and a section tag on one of its tasks is as redundant as on
-       a manual one. */
-    const own=this.state && this.state.gcal && this.state.gcal.ccCalId;
-    return !!own && t.calendarId===own;
-  }
+  /* PP-EXT (owner 2026-08-14): `sectionTagStrippable` is DELETED. It existed for exactly one reason — an
+     external calendar owned its tag and `mergeCalendarEvents` re-added it, so stripping a coinciding
+     section tag would have started a strip → re-import → re-add churn loop. With calendar tags gone there
+     is no re-add, so there is no loop, and a calendar-linked task's labels are now ordinary user labels
+     that the section rule may treat like any other. `stripSectionTags` simply no longer asks. */
   /* PURE, idempotent: drop the reserved own-calendar tag wherever it appears. Returns tasks changed.
      Applied to EVERY task, not only to ones currently linked to that calendar, because the name is
      reserved — a task that was unlinked, imported before the rule existed, or hand-tagged would otherwise
@@ -3148,6 +3164,38 @@ class Component extends DCLogic {
   /* The tag a calendar name WOULD produce, ignoring the own-calendar suppression in calTag — the one
      thing the migration needs and the only caller that must see through it. */
   calTagFor(summary){ return String(summary||'').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,''); }
+  /* PURE, idempotent (mutates the array it is handed, returns the count of tasks changed) → unit-tested.
+     One-time migration `no-calendar-tags` (owner 2026-08-14: "get rid of the calendar tags"). Existing
+     workspaces are wearing tags that every earlier build stamped on at import, so the forward fix alone
+     would leave them there forever — the same shape as `strip-section-tags` and `implicit-own-calendar-tag`.
+
+     HOW A CALENDAR TAG IS TOLD APART FROM A USER TAG — this is the whole risk of the migration, and the
+     answer is deliberately narrow. TWO conditions must BOTH hold:
+       1. the task carries a `calendarId`, i.e. it is linked to a calendar right now; and
+       2. the label matches the slugified summary of THAT task's OWN calendar — not of any calendar.
+     Condition 2 is the one that matters. Matching against the whole calendar list would delete a hand-made
+     `@work` from a manually-typed task the moment the user happens to own a calendar called "Work";
+     matching only the task's own calendar means the label being removed is, by construction, the exact
+     string this task's own import path wrote. A user who ALSO typed `@work` onto a task imported from
+     their "Work" calendar loses that one label — accepted, because it is textually indistinguishable from
+     the stamped one and it was already redundant on the row.
+
+     WHAT IT CANNOT DO, stated rather than papered over: if the user RENAMED a Google calendar after the
+     import, the stamped tag no longer matches the current summary and this pass will not find it. There is
+     no local history of past summaries to check against, so the alternative would be a broad name-agnostic
+     sweep — which is exactly the user-data-destroying heuristic condition 2 exists to refuse. The chosen
+     failure mode is a stale tag left behind (visible, and deletable by hand) rather than a real tag
+     silently destroyed. `stripOwnCalendarTag` still covers the reserved name unconditionally, since that
+     one string is ours and is never a legitimate user tag. */
+  stripCalendarTags(tasks, cals){
+    const tagById={}; (cals||[]).forEach(c=>{ if(c&&c.id){ const g=this.calTagFor(c.summary); if(g) tagById[c.id]=g; } });
+    let changed=0;
+    (tasks||[]).forEach(t=>{ if(!t || !t.calendarId || !t.labels || !t.labels.length) return;
+      const tag=tagById[t.calendarId]; if(!tag) return;
+      const after=t.labels.filter(l=>this.normalizeTag(l)!==tag);
+      if(after.length!==t.labels.length){ t.labels=after; changed++; } });
+    return changed;
+  }
   /* PURE, idempotent: remove from each root task's `labels` the tag that merely restates its own section's
      name. Returns the number of tasks changed.
      PP-EXT (owner 2026-08-13): "Sections should not be a tag." Sections became a first-class entity in
@@ -3164,7 +3212,7 @@ class Component extends DCLogic {
     const nameById={}; secs.forEach(s=>{ if(s && s.id!=null) nameById[s.id]=this.normalizeTag(s.name); });
     let changed=0;
     list.forEach(t=>{
-      if(!t || t.sectionId==null || !this.sectionTagStrippable(t)) return;
+      if(!t || t.sectionId==null) return;
       const nm=nameById[t.sectionId]; if(!nm) return;
       const before=(t.labels||[]); const after=before.filter(l=>this.normalizeTag(l)!==nm);
       if(after.length!==before.length){ t.labels=after; changed++; }
@@ -6328,31 +6376,45 @@ class Component extends DCLogic {
     this.gcalFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList')
       .then(d=>{ const cals=(d.items||[]).map(c=>({id:c.id,summary:c.summary,color:c.backgroundColor}));
         this.setState(s=>({gcal:Object.assign({},s.gcal,{calendars:cals,msg:cals.length+' calendars loaded'})}));
-        if(cals.length) this.gcalReconcileLinks(cals); /* PP-EXT: a fresh list is authoritative — unlink tasks whose calendar is gone */ })
+        if(cals.length) this.gcalReconcileLinks(cals); /* PP-EXT: a fresh list is authoritative — unlink tasks whose calendar is gone */
+        if(cals.length) this.sweepCalendarTags(cals); /* PP-EXT (owner 2026-08-14): completes `no-calendar-tags` — see below */ })
       .catch(e=>this.gcalMsg('List failed: '+e.message));
   }
   /* PP-EXT: reconcile task↔calendar links against the authoritative calendarList. A task linked to a
      calendarId that no longer appears (calendar deleted, or access removed — e.g. an old "@todoist" import)
-     is UNLINKED: its calendar @tag + calendarId/eventId are cleared so it survives as a plain manual task.
-     The @tag to strip is the label common to ALL tasks sharing that gone calendarId (import stamps the
-     calendar tag on every one of them); labels only some of them carry are user labels and stay. */
+     is UNLINKED: its calendarId/eventId are cleared so it survives as a plain manual task.
+     PP-EXT (owner 2026-08-14): the "strip the label common to ALL tasks of the gone calendar" heuristic is
+     DELETED. It inferred the calendar tag from an intersection, which was a sound inference only while
+     import guaranteed such a tag existed. With no calendar tags, that intersection is simply a label the
+     user chose to apply to all of those tasks — and deleting it because calendar ACCESS lapsed would
+     destroy real user data on an event the user never took part in. Losing the link is not licence to
+     lose the labels. */
   gcalReconcileLinks(cals){
     const known={}; (cals||[]).forEach(c=>{ if(c&&c.id) known[c.id]=1; });
     const cc=this.state.gcal&&this.state.gcal.ccCalId; if(cc) known[cc]=1; /* our own calendar counts as known */
-    const byGone={};
-    this.state.tasks.forEach(t=>{ if(t.calendarId && !known[t.calendarId]) (byGone[t.calendarId]=byGone[t.calendarId]||[]).push(t); });
-    const goneIds=Object.keys(byGone); if(!goneIds.length) return 0;
-    const stripFor={}; /* gone calendarId → Set of tags to remove (intersection of each linked task's labels) */
-    goneIds.forEach(cid=>{ let inter=null;
-      byGone[cid].forEach(t=>{ const s=new Set(t.labels||[]);
-        inter = inter===null ? s : new Set([...inter].filter(x=>s.has(x))); });
-      stripFor[cid]=inter||new Set(); });
+    if(!this.state.tasks.some(t=>t.calendarId && !known[t.calendarId])) return 0;
     let n=0; const wasApplying=this._gcalApplying; this._gcalApplying=true; /* local unlink — never diff a DELETE back to a calendar that no longer exists */
     try{ this.commit(tasks=>{ tasks.forEach(t=>{ if(t.calendarId && !known[t.calendarId]){
-      const strip=stripFor[t.calendarId]; if(strip&&strip.size) t.labels=(t.labels||[]).filter(l=>!strip.has(l));
       t.calendarId=null; t.eventId=null; n++; } }); }); }
     finally { this._gcalApplying=wasApplying; }
     if(n) this.gcalMsg('Unlinked '+n+' task'+(n>1?'s':'')+' from a removed calendar.');
+    return n;
+  }
+  /* PP-EXT (owner 2026-08-14): the second, effective half of the `no-calendar-tags` migration. The
+     constructor pass cannot do the work because `loadGcal` rebuilds `calendars: []` on every boot, so this
+     runs at the one moment a real, authoritative list exists — right after `calendarList` returns. It
+     records the once-flag, because from here the claim "the sweep has been done" is actually true.
+     Routed through `commit()` like every other task mutation, and guarded by `_gcalApplying` so a local
+     label cleanup is never diffed back out as an edit to the user's Google events. */
+  sweepCalendarTags(cals){
+    let done={}; try{ done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{}; }catch(_){ done={}; }
+    if(done['no-calendar-tags']) return 0;
+    if(!this.stripCalendarTags(this.state.tasks.map(t=>Object.assign({},t,{labels:(t.labels||[]).slice()})), cals)){
+      done['no-calendar-tags']=1; this.lsSet('pp-migrations', JSON.stringify(done)); return 0; }
+    let n=0; const wasApplying=this._gcalApplying; this._gcalApplying=true;
+    try{ this.commit(tasks=>{ n=this.stripCalendarTags(tasks, cals); }); }
+    finally { this._gcalApplying=wasApplying; }
+    done['no-calendar-tags']=1; this.lsSet('pp-migrations', JSON.stringify(done));
     return n;
   }
   toggleCalSel(id){ const sel=Object.assign({},this.state.gcal.selected); sel[id]=!sel[id]; this.saveGcal({selected:sel}); this.gcalSyncSoon(); /* PP-EXT: sync on selection change */ }
@@ -6361,11 +6423,17 @@ class Component extends DCLogic {
      and for a calendar the user created by hand with that name — all three are cases where the id is
      absent but the calendar is unmistakably ours. */
   isOwnCalendar(cal){ return !!cal && String(cal.summary||'').trim().toLowerCase()===this.GCAL_OWN_CAL_NAME.toLowerCase(); }
-  /* PP-EXT (owner 2026-08-13): returns '' for our own calendar — its tag is IMPLICIT. Callers already had
-     to handle a falsy tag (an unnamed calendar could normalize to an empty string), so this widens an
-     existing path rather than adding a new one; `mergeCalendarEvents` is the site that must not push it. */
-  calTag(cal){ if(this.isOwnCalendar(cal)) return '';
-    return this.calTagFor(cal&&cal.summary?cal.summary:'cal'); }
+  /* PP-EXT (owner 2026-08-14): "get rid of the calendar tags." NO calendar contributes a label any more —
+     not ours, not an external one. Kept as a method rather than deleted outright because it is the single
+     seam every import path already funnels through, so one `return ''` is provably exhaustive in a way
+     that hunting call sites is not, and because a future opt-in setting would restore it here.
+     The 2026-08-13 argument for keeping external tags was provenance; provenance lives on `t.calendarId`
+     and is read back through `calNameOf`, so nothing is lost by not also spending one of the user's tags
+     on it. Every caller already handled a falsy tag (an unnamed calendar normalized to ''), which is why
+     this widens an existing path instead of adding one.
+     `calTagFor` still computes the tag a summary WOULD have produced — that is what the `no-calendar-tags`
+     migration and `mergeCalendarEvents`' shedding pass need in order to find and remove the old ones. */
+  calTag(cal){ return ''; }
   /* Parse a Google RRULE array into our recurrence model (kind/n/days/until). Returns null if none. */
   rruleToRecur(recurrence){
     if(!recurrence||!recurrence.length) return null;
@@ -7359,7 +7427,12 @@ class Component extends DCLogic {
   mergeCalendarEvents(tasks, results, masters, calById, tombstones){ /* PP-EXT: tombstones = locally-deleted event ids awaiting remote DELETE */
     const byEid={}; tasks.forEach(t=>{ if(t.eventId) byEid[t.eventId]=t; });
     const handled={}; let added=0, updated=0;
+    /* PP-EXT (owner 2026-08-14): import no longer ADDS a calendar tag (calTag is '' for everything), and
+       it is also the one place that reliably has the calendar's summary in hand, so it SHEDS the tag a
+       previous version stamped on. That matters because the `no-calendar-tags` migration runs at boot,
+       when `gcal.calendars` may still be empty — this pass covers the same workspace as soon as it syncs. */
     results.forEach(({cid,items})=>{ const tag=this.calTag(calById&&calById[cid]);
+      const shed=this.calTagFor((calById&&calById[cid]&&calById[cid].summary)||'');
       items.forEach(ev=>{ if(!ev.id||ev.status==='cancelled') return;
         const masterId=ev.recurringEventId||null; let src=ev; let recur=null; let eid=ev.id;
         if(masterId){ eid=masterId; if(handled[cid+'|'+eid]) return; handled[cid+'|'+eid]=1;
@@ -7376,10 +7449,15 @@ class Component extends DCLogic {
         if(t){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay;
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
           if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
-          /* PP-EXT (owner 2026-08-13): `tag` is '' for our own reserved calendar — never push an empty
-             label. This was the re-add half of the churn loop, so it has to be guarded here and not only
-             at first import below. */
-          if(tag && !t.labels.includes(tag)) t.labels.push(tag); t.calendarId=cid; updated++; }
+          /* PP-EXT (owner 2026-08-14): `tag` is now '' for EVERY calendar, so nothing is ever pushed; the
+             guard stays because the expression is what makes that visible at the site. The re-add half of
+             the old churn loop is gone, which is what frees `sectionTagStrippable` to disappear.
+             `shed` removes a tag stamped by an older build. Safe on a linked task specifically because
+             this task carries `calendarId===cid`: the label matching THIS calendar's name on a task
+             imported FROM this calendar is the tag import wrote. */
+          if(tag && !t.labels.includes(tag)) t.labels.push(tag);
+          if(shed && t.labels.includes(shed)) t.labels=t.labels.filter(l=>l!==shed);
+          t.calendarId=cid; updated++; }
         else if(tombstones && tombstones[eid]){ /* PP-EXT: deleted locally — don't resurrect while the DELETE is in flight */ }
         else { const id='t'+Math.random().toString(36).slice(2,8);
           /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
@@ -7387,8 +7465,10 @@ class Component extends DCLogic {
           const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
           const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:'Proportional',
             start,end,allDay,priority:4,deps:[],pct:0,planned:evMins,spent:0,goal:'',
-            /* PP-EXT (owner 2026-08-13): our own calendar's events arrive UNTAGGED and land in the regular
-               task pool, indistinguishable from a task typed into the app — which is what they are. */
+            /* PP-EXT (owner 2026-08-14): EVERY calendar's events now arrive UNTAGGED and land in the
+               regular task pool, indistinguishable from a task typed into the app. `tag?[tag]:[]` is
+               therefore always `[]`; it is left as the expression so the one seam (`calTag`) stays the
+               only thing that would have to change to bring tagging back. */
             description:src.description||'',labels:tag?[tag]:[],recur:recur,completion:null,calendarId:cid,eventId:eid,
             /* PP-EXT (10): busy/free transparency seeds the blocking flag on FIRST import only. Re-import
                never overwrites it, exactly like planned/goal/description above — once the user has toggled
@@ -7464,21 +7544,23 @@ class Component extends DCLogic {
       .then(()=>{ this._gcalSyncing=false; });
   }
   /* PP-EXT: drop calendars that returned 404/410 from the selection so we stop polling a calendar the user
-     deleted (or lost access to). Imported tasks are kept but UNLINKED — their calendar `@tag` and
-     calendarId/eventId are cleared so they survive as plain manual tasks (a fetch failure isn't proof the
-     events were deleted, so we never silently remove them). */
+     deleted (or lost access to). Imported tasks are kept but UNLINKED — their calendarId/eventId are
+     cleared so they survive as plain manual tasks (a fetch failure isn't proof the events were deleted,
+     so we never silently remove them).
+     PP-EXT (owner 2026-08-14): this used to also strip the calendar's `@tag`. There is no such tag any
+     more, and the same reasoning as `gcalReconcileLinks` applies — a 404 from Google is not evidence about
+     what the user's labels mean, so the labels are left exactly as the user left them. */
   gcalDropGone(gone,calById){
     if(!gone||!gone.length) return;
-    const goneSet={}, goneTags={};
+    const goneSet={};
     const sel=Object.assign({},this.state.gcal.selected);
     const names=gone.map(cid=>{ goneSet[cid]=1; delete sel[cid];
-      const c=calById&&calById[cid]; if(c) goneTags[cid]=this.calTag(c); return c&&c.summary?c.summary:cid; });
+      const c=calById&&calById[cid]; return c&&c.summary?c.summary:cid; });
     this.saveGcal({selected:sel});
     let detached=0;
     if(this.state.tasks.some(t=>t.calendarId&&goneSet[t.calendarId])){
       const wasApplying=this._gcalApplying; this._gcalApplying=true; /* local unlink — don't diff a DELETE back out to a calendar that no longer exists */
       try{ this.commit(tasks=>{ tasks.forEach(t=>{ if(t.calendarId&&goneSet[t.calendarId]){
-        const tag=goneTags[t.calendarId]; if(tag) t.labels=(t.labels||[]).filter(l=>l!==tag);
         t.calendarId=null; t.eventId=null; detached++; } }); }); }
       finally { this._gcalApplying=wasApplying; }
     }

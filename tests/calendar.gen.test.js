@@ -112,8 +112,8 @@ test('mergeCalendarEvents: imports a single event as a new task', () => {
   assert.equal(t.planned, 60);
   // description is imported verbatim (no marker stripping); goal is not derived from it
   assert.equal(t.goal, '');
-  // calendar summary becomes a slugged tag
-  assert.deepEqual([...t.labels], ['work']);
+  // CONTRACT CHANGED (owner 2026-08-14): the calendar summary no longer becomes a slugged tag.
+  assert.deepEqual([...t.labels], []);
 });
 
 test('mergeCalendarEvents: timed event -> planned = actual gcal duration in minutes', () => {
@@ -166,7 +166,7 @@ test('mergeCalendarEvents: re-import is idempotent (no duplicate)', () => {
   assert.equal(tasks.length, 1); // still exactly one task
 });
 
-test('mergeCalendarEvents: updating an existing event refreshes name/times, no dup tag', () => {
+test('mergeCalendarEvents: updating an existing event refreshes name/times, still untagged', () => {
   const c = make();
   const tasks = [];
   c.mergeCalendarEvents(tasks, results('cal1', [timedEvent()]), {}, calById('cal1','Work'));
@@ -175,7 +175,7 @@ test('mergeCalendarEvents: updating an existing event refreshes name/times, no d
   assert.equal(tasks.length, 1);
   assert.equal(tasks[0].name, 'Renamed');
   assert.equal(tasks[0].end, new Date('2026-07-02T11:00:00Z').getTime());
-  assert.deepEqual([...tasks[0].labels], ['work']); // tag not duplicated
+  assert.deepEqual([...tasks[0].labels], []); // no tag added on import or re-import (owner 2026-08-14)
 });
 
 test('mergeCalendarEvents: all-day event spans whole days from local midnight', () => {
