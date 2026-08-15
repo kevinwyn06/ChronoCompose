@@ -1878,7 +1878,7 @@ class Component extends DCLogic {
     if(!t || t.archivedAt || this.isMilestone(t)) return false;
     const d=this.taskDisp(t);
     if(d.dispEnd==null) return false;
-    return this.dueChipClass(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}), this.startOfToday())==='overdue';
+    return this.dueChipClass(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}), Date.now())==='overdue';
   }
   originOf(t){
     if(this.isOverdueToday(t)) return 'overdue';    /* late — outranks provenance */
@@ -4931,17 +4931,44 @@ class Component extends DCLogic {
     return wd+' '+mo+' '+p(d.getDate())+yr + (dateOnly ? '' : (', '+p(d.getHours())+':'+p(d.getMinutes()))); /* PP-EXT */
   }
   /* PP-EXT V1.5: pure due-chip bucket. All-day ends are exclusive, so classify their visible
-     due day (end-1ms). Specific today/tomorrow buckets outrank the <=1-week bucket. */
-  dueChipClass(task,today){
-    if(!task || task.end==null) return null;
-    const due=this.startOfDay(task.end-(task.allDay?1:0));
-    const base=this.startOfDay(today);
-    const days=Math.round((due-base)/this.DAY);
-    if(days<0 && (task.pct||0)<100) return 'overdue';
+     due day (end-1ms). Specific today/tomorrow buckets outrank the <=1-week bucket.
+     PP-EXT (owner 2026-08-13): the ladder below is the ONE place the chip's tone is decided.
+     Reported bug: a task due at 09:00 *today*, still open at 14:00, painted green — the old ladder
+     tested only the calendar day, so `days===0 → 'today'` matched before anything could notice the
+     clock had passed. Overdue now sits at the top of an explicit, ordered ladder.
+
+     Ruling on untimed due dates: a bare date carries no clock (it merely sits at midnight, which is
+     why `endClock`/`hasEndTime` exist), so it is NOT overdue merely because the morning has passed —
+     an untimed task due today stays 'today' all day and turns 'overdue' at the next midnight. Only a
+     due edge that carries a user-typed time is compared against the wall clock. All-day tasks are
+     untimed by construction and always use the day comparison. */
+  /* The tones this ladder can return, highest precedence first. 'done' is not a tone: completion
+     removes overdueness and the task then paints as its plain calendar bucket. 'recur' is last: it is
+     the no-due-date fallback, so a repeating task that IS late still paints overdue. */
+  DUE_TONE_ORDER(){ return ['overdue','today','tomorrow','week','later','recur']; }
+  /* Pure: no `this.state`, no clock read. `nowMs` is the instant to judge against; `timed` says
+     whether the due edge carries a user-typed time. */
+  dueChipState(task, nowMs, timed){
+    if(!task) return null;
+    /* rung 0 — nothing to date: a repeating task still says so; anything else has no chip. */
+    if(task.end==null) return task.recur ? 'recur' : null;
+    const allDay=!!task.allDay;
+    const dueMs=task.end-(allDay?1:0);
+    const days=Math.round((this.startOfDay(dueMs)-this.startOfDay(nowMs))/this.DAY);
+    /* rung 1 — done: a finished task is not late. Completion is the one fact that can stop a task
+       being overdue at all, so it is checked as part of the definition rather than after it. */
+    const done=(task.pct||0)>=100;
+    /* rung 2 — OVERDUE. Outranks 'today' and every later bucket. */
+    if(!done && (timed && !allDay ? dueMs<=nowMs : days<0)) return 'overdue';
+    /* rungs 3..6 — plain calendar buckets. */
     if(days===0) return 'today';
     if(days===1) return 'tomorrow';
     if(days>1 && days<=7) return 'week';
     return 'later';
+  }
+  dueChipClass(task,nowMs){
+    if(!task || task.end==null) return null;
+    return this.dueChipState(task, nowMs==null?Date.now():nowMs, this.hasEndTime(task));
   }
 
   /* ---------- natural-language date parser ----------
@@ -9363,7 +9390,10 @@ class Component extends DCLogic {
   taskDueRecurChip(t, d){
     const h=React.createElement; d=d||this.taskDisp(t);
     if(d.dispEnd==null && !t.recur) return null;
-    const tone=d.dispEnd==null ? 'recur' : this.dueChipClass(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}),this.startOfToday());
+    /* PP-EXT (owner 2026-08-13): tone comes from the shared ladder in dueChipState — this builder is
+       called by BOTH the sheet row and planCard, so the fix lands on both surfaces at once. */
+    const tone=this.dueChipState(Object.assign({},t,{end:d.dispEnd,pct:d.dispPct}), Date.now(),
+      d.dispEnd!=null && this.hasEndTime(Object.assign({},t,{end:d.dispEnd})));
     const dueText=d.dispEnd==null ? '' : this.fmtDT(t.allDay?d.dispEnd-1:d.dispEnd,true);
     const recurText=t.recur ? ('↻ '+(t.recur.label||'Repeats')) : '';
     const label=[dueText,recurText].filter(Boolean).join(' · ');
