@@ -1450,6 +1450,14 @@ class Component extends DCLogic {
     this.trackKey(e); /* PP-EXT (31): the ONE key funnel — names/counts only, never characters */
     const k=e.key.toLowerCase();
     if(e.key==='Escape'){
+      /* PP-EXT (#109): Escape is a LADDER, and this is the whole order, most transient first:
+           1. an in-flight drag  (`_edgeDrag`, then `_blockDrag`)
+           2. the topmost overlay: datePick › pctPop › inclPick › barMenu › quickOpen › scopePrompt ›
+              settingsOpen › colMenu › selCols › menu
+           3. the open detail sheet (`detailId`)
+           4. the row selection (`selectedIds` + `selCursor`) — only when not typing.
+         Exactly one rung fires per press, so each Escape undoes one layer of context and nothing more.
+         Adding a rung means putting it in transience order, never at the top for convenience. */
       /* PP-EXT (04b): a drag in flight outranks every overlay — it is the most transient thing on
          screen and the only one the pointer is still holding. Dropping `_blockDrag` makes the block
          repaint at its real start and makes onMouseUp fall through without pinning, so the release
@@ -1461,7 +1469,14 @@ class Component extends DCLogic {
       if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
       else if(this.state.pctPop) this.closePctPop(); else if(this.state.inclPick) this.closeInclPick();
       else if(this.state.barMenu) this.closeBarMenu(); /* PP-EXT V1.4: bar menu sits under the popups it opens */
-      else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail(); return; }
+      else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail();
+      /* PP-EXT (#109): LAST rung of the ladder — with nothing in flight and nothing open, Escape clears
+         the selection. Deliberately last so it can never steal from the rungs above it (a drag cancel or
+         an overlay close must still win), and guarded by `isEditingTarget` so Escape pressed inside an
+         inline title editor, a description, or the quick-add box dismisses/leaves that field without
+         also wiping the row the user is editing. */
+      else if(!this.isEditingTarget(e)) this.clearSelection();
+      return; }
     if(this.isEditingTarget(e)) {
       if((e.ctrlKey||e.metaKey) && (k==='z'||k==='y')) return; // let inputs handle their own undo
     }
@@ -3982,7 +3997,16 @@ class Component extends DCLogic {
 
   /* ---------- selection / detail / menu ---------- */
   isSel(id){ return this.state.selectedIds.includes(id); }
-  clearSelection(){ if(this.state.selectedIds.length||this.state.selCols.length) this.setState({selectedIds:[], selCols:[], menu:null, colMenu:null}); }
+  /* PP-EXT (#109): "nothing selected" is the app's DEFAULT and a state it must be able to HOLD.
+     Nothing re-seeds a selection when the set empties — no renderer falls back to the first task, and
+     the only writers of `selectedIds` are explicit user acts (row/card click, range/toggle, quick-add's
+     just-created row, j/k). The one thing missing was a way back OUT: before this, an empty set was
+     only reachable by clicking the exact background of a pane (`e.target===e.currentTarget`), which is
+     a sliver of pixels, so in practice a task stayed highlighted forever. Escape now clears it (see
+     `onKey`). `selCursor` goes with it: it is the Selection view's rendering of the same "current row"
+     idea, and leaving it behind would repaint a highlight the user just dismissed. */
+  clearSelection(){ if(this.state.selectedIds.length||this.state.selCols.length||this.state.selCursor)
+    this.setState({selectedIds:[], selCols:[], selCursor:null, menu:null, colMenu:null}); }
   toggleSelect(id){ this.setState(s=>({selectedIds: s.selectedIds.includes(id) ? s.selectedIds.filter(x=>x!==id) : [...s.selectedIds, id]})); this._selAnchor=id; /* PP-EXT */ }
   rowClick(e,id){
     if(this._suppressRowClick){ this._suppressRowClick=false; return; }

@@ -242,6 +242,26 @@ control is an upward caret below the bar, not a circle inside it. The timeline b
 follow the same rule: the glyph stays 16px inside a transparent `HIT_MIN_PX`-wide, full-height hit column at
 the block's left edge, and the block's left padding clears that column so the title never shares its pixels.
 
+### The Escape ladder
+
+`onKey`'s Escape branch is a ladder, and exactly one rung fires per press — most transient first:
+
+1. **an in-flight drag** — `_edgeDrag`, then `_blockDrag`
+2. **the topmost overlay** — `datePick` › `pctPop` › `inclPick` › `barMenu` › `quickOpen` › `scopePrompt` ›
+   `settingsOpen` › `colMenu` › `selCols` › `menu`
+3. **the open detail sheet** — `detailId`
+4. **the row selection** — `clearSelection()`, which empties `selectedIds`, `selCols` *and* `selCursor`
+
+Rung 4 is last on purpose: it can never steal from a drag cancel or an overlay close. It is also the only
+rung guarded by `isEditingTarget`, so Escape inside an inline title editor, a description, or the quick-add
+input never wipes the row being edited. A new rung goes in transience order, not at the top.
+
+**Nothing selected is the default and a holdable state.** No renderer falls back to the first task when
+`selectedIds` is empty, and nothing re-seeds it; every write is an explicit user act (row/card click,
+shift-range, quick-add's just-created row, `j`/`k`). Before the ladder grew rung 4 the only way back to
+empty was clicking the exact background of a pane (`e.target===e.currentTarget`) — a sliver of pixels — so
+in practice a task stayed highlighted forever.
+
 A block drag in flight outranks every overlay in `onKey`'s Escape chain: Escape drops `_blockDrag` (or
 `_edgeDrag`), the block repaints at its real start and size, and the release that follows falls through
 `onMouseUp` without writing — so a cancelled drag commits nothing and leaves nothing to undo. Both drags'
