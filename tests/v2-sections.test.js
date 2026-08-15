@@ -437,3 +437,114 @@ test('V2.6b a NESTED drop does not stamp sectionId — the root owns the section
   assert.equal(got.parentId, 'p');
   assert.equal(got.sectionId, 's1', 'unchanged: only roots carry a section');
 });
+
+/* ---- The bottom-most slot of a section. Owner report: "a task cannot be dragged to become the bottom-most
+   task in a section — it is currently impossible entirely."
+   Root cause: a gap index is SHARED by the band that ends there and the band that starts there, so resolving
+   the index and the section as two independent passes gave "after the last row of S" no representation of its
+   own. resolveRowInsert resolves index + section + `atEnd` in one pass, and clamps the index into the band the
+   cursor is in — which is also what makes an empty or collapsed band stop borrowing a neighbour's index. */
+
+/* Real geometry, built by sectionGeometry itself rather than by hand, so the fixture cannot drift from the
+   layout both panes actually paint: s1 (2 rows) · sEmpty (declared, 0 rows) · s2 (2 rows) · No section (1). */
+const geo = c => {
+  const T = n => ({ id:n });
+  const bands = [
+    { id:'s1',     name:'Research', tasks:[T('a1'), T('a2')] },
+    { id:'sEmpty', name:'Empty',    tasks:[] },
+    { id:'s2',     name:'Admin',    tasks:[T('b1'), T('b2')] },
+    { id:null,     name:'No section', tasks:[T('n1')] },
+  ];
+  const g = c.sectionGeometry(bands);
+  return { g, count:5, H:c.TAG_SECTION_H, R:c.rowH };
+};
+const at = (c, y) => { const { g, count } = geo(c); return c.resolveRowInsert(y, g.yTop, g.secLayout, count); };
+
+test('bottom-of-section: dropping below the last row of a MIDDLE section resolves to that section, atEnd', () => {
+  const c = make(); const { H, R } = geo(c);
+  const r = at(c, H + 2*R - 1); /* lower half of s1's last row */
+  assert.equal(r.sectionId, 's1');
+  assert.equal(r.index, 2, 'the gap after s1\'s last row');
+  assert.equal(r.atEnd, true, 'the slot that had no representation before');
+  assert.equal(r.bandEmpty, false);
+});
+
+test('bottom-of-section: it is DISTINCT from the top of the next section, which shares its index', () => {
+  const c = make(); const { H, R } = geo(c);
+  const bottomOfS1 = at(c, H + 2*R - 1);
+  const topOfEmpty = at(c, H + 2*R + 2); /* one band down: same integer, different place */
+  assert.equal(bottomOfS1.index, topOfEmpty.index, 'the two positions really are the same gap index');
+  assert.notEqual(bottomOfS1.sectionId, topOfEmpty.sectionId, '...and were therefore indistinguishable');
+  assert.equal(topOfEmpty.atEnd, false, 'only the flag separates them');
+});
+
+test('bottom-of-section: the LAST section\'s bottom row resolves to the end of the visible list', () => {
+  const c = make(); const { H, R, count } = { ...geo(c), ...{} };
+  const r = at(c, 4*H + 5*R - 1); /* lower half of the No-section bucket\'s only row */
+  assert.equal(r.sectionId, null, 'No section is the last bucket');
+  assert.equal(r.index, 5);
+  assert.equal(r.index, count, 'past every visible row');
+  assert.equal(r.atEnd, true);
+});
+
+test('bottom-of-section: the boundary between the last DECLARED section and No section', () => {
+  const c = make(); const { H, R } = geo(c);
+  const bottomOfS2 = at(c, 3*H + 4*R - 1);
+  assert.deepEqual([bottomOfS2.sectionId, bottomOfS2.index, bottomOfS2.atEnd], ['s2', 4, true],
+    'bottom-most in s2, even though index 4 is also No section\'s first row');
+  const topOfNone = at(c, 3*H + 4*R + 2);
+  assert.deepEqual([topOfNone.sectionId, topOfNone.index, topOfNone.atEnd], [null, 4, false],
+    'No section is a valid drop target but nothing is ordered AFTER it as a section');
+});
+
+test('bottom-of-section: a declared-but-EMPTY section clamps to its own gap and paints no row rule', () => {
+  const c = make(); const { H, R } = geo(c);
+  const r = at(c, H + 2*R + 5); /* inside sEmpty\'s header — its whole band */
+  assert.equal(r.sectionId, 'sEmpty');
+  assert.equal(r.index, 2, 'clamped into the band, never borrowing a neighbour\'s index');
+  assert.equal(r.bandEmpty, true, 'no visible row, so the band highlight is the only possible feedback');
+  assert.equal(r.atEnd, false, 'atEnd would put the rule on the PREVIOUS section\'s last row');
+});
+
+test('bottom-of-section: a COLLAPSED section behaves like an empty one and cannot steal a neighbour index', () => {
+  const c = make();
+  const g = c.sectionGeometry([
+    { id:'s1', name:'Research', tasks:[{ id:'a1' }, { id:'a2' }] },
+    { id:'s2', name:'Admin', tasks:[{ id:'b1' }], collapsed:true },
+    { id:null, name:'No section', tasks:[{ id:'n1' }] },
+  ]);
+  const H = c.TAG_SECTION_H, R = c.rowH;
+  /* s2 is collapsed: header only, and its one row is NOT in yTop, so the visible count is 3 */
+  const r = c.resolveRowInsert(H + 2*R + 5, g.yTop, g.secLayout, 3);
+  assert.equal(r.sectionId, 's2');
+  assert.equal(r.index, 2);
+  assert.equal(r.bandEmpty, true);
+});
+
+test('bottom-of-section: Group by: None has no bands, so the drop resolves an index and no section', () => {
+  const c = make();
+  const g = c.sectionGeometry([{ id:null, name:'', flat:true, tasks:[{ id:'a' }, { id:'b' }] }]);
+  assert.equal(g.secLayout.length, 0, 'a flat band emits no layout at all');
+  const mid = c.resolveRowInsert(c.rowH * 0.4, g.yTop, g.secLayout, 2);
+  assert.equal(mid.sectionId, undefined, 'undefined means "leave sectionId alone", never null');
+  assert.equal(mid.sectionPos, null);
+  assert.equal(mid.atEnd, false);
+  const end = c.resolveRowInsert(c.rowH * 2 - 1, g.yTop, g.secLayout, 2);
+  assert.deepEqual([end.index, end.atEnd], [2, true], 'the end of a flat list is still an end slot');
+});
+
+test('bottom-of-section: the resolved slot really lands the row bottom-most, through reorderRows', () => {
+  const c = make();
+  c.state.sections = [c.normalizeSection({ id:'s1', name:'Research', order:0 }),
+                      c.normalizeSection({ id:'s2', name:'Admin', order:1 })];
+  c.state.tasks = [activeTask(c, { id:'a1', sectionId:'s1' }), activeTask(c, { id:'a2', sectionId:'s1' }),
+                   activeTask(c, { id:'b1', sectionId:'s2' })];
+  c._visTasks = c.state.tasks.slice();
+  const before = c.history.length;
+
+  /* the drop resolved above for "below s1's last row": index 2, section s1 */
+  c.reorderRows(['b1'], 2, null, 's1');
+  const ids = c.tasksBySection(c.state.tasks).find(s => s.id === 's1').tasks.map(t => t.id);
+  assert.deepEqual(ids, ['a1', 'a2', 'b1'], 'bottom-most in s1, not first in s2');
+  assert.equal(c.history.length, before + 1, 'still one undo step');
+});

@@ -4634,15 +4634,40 @@ class Component extends DCLogic {
     for(let i=0;i<L.length;i++) if(y>=L[i].top && y<L[i].bottom) return {id:L[i].id, pos:i};
     return y<L[0].top ? {id:L[0].id, pos:0} : {id:L[L.length-1].id, pos:L.length-1};
   }
-  rowAtInsert(clientY){
-    if(!this.sheetScrollEl) return 0;
-    const y=this.sheetLocalY(clientY);
-    const vis=this._visTasks||this.state.tasks, tops=this._yTop;
-    if(tops&&tops.length===vis.length){ let idx=0; while(idx<vis.length && y>=tops[idx]+this.rowH/2) idx++;
-      return idx; } /* PP-EXT V2.3: section headers and expanded descriptions are real Y-space, never task indices */
-    const idx=Math.round(y/this.rowH);
-    return Math.max(0, Math.min(vis.length, idx)); /* PP-EXT: rows are the VISIBLE list */
+  /* PP-EXT: PURE — resolve a row drop in ONE pass: which gap, which section band, and whether the gap is
+     "after the LAST row of this band" rather than "before the first row of the next one".
+     Those two positions are the same integer — a gap index is shared by the band that ends there and the
+     band that starts there — so resolving the index and the section as two independent passes leaves the
+     bottom-most slot of every section with no representation of its own. It was therefore unreachable as a
+     distinct outcome and unpaintable as a distinct place: the insertion rule was drawn at the top of the
+     NEXT section's first row, i.e. under that section's header, which is what makes "drop a task at the
+     bottom of a section" read as impossible.
+     Resolving them together also CLAMPS the gap into the band the cursor is actually in, which is what stops
+     a collapsed or declared-but-empty band (it owns Y-space but no rows) resolving to a neighbour's index.
+     Returns {index, sectionId, sectionPos, atEnd, bandEmpty}. `sectionPos` is null under Group by: None,
+     where there are no bands at all. IO-free → unit-tested. */
+  resolveRowInsert(y, tops, layout, count){
+    const R=this.rowH; const n=count|0;
+    let idx;
+    if(tops && tops.length===n){ idx=0; while(idx<n && y>=tops[idx]+R/2) idx++; }
+    /* PP-EXT V2.3: section headers and expanded descriptions are real Y-space, never task indices — which is
+       why the tops walk above is the real path and the flat divide is only a not-yet-rendered fallback. */
+    else idx=Math.max(0, Math.min(n, Math.round(y/R)));
+    const L=layout||[];
+    if(!L.length) return {index:idx, sectionId:undefined, sectionPos:null, atEnd:idx===n, bandEmpty:false};
+    const hit=this.sectionAtY(L, y); const band=L[hit.pos]||{};
+    const lo=band.firstIndex|0, hi=band.endIndex|0;
+    const index=Math.max(lo, Math.min(hi, idx));
+    const bandEmpty=(hi<=lo); /* declared-but-empty, or collapsed: no row for an insertion rule to sit on */
+    return {index, sectionId:hit.id, sectionPos:hit.pos, atEnd:!bandEmpty && index===hi, bandEmpty};
   }
+  /* PP-EXT: the DOM-facing wrapper — clientY → the full resolution above. */
+  rowInsertAt(clientY){
+    const vis=this._visTasks||this.state.tasks;
+    if(!this.sheetScrollEl) return {index:0, sectionId:undefined, sectionPos:null, atEnd:false, bandEmpty:false};
+    return this.resolveRowInsert(this.sheetLocalY(clientY), this._yTop, this._secLayout, vis.length);
+  }
+  rowAtInsert(clientY){ return this.rowInsertAt(clientY).index; } /* PP-EXT: rows are the VISIBLE list */
   /* PP-EXT: drag-to-nest — PURE projection of a row-drop into {index, depth, parentId}. Given the visible rows,
      a depth map + full byId (for the ancestor walk), the insertion gap, the set of rows riding along (moveSet),
      and a horizontal nest intent in whole levels (steps: +right nests, −left outdents), it resolves which parent
@@ -4794,7 +4819,9 @@ class Component extends DCLogic {
     if(this._rowDrag){
       const rd=this._rowDrag;
       rd.x=e.clientX; rd.y=e.clientY; /* PP-EXT: floating drag ghost tracks the cursor */
-      const oi=this.rowAtInsert(e.clientY);
+      /* PP-EXT: ONE pass resolves gap + section + the bottom-of-section slot (see resolveRowInsert). */
+      const res=this.rowInsertAt(e.clientY);
+      const oi=res.index;
       /* PP-EXT: drag-to-nest — horizontal offset past the deadzone picks a nesting level (right nests, left outdents) */
       const dx=e.clientX-rd.startX;
       const steps=(Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
@@ -4803,7 +4830,7 @@ class Component extends DCLogic {
       /* PP-EXT V2.6b: a vertical row drag also RE-SECTIONS the row. Only when it lands as a root — a nested
          row's section is its root's by definition (tasksBySection), so stamping it would write a field
          nothing reads. `undefined` means "leave sectionId alone", distinct from `null` = No section. */
-      const hit=(drop.parentId==null) ? this.sectionAtY(this._secLayout, this.sheetLocalY(e.clientY)) : null;
+      const hit=(drop.parentId==null && res.sectionPos!=null) ? {id:res.sectionId, pos:res.sectionPos} : null;
       /* PP-EXT V2.9 §6: under Group by: Inclusion the bands are not sections, so the SAME resolved band
          writes `included` instead of `sectionId`. Dragging a row across the divider is therefore the same
          gesture as dragging it into a section, on a surface the user already knows. */
@@ -4812,8 +4839,11 @@ class Component extends DCLogic {
       const dropInclusion = (hit && inclMode) ? (hit.id===this.INCL_BAND_IN()?'included':'excluded') : undefined;
       const secChanged = dropSectionId!==undefined && dropSectionId!==rd.origSectionId;
       const inclChanged = dropInclusion!==undefined && dropInclusion!==rd.origInclusion;
-      if(oi!==rd.overIndex || drop.depth!==rd.depth || drop.parentId!==rd.parentId || secChanged || inclChanged) this.rowDragMoved=true;
-      rd.overIndex=oi; rd.depth=drop.depth; rd.parentId=drop.parentId; rd.dropParentId=drop.parentId;
+      /* PP-EXT: `atEnd` is part of the drag's identity, not decoration — "bottom of section A" and "top of
+         section B" share an index, so without it a move between the two would read as no move at all. */
+      if(oi!==rd.overIndex || res.atEnd!==rd.atEnd || drop.depth!==rd.depth || drop.parentId!==rd.parentId || secChanged || inclChanged) this.rowDragMoved=true;
+      rd.overIndex=oi; rd.atEnd=res.atEnd; rd.bandEmpty=res.bandEmpty;
+      rd.depth=drop.depth; rd.parentId=drop.parentId; rd.dropParentId=drop.parentId;
       rd.dropSectionId=dropSectionId; rd.dropInclusion=dropInclusion;
       this.setState({rowDrag:Object.assign({},rd)}); /* PP-EXT: re-render every move so the ghost follows smoothly */
       return;
@@ -10856,14 +10886,21 @@ class Component extends DCLogic {
     if(!rd) return {bar:null, glow:''};
     const h=React.createElement;
     const acc=this._accent;
-    const visN=(this._visTasks||this.state.tasks).length;
     const indent = 8 + (rd.depth||0)*16; /* PP-EXT: align the bar with the name indent (depth*16) */
-    const mkBar=(edge)=>h('div',{key:'ppdrop',style:Object.assign({position:'absolute',left:indent+'px',right:'6px',height:'2px',
+    /* PP-EXT: `data-drop-rule` is the e2e hook — WHERE this rule is painted is the whole user-visible half
+       of the bottom-of-section fix, and it has no other addressable identity. */
+    const mkBar=(edge)=>h('div',{key:'ppdrop','data-drop-rule':'1',style:Object.assign({position:'absolute',left:indent+'px',right:'6px',height:'2px',
         background:acc,borderRadius:'2px',zIndex:7,pointerEvents:'none',boxShadow:'0 0 0 1.5px var(--sheet-bg)'}, edge)},
       h('div',{style:{position:'absolute',left:'-3px',top:'-2px',width:'6px',height:'6px',borderRadius:'50%',background:acc}}));
     let bar=null;
-    if(rd.overIndex===i) bar=mkBar({top:'-1px'});
-    else if(rd.overIndex===visN && i===visN-1) bar=mkBar({bottom:'-1px'});
+    /* PP-EXT: `atEnd` (from resolveRowInsert) means the drop is AFTER the band's last row, so the rule is
+       drawn on that row's BOTTOM edge. Painting it at `overIndex`'s top instead would put it under the next
+       section's header — the same integer, the wrong side of a header, and the reason the bottom-most slot
+       looked unreachable. A band with no visible rows (empty or collapsed) gets no rule at all; the band
+       highlight is its only possible feedback. */
+    if(rd.bandEmpty) bar=null;
+    else if(rd.atEnd){ if(i===rd.overIndex-1) bar=mkBar({bottom:'-1px'}); }
+    else if(rd.overIndex===i) bar=mkBar({top:'-1px'});
     /* PP-EXT: highlight the row the dragged task would drop INTO (nesting), unless it's part of the moving set */
     const nesting = rd.dropParentId!=null && rd.dropParentId===t.id && !(rd.moveSet&&rd.moveSet[t.id]);
     const glow = nesting ? (',inset 0 0 0 1.5px '+acc) : '';
