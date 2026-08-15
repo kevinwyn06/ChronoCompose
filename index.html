@@ -48,6 +48,10 @@
      just hard on the eyes whether in light or dark mode"). Now a token per theme, and considerably more
      opaque: a derived date is meant to look derived, not to look absent. */
   --ghost-flat:rgba(160,174,192,0.34);--ghost-dots:rgba(198,208,222,0.78);
+  /* PP-EXT (owner 2026-08-13b): section-header band. It used to paint --top-bg, which is four units from
+     --sheet-bg here, so the band was carried entirely by a hairline rule instead of by a surface. Per
+     theme, deliberately NOT one shared rgba — that is exactly the 2026-08-12 ghost-contrast defect. */
+  --sec-head-bg:#2b2c31;--sec-head-border:#3a3b41;
   /* PP-EXT (B2 — color/contrast): semantic status tokens, replacing scattered inline hex.
      Dark-theme values keep the original hex (already AA-passing against dark surfaces). */
   --danger:#e5484d;--danger-strong:#e5615d;--success:#79c08e;--success-strong:#2f9e5f;
@@ -73,6 +77,9 @@
   /* PP-EXT (owner 2026-08-12): see the dark-theme note. A grey that reads on #191919 disappears on
      white, so the light values are DARKER rather than the same rgba at a different alpha. */
   --ghost-flat:rgba(90,105,130,0.44);--ghost-dots:rgba(71,85,105,0.72);
+  /* PP-EXT (owner 2026-08-13b): see the dark-theme note. Sheet rows are white here, so the band goes
+     DARKER; the dark theme's lighter grey would be invisible against white. */
+  --sec-head-bg:#eeedea;--sec-head-border:#dcdbd6;
   /* PP-EXT (B2 — color/contrast): semantic status tokens, darkened from the dark-theme hex to
      clear WCAG AA (4.5:1) for small text against white/light surfaces — see progress log for
      the measured ratios. */
@@ -10837,14 +10844,16 @@ class Component extends DCLogic {
       title:isNone?null:'Drag to reorder this section',
       style:{display:'flex',alignItems:'center',gap:'2px',height:this.TAG_SECTION_H+'px',minWidth:totalW+'px',padding:'0 8px 0 4px',
         cursor:isNone?'default':(beingDragged?'grabbing':'grab'), opacity:beingDragged?0.45:1,
-        background:isRowTarget?'var(--menu-hover)':'var(--top-bg)',
+        /* PP-EXT (owner 2026-08-13b): the band is a real surface now (--sec-head-bg, per theme), so a
+           header is distinguishable from a task row at a glance without leaning on a hairline. */
+        background:isRowTarget?'var(--menu-hover)':'var(--sec-head-bg)',
         /* PP-EXT V2.9 §6: the inclusion division reads HEAVIER than a section header — it is a higher-order
            split, and if it looked the same the two structures would be indistinguishable at a glance.
            Height stays TAG_SECTION_H regardless, because sectionGeometry reserves exactly that and row
            alignment between the panes is load-bearing. */
         borderTop:isSecTarget?('3px solid '+this._accent)
-          :(isIncl?('2px solid '+this._accent):(si?'1px solid var(--top-border)':'none')),
-        borderBottom:'1px solid var(--top-border)',
+          :(isIncl?('2px solid '+this._accent):(si?'1px solid var(--sec-head-border)':'none')),
+        borderBottom:'1px solid var(--sec-head-border)',
         color:isIncl?'var(--text)':(isNone?'var(--text-faint)':'var(--tag-text)'),fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
         textTransform:'uppercase',position:'relative'}},
       /* collapse caret is always visible — it is the section's primary affordance, not a hover extra */
@@ -10855,7 +10864,10 @@ class Component extends DCLogic {
           transform:collapsed?'rotate(-90deg)':'none',transition:'transform 120ms ease'}},'▼'),
       nameEl,
       h('span',{key:'n',style:{marginLeft:'6px',fontSize:'9px',fontWeight:600,color:'var(--text-faint2)',letterSpacing:0}},sec.tasks.length),
-      h('span',{key:'rule',style:{height:'1px',background:'var(--tag-border)',opacity:0.65,flex:1,margin:'0 8px'}}),
+      /* PP-EXT (owner 2026-08-13b): the horizontal rule that ran from the count to the ▲▼✕ controls is
+         DELETED. With a real band behind it, it read as a strikethrough across an empty header. The flex
+         SPACER stays — it is what right-aligns the controls; only the paint is gone. */
+      h('span',{key:'rule',style:{flex:1,minWidth:'8px'}}),
       /* No section is a fallback bucket, not a thing anyone made: it cannot be renamed, moved, or deleted. */
       isNone?null:btn('up','▲','Move section up',()=>this.reorderSection(sec.id,pos-1),{opacity:hov&&pos>0?0.95:0,pointerEvents:pos>0?'auto':'none'}),
       isNone?null:btn('dn','▼','Move section down',()=>this.reorderSection(sec.id,pos+1),{opacity:hov&&pos<order.length-1?0.95:0,pointerEvents:pos<order.length-1?'auto':'none'}),
@@ -11298,8 +11310,11 @@ class Component extends DCLogic {
       ...weekendRects, ...gridLines,
       ...sectionBands.map((sec,si)=>h('div',{key:sec.key,'data-section-id':sec.id||'',
         style:{position:'absolute',left:0,right:0,top:sec.top+'px',height:this.TAG_SECTION_H+'px',zIndex:2,pointerEvents:'none',
-          background:'color-mix(in srgb, var(--top-bg) 88%, transparent)',borderTop:si?'1px solid var(--top-border)':'none',
-          borderBottom:'1px solid var(--top-border)',boxShadow:'inset 0 -1px 0 color-mix(in srgb, var(--tag-border) 55%, transparent)'}})),
+          /* PP-EXT (owner 2026-08-13b): same --sec-head-bg as the sheet, and OPAQUE — the old 88% color-mix
+             let the chart grid show through, so the two panes' bands did not read as one surface. The inset
+             hairline is gone with the sheet's rule. Height/top are untouched, so row alignment is unchanged. */
+          background:'var(--sec-head-bg)',borderTop:si?'1px solid var(--sec-head-border)':'none',
+          borderBottom:'1px solid var(--sec-head-border)'}})),
       // row hover stripes
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
         return h('div',{key:'r'+t.id,'data-gantt-task-id':t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),

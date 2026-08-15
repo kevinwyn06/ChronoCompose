@@ -76,6 +76,16 @@ same fixed row height; expanded description height is still measured into the Ga
 the same sections and uniform 52px task rows with `spent / allotted`, a progress fill, done, timer, and
 `+15` tracked-time actions.
 
+The section-header band is painted from per-theme `--sec-head-bg` / `--sec-head-border` (owner
+2026-08-13b), in **both** panes, opaque in both. It previously painted `--top-bg`, which is four units
+from `--sheet-bg` in the dark theme and *identical* to it in the light theme, so the header was carried
+entirely by a hairline; the flex-grown 1px rule that ran from the task count to the ▲▼✕ controls is
+deleted, and only its spacer survives to keep those controls right-aligned. The tokens are per theme
+deliberately — one shared rgba is the 2026-08-12 ghost-contrast defect. Measured against the painted task
+row: **dark 1.222:1** (`rgb(43,44,49)` vs `rgb(28,28,29)`), **light 1.171:1** (`rgb(238,237,234)` vs
+white). Nothing about the band's height or padding changed, so `sectionGeometry` is untouched and the
+sheet↔Gantt row-top delta is unmoved at **0.0156px** (identical before and after the change).
+
 V2.9 removed the V2.2 ambient row encodings (`ambientRowBackground`: the ineligibility crosshatch and the
 carried-over tint). The predicates behind them remain and are load-bearing — `isInheritedToday` decides
 what carries onto today via `isActiveOn` — so only the paint was deleted. Selection, critical-path inset,
