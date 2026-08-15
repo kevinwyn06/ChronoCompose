@@ -447,6 +447,24 @@ class Component extends DCLogic {
        (the %-done caret has only (rowH−barH)/2 px under the bar), the axis that carries the
        precision — horizontal, along the bar — still gets the full box. See product-vision.md. */
     this.HIT_MIN_PX = 24;            // minimum interactive target (local px, pre-zoom)
+    /* PP-EXT (owner 2026-08-15): the %-done grab zone moved back ONTO the bar. The caret under the bar
+       was a working gesture (tests/e2e/pct-drag.spec.js drags it with real pointer input and it passes)
+       that nobody could find: a 24×16 box, invisible until hover, in the 10px gap below the bar. The
+       owner's instruction was "I would actually prefer to click and click drag directly on the bar",
+       naming the date-drag conflict in the same breath. The resolution is a band centred on the FILL
+       EDGE — the progress boundary is the one place on the bar whose meaning is already "% done", so
+       the zone is self-describing rather than a remembered rule.
+       GRAB is the HALF-width, so the zone is 2× this wide. */
+    this.PCT_GRAB_PX = 12;           // half-width of the on-bar %-done grab band, centred on the fill edge
+    /* The owner's constraint, verbatim: "if you have the grab at ±n, make sure 0% and 100% have no drag
+       range overlap with the edges of the bar for date dragging." At 0% the fill edge sits ON the left
+       resize grip and at 100% on the right one, so an unclamped band would swallow the grip and make the
+       bar unresizable at exactly the two most common pct values. The band is therefore SHIFTED inward to
+       clear the grips rather than shrunk — a clipped band would degrade to a sliver at the extremes,
+       which is the failure this whole change exists to fix. `pctGrabZone` is the one place that math
+       lives; it returns null when the bar cannot afford a full band clear of both grips. */
+    this.BAR_GRIP_PX = 7;            // width of each bar edge resize grip — the %-grab band must never overlap it
+    this.PCT_LABEL_MIN_W = 46;       // narrowest bar that still carries the in-bar "n%" readout (below this it is dropped, never clipped)
     /* PP-EXT (2026-08-12): the row's double-click-to-activate gesture cannot use the browser's own
        `dblclick`. The FIRST click opens the detail modal, whose full-screen scrim/card is then under
        the cursor when the second press lands — a different event target, so Chromium resets the click
@@ -935,15 +953,17 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections','pp-scratch','pp-journal-prompts']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6, pp-scratch: V3.1, pp-journal-prompts: V3.2 (all local-only until the deferred sync batch, so backup is their ONLY portability) */ }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections','pp-scratch','pp-journal-prompts']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6 (SYNCED as of migration 0012, 2026-08-15 — it stays in the backup because a backup is a whole-workspace snapshot, not a list of unsynced stores); pp-scratch: V3.1, pp-journal-prompts: V3.2 (still local-only, so backup is their ONLY portability) */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=this.lsGet(k); if(v==null) return; /* PP-EXT: active-workspace scoped (pp-theme stays global) */
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
     /* PP-EXT (16/F9): stamp the namespace this dump came from. collectBackup/applyBackup are wsKey-scoped,
        so a backup is a snapshot of ONE workspace, but nothing in the file used to say which — export
        signed in, restore signed out, and it silently overwrote the anon namespace instead. This matters
-       more than it looks: backup is the ONLY portability path for pp-scratch, pp-journal-prompts and
-       pp-sections, none of which sync, so a wrong-namespace restore is unrecoverable. */
+       more than it looks: backup is the ONLY portability path for pp-scratch and pp-journal-prompts,
+       neither of which syncs, so a wrong-namespace restore is unrecoverable. (pp-sections was in that
+       list until 2026-08-15; it syncs now, so a bad restore of it is at least recoverable from the
+       backend — the other two are not.) */
     return {app:'ChronoCompose', version:1, exportedAt:new Date().toISOString(),
       workspace:(this._workspace||'anon'), data}; }
   /* PP-EXT (16/F9): PURE — the confirmation text for an import, naming the namespace that will be
@@ -1543,7 +1563,20 @@ class Component extends DCLogic {
       if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
       else if(this.state.pctPop) this.closePctPop(); else if(this.state.inclPick) this.closeInclPick();
       else if(this.state.barMenu) this.closeBarMenu(); /* PP-EXT V1.4: bar menu sits under the popups it opens */
-      else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu(); else if(this.state.detailId) this.closeDetail();
+      else if(this.state.quickOpen) this.setState({quickOpen:false}); else if(this.state.scopePrompt) this.closeScope(); else if(this.state.settingsOpen) this.setState({settingsOpen:false}); else if(this.state.colMenu) this.setState({colMenu:null}); else if(this.state.selCols.length) this.setState({selCols:[]}); else if(this.state.menu) this.closeMenu();
+      /* PP-EXT (owner 2026-08-15): rungs 3 and 4 COLLAPSE INTO ONE when the sheet is showing the sole
+         selected row. The owner reported the Escape deselect as missing; it was not — it was two presses
+         away, and the reason is that a row click does two things at once (`rowClick` sets `selectedIds`
+         AND `detailId` in the same setState). So the first Escape closed the sheet, the row stayed lit,
+         and the feature looked absent. One gesture should cost one Escape: if the open sheet IS the
+         selection, one press undoes the whole click. When they have drifted apart — a sheet opened from
+         a card, a search result, or the Gantt while a different range is selected — the ladder still
+         takes them one rung at a time, because there the two really are separate contexts. */
+      else if(this.state.detailId){
+        const sel=this.state.selectedIds||[];
+        if(sel.length===1 && sel[0]===this.state.detailId && !this.isEditingTarget(e)){ this.closeDetail(); this.clearSelection(); }
+        else this.closeDetail();
+      }
       /* PP-EXT (#109): LAST rung of the ladder — with nothing in flight and nothing open, Escape clears
          the selection. Deliberately last so it can never steal from the rungs above it (a drag cancel or
          an overlay close must still win), and guarded by `isEditingTarget` so Escape pressed inside an
@@ -1586,6 +1619,35 @@ class Component extends DCLogic {
     }
     if((e.key==='Delete'||e.key==='Backspace') && this.state.selectedIds.length && !this.isEditingTarget(e) && !this.state.detailId){
       e.preventDefault(); this.deleteMulti(this.state.selectedIds);
+    }
+    /* PP-EXT (owner 2026-08-15): ↑/↓ · Shift+↑/↓ · Enter on the selected row — see `selRowNav`.
+       Placed LAST in `onKey`, after every other claim, so it can only ever fire on a keypress nothing
+       else wanted. Three guards, each load-bearing:
+         - `selectedIds.length` — with nothing selected the arrows are NOT claimed, so they keep scrolling
+           the pane. This is why a sticky selection is now a feature rather than a tax: the keys exist
+           exactly when there is something for them to act on.
+         - the Selection grid is excluded, because it already owns j/k/space for the same "current row"
+           idea and two competing cursors in one view would be worse than one.
+         - the usual editing/overlay guards, so arrows still move the caret inside a title editor and
+           still work inside any open modal. */
+    if((e.key==='ArrowUp'||e.key==='ArrowDown'||e.key==='Enter')
+       && this.state.selectedIds.length && !e.ctrlKey && !e.metaKey && !e.altKey
+       && !this.isEditingTarget(e) && !this.isFocusableTarget(e)
+       && !this.state.detailId && !this.state.settingsOpen && !this.state.menu && !this.state.colMenu
+       && !this.state.scopePrompt && !this.state.quickOpen && !this.state.datePick && !this.state.pctPop
+       && !this.state.inclPick && !this.state.barMenu
+       && !(this.state.mainView==='dashboard' && (this.state.dashMode||'overview')==='overview'
+            && (this.state.leftSurface||'list')==='select')){
+      if(e.key==='Enter'){
+        /* Enter opens the row the cursor is on. With a multi-row range selected there is no single
+           "current" row to open, so Enter does nothing rather than guessing at one. */
+        const sel=this.state.selectedIds;
+        if(sel.length===1){ e.preventDefault(); this.openDetail(sel[0]); }
+        return;
+      }
+      e.preventDefault();
+      this.selRowNav(e.key==='ArrowDown'?1:-1, !!e.shiftKey);
+      return;
     }
   }
 
@@ -3148,10 +3210,34 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT V2.6: Sections — a first-class, exclusive, ordered CONTAINER entity (own pp-sections store,
      like pp-habits: no gcal/undo funnel). Spec: docs/superpowers/specs/2026-08-03-sections-and-triage-design.md.
-     Deliberately NOT derived from @tags — see tasksBySection. Local-only for now: sectionId and this store
-     join the deferred sync batch with snoozeUntil (spec §2.6), so they do NOT enter SYNC_FIELDS. ==== */
+     Deliberately NOT derived from @tags — see tasksBySection.
+     PP-EXT (owner 2026-08-15): **SYNCED**, no longer local-only. The store rides the kv blob funnel as
+     the `sections` table (migration 0012) and `sectionId` is in `SYNC_FIELDS`. The owner found the gap by
+     using the app: *"My section grouping is different on vercel (main) and local host (dev). That seems
+     to suggest it's not synced - it should be."* ==== */
   loadSections(){ try{ const a=JSON.parse(this.lsGet('pp-sections')||'[]'); return Array.isArray(a)?a.map(x=>this.normalizeSection(x)):[]; }catch(e){ return []; } }
-  saveSections(sections){ try{ this.lsSet('pp-sections', JSON.stringify(sections)); }catch(e){} this.setState({sections}); }
+  /* PP-EXT (owner 2026-08-15): `saveSections` is now the sections SYNC CHOKE POINT, exactly as
+     `saveHabits` is for habits. Owner report: *"My section grouping is different on vercel (main) and
+     local host (dev). That seems to suggest it's not synced - it should be."* Correct, and it never was:
+     `pp-sections` had no Supabase table and `sectionId` was deliberately held out of `SYNC_FIELDS`, so
+     every device kept its own private filing. Migration 0012 adds the table; this routes the store.
+     Every section mutation already funnels through here (add/rename/reorder/delete all call it), which
+     is why one line covers the whole entity — the same property that made `saveHabits` sufficient. */
+  saveSections(sections){
+    const before=this.sectionsToMap(this.state.sections);
+    try{ this.lsSet('pp-sections', JSON.stringify(sections)); }catch(e){}
+    this.setState({sections});
+    this.syncKvOut('sections', before, this.sectionsToMap(sections));
+  }
+  /* id -> section, the shape the kv funnel diffs. Mirrors habitsToMap. */
+  sectionsToMap(arr){ const m={}; (arr||[]).forEach(s=>{ if(s&&s.id) m[s.id]=s; }); return m; }
+  /* PURE: the map back to the ordered list the app renders from. `order` is the sort key and id breaks
+     ties, matching `tasksBySection` — so two devices that pulled the same rows in different orders still
+     agree on the list, which is the whole point of syncing this store rather than just its ids. */
+  sectionsFromMap(map){
+    return Object.keys(map||{}).map(id=>this.normalizeSection(Object.assign({}, map[id], {id})))
+      .sort((a,b)=> (a.order-b.order) || (a.id<b.id?-1:a.id>b.id?1:0));
+  }
   normalizeSection(s){ s=s||{}; return { id: s.id||('sec_'+Math.random().toString(36).slice(2,8)),
     name: s.name||'New section', order: (+s.order||0) }; }
   /* Pure: append a section at the end of the current order. Returns the new list. */
@@ -3383,9 +3469,11 @@ class Component extends DCLogic {
      rotates, truncates or clears the doc — only the user editing the field changes it.
      It reuses `richField` (the same editor as the journal entry and the task description) rather than
      introducing a second editor, so the stored value is exactly the sanitized HTML subset those produce.
-     LOCAL-ONLY, like `pp-sections`: `KV_TABLES` names real Supabase tables, so a new store cannot ride the
-     kv sync funnel without a schema migration. It joins the deferred sync batch; until then `BACKUP_KEYS`
-     is its only portability, which is why it is in that list. ==== */
+     LOCAL-ONLY: `KV_TABLES` names real Supabase tables, so a new store cannot ride the kv sync funnel
+     without a schema migration. It joins the deferred sync batch; until then `BACKUP_KEYS` is its only
+     portability, which is why it is in that list. (This used to cite `pp-sections` as the sibling example
+     — that store was synced on 2026-08-15 via migration 0012, so the remaining local-only stores are this
+     one and `pp-journal-prompts`. The path it took is the template if this one follows.) ==== */
   loadScratch(){ try{ return this.normalizeScratch(JSON.parse(this.lsGet('pp-scratch')||'null')); }
     catch(e){ return this.normalizeScratch(null); } }
   /* PURE: coerce whatever came out of the store (or a hand-edited backup) into {html,updatedAt}. A bare
@@ -3438,10 +3526,11 @@ class Component extends DCLogic {
         Absence of the key means "never configured" → the defaults; a STORED empty list means "I deleted
         them all" and is honoured. Those two states must stay distinguishable, hence loadJournalPrompts
         checks for a null raw value rather than falling back on an empty items array.
-     3. LOCAL-ONLY, exactly like `pp-scratch` and `pp-sections`. `KV_TABLES` names real Supabase tables;
-        a `journal_prompts` table does not exist, so this store cannot ride the kv funnel without a schema
-        migration, and no new synced field was invented for it. It joins the deferred sync batch; until
-        then `BACKUP_KEYS` is its only portability.
+     3. LOCAL-ONLY, exactly like `pp-scratch`. `KV_TABLES` names real Supabase tables; a `journal_prompts`
+        table does not exist, so this store cannot ride the kv funnel without a schema migration, and no
+        new synced field was invented for it. It joins the deferred sync batch; until then `BACKUP_KEYS`
+        is its only portability. (`pp-sections` was the third store in this list until 2026-08-15, when
+        migration 0012 gave it a table — see `KV_TABLES` for what joining costs.)
      Defaults are psychology-informed rather than decorative: three-good-things (Seligman's gratitude/
      savouring work), an obstacle review (implementation-intention framing — name the friction, not the
      failure), one concrete intention for tomorrow, and gratitude. The two DERIVED prompts ('scratch' and
@@ -4114,6 +4203,72 @@ class Component extends DCLogic {
   clearSelection(){ if(this.state.selectedIds.length||this.state.selCols.length||this.state.selCursor)
     this.setState({selectedIds:[], selCols:[], selCursor:null, menu:null, colMenu:null}); }
   toggleSelect(id){ this.setState(s=>({selectedIds: s.selectedIds.includes(id) ? s.selectedIds.filter(x=>x!==id) : [...s.selectedIds, id]})); this._selAnchor=id; /* PP-EXT */ }
+  /* PP-EXT (owner 2026-08-15): KEYBOARD NAVIGATION for the row selection. The owner's report was that the
+     selection is "too sticky", and the reason it read that way is worth stating exactly, because it is
+     not the stickiness: *"I'm unable to use arrow keys or enter on that sticky highlighted task."* A
+     persistent selection that carries no keyboard affordance is pure cost — it holds a row lit and gives
+     nothing back. #112 made the selection reachable and dismissable; this makes it worth having.
+
+     ↑/↓ move by one row, Shift+↑/↓ extend the range from the anchor, Enter opens the current row's
+     details. Together with Tab/Shift+Tab (indent) and Delete, which already existed, a lit row is now
+     operable without the mouse.
+
+     Two deliberate choices:
+     - Navigation walks the VISIBLE list (`_visTasks` — the same list `onMouseUp` uses to resolve a
+       dependency drop), not `state.tasks`. Arrow keys must move to the row the user can see below the
+       one they are on; walking the raw store would skip over collapsed and filtered rows and jump the
+       highlight somewhere off screen. (Shift+click's range still walks `state.tasks`; that predates
+       this and is left alone rather than changed under a report that was not about it.)
+     - `_selAnchor` is shared with shift-click on purpose, so a shift-click followed by Shift+↓ extends
+       the SAME range rather than starting a second, competing one. */
+  selVisRows(){ return this._visTasks || this.state.tasks || []; }
+  selRowNav(dir, extend){
+    const rows=this.selVisRows(); if(!rows.length) return;
+    const sel=this.state.selectedIds||[];
+    /* The row the cursor is on: the anchor if it is still visible, else the last-selected row. Falling
+       back to the END of the selection (not the start) keeps a plain ↓ after a range moving downward. */
+    let cur = rows.findIndex(t=>t.id===(this._selAnchor));
+    if(!extend || cur<0){
+      const lastSel = sel.length ? sel[sel.length-1] : null;
+      const li = lastSel!=null ? rows.findIndex(t=>t.id===lastSel) : -1;
+      if(!extend) cur = li>=0 ? li : cur;
+      else if(cur<0) cur = li;
+    }
+    if(cur<0) return;
+    if(extend){
+      /* Extend: the anchor stays put and the FAR end moves, exactly like shift-click. The far end is
+         whichever selected row is not the anchor; with a single row selected the anchor is the far end
+         too, so the first Shift+↓ grows a two-row range. */
+      const ai=rows.findIndex(t=>t.id===this._selAnchor);
+      if(ai<0){ this._selAnchor=rows[cur].id; }
+      const anchor=rows.findIndex(t=>t.id===this._selAnchor);
+      let far=-1;
+      sel.forEach(id=>{ const i=rows.findIndex(t=>t.id===id); if(i>=0 && (far<0 || Math.abs(i-anchor)>Math.abs(far-anchor))) far=i; });
+      if(far<0) far=anchor;
+      const nf=Math.max(0, Math.min(rows.length-1, far+dir));
+      const a=Math.min(anchor,nf), b=Math.max(anchor,nf);
+      this.setState({selectedIds:rows.slice(a,b+1).map(t=>t.id), menu:null});
+      return;
+    }
+    const ni=Math.max(0, Math.min(rows.length-1, cur+dir));
+    const id=rows[ni].id; this._selAnchor=id;
+    /* A plain arrow move does NOT open the detail sheet, even though a row CLICK does. Opening a modal on
+       every keypress would make ↓↓↓ unusable, and it would put the sheet under the next Escape — which is
+       the exact two-press problem this session is also fixing. Enter is the explicit open. */
+    this.setState({selectedIds:[id], menu:null, selCursor:null});
+    this.scrollRowIntoView(id);
+  }
+  /* Keep the keyboard cursor on screen. Best-effort and silent: the sheet row carries `data-task-id`, so
+     if the surface in front of the user does not render one, navigation still works — the highlight
+     simply is not scrolled to. `data-task-id` is not unique (a Selection/Matrix card carries the same
+     attribute for the same task), which is fine here: any element for this task is a correct thing to
+     scroll to, and `block:'nearest'` is a no-op when it is already in view. */
+  scrollRowIntoView(id){
+    try{
+      const el=document.querySelector('[data-task-id="'+String(id).replace(/"/g,'\\"')+'"]');
+      if(el&&el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+    }catch(_e){}
+  }
   rowClick(e,id){
     if(this._suppressRowClick){ this._suppressRowClick=false; return; }
     /* PP-EXT: shift-click selects the inclusive range from the anchor row to the clicked row */
@@ -4683,6 +4838,27 @@ class Component extends DCLogic {
      Anchoring is done off the bar's own client rect, so the `zoom:0.8` wrapper cancels out — the ratio
      of two viewport measurements needs no `uiPt` conversion.
      Pinned by `tests/e2e/pct-drag.spec.js`, in both directions. */
+  /* PP-EXT (owner 2026-08-15): where the on-bar %-done grab band sits, in local px from the bar's left
+     edge. PURE — width and pct in, {left,width,centre} or null out — so the extremes are provable in the
+     unit layer rather than by eye on a chart (CLAUDE.md "keep new logic pure").
+     The rule, in order:
+       1. the band is 2·PCT_GRAB_PX wide and centred on the fill edge (w·pct/100);
+       2. it is then SHIFTED, not clipped, until it clears both resize grips — so a 0% band starts exactly
+          at BAR_GRIP_PX and a 100% band ends exactly at w−BAR_GRIP_PX, and neither ever overlaps a grip;
+       3. if the space between the grips cannot hold a full band, there is no zone at all and the bar
+          keeps its old behaviour (body drag everywhere) — the caret below the bar remains the fallback.
+     Consequence worth naming: inside the band a press sets % instead of moving dates, so at 0% the band
+     occupies the bar's left 12–36px of *body*. That is the trade the owner chose; the grips, which are
+     the ambiguous part, are the thing being protected. */
+  pctGrabZone(w, pct){
+    const g=this.BAR_GRIP_PX, bw=this.PCT_GRAB_PX*2;
+    const lo=g, hi=w-g;                       /* the body, exclusive of both grips */
+    if(!(hi-lo>=bw)) return null;             /* too narrow to hold a full band clear of the grips */
+    const centre=w*(Math.max(0,Math.min(100,+pct||0)))/100;
+    let left=centre-this.PCT_GRAB_PX;
+    left=Math.max(lo, Math.min(hi-bw, left)); /* shift inward, never clip */
+    return {left, width:bw, centre};
+  }
   startPctDrag(e,task,occIdx,barEl){
     if(e.button!==0) return; /* primary button only — same guard as startBarDrag */
     e.preventDefault(); e.stopPropagation();
@@ -6745,17 +6921,21 @@ class Component extends DCLogic {
      All IO-free and unit-tested in tests/sync.gen.test.js (CLAUDE.md "keep new logic pure"). */
   /* PP-EXT (10): `snoozeUntil` and `blocking` join here TOGETHER, as one batch, satisfying the standing
      tasks.md instruction not to ship a one-off migration per field. Both are self-contained scalars whose
-     meaning survives alone. `sectionId` deliberately does NOT ride along even though it is in the same
-     backlog line: its value is an id into `pp-sections`, and that STORE has no Supabase table, so syncing
-     the field alone would restore a fresh device's tasks pointing at sections that exist nowhere. Its
-     COLUMN is created by migration 0008 anyway so the tasks table never needs a second schema change —
-     adding it to this list is then a one-line client change with no SQL.
+     meaning survives alone.
+     PP-EXT (owner 2026-08-15): **`sectionId` now rides along too.** It was held out because its value is
+     an id into `pp-sections` and that store had no Supabase table, so mirroring the reference alone would
+     have restored a fresh device's tasks pointing at sections that exist nowhere. Migration 0012 creates
+     the table and `saveSections` now feeds the kv funnel, so the referent travels with the reference and
+     the objection is gone. Its COLUMN was already created by migration 0008 against exactly this day,
+     which is why promoting it here needed no further task-table SQL — the one-line change that comment
+     promised. Ordering note for anyone re-running this on a fresh backend: the sections table must exist
+     before a client with this field ships, or tasks arrive filed under sections that cannot be pulled.
      Every name here must equal its Postgres column verbatim (the row is mirrored 1:1, no mapping layer):
      that is the `t.pin` rename trap, and it is why `blocking` is the field name in normalizeTask too. */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking']; }
+    'snoozeUntil','blocking','sectionId']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -6832,8 +7012,14 @@ class Component extends DCLogic {
      of rowToTask -> normalizeTask, so every local-only field on it is a fresh DEFAULT, not the user's
      value: taking `r` wholesale reset `sectionId` to null (and `demo` to false) on every remote-wins
      pull, eroding section filing one task at a time, silently and outside undo. Keeping `sectionId` out
-     of SYNC_FIELDS stays correct (its ids live in pp-sections, which has no backend table) — the merge
-     is what was wrong. Anything not in SYNC_FIELDS is by definition device-local and survives. */
+     of SYNC_FIELDS was correct AT THE TIME (its ids lived in pp-sections, which had no backend table) —
+     the merge is what was wrong. Anything not in SYNC_FIELDS is by definition device-local and survives.
+     PP-EXT (owner 2026-08-15): `sectionId` has since JOINED SYNC_FIELDS, so this line now does take it
+     from the remote row — which is the intended behaviour, not a regression of the bug above. The
+     difference is that the referent travels too: `sections` is a synced table as of migration 0012, so a
+     remote-wins pull can no longer file a task under a section this device has never heard of. The
+     defect this comment records was `r`'s FRESH DEFAULT overwriting a real local value; LWW replacing it
+     with another device's real value is the contract. `demo` is still local-only and still survives. */
   mergeRemoteOverLocal(local, remote){
     const out=Object.assign({}, local);
     this.SYNC_FIELDS().forEach(k=>{ out[k]=remote[k]; });
@@ -6845,7 +7031,12 @@ class Component extends DCLogic {
      fingerprint of the whole `data` value (minus its embedded updatedAt clock) with row-level LWW.
      Choke points that feed this: saveHabits (all habit mutations) + updateJournal (all journal mutations).
      IO-free and unit-tested in tests/sync.gen.test.js alongside the tasks (B1) layer. ==== */
-  KV_TABLES(){ return ['habits','journal']; }
+  /* PP-EXT (owner 2026-08-15): `sections` joins the blob tables. It fits the kv funnel exactly — an
+     id-keyed entity with a small opaque body and no cross-row invariants — so it inherits the whole
+     tested pure layer (kvFp/kvStamp/computeKvOps/kvMergeDecision) rather than growing a third sync
+     dialect. Adding a name here is most of the work; the rest is one branch in `syncApplyKvRemote`, one
+     pull in `syncInitialSyncKv`, and one changefeed subscription. */
+  KV_TABLES(){ return ['habits','journal','sections']; }
   habitsToMap(arr){ const m={}; (arr||[]).forEach(hb=>{ if(hb&&hb.id) m[hb.id]=hb; }); return m; }
   kvTombKey(table, id){ return table+':'+id; }
   /* fingerprint of a blob's data for change detection: stable JSON minus the LWW clock (updatedAt moving
@@ -7355,6 +7546,18 @@ class Component extends DCLogic {
       const ops=this.computeKvOps(remoteMap, jmap).filter(o=>o.op!=='delete');
       if(ops.length) this.syncKvEnqueue('journal', ops);
     }).catch(e=>this.syncError(e));
+    /* PP-EXT (owner 2026-08-15): the sections reconcile. Same never-delete-on-first-reconcile rule as the
+       two above — a section absent remotely means "this device has not pushed it yet", not "deleted" —
+       which matters more here than for habits: a wrong delete would orphan every task filed under it. */
+    this._sb.from('sections').select('*').then(({data, error})=>{ if(error) throw error;
+      const map=this.sectionsToMap(this.state.sections); const remoteMap={};
+      (data||[]).forEach(r=>{ const inc=this.normalizeSection(Object.assign({}, r.data||{}, {id:r.id})); remoteMap[r.id]=inc;
+        if(this.kvMergeDecision(map[r.id], inc, tomb[this.kvTombKey('sections', r.id)])==='set') map[r.id]=inc; });
+      this._syncApplying=true;
+      try{ this.saveSections(this.sectionsFromMap(map)); } finally{ this._syncApplying=false; }
+      const ops=this.computeKvOps(remoteMap, this.sectionsToMap(this.state.sections)).filter(o=>o.op!=='delete');
+      if(ops.length) this.syncKvEnqueue('sections', ops);
+    }).catch(e=>this.syncError(e));
   }
   /* a single habits/journal Realtime changefeed event -> merge one row (INSERT/UPDATE) or a delete into local,
      echo-suppressed (_syncApplying). Our own writes echo back but kvMergeDecision makes them no-ops. */
@@ -7373,6 +7576,20 @@ class Component extends DCLogic {
         const dec=this.kvMergeDecision(ex, inc, tomb);
         if(dec==='delete') this.saveHabits(local.filter(h=>h.id!==id));
         else if(dec==='set') this.saveHabits(ex ? local.map(h=>h.id===id?inc:h) : [...local, inc]);
+      /* PP-EXT (owner 2026-08-15): sections merge row-by-row like habits, then RE-SORT through
+         `sectionsFromMap`. The re-sort is the part that is not optional: a remote row arriving with a
+         changed `order` has to move in the list, and appending it where habits would append it would
+         leave the two devices agreeing on the rows while disagreeing on the grouping — which is the
+         owner's original symptom wearing a different hat. */
+      } else if(table==='sections'){
+        const inc = data==null ? null : this.normalizeSection(Object.assign({}, data, {id:id}));
+        const map=this.sectionsToMap(this.state.sections);
+        const dec=this.kvMergeDecision(map[id], inc, tomb);
+        if(dec==='delete' || dec==='set'){
+          const nx=Object.assign({}, map);
+          if(dec==='delete') delete nx[id]; else nx[id]=inc;
+          this.saveSections(this.sectionsFromMap(nx));
+        }
       } else {
         const jmap=this.state.journal||{}; const dec=this.kvMergeDecision(jmap[id], data==null?null:data, tomb);
         if(dec==='delete' || dec==='set'){ const nx=Object.assign({}, jmap);
@@ -7408,6 +7625,9 @@ class Component extends DCLogic {
     try{ this._syncKvChan=this._sb.channel('pp-kv-sync')
         .on('postgres_changes', {event:'*', schema:'public', table:'habits'}, p=>this.syncOnKvChange('habits', p))
         .on('postgres_changes', {event:'*', schema:'public', table:'journal'}, p=>this.syncOnKvChange('journal', p))
+        /* PP-EXT (owner 2026-08-15): sections ride the same channel. Migration 0012 adds the table to the
+           B0 realtime publication, without which this subscription is silently inert. */
+        .on('postgres_changes', {event:'*', schema:'public', table:'sections'}, p=>this.syncOnKvChange('sections', p))
         .subscribe(); }
     catch(e){ this.syncError(e); }
   }
@@ -11619,22 +11839,31 @@ class Component extends DCLogic {
      carries the name on every bar, diamond and strip. `GANTT_LABEL_MIN_PX`, `ganttLabelInside`,
      `ganttNameInside` and `ganttNameOutside` are all gone with it.
 
-     `ganttSideRow` SURVIVES: it still hosts the %-done readout, which is per-bar data rather than a
-     repeated identifier. It keeps its flex shape so a future right-hand adornment cannot overlap it. */
-  /* The strip to the right of a bar: the %-done readout. It starts past the link dot's HIT_MIN_PX box
-     so it can never swallow a dependency drag (pointerEvents:none besides). */
-  ganttSideRow(w,kids){
-    return React.createElement('div',{key:'side',
-      style:{position:'absolute',left:(w+this.HIT_MIN_PX+2)+'px',top:'-1px',height:this.barH+'px',
-        display:'flex',alignItems:'center',gap:'6px',whiteSpace:'nowrap',
-        pointerEvents:'none',zIndex:6}}, kids);
-  }
+     `ganttSideRow` survived that pass because it still hosted the %-done readout, which is per-bar data
+     rather than a repeated identifier. **It is now gone too (owner 2026-08-15):** the readout moved
+     INSIDE the bar as small overlaid text, on the owner's instruction, so the helper had no children
+     left. Nothing is drawn to the right of a bar any more except the link dot. If a right-hand adornment
+     is ever wanted again, note what this strip got right and rebuild it the same way: it started past the
+     link dot's HIT_MIN_PX box, so it could never swallow a dependency drag, and it was
+     `pointerEvents:none` besides. */
   /* /PP-EXT */
 
   ganttBlock(t,rowI,o){
     const h=React.createElement;
     const dragging = this.dragState && this.dragState.recurring && this.dragState.id===t.id && this.dragState.occIdx===o.idx;
-    const dShift = dragging ? (this.dragState.deltaSteps||0)*this.DAY : 0;
+    /* PP-EXT (owner 2026-08-15, "no haptic feedback from dragging a block on a recurring block"): this
+       line read `(this.dragState.deltaSteps||0)*this.DAY`. **Nothing has ever written `deltaSteps`.**
+       `startBarDrag` records `deltaMs` and `onMouseMove` updates `deltaMs`; `deltaSteps` appears in this
+       expression and nowhere else in the file, so the whole recurring preview evaluated to a constant 0
+       and a recurring bar drag repainted itself identically on every mouse move — no movement until the
+       scope prompt resolved on release.
+       The owner asked to "show just that block getting dragged", and that part was already built: the
+       `dragging` guard above is occurrence-scoped (`occIdx===o.idx`), so the shift lands on the dragged
+       occurrence alone and its siblings hold still. Only the number was missing.
+       `deltaMs` is already snapped to a whole day (or hour, when zoomed in) by `snapDragMs`, so the
+       `*this.DAY` multiply the dead field needed is gone with it — multiplying a millisecond delta by a
+       day would have flung the bar off the chart. */
+    const dShift = dragging ? (this.dragState.deltaMs||0) : 0;
     /* PP-EXT (V1.2 round3): draw a ghost across its DRAWN span, not its derived one — see ghostDrawSpan. The
        data span is untouched; only these two render-locals widen. */
     const ghost=!!o.ghost; /* PP-EXT (V1.2 round3): hoisted — the chore branch below now defers to it */
@@ -11734,8 +11963,11 @@ class Component extends DCLogic {
        edge grips + move body stop stacking on top of each other on a short bar (the old 8px floor was narrower
        than the two 7px grips). At high zoom the real width dominates, so a true sub-day appointment still reads. */
     const w=Math.max(this.BAR_MIN_PX,this.xOf(this.effBarEnd(st,en))-left);
+    /* PP-EXT (owner 2026-08-15): the literal 7 became `BAR_GRIP_PX`, because `pctGrabZone` now has to
+       reason about this exact width to keep the %-done band off the grips. Two copies of the number
+       would have made the clearance rule silently wrong the first time either moved. */
     const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),
-      style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:'7px',cursor:'ew-resize',zIndex:3}});
+      style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:this.BAR_GRIP_PX+'px',cursor:'ew-resize',zIndex:3}});
     /* PP-EXT (V1.2 round2 — anchored ghosts): a derived span no longer greys out WHOLESALE. The committed
        edge keeps the task's real colour and a solid border; the bar dissolves toward the derived edge while
        a dotted outline fades in over the same ramp (see ghostPaint). A double-ghost has no committed edge,
@@ -11759,6 +11991,21 @@ class Component extends DCLogic {
           boxSizing:'border-box',
           boxShadow:sel?'0 0 0 2px var(--bar-ring)':(ghost?'none':'0 1px 2px rgba(0,0,0,0.4)')}},
         h('div',{style:{position:'absolute',top:0,left:0,bottom:0,width:pct+'%',background:'rgba(255,255,255,0.28)'}}),
+        /* PP-EXT (owner 2026-08-15): "Make % complete overlaid in small text in the bar." The readout was
+           in `ganttSideRow`, OUTSIDE the bar to its right, where it competed with the label row and told
+           you nothing about which pixel the boundary was on. Inside the bar it sits directly against the
+           fill it describes. Drawn INSIDE the overflow:hidden body so a long bar cannot push it into its
+           neighbour, `pointerEvents:none` so it never eats the grab band underneath it, and skipped on
+           bars too narrow to hold it (`w>=PCT_LABEL_MIN_W`) rather than clipped to "1…". Sits at the
+           right end because the fill grows from the left: the two never collide until 100%, and at 100%
+           the text is on fill either way. */
+        (w>=this.PCT_LABEL_MIN_W && pct>0) ? h('div',{key:'pctlbl','data-pct-label':String(pct),
+          style:{position:'absolute',right:'4px',top:'50%',transform:'translateY(-50%)',
+            fontSize:'9px',lineHeight:1,fontWeight:600,letterSpacing:'0.02em',
+            /* On the white-veil fill AND on the base colour, so it is given its own contrast rather than
+               inheriting either: white text with a dark shadow reads on both without a second token. */
+            color:'#fff',textShadow:'0 1px 2px rgba(0,0,0,0.55)',
+            pointerEvents:'none',whiteSpace:'nowrap'}}, pct+'%') : null,
         /* PP-EXT (V1.2 round2): the dotted ghost outline. One overlay on all four sides (a CSS border can't
            be dashed for only part of its length), masked by the inverse of the fill ramp so the dots fade in
            exactly as the colour fades out. Unmasked on a double-ghost — dotted all round at full opacity. */
@@ -11794,12 +12041,46 @@ class Component extends DCLogic {
          moved. `parentNode` is the bar wrapper, whose client rect is the bar: the caret is its direct
          child by construction (the hover-owner tenet), so the anchor cannot drift out of sync with the
          bar it measures. */
-      (w>28) ? h('div',{onMouseDown:e=>this.startPctDrag(e,t,o.idx,e.currentTarget.parentNode),
+      /* PP-EXT (owner 2026-08-15): the PRIMARY %-done target is now this band, ON the bar, centred on the
+         fill edge — see `pctGrabZone` for the geometry and the grip-clearance rule. Three things differ
+         from the caret it replaces, and each is deliberate:
+           - it is NOT hover-gated. The caret had to be (it hung below the bar, where a resting pointer
+             would have had it steal a body drag); a band on the bar is inside the bar's own drag surface
+             already, so gating it would only hide it from the person looking for it. `pointerEvents` is
+             always auto, and a press here means "% done" by design — that is the trade the owner chose.
+           - it is drawn as a visible seam at the boundary, not an invisible box. Faint at rest so it does
+             not compete with the fill, full strength on hover or while dragging.
+           - it sits at zIndex 2, BELOW the two resize grips at zIndex 3, so even if the clearance math in
+             `pctGrabZone` were ever wrong the grips would still win the overlap. Defence in depth: the
+             band already cannot reach them. (zIndex, not document order — the band is rendered after the
+             grips, so painting order alone would have given it the overlap.)
+         `parentNode` is the bar wrapper, whose client rect IS the bar (the hover-owner tenet), so the
+         drag anchor cannot drift out of sync with the bar it measures. */
+      (function(){
+        const z=this.pctGrabZone(w, pct);
+        if(!z) return null;
+        const hot=linkOn||pctDragging;
+        return h('div',{key:'pctgrab','data-pct-grab':t.id,
+          onMouseDown:e=>this.startPctDrag(e,t,o.idx,e.currentTarget.parentNode),
+          title:'% done: '+pct+'% — drag to set, click to type',
+          style:{position:'absolute',left:z.left+'px',top:0,width:z.width+'px',height:this.barH+'px',
+            /* ew-resize, not grab: this band's gesture is horizontal and it is the only affordance that
+               distinguishes it from the bar body underneath before the user commits to a press. */
+            cursor:'ew-resize',zIndex:2,pointerEvents:'auto'}},
+          /* The seam. Positioned at the true fill edge, which is NOT the band's centre once the band has
+             been shifted clear of a grip — so it is placed relative to the bar, not to the band. */
+          h('div',{style:{position:'absolute',left:(z.centre-z.left-1)+'px',top:'2px',bottom:'2px',width:'2px',
+            borderRadius:'1px',background:'rgba(255,255,255,'+(hot?0.95:0.45)+')',
+            boxShadow:hot?'0 0 0 1px rgba(0,0,0,0.35)':'none',pointerEvents:'none'}}));
+      }).call(this),
+      /* PP-EXT (V1.5 → owner 2026-08-15): the caret under the bar SURVIVES, demoted to a secondary target.
+         It is the fallback on bars too narrow for a grab band clear of both grips (`pctGrabZone` returns
+         null there), and it keeps working for anyone who already learned it. Still hover-gated, still
+         `startPctDrag`, still skipped on very short bars — only its primacy changed. */
+      (w>28) ? h('div',{key:'pctcaret',onMouseDown:e=>this.startPctDrag(e,t,o.idx,e.currentTarget.parentNode),
         title:'% done: '+pct+'% — drag to set, click to type',
         style:{position:'absolute',left:(Math.max(6,Math.min(w-6, w*pct/100))-this.HIT_MIN_PX/2)+'px',
           top:this.barH+'px',width:this.HIT_MIN_PX+'px',height:((this.rowH-this.barH)/2+6)+'px',
-          /* ew-resize, not pointer: the control's primary gesture is now a horizontal drag, and the
-             cursor is the only affordance saying so before the user commits to a press. */
           cursor:'ew-resize',zIndex:7,
           /* A live %-drag pins the control visible even if the pointer has travelled off the bar's own
              hover region — otherwise the thing being dragged unmounts mid-gesture. */
@@ -11807,9 +12088,11 @@ class Component extends DCLogic {
         h('div',{style:{position:'absolute',left:'50%',top:'1px',transform:'translateX(-50%)',width:0,height:0,
           borderLeft:'5px solid transparent',borderRight:'5px solid transparent',borderBottom:'6px solid '+base,
           pointerEvents:'none'}})) : null,
-      this.ganttSideRow(w,[
-        pct>0?h('span',{key:'pct',style:{fontSize:'11px',color:'var(--text-mut)'}},pct+'%'):null
-      ])
+      /* PP-EXT (owner 2026-08-15): the side readout is GONE — the percentage moved INSIDE the bar (see the
+         `pctlbl` node above). Keeping both would have printed the same number twice on every bar, so
+         `ganttSideRow` lost its last child and was deleted with it; the strip to the right of a bar now
+         holds nothing at all. */
+      null
     );
   }
 

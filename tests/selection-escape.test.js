@@ -97,15 +97,32 @@ test('rung 2 — an open overlay outranks the selection', () => {
   assert.deepStrictEqual(sel(c), [], 'the next press clears it');
 });
 
-test('rung 3 — the detail sheet closes before the selection clears', () => {
+// Owner, 2026-08-15: the Escape deselect looked missing because it cost TWO presses. A row click is one
+// gesture that sets `selectedIds` AND `detailId` in the same setState, so the ladder charged for each
+// half separately: press one closed the sheet, the row stayed lit, and the feature read as absent.
+// Rungs 3 and 4 therefore COLLAPSE when the open sheet is the sole selected row — one gesture, one press.
+test('rung 3 — one Escape undoes a row click entirely (sheet + selection)', () => {
   const c = comp();
   c.openDetail('t1');
   assert.strictEqual(c.state.detailId, 't1');
+  assert.deepStrictEqual(sel(c), ['t1'], 'opening details selects the row');
   c.onKey(esc());
-  assert.strictEqual(c.state.detailId, null, 'detail closes first');
-  assert.deepStrictEqual(sel(c), ['t1'], 'the row it opened from stays selected');
+  assert.strictEqual(c.state.detailId, null, 'the sheet closes');
+  assert.deepStrictEqual(sel(c), [], 'and the row it opened from is deselected by the SAME press');
+});
+
+// The collapse is conditional, not a shortcut bolted on top. When the sheet and the selection have
+// drifted apart they are genuinely two contexts, and the ladder still charges one press for each.
+test('rung 3 stays a separate rung when the sheet is NOT the selection', () => {
+  const c = comp();
+  c.setState({ selectedIds: ['t0', 't2'] });
+  c.openDetail('t1');
+  c.setState({ selectedIds: ['t0', 't2'] }); // a range selected, a different row's sheet open
   c.onKey(esc());
-  assert.deepStrictEqual(sel(c), [], 'a second press clears the row');
+  assert.strictEqual(c.state.detailId, null, 'the sheet closes first');
+  assert.deepStrictEqual(sel(c), ['t0', 't2'], 'the unrelated range survives that press');
+  c.onKey(esc());
+  assert.deepStrictEqual(sel(c), [], 'the next press clears it');
 });
 
 test('Escape while typing never clears the selection', () => {
@@ -117,4 +134,123 @@ test('Escape while typing never clears the selection', () => {
   assert.deepStrictEqual(sel(c), ['t0'], 'contenteditable description / journal prose');
   c.onKey(esc(null));
   assert.deepStrictEqual(sel(c), [], 'but a press outside any field does clear it');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Owner, 2026-08-15: *"I'm unable to use arrow keys or enter on that sticky highlighted task. Not
+// something I want to begin with. That's why I think it's too sticky."* The complaint is not really the
+// stickiness — it is that a persistent selection cost something and returned nothing. These pin the
+// keyboard model that makes it earn its keep: ↑/↓ move, Shift+↑/↓ extend, Enter opens.
+// ---------------------------------------------------------------------------------------------------
+function key(k, opts) {
+  return Object.assign({ key: k, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false,
+    target: null, preventDefault() {} }, opts || {});
+}
+// Navigation walks the VISIBLE list. `_visTasks` is what the renderer publishes and what onMouseUp
+// already resolves dependency drops against; tests set it directly rather than driving a full render.
+function navComp(n) {
+  const c = comp(n);
+  c._visTasks = c.state.tasks;
+  return c;
+}
+
+test('↓ and ↑ move the selection one visible row at a time', () => {
+  const c = navComp(4);
+  c.setState({ selectedIds: ['t1'] });
+  c._selAnchor = 't1';
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t2'], 'down moves to the next row');
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t3']);
+  c.onKey(key('ArrowUp'));
+  assert.deepStrictEqual(sel(c), ['t2'], 'up moves back');
+});
+
+test('arrow navigation stops at both ends instead of wrapping', () => {
+  const c = navComp(3);
+  c.setState({ selectedIds: ['t0'] });
+  c._selAnchor = 't0';
+  c.onKey(key('ArrowUp'));
+  assert.deepStrictEqual(sel(c), ['t0'], 'up at the top is a no-op, not a wrap to the bottom');
+  c.setState({ selectedIds: ['t2'] });
+  c._selAnchor = 't2';
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t2'], 'down at the bottom is a no-op');
+});
+
+// The owner's addition to the brief: "also add stuff like shift + up/down."
+test('Shift+↓ extends the range from the anchor, and Shift+↑ shrinks it back', () => {
+  const c = navComp(5);
+  c.setState({ selectedIds: ['t1'] });
+  c._selAnchor = 't1';
+  c.onKey(key('ArrowDown', { shiftKey: true }));
+  assert.deepStrictEqual(sel(c), ['t1', 't2'], 'the first extend grows a two-row range');
+  c.onKey(key('ArrowDown', { shiftKey: true }));
+  assert.deepStrictEqual(sel(c), ['t1', 't2', 't3']);
+  c.onKey(key('ArrowUp', { shiftKey: true }));
+  assert.deepStrictEqual(sel(c), ['t1', 't2'], 'the anchor holds and the far end comes back');
+});
+
+test('a plain arrow after a Shift range collapses to a single row', () => {
+  const c = navComp(5);
+  c.setState({ selectedIds: ['t1'] });
+  c._selAnchor = 't1';
+  c.onKey(key('ArrowDown', { shiftKey: true }));
+  c.onKey(key('ArrowDown', { shiftKey: true }));
+  assert.strictEqual(sel(c).length, 3);
+  c.onKey(key('ArrowDown'));
+  assert.strictEqual(sel(c).length, 1, 'a plain arrow is a move, not an extend');
+});
+
+// A move must NOT open the sheet even though a row CLICK does: ↓↓↓ would be unusable, and each sheet
+// would land under the next Escape — the exact two-press problem fixed above.
+test('arrow navigation never opens the detail sheet; Enter is the explicit open', () => {
+  const c = navComp(3);
+  c.setState({ selectedIds: ['t0'] });
+  c._selAnchor = 't0';
+  c.onKey(key('ArrowDown'));
+  assert.strictEqual(c.state.detailId, null, 'moving does not open anything');
+  c.onKey(key('Enter'));
+  assert.strictEqual(c.state.detailId, 't1', 'Enter opens the row the cursor is on');
+});
+
+test('Enter does nothing on a multi-row range — there is no single row to open', () => {
+  const c = navComp(4);
+  c.setState({ selectedIds: ['t0', 't1'] });
+  c.onKey(key('Enter'));
+  assert.strictEqual(c.state.detailId, null, 'Enter declines to guess which row was meant');
+});
+
+// The guard that keeps a sticky selection from being a tax on everything else: with nothing selected the
+// arrows are not claimed at all, so they still scroll the pane.
+test('with nothing selected the arrow keys are not claimed', () => {
+  const c = navComp(3);
+  let prevented = false;
+  c.onKey(key('ArrowDown', { preventDefault() { prevented = true; } }));
+  assert.strictEqual(prevented, false, 'the app does not swallow the key');
+  assert.deepStrictEqual(sel(c), [], 'and selects nothing');
+});
+
+test('arrow keys stay out of the way while typing and inside an open overlay', () => {
+  const c = navComp(3);
+  c.setState({ selectedIds: ['t0'] });
+  c._selAnchor = 't0';
+  c.onKey(key('ArrowDown', { target: INPUT }));
+  assert.deepStrictEqual(sel(c), ['t0'], 'the caret moves in the field, the selection does not');
+  c.setState({ settingsOpen: true });
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t0'], 'an open overlay owns its own arrows');
+  c.setState({ settingsOpen: false });
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t1'], 'and navigation resumes once it closes');
+});
+
+// The Selection grid already owns j/k/space for the same "current row" idea; two cursors in one view
+// would be worse than one.
+test('the Selection grid keeps its own cursor — arrows are not claimed there', () => {
+  const c = navComp(3);
+  c.setState({ selectedIds: ['t0'], mainView: 'dashboard', dashMode: 'overview', leftSurface: 'select' });
+  c._selAnchor = 't0';
+  c.onKey(key('ArrowDown'));
+  assert.deepStrictEqual(sel(c), ['t0'], 'the grid view is excluded');
 });

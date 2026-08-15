@@ -215,13 +215,17 @@ test('V2.6 runOnceMigrations records the sections flag and does not re-run it', 
   assert.equal(tasks[0].sectionId, null, 'guarded migration did not re-stamp');
 });
 
-test('V2.6 sectionId defaults to null in normalizeTask and stays out of SYNC_FIELDS', () => {
+// Updated 2026-08-15: this used to assert `sectionId` stays OUT of SYNC_FIELDS, deferring it to "the
+// batched sync migration (spec §2.6)". That migration is 0012 and this is it — the owner hit the gap in
+// real use ("My section grouping is different on vercel (main) and local host (dev)"). The rest of the
+// test is unchanged, because the rest of the contract is unchanged.
+test('V2.6 sectionId defaults to null in normalizeTask and is now a MIRRORED field', () => {
   const c = make();
   assert.equal(c.normalizeTask({ id:'n' }).sectionId, null);
-  assert.equal(c.SYNC_FIELDS().includes('sectionId'), false,
-    'sectionId is deferred to the batched sync migration (spec §2.6)');
+  assert.equal(c.SYNC_FIELDS().includes('sectionId'), true,
+    'the deferred sync migration landed (0012) — the store syncs, so the reference may too');
   assert.equal(c.BACKUP_KEYS().includes('pp-sections'), true,
-    'local-only means backup is its only portability');
+    'still backed up — a backup is a whole-workspace snapshot, not a list of unsynced stores');
   assert.equal(c.WS_SCOPED_KEYS().includes('pp-sections'), true,
     'sections are per-account workspace data');
 });

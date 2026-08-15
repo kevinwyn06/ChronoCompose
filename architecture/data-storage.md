@@ -36,9 +36,11 @@ edit that empties the field stores `''`, never `<br>`. Nothing in the app rotate
 it (that is what "append-only" means here — there is no processing step). `normalizeScratch` also reads
 a bare string as the document itself, so a hand-edited backup cannot lose notes to a shape mismatch.
 Surfaced in Focus (its home, hotkey `n`) and echoed as a Journal rail card; both render the same
-`fieldKey`, so they are two views of one document, never two copies. Like `pp-sections` it is
-**local-only** — `KV_TABLES` names real Supabase tables, so it joins the deferred sync batch — and until
-then `BACKUP_KEYS` is its only portability.
+`fieldKey`, so they are two views of one document, never two copies. It is **local-only** — `KV_TABLES`
+names real Supabase tables, so it joins the deferred sync batch — and until then `BACKUP_KEYS` is its only
+portability. (This used to name `pp-sections` as the sibling example; that store was promoted to a synced
+table on 2026-08-15 — see below — so the remaining local-only stores are this one and
+`pp-journal-prompts`.)
 
 `pp-journal-prompts` (V3.2) is the **guided journal's prompt set**: `{items:[{id,kind,text}],
 updatedAt}`. It stores the *questions*, never the answers — prompts are guidance, and the day's single
@@ -78,11 +80,33 @@ painted state rather than reading the stored value alone. `pp-settings` gained `
 `SYNC_FIELDS` **together**, as the one batch the backlog asked for rather than a migration per field.
 `supabase/migrations/0008_blocking_snooze_section.sql` adds all three columns — `blocking`,
 `"snoozeUntil"` and `"sectionId"` — nullable with no default, so the tasks table needs no further
-additive migration. `sectionId` nonetheless stays **out** of `SYNC_FIELDS`: its value is an id into
-`pp-sections`, and that store has no Supabase table, so mirroring the reference alone would leave a
-fresh device's tasks pointing at sections that exist nowhere. Promoting it is later a one-line client
-change with no SQL. Column names are quoted camelCase and must equal the JS field name verbatim — the
-row is mirrored 1:1 with no mapping layer, which is the `pin` rename trap.
+additive migration. `sectionId` nonetheless stayed **out** of `SYNC_FIELDS` at that point: its value is an
+id into `pp-sections`, and that store had no Supabase table, so mirroring the reference alone would leave a
+fresh device's tasks pointing at sections that exist nowhere. Column names are quoted camelCase and must
+equal the JS field name verbatim — the row is mirrored 1:1 with no mapping layer, which is the `pin`
+rename trap.
+
+**Sections sync (migration 0012, 2026-08-15).** That deferral is now closed, and `sectionId` is in
+`SYNC_FIELDS`. The owner found the gap by using the app on two origins: *"My section grouping is different
+on vercel (main) and local host (dev). That seems to suggest it's not synced - it should be."*
+
+`supabase/migrations/0012_sections.sql` creates `public.sections` with the same `{id, owner_id, data jsonb,
+updated_at}` shape as `habits`/`journal` — RLS on `owner_id = auth.uid()`, CRUD granted to `authenticated`
+only, `truncate/references/trigger` revoked, the `touch_updated_at` trigger, and the table added to the
+`supabase_realtime` publication (without which the client's changefeed subscription is silently inert).
+
+Client side: `sections` joins `KV_TABLES`, so the store rides the existing **kv blob funnel** and inherits
+its whole tested pure layer (`kvFp` / `kvStamp` / `computeKvOps` / `kvMergeDecision`) rather than growing a
+third sync dialect. `saveSections` is the choke point, exactly as `saveHabits` is for habits — every section
+mutation already routed through it. `sectionsToMap`/`sectionsFromMap` convert between the id-keyed map the
+funnel diffs and the ordered list the app renders; **`sectionsFromMap` re-sorts by `order` with id as the
+tiebreak**, which is not optional — rows come back from Postgres in pull order, and two devices agreeing on
+the rows while disagreeing on the order is the reported bug wearing a different hat.
+
+The rule the deferral was protecting still stands and is now pinned by a test: **the reference and the
+referent sync together or not at all.** Shipping `sectionId` without the `sections` table is the dangling-id
+trap 0008 refused to walk into; on a fresh backend, apply 0012 *before* deploying a client that carries the
+field.
 
 `blocking` is tri-state (`true` blocking / `false` background / `null` inherit `BLOCKING_DEFAULT`), so
 `null` is the value every pre-existing row holds and no data backfill is needed. Upgrading costs one

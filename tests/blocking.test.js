@@ -103,13 +103,23 @@ test('mergeCalendarEvents: re-import never overwrites a local blocking choice', 
 // =======================================================================
 // migration + sync — both directions
 // =======================================================================
-test('SYNC_FIELDS gains blocking and snoozeUntil as ONE batch; sectionId stays out', () => {
+test('SYNC_FIELDS gains blocking and snoozeUntil as ONE batch', () => {
   const c = make();
   const f = c.SYNC_FIELDS();
   assert.ok(f.includes('blocking'));
   assert.ok(f.includes('snoozeUntil'));
-  assert.equal(f.includes('sectionId'), false,
-    'the pp-sections STORE is unsynced, so a mirrored sectionId would dangle');
+});
+
+// This test used to assert the OPPOSITE — that `sectionId` stays out, because "the pp-sections STORE is
+// unsynced, so a mirrored sectionId would dangle". That reasoning was right, and it was retired by
+// removing its premise rather than by overriding it: migration 0012 gives the store a table and
+// `saveSections` feeds the kv funnel, so the referent now travels with the reference. The dangling-id
+// rule itself still holds and is what the second assertion here pins.
+test('sectionId joins SYNC_FIELDS only because the sections STORE is synced too (owner 2026-08-15)', () => {
+  const c = make();
+  assert.ok(c.SYNC_FIELDS().includes('sectionId'), 'the reference is mirrored');
+  assert.ok(c.KV_TABLES().includes('sections'),
+    'and the referent is too — mirroring one without the other is the trap 0008 refused to walk into');
 });
 
 test('UPGRADE: a legacy row with no blocking column normalizes to inherit-blocking', () => {

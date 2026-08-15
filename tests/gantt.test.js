@@ -113,21 +113,83 @@ test('the link dot carries a HIT_MIN_PX hit box that clears the right resize gri
     'the visible circle is drawn inside the hit box, not enlarged');
 });
 
-test('the %-done handle sits BELOW the bar, never inside it (owner 2026-07-26)', () => {
+// The %-done control has TWO targets as of the owner's 2026-08-15 instruction ("I would actually prefer
+// to click and click drag directly on the bar"). The band ON the bar is primary; the caret BELOW the bar
+// survives as the secondary/narrow-bar fallback. Both start the same `startPctDrag`, so both are found by
+// the same `% done` title — this pair of tests keeps them straight by position.
+const pctNodes = (c, bar) => findAll(bar, n => n.props && /^% done/.test(n.props.title || ''));
+
+test('the primary %-done target is a band ON the bar, centred on the fill edge (owner 2026-08-15)', () => {
   const c = ganttReady();
   const t = mkTask(c);
   const bar = c.ganttBlock(t, 0, occOf(t));
-  const pctH = findAll(bar, n => n.props && /^% done/.test(n.props.title || ''))[0];
-  assert.ok(pctH, '%-done handle exists');
+  const band = pctNodes(c, bar).filter(n => px(styleOf(n).top) === 0)[0];
+  assert.ok(band, 'the on-bar %-done band exists');
+  const s = styleOf(band);
+  assert.strictEqual(px(s.height), c.barH, 'the band is the full height of the bar, not a sliver');
+  assert.strictEqual(px(s.width), c.PCT_GRAB_PX * 2, 'the band is 2×PCT_GRAB_PX wide');
+  // It must sit UNDER the resize grips in stacking order, so a geometry bug can never cost the bar its
+  // resize handles — defence in depth behind pctGrabZone's own clearance rule.
+  assert.ok(Number(s.zIndex) < 3, 'the band stacks below the grips at zIndex 3, got ' + s.zIndex);
+  assert.strictEqual(s.cursor, 'ew-resize', 'the cursor is the affordance distinguishing it from the bar body');
+  // Not hover-gated: unlike the caret it is ON the bar's own drag surface, so hiding it would only hide
+  // it from the person hunting for it — which is the whole defect being fixed.
+  assert.strictEqual(s.pointerEvents, 'auto', 'the band is always hit-testable, not hover-gated');
+});
+
+test('the %-done caret survives BELOW the bar as the secondary target (owner 2026-07-26)', () => {
+  const c = ganttReady();
+  const t = mkTask(c);
+  const bar = c.ganttBlock(t, 0, occOf(t));
+  const pctH = pctNodes(c, bar).filter(n => px(styleOf(n).top) >= c.barH)[0];
+  assert.ok(pctH, '%-done caret exists');
   const s = styleOf(pctH);
-  assert.ok(/px$/.test(String(s.top)), 'handle top is an absolute offset, not a %-of-bar, got ' + s.top);
-  assert.ok(px(s.top) >= c.barH, 'handle top is at/below the bar bottom, got top=' + s.top);
-  assert.ok(!/translateY/.test(String(s.transform || '')), 'handle is not re-centred back onto the bar');
-  assert.ok(px(s.width) >= c.HIT_MIN_PX, 'handle is at least HIT_MIN_PX wide, got ' + s.width);
+  assert.ok(/px$/.test(String(s.top)), 'caret top is an absolute offset, not a %-of-bar, got ' + s.top);
+  assert.ok(px(s.top) >= c.barH, 'caret top is at/below the bar bottom, got top=' + s.top);
+  assert.ok(!/translateY/.test(String(s.transform || '')), 'caret is not re-centred back onto the bar');
+  assert.ok(px(s.width) >= c.HIT_MIN_PX, 'caret is at least HIT_MIN_PX wide, got ' + s.width);
   // …and it must not reach into the row below: the bar is centred, so the budget under it is
   // (rowH - barH)/2 plus the row gap the next stripe can spare.
   assert.ok(px(s.top) + px(s.height) <= c.barH + (c.rowH - c.barH) / 2 + 6,
-    'handle stays within the row (≤6px into the next stripe), got bottom=' + (px(s.top) + px(s.height)));
+    'caret stays within the row (≤6px into the next stripe), got bottom=' + (px(s.top) + px(s.height)));
+});
+
+// The owner's one hard constraint on the band, verbatim: "if you have the grab at ±n, make sure 0% and
+// 100% have no drag range overlap with the edges of the bar for date dragging." `pctGrabZone` is pure, so
+// the extremes are provable here rather than by eye on a chart.
+test('pctGrabZone never overlaps either resize grip, at any percentage', () => {
+  const c = make();
+  const w = 200;
+  for (let pct = 0; pct <= 100; pct += 5) {
+    const z = c.pctGrabZone(w, pct);
+    assert.ok(z, 'a 200px bar can afford a band at ' + pct + '%');
+    assert.ok(z.left >= c.BAR_GRIP_PX, 'band clears the LEFT grip at ' + pct + '%, got left=' + z.left);
+    assert.ok(z.left + z.width <= w - c.BAR_GRIP_PX,
+      'band clears the RIGHT grip at ' + pct + '%, got right=' + (z.left + z.width));
+    // Shifted, never shrunk: a clipped band would degrade to a sliver at exactly the two most common
+    // values, which is the failure mode this change exists to remove.
+    assert.strictEqual(z.width, c.PCT_GRAB_PX * 2, 'band keeps its full width at ' + pct + '%');
+  }
+});
+
+test('pctGrabZone yields no band at all when the bar cannot hold one clear of both grips', () => {
+  const c = make();
+  const tooNarrow = c.BAR_GRIP_PX * 2 + c.PCT_GRAB_PX * 2 - 1;
+  assert.strictEqual(c.pctGrabZone(tooNarrow, 50), null, 'no partial band on a bar that cannot fit one');
+  assert.ok(c.pctGrabZone(tooNarrow + 1, 50), 'exactly one px more is enough');
+  // The caret below the bar is the fallback there, which is why it was kept rather than deleted.
+});
+
+test('the band reports the true fill edge as `centre`, even when it has been shifted clear of a grip', () => {
+  const c = make();
+  const w = 200;
+  assert.strictEqual(c.pctGrabZone(w, 0).centre, 0, 'centre is the fill edge (0%), not the shifted band centre');
+  assert.strictEqual(c.pctGrabZone(w, 100).centre, w, 'centre is the fill edge (100%)');
+  assert.strictEqual(c.pctGrabZone(w, 50).centre, 100, 'centre is the fill edge (50%)');
+  // At 0% the band has been pushed right off the grip, so its own midpoint is NOT the fill edge — which
+  // is exactly why the seam is positioned from `centre` rather than from the band.
+  const z = c.pctGrabZone(w, 0);
+  assert.notStrictEqual(z.left + z.width / 2, z.centre, 'the shifted band midpoint is not the fill edge');
 });
 
 // ---- V4.4: the day-drawer zoom is a two-level toggle, not a range ----
@@ -240,14 +302,104 @@ test('no Gantt shape renders its task name as text; the tooltip still carries it
   assert.strictEqual(typeof dia.props.onMouseDown, 'function', 'and is still draggable');
 });
 
-test('the side row survives the name removal and still carries the %-done readout, clear of the link box', () => {
+// Owner, 2026-08-15: "Make % complete overlaid in small text in the bar." The readout used to live in
+// `ganttSideRow`, OUTSIDE the bar to its right; that helper had no other children and was deleted with it.
+test('the %-done readout is overlaid INSIDE the bar, and the side row is gone (owner 2026-08-15)', () => {
   const c = ganttReady();
   const t = mkTask(c, { name: 'Half done', pct: 50 });
   const bar = c.ganttBlock(t, 0, occOf(t));
-  const row = findAll(bar, n => styleOf(n).display === 'flex' && /%/.test(textOf(n)))[0];
-  assert.ok(row, 'the %-done readout still renders in the side row');
-  // Unchanged from V5.27b: it must clear the link dot so it cannot swallow a dependency drag.
-  assert.ok(px(styleOf(row).left) >= c.BAR_MIN_PX + c.HIT_MIN_PX,
-    'the side row clears the HIT_MIN_PX link box, got ' + styleOf(row).left);
-  assert.strictEqual(styleOf(row).pointerEvents, 'none', 'and never takes pointer events');
+
+  assert.strictEqual(typeof c.ganttSideRow, 'undefined',
+    'ganttSideRow is deleted, not merely unused — a dead helper invites a second readout');
+
+  const lbl = findAll(bar, n => n.props && n.props['data-pct-label'] != null)[0];
+  assert.ok(lbl, 'the in-bar %-done readout renders');
+  assert.strictEqual(lbl.props['data-pct-label'], '50', 'and reports the task percentage');
+  assert.ok(textOf(lbl).includes('50%'), 'as visible text, not attribute-only');
+  const s = styleOf(lbl);
+  // Inside the bar means positioned within it, not offset past its right edge the way the side row was.
+  assert.ok(px(s.right) >= 0 && px(s.right) < c.BAR_MIN_PX, 'anchored inside the bar, got right=' + s.right);
+  assert.ok(px(s.fontSize) <= 10, 'small text, got ' + s.fontSize);
+  // It must never eat the grab band underneath it — the band is the whole point of this change.
+  assert.strictEqual(s.pointerEvents, 'none', 'the readout never takes pointer events');
+});
+
+test('a bar too narrow for the readout drops it rather than clipping it', () => {
+  const c = ganttReady();
+  const t = mkTask(c, { name: 'Tiny', pct: 50 });
+  const occ = occOf(t);
+  // Collapse the span so the drawn width falls under PCT_LABEL_MIN_W.
+  const bar = c.ganttBlock(t, 0, Object.assign({}, occ, { end: occ.start }));
+  const lbl = findAll(bar, n => n.props && n.props['data-pct-label'] != null)[0];
+  assert.ok(!lbl, 'no readout on a bar narrower than PCT_LABEL_MIN_W');
+});
+
+test('a 0% bar carries no readout at all — "0%" on every untouched bar is noise', () => {
+  const c = ganttReady();
+  const t = mkTask(c, { name: 'Not started', pct: 0 });
+  const bar = c.ganttBlock(t, 0, occOf(t));
+  assert.ok(!findAll(bar, n => n.props && n.props['data-pct-label'] != null)[0], 'no readout at 0%');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// Owner, 2026-08-15: "No haptic feedback from dragging a block on a recurring block: show just that
+// block getting dragged." The preview was already written and already occurrence-scoped — it read
+// `dragState.deltaSteps`, a field NOTHING in the file ever assigned, so it evaluated to a constant 0 and
+// a recurring bar never moved until the scope prompt resolved on release. These tests pin the live
+// preview by POSITION, so a rename that breaks the wiring again cannot pass.
+// ---------------------------------------------------------------------------------------------------
+function recurFixture(c) {
+  const t = mkTask(c, { id: 'r1', recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const occs = [
+    { idx: 0, start: B0, end: B0 + DAY, ghost: false },
+    { idx: 1, start: B0 + 3 * DAY, end: B0 + 4 * DAY, ghost: false },
+  ];
+  return { t, occs };
+}
+const leftOf = bar => px(styleOf(bar).left);
+
+test('dragging one occurrence of a recurring task previews THAT occurrence moving', () => {
+  const c = ganttReady();
+  const { t, occs } = recurFixture(c);
+  const restLeft = leftOf(c.ganttBlock(t, 0, occs[0]));
+
+  c.dragState = { id: 'r1', occIdx: 0, mode: 'move', recurring: true, deltaMs: 2 * DAY };
+  const dragged = leftOf(c.ganttBlock(t, 0, occs[0]));
+  assert.ok(dragged > restLeft, 'the dragged occurrence moves during the gesture, got ' + dragged + ' vs ' + restLeft);
+  // Two days at the fixture's dayW — the shift is the snapped delta itself, not a multiple of it. The
+  // dead field was multiplied by DAY; doing that to a millisecond delta flings the bar off the chart.
+  assert.strictEqual(dragged - restLeft, 2 * c.state.dayW, 'it moves by exactly the snapped delta');
+});
+
+test('its SIBLING occurrences hold still — "just that block"', () => {
+  const c = ganttReady();
+  const { t, occs } = recurFixture(c);
+  const siblingAtRest = leftOf(c.ganttBlock(t, 0, occs[1]));
+  c.dragState = { id: 'r1', occIdx: 0, mode: 'move', recurring: true, deltaMs: 2 * DAY };
+  assert.strictEqual(leftOf(c.ganttBlock(t, 0, occs[1])), siblingAtRest,
+    'occurrence 1 does not move while occurrence 0 is dragged');
+});
+
+test('a recurring drag previews the edge modes too, without inverting the span', () => {
+  const c = ganttReady();
+  const { t, occs } = recurFixture(c);
+  const w = bar => px(styleOf(bar).width);
+  const restW = w(c.ganttBlock(t, 0, occs[0]));
+
+  c.dragState = { id: 'r1', occIdx: 0, mode: 'end', recurring: true, deltaMs: 2 * DAY };
+  assert.ok(w(c.ganttBlock(t, 0, occs[0])) > restW, 'dragging the end grows the bar');
+
+  // Dragged far enough backwards to invert, the span floors at one day rather than going negative.
+  c.dragState = { id: 'r1', occIdx: 0, mode: 'end', recurring: true, deltaMs: -30 * DAY };
+  assert.ok(w(c.ganttBlock(t, 0, occs[0])) > 0, 'an over-dragged end never renders a negative span');
+  c.dragState = null;
+});
+
+test('a drag on a DIFFERENT task previews nothing here', () => {
+  const c = ganttReady();
+  const { t, occs } = recurFixture(c);
+  const restLeft = leftOf(c.ganttBlock(t, 0, occs[0]));
+  c.dragState = { id: 'someone-else', occIdx: 0, mode: 'move', recurring: true, deltaMs: 5 * DAY };
+  assert.strictEqual(leftOf(c.ganttBlock(t, 0, occs[0])), restLeft, 'the preview is scoped to its own task');
+  c.dragState = null;
 });

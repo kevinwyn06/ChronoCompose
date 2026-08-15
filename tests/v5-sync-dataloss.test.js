@@ -26,22 +26,37 @@ function remoteRow(c, over){
 // =======================================================================
 // F6 — remote-wins pulls must not erase local-only fields
 // =======================================================================
-test('F6: a remote-wins pull keeps sectionId (a local-only field) on the surviving task', () => {
+// NOTE (2026-08-15): these two tests used `sectionId` as their example of a local-only field, because at
+// the time it was one. It is now MIRRORED — migration 0012 gave the sections store a table, so the
+// reference was safe to sync. The F6 defect is unchanged and still worth guarding (a remote win must
+// replace the mirrored columns ONLY, never the whole row), so the exemplar simply moves to `demo`, which
+// is still deliberately out of SYNC_FIELDS. The sectionId case gets its own test below, asserting the
+// new, opposite contract.
+test('F6: a remote-wins pull keeps demo (a local-only field) on the surviving task', () => {
   const c = make();
-  const local = [task(c, { sectionId:'sec-work', updatedAt: 1000 })];
+  const local = [task(c, { demo:true, updatedAt: 1000 })];
   const out = c.applyRemoteSnapshot(local, [remoteRow(c, { name:'FromRemote', updated_at: 5000 })], {});
   assert.equal(out.length, 1);
   assert.equal(out[0].name, 'FromRemote', 'remote wins on the mirrored columns');
-  assert.equal(out[0].sectionId, 'sec-work', 'sectionId is local-only and must survive the replace');
+  assert.equal(out[0].demo, true, 'demo is local-only and must survive the replace');
 });
 
 test('F6: every non-mirrored local field survives a remote-wins pull', () => {
   const c = make();
-  const local = [task(c, { sectionId:'sec-x', demo:true, updatedAt: 1 })];
+  const local = [task(c, { demo:true, updatedAt: 1 })];
   const out = c.applyRemoteSnapshot(local, [remoteRow(c, { planned: 999, updated_at: 9000 })], {});
   assert.equal(out[0].planned, 999);
-  assert.equal(out[0].sectionId, 'sec-x');
   assert.equal(out[0].demo, true, '`demo` is deliberately out of SYNC_FIELDS and must not be reset');
+});
+
+// The other half of the same rule, and the reason the F6 bug was subtle: a field IN SYNC_FIELDS is
+// SUPPOSED to be taken from the remote row. The original defect was a fresh DEFAULT overwriting a real
+// local value; LWW replacing it with another device's real value is the contract working.
+test('sectionId now follows LWW like any other mirrored column (owner 2026-08-15)', () => {
+  const c = make();
+  const local = [task(c, { sectionId:'sec-work', updatedAt: 1000 })];
+  const out = c.applyRemoteSnapshot(local, [remoteRow(c, { sectionId:'sec-home', updated_at: 5000 })], {});
+  assert.equal(out[0].sectionId, 'sec-home', 'the newer device wins the filing, as it should');
 });
 
 test('F6: a local task that WINS the race is untouched', () => {
@@ -49,7 +64,7 @@ test('F6: a local task that WINS the race is untouched', () => {
   const local = [task(c, { sectionId:'sec-y', name:'Local', updatedAt: 9000 })];
   const out = c.applyRemoteSnapshot(local, [remoteRow(c, { name:'Remote', updated_at: 10 })], {});
   assert.equal(out[0].name, 'Local');
-  assert.equal(out[0].sectionId, 'sec-y');
+  assert.equal(out[0].sectionId, 'sec-y', 'the loser cannot rewrite the winner, mirrored or not');
 });
 
 // =======================================================================

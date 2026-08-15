@@ -314,10 +314,38 @@ exactly one place — the top of `onMouseUp`, above every returning branch — p
 Every Gantt element layered above a row stripe owns its own `state.hoverId` enter/leave lifecycle. The bar
 wrapper contains the right-side dependency handle, so moving onto the handle cannot clear hover. Collapsed
 recurrence strips follow the same rule. Milestones own hover only for row/day glow and deliberately expose
-no dependency handle. Bar handles use separate glyph and hit-box sizes: `HIT_MIN_PX` is 24; the %-done
-control is an upward caret below the bar, not a circle inside it. The timeline block's unpin ✕ and regroup ⧉
+no dependency handle. Bar handles use separate glyph and hit-box sizes: `HIT_MIN_PX` is 24. The timeline block's unpin ✕ and regroup ⧉
 follow the same rule: the glyph stays 16px inside a transparent `HIT_MIN_PX`-wide, full-height hit column at
 the block's left edge, and the block's left padding clears that column so the title never shares its pixels.
+
+### The %-done control on a Gantt bar
+
+Two targets, both starting `startPctDrag`, both `ew-resize`:
+
+- **The band (primary, 2026-08-15).** A `PCT_GRAB_PX`-half-width band ON the bar, full bar height, centred
+  on the fill edge, drawn as a faint vertical seam that strengthens on hover. **Not hover-gated** — it lives
+  on the bar's own drag surface, so a press inside it means "% done" by design.
+- **The caret (secondary).** The upward caret below the bar, hover-gated, kept as the fallback for bars too
+  narrow to hold a band and for anyone who already learned it.
+
+`pctGrabZone(w, pct)` is the whole geometry, and it is pure. The band is **shifted, never clipped**, until it
+clears both `BAR_GRIP_PX` resize grips, and returns `null` when the body between the grips cannot hold a full
+band. That rule is the owner's constraint stated directly: at 0% and 100% the fill edge sits *on* a grip, and
+a band that overlapped one would cost the bar its resize handle at the two most common percentages there are.
+The band also stacks at `zIndex 2`, *below* the grips at 3, so a geometry bug still cannot win the overlap.
+
+Consequence worth knowing: inside the band a press sets % instead of moving dates, so at 0% the band occupies
+a stretch of the bar's left body. That is the accepted trade — the grips, which are the genuinely ambiguous
+part, are what the clearance rule protects.
+
+The percentage is drawn as small overlaid text **inside** the bar (`data-pct-label`), right-aligned,
+`pointerEvents:none`, dropped entirely below `PCT_LABEL_MIN_W` and at 0% rather than clipped. `ganttSideRow`
+— the old strip to the right of a bar that used to hold this readout — is deleted; nothing is drawn to a
+bar's right any more except the link dot.
+
+*History worth keeping:* the caret's drag gesture worked, and `tests/e2e/pct-drag.spec.js` proved it with
+real pointer input in both directions. The owner still could not use it. A 24×16 box, invisible until hover,
+in the 10px gap below the bar, is not findable — a passing gesture test is not a usable control.
 
 ### The Escape ladder
 
@@ -332,6 +360,29 @@ the block's left edge, and the block's left padding clears that column so the ti
 Rung 4 is last on purpose: it can never steal from a drag cancel or an overlay close. It is also the only
 rung guarded by `isEditingTarget`, so Escape inside an inline title editor, a description, or the quick-add
 input never wipes the row being edited. A new rung goes in transience order, not at the top.
+
+**Rungs 3 and 4 collapse into one press when the open sheet is the sole selected row** (owner, 2026-08-15).
+A row click is *one* gesture — `rowClick` writes `selectedIds` and `detailId` in the same `setState` — so
+charging one Escape per half made the deselect look absent: the first press closed the sheet and the row
+stayed lit. One gesture, one press. When the two have genuinely drifted apart (a sheet opened from a card or
+the Gantt while a different range is selected) they are separate contexts and the ladder still charges
+separately. The sheet's own ✕ (`Close (Esc)`) closes without clearing, which is how a lit row with no sheet
+is reached.
+
+### Keyboard navigation of the selection
+
+`↑`/`↓` move the selection one **visible** row (`_visTasks`, not `state.tasks` — arrows must reach the row
+below the one on screen, not skip through collapsed and filtered rows); `Shift+↑`/`Shift+↓` extend the range
+from `_selAnchor`, which is shared with shift-click so the two extend the *same* range; `Enter` opens the
+current row, and does nothing on a multi-row range rather than guessing which row was meant. A plain arrow
+move deliberately does **not** open the sheet — `↓↓↓` would be unusable, and each sheet would land under the
+next Escape.
+
+The keys are claimed **only while something is selected**, so with an empty selection the arrows still scroll
+the pane. The Selection grid is excluded because it already owns `j`/`k`/`space` for the same "current row"
+idea. This exists because a persistent selection that carries no keyboard affordance is pure cost — the
+owner's report was *"I'm unable to use arrow keys or enter on that sticky highlighted task… that's why I
+think it's too sticky"*, which is a complaint about the selection returning nothing, not about it persisting.
 
 **Nothing selected is the default and a holdable state.** No renderer falls back to the first task when
 `selectedIds` is empty, and nothing re-seeds it; every write is an explicit user act (row/card click,

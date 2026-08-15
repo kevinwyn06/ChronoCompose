@@ -29,7 +29,10 @@ const fixture = () => ({
    its own `% done:` title. Both are the only per-node identity the DOM offers here (PR #102 removed
    the bar label), which `gantt-gestures.spec.js` documents at length. */
 const BAR = '[title^="Ship the release ·"]';
+/* Both %-done targets carry this title — the on-bar band and the caret below the bar both start the same
+   `startPctDrag`. `GRAB` picks out the band specifically. */
 const PCT = '[title^="% done:"]';
+const GRAB = '[data-pct-grab]';
 
 async function bootGantt(page) {
   await bootSurface(page, { view: 'gantt' }, fixture());
@@ -106,6 +109,93 @@ test.describe('Gantt %-done control vs bar drag', () => {
     await page.mouse.move(p.x + 2, p.y + 1); /* under the 4px threshold on both axes */
     await page.mouse.up();
     await expect(page.getByText('% DONE'), 'the popover is still reachable by clicking').toBeVisible();
+  });
+
+  /* ------------------------------------------------------------------------------------------------
+   * Owner, 2026-08-15. The caret tests above PASS and always have — the gesture worked. The owner still
+   * could not use it: *"I'm still unable to drag the %-done caret. I would actually prefer to click and
+   * click drag directly on the bar, but I realize the latter conflicts with date dragging."*
+   * A 24×16 box that is invisible until hover, hanging in the 10px gap below the bar, is not findable.
+   * The primary target is now a band ON the bar, centred on the fill edge, shifted clear of both resize
+   * grips. These tests are the ones that speak to the report; the caret keeps its coverage as a fallback.
+   * ------------------------------------------------------------------------------------------------ */
+
+  test('the %-done band is on the bar and needs no hover to be hit-testable', async ({ page }) => {
+    await bootGantt(page);
+    const bar = await barBox(page);
+    /* Park the pointer far away: the band must exist and take pointer events at REST, which is the whole
+       difference from the caret. */
+    await page.mouse.move(2, 2);
+    const band = await page.locator(GRAB).first().boundingBox();
+    if (!band) throw new Error('the %-done band has no box while the pointer is elsewhere');
+    /* Vertically inside the bar, not below it. */
+    expect(band.y).toBeGreaterThanOrEqual(bar.y - 1);
+    expect(band.y + band.height).toBeLessThanOrEqual(bar.y + bar.height + 1);
+    const pe = await page.locator(GRAB).first().evaluate((el) => getComputedStyle(el).pointerEvents);
+    expect(pe, 'always hit-testable, unlike the hover-gated caret').toBe('auto');
+  });
+
+  test('dragging the band on the bar sets pct and leaves the dates alone', async ({ page }) => {
+    await bootGantt(page);
+    const before = await stored(page, 'g-long');
+    const bar = await barBox(page);
+    const band = await page.locator(GRAB).first().boundingBox();
+    if (!band) throw new Error('no band');
+
+    await page.mouse.move(band.x + band.width / 2, band.y + band.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(bar.x + bar.width * 0.6, band.y + band.height / 2, { steps: 12 });
+    await page.mouse.up();
+
+    const after = await stored(page, 'g-long');
+    expect(after.pct, 'the on-bar drag set a percentage').toBeGreaterThan(0);
+    expect(after.start, 'and must not re-date the task').toBe(before.start);
+    expect(after.end, 'and must not re-date the task').toBe(before.end);
+  });
+
+  /* The owner's one hard constraint: "make sure 0% and 100% have no drag range overlap with the edges of
+     the bar for date dragging." At 0% the fill edge sits on the left grip, so an unclamped band would
+     swallow it and make the bar unresizable at the most common percentage there is. */
+  test('at 0% the band clears the left resize grip, so the edge still re-dates', async ({ page }) => {
+    await bootGantt(page);
+    const before = await stored(page, 'g-long');
+    expect(before.pct || 0, 'fixture starts at 0%').toBe(0);
+
+    const bar = await barBox(page);
+    const band = await page.locator(GRAB).first().boundingBox();
+    if (!band) throw new Error('no band');
+    expect(band.x, 'the band starts clear of the left grip').toBeGreaterThan(bar.x);
+
+    /* Grab the extreme left edge — the grip — and drag. That must move the START date, not the pct. */
+    await page.mouse.move(bar.x + 2, bar.y + bar.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(bar.x + 2 + 90, bar.y + bar.height / 2, { steps: 10 });
+    await page.mouse.up();
+
+    const after = await stored(page, 'g-long');
+    expect(after.start, 'the left grip still resizes at 0%').not.toBe(before.start);
+    expect(after.pct || 0, 'and the band did not steal the gesture').toBe(0);
+  });
+
+  test('the in-bar readout reports the percentage and sits inside the bar', async ({ page }) => {
+    await bootGantt(page);
+    const bar = await barBox(page);
+    const band = await page.locator(GRAB).first().boundingBox();
+    if (!band) throw new Error('no band');
+
+    await page.mouse.move(band.x + band.width / 2, band.y + band.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(bar.x + bar.width * 0.5, band.y + band.height / 2, { steps: 10 });
+    await page.mouse.up();
+
+    const lbl = page.locator('[data-pct-label]').first();
+    await expect(lbl, 'the readout renders once a percentage exists').toBeVisible();
+    const box = await lbl.boundingBox();
+    if (!box) throw new Error('readout has no box');
+    expect(box.x, 'inside the bar, not beside it').toBeGreaterThanOrEqual(bar.x - 1);
+    expect(box.x + box.width).toBeLessThanOrEqual(bar.x + bar.width + 1);
+    const stored2 = await stored(page, 'g-long');
+    await expect(lbl).toHaveText(stored2.pct + '%');
   });
 
   test('dragging the bar body re-dates the task and leaves pct alone', async ({ page }) => {

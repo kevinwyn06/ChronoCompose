@@ -56,7 +56,14 @@ test('a fresh load highlights nothing', async ({ page }) => {
   await expect(detailOpen(page)).toHaveCount(0);
 });
 
-test('Escape closes the detail sheet, then clears the selection, and empty holds', async ({ page }) => {
+/* AMENDED (owner 2026-08-15). This test used to assert that Escape took TWO presses to undo a row click
+   — one for the sheet, one for the selection — and that is exactly what the owner reported as the
+   deselect being missing: *"Certainly add the esc deselect."* It was there; it was just a press further
+   away than the gesture that created the state. A row click is ONE gesture (`rowClick` sets `selectedIds`
+   and `detailId` in the same setState), so rungs 3 and 4 now collapse when the open sheet IS the sole
+   selected row. The separate-rungs behaviour is still pinned, in the unit layer, for the case where the
+   sheet and the selection have genuinely drifted apart. */
+test('one Escape undoes a row click entirely, and empty holds', async ({ page }) => {
   await boot(page);
   const clean = await rowBackgrounds(page);
 
@@ -68,14 +75,11 @@ test('Escape closes the detail sheet, then clears the selection, and empty holds
   await expect(detailOpen(page)).toBeVisible();
   await expect.poll(() => selectedRowIds(page), { message: 'a click selects the row' }).toEqual(['e2e-2']);
 
-  /* rung 3: the open sheet closes and the selection is untouched by that press */
+  /* ONE press: the sheet closes and the row it opened from is deselected by the same press. */
   await page.keyboard.press('Escape');
   await expect(detailOpen(page)).toHaveCount(0);
-  expect(await selectedRowIds(page), 'the row that opened the sheet stays selected').toEqual(['e2e-2']);
-
-  /* rung 4: with nothing open, Escape clears — and the sheet repaints exactly as it loaded */
-  await page.keyboard.press('Escape');
-  await expect.poll(() => selectedRowIds(page)).toEqual([]);
+  await expect.poll(() => selectedRowIds(page),
+    { message: 'one gesture costs one Escape' }).toEqual([]);
   /* Park the pointer off the sheet first: `sheetRow` paints `var(--hover)` under the cursor, so the row
      just clicked would still differ from its fresh-load fill for a reason that is not selection. */
   await page.mouse.move(2, 2);
