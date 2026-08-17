@@ -103,12 +103,18 @@ test('dateless task: pressed joins today; unpressed/snoozed do not', () => withN
   c.state.tasks = [dl];
   const map = c.computeAllotted(c.state.tasks, today);
   assert.ok(map[dl.id].active && map[dl.id].allotted > 0, 'dateless task allots time today');
-  // V2.1: planned:0 gets the named default so it is immediately visible and draggable.
+  // 2026-08-16: REVERSED. V2.1 gave a `planned:0` task the named default so it was draggable, but
+  // that is exactly the owner's report — "0 minute tasks are getting 30 minutes". `planned` is now
+  // nullable, so 0 is a DECISION ("ask for nothing") and only `null` draws DEFAULT_TASK_MINUTES.
   const zeroPlanned = dateless({ included:true, planned:0 });
   c.state.tasks = [zeroPlanned];
   const map2 = c.computeAllotted(c.state.tasks, today);
   assert.strictEqual(map2[zeroPlanned.id].active, true, 'still active (in the pool)');
-  assert.strictEqual(map2[zeroPlanned.id].allotted, c.DEFAULT_TASK_MINUTES);
+  assert.strictEqual(map2[zeroPlanned.id].allotted, 0, 'a deliberate 0 competes normally and is allotted 0');
+  const unsetPlanned = dateless({ included:true, planned:null });
+  c.state.tasks = [unsetPlanned];
+  assert.strictEqual(c.computeAllotted(c.state.tasks, today)[unsetPlanned.id].allotted,
+    c.DEFAULT_TASK_MINUTES, '...and an UNSET planned is what draws the default slice');
 }));
 
 test('isActiveOn: {dated,dateless} x {auto,forced-in,snoozed-active,snoozed-expired} x {today,other day}', () => {
@@ -214,9 +220,10 @@ test('computeAllotted: manual-override fixed, excluded/milestone inactive, Propo
   c.state.tasks = [ex, p1, p2, excl];
   const a = c.computeAllotted(c.state.tasks);
   assert.strictEqual(a[ex.id].allotted, 120, 'override = predicted');
-  // pool after fixed = 600-120 = 480; split 120:240 => 160 and 320
-  assert.strictEqual(a[p1.id].allotted, 160);
-  assert.strictEqual(a[p2.id].allotted, 320);
+  // pool after the reserve = 600-120 = 480; the 120:240 shares would be 160:320, but the 2026-08-16
+  // cap holds each row at its own figure — nothing is ever allotted more than it asked for.
+  assert.strictEqual(a[p1.id].allotted, 120);
+  assert.strictEqual(a[p2.id].allotted, 240);
   assert.strictEqual(a[excl.id].active, false);
   assert.strictEqual(a[excl.id].allotted, 0);
 });
@@ -229,13 +236,15 @@ test('computeAllotted: manual override redistributes pool to remaining Proportio
   const p2 = activeTask(c, { type:'Proportional', planned:240 });
   c.state.tasks = [p1, p2];
   const before = c.computeAllotted(c.state.tasks);
-  assert.strictEqual(before[p1.id].allotted, 200); // 600 * 120/360
-  assert.strictEqual(before[p2.id].allotted, 400);
-  // override p1 to a fixed 60 -> p2 should get whole remaining 540
+  // 2026-08-16: Σdemand = 360 into a 600 pool, so both shares (600*120/360 = 200, 600*240/360 = 400)
+  // are capped at the rows' own figures. The 240 surplus minutes stay unallocated.
+  assert.strictEqual(before[p1.id].allotted, 120);
+  assert.strictEqual(before[p2.id].allotted, 240);
+  // override p1 to a fixed 60 -> the remaining 540 all goes to p2, but p2 only asked for 240
   p1.predictManual = true; p1.predicted = 60;
   const after = c.computeAllotted(c.state.tasks);
   assert.strictEqual(after[p1.id].allotted, 60);
-  assert.strictEqual(after[p2.id].allotted, 540, 'remaining pool 600-60 all to p2');
+  assert.strictEqual(after[p2.id].allotted, 240, 'the whole remaining pool, capped at p2\'s own ask');
 });
 
 test('getSpent adds live elapsed while running', () => {
@@ -441,12 +450,14 @@ test('computeAllotted subtracts today-only spent (prior-day spent no longer shri
   const p2 = activeTask(c, { type:'Proportional', planned:240 });
   c.state.tasks = [p1, p2];
   const a = c.computeAllotted(c.state.tasks);
-  assert.strictEqual(a[p1.id].allotted, 200, 'full 600*120/360 — yesterday spent ignored today');
-  assert.strictEqual(a[p2.id].allotted, 400);
-  // now log 50 min TODAY -> its allotment drops by exactly 50
+  // 2026-08-16: the 600*120/360 = 200 share is capped at p1's own 120 (and p2's 400 at 240); what
+  // this test is about is unchanged — yesterday's 60 minutes do not touch today's figure.
+  assert.strictEqual(a[p1.id].allotted, 120, 'its whole ask — yesterday spent ignored today');
+  assert.strictEqual(a[p2.id].allotted, 240);
+  // now log 50 min TODAY -> its allotment drops by exactly 50, because the cap is demand MINUS spent
   p1.spentByDay[c.ymdOf(today)] = 50; p1.spent = 110;
   const b = c.computeAllotted(c.state.tasks);
-  assert.strictEqual(b[p1.id].allotted, 150, '200 share - 50 done today');
+  assert.strictEqual(b[p1.id].allotted, 70, '120 ask - 50 done today');
 });
 
 test('togglePredictManual / setPredict', () => {

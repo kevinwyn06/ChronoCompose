@@ -88,15 +88,24 @@ test('a Point on a FUTURE day is a Point on that day and nowhere else', () => {
   assert.equal(c.isActiveOn(later, today), false, 'and not today');
 });
 
-test('a non-Point zero-planned task is unaffected — it still takes its default slice', () => {
+test('a non-Point UNESTIMATED task is unaffected — it still takes its default slice', () => {
   const { c, today } = fixture();
-  // Same zero planned, but a real end: an ordinary zero-planned flexible task, NOT a Point.
-  const zero = activeTask(c, { id: 'zero', name: 'Tidy up', start: today - DAY, end: today + 3 * DAY,
+  // Same missing estimate, but a real end: an ordinary unestimated flexible task, NOT a Point.
+  // 2026-08-16: the carrier of "no time given" is now `planned:null`, not `planned:0`. A typed 0 is a
+  // decision to ask the day for nothing — giving it the default slice anyway was the owner's report
+  // ("0 minute tasks are getting 30 minutes"), so that half of the old assertion is REVERSED below.
+  const unset = activeTask(c, { id: 'unset', name: 'Tidy up', start: today - DAY, end: today + 3 * DAY,
+    planned: null, priority: 3 });
+  c.state.tasks.push(unset);
+  const map = c.computeAllotted(c.state.tasks, today + DAY);
+  assert.equal(((map[unset.id] || {}).allotted || 0), c.DEFAULT_TASK_MINUTES,
+    'the DEFAULT_TASK_MINUTES slice belongs to work with no estimate, and stays');
+  const zero = activeTask(c, { id: 'zero', name: 'Nothing', start: today - DAY, end: today + 3 * DAY,
     planned: 0, priority: 3 });
   c.state.tasks.push(zero);
-  const map = c.computeAllotted(c.state.tasks, today + DAY);
-  assert.ok(((map[zero.id] || {}).allotted || 0) > 0,
-    'the DEFAULT_TASK_MINUTES slice belongs to real zero-planned work, and stays');
+  const map2 = c.computeAllotted(c.state.tasks, today + DAY);
+  assert.equal(((map2[zero.id] || {}).allotted || 0), 0,
+    'a deliberate 0 competes normally and is allotted nothing');
 });
 
 test('a task with a start clock but a real end is a fixed appointment, not a Point', () => {

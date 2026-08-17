@@ -136,7 +136,8 @@ test('a manual override moves to the fixed bucket and the rest redistribute', ()
   const b = activeTask(c, { type: 'Proportional', planned: 120 });
   const m = c.computeAllotted([a, b]);
   assert.equal(m[a.id].allotted, 30);   // fixed
-  assert.equal(m[b.id].allotted, 150);  // 120/120 * (180 - 30)
+  // 2026-08-16: the whole 180-30 = 150 remaining pool is b's share, capped at b's own ask of 120.
+  assert.equal(m[b.id].allotted, 120);
 });
 
 // ---------------------------------------------------------------------------

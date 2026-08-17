@@ -47,7 +47,13 @@ function gridFixture() {
   return {
     settings: cleanDaySettings('10:00'),
     tasks: [
-      task('md-span', 'Every day', { start: '0d', end: '+3d', planned: 120, priority: 2 }),
+      /* `planned` was 120 until 2026-08-16. The old seam gave a lone flexible task the whole remaining
+         pool regardless of its ask, so 120 minutes of planning was drawn across the +1d appointment;
+         the new rule caps a row at its own ask and leaves the surplus unallocated, so 120 minutes now
+         fits in the 120-minute gap before 02:00 and draws in one piece. Recomputed by hand: the ask has
+         to exceed that gap for the appointment to split it, so 300 — drawn 00:00–02:00 then 03:00–06:00
+         on +1d, and as one 300-minute block on a clear day. */
+      task('md-span', 'Every day', { start: '0d', end: '+3d', planned: 300, priority: 2 }),
       task('md-appt', 'Standup', { start: '+1d+2h', end: '+1d+3h', priority: 1, included: false }),
       task('md-d2', 'Day two only', { start: '+2d', end: '+2d', planned: 60, priority: 1, included: false }),
     ],

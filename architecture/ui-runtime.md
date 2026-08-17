@@ -535,4 +535,23 @@ Because the drag's px→minute conversion reads the scale the column rendered at
 after `uiPt`), changing the level changes that conversion; a body-drag lands on the same minute at both
 levels, and `tests/e2e/drawer-zoom.spec.js` holds that at the non-default level specifically.
 
+### Boundary notifications (PR #126, 2026-08-16)
+
+There is now exactly **one** task notification type, `taskBoundary`. `deadlineRisk` is deleted outright
+(owner: *"its just a nuisance alarm"*), and the old clocked-start heads-up and block-end notification are
+merged into it. The body is assembled from two optional halves — "X has ended" and "Y will start" — so one
+half, the other, or the pair all render from a single builder.
+
+**Triggers:** every clocked start fires, and every block end fires; **coincident ones merge into a single
+notification**. This is an owner correction made during implementation — *"no info loss compared to having
+both, but less nuisance"* — and it supersedes the spec's narrower "the day's first task start" wording,
+which was not what was intended.
+
+There is **no lead time**, so the 5-minute lead constant retires with the heads-up. `NOTIFY_GRACE_MS`
+stays, as the missed-tick window. The three Settings toggles collapse to one. `notifyPlan` remains pure.
+
+Note the `uncompressable` interaction (see `scheduling.md`): `isFixedOn` is gated on the field, so a clocked
+task with "Exact" unticked no longer generates a block-end notification. That is intended — an unticked
+task's end genuinely floats, so there is no fixed end to announce.
+
 Tests mount the component in a Node VM with mocked runtime/storage. Browser QA uses localhost.

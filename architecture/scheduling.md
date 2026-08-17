@@ -4,17 +4,89 @@
 fixed blocks, meals, breaks, and point keep-clear boundaries. `buildDayTimeline` packs the daily timeline
 and supplies its day-specific allotment map during synchronous rendering.
 
-S1 keeps both future learning hooks behind pure seams. `compressionSeam(features, availableMinutes)` is
-the default linear/proportional-by-planned allocator, including today's spent time and manual Predict
-overrides. `orderingSeam(features)` is the default priority, earliest-deadline, then longer-first order.
-Both receive feature records without mutating them, so a later learned implementation can use priority,
-urgency, slack, labels, or other task fields without changing scheduling callers.
+S1 keeps both future learning hooks behind pure seams. `compressionSeam(features, availableMinutes)` is the
+default allocator; `orderingSeam(features)` is the default priority, earliest-deadline, then longer-first
+order. Both receive feature records without mutating them, so a later learned implementation can use
+priority, urgency, slack, labels, or other task fields without changing scheduling callers.
+
+## Allotment: reserve → share → cap (owner report, 2026-08-16)
+
+`compressionSeam` was rewritten. The old shape paid zero-planned tasks off the top, in full, and never
+compressed them, and it used `planned` only as a **weight** and never as a **target** — two faces of one
+defect, and both halves of the owner's report (*"0 minute tasks are getting 30 minutes while 1 hour tasks
+get just a few minutes"*). The shape now is:
+
+```
+demand(f)    = f.demand (precomputed by computeAllotted for day B) or requestedMinutes(f)
+reserved     = predictManual OR uncompressable rows → allotted = demand, off the top, never squeezed
+pool         = max(0, availableMinutes − Σ reserved)
+compressible = everything else, sharing `pool` in proportion to demand
+allotted(f)  = min(share(f), max(0, demand(f) − spent(f)))     ← the cap
+```
+
+- **Surplus is left UNALLOCATED on purpose.** There is no redistribution pass. A loose day should show real
+  free time rather than pad every estimate.
+- **Deliberate over-subscription is still a feature.** When demand exceeds the pool every compressible row
+  shrinks proportionally; the capacity readout reports, it never trims.
+- **The cap must run BEFORE the (28a) largest-remainder apportionment.** Run before the cap, the
+  apportionment could hand a row a leftover whole minute past its own estimate — the exact thing the cap
+  exists for. `left` is therefore derived from the CAPPED total.
+- The reserve for an `uncompressable` row subtracts `spent`; a `predictManual` row's does not. A re-typed
+  figure means "give me this much *more* today"; a checkbox cannot carry that meaning. Precedent is V5
+  block 34 — *"what is freed is the REMAINING demand only"*.
+- `computed` is the **counterfactual auto value**, never a copy of `allotted`: the share the row would have
+  received had it competed normally. `togglePredictManual` and the V4.3 edge-drag snap-back both exist to
+  compare the two. Its pool is re-derived as `max(0, availableMinutes − (reservedSum − thisRow))` — *not*
+  `pool + thisRow`, since `pool` is clamped at 0 and the additive form would invent minutes — and it is
+  weighted by `f.autoDemand` (the row's demand with any manual override taken out), or "auto" grows with the
+  override and a drag-back never converges.
+
+**`planned` is three-valued.** `null` = no time given (renders `—`), `0` = deliberately zero (renders
+`0:00`), `> 0` = an estimate. `requestedMinutes(t, B)` is the single definition of what one task asks day B
+for, and its branch order is the design:
+
+1. `predictManual` → the typed figure.
+2. `planned != null` → the figure, so a deliberate `0` asks for 0 and competes normally.
+3. both clocks set → `clockSpanMinutes`, because an appointment carries its duration in its clocks.
+4. otherwise → `DEFAULT_TASK_MINUTES`, now **5** (was 30). Named cost: unestimated work renders as a sliver
+   in the timeline, a deliberate nudge to estimate.
+
+**`clockSpanMinutes(t, B)` is the appointment-shaped predicate, and new code should use it.**
+`hasStartTime`/`hasEndTime` DERIVE a clock from the timestamp when the explicit flags are null, so "has both
+clocks" is a strictly **wider** set than "is an appointment" — a plain multi-day window at non-midnight
+timestamps satisfies it. That single confusion mis-scaled `requestedMinutes` (a 2-day window demanding 2880
+minutes from a per-day method) and mis-defaulted `uncompressable`. `clockSpanMinutes` applies `isFixedOn`'s
+own day-fit test once and returns `null` — not 0 — for every other shape, so a caller can tell "no span to
+read" from "a zero-length span".
+
+**`uncompressable`** is a **tri-state** field ("Time needed: Flexible / Exact" in the detail panel, written
+through `setUncompressable` → `commit()`). Ticked, the row reserves off the top and is never compressed. It
+**gates `isFixedOn`**, so unticking a clocked task stops it being a fixed block — and `notBeforeMsOf` is
+deliberately untouched, so the start still holds and only the end floats.
+
+`null` means **never decided**, and `isUncompressable(t)` — the single reader, the rule `isBlockingTask`
+follows for `blocking` — then derives the answer from `clockSpanMinutes(t) != null` **on every read**. So a
+task that gains clock times later becomes Exact by itself (owner, 2026-08-16: *"uncompressable should
+rederive"*); the earlier shape stamped the boolean once in `normalizeTask` and froze it there. A stored
+`true`/`false` is a user **decision** and outranks the derivation permanently. `normalizeTask` stores
+nothing; `computeAllotted` resolves the field when it builds the seam's features, so `compressionSeam`
+still receives a plain boolean. It is in `SYNC_FIELDS` and needs Supabase migration `0013` (**nullable**
+column — the never-decided state has to survive a round trip).
+
+**Breaks** default to `settings.breakMin` **3** (was 0); the `break-min-default` local migration delivers it
+to workspaces that have already saved settings. The pool's break estimate reserves `breakMin` per whole
+family rather than per competing family — deliberately in the safe direction (it only ever under-allots),
+after a pin was found to shrink the competing count and hand the remaining tasks `breakMin` extra minutes
+each.
 
 V2.1 makes today's participation explicit: `included===true` is pressed/in today regardless of the
 date window, while false or legacy null is unpressed. The most recently started running timer is the
 single stronger active state; it participates even if previously unpressed and packs no earlier than
-the current time. Other-day columns remain date-window-derived. Non-Point pressed work with zero
-`planned` reserves `DEFAULT_TASK_MINUTES` (30 minutes), compressed evenly only when the pool is smaller.
+the current time. Other-day columns remain date-window-derived. (V2.1 also gave non-Point pressed work with
+zero `planned` a 30-minute reserve paid off the top and never compressed. **That rule is retired as of
+2026-08-16** — see "Allotment: reserve → share → cap" above: `planned:null` now falls through the
+`requestedMinutes` ladder to a 5-minute default and competes for the pool like anything else, while
+`planned:0` deliberately asks for nothing.)
 
 V2.2 adds two derived ambient signals without gating discretion. `isEligibleToday` requires today's day
 inside the real/derived occurrence window and all existing predecessors complete; planned duration is not
@@ -100,8 +172,9 @@ Body-drag answers *when* — it is the drag-pin above, unchanged. Edge-drag (the
 `predictManual` pair — the same field the sheet's Predict column writes — and not through a new field or a
 per-block one. `edgePointerDown` captures the task's current `allotted` for that day, `edgeAllotFor(base,
 deltaMin)` is the pure delta step (floored at `EDGE_MIN_ALLOT`), and the release calls `setAllottedManual`,
-the numeric sibling of `setPredict`, inside one `commit()`. Nothing else changes: `compressionSeam` already
-takes every `predictManual` task's minutes off the top before it splits the pool, so the other tasks
+the numeric sibling of `setPredict`, inside one `commit()`. Nothing else changes: `compressionSeam` still
+reserves every `predictManual` task's minutes off the top before it splits the pool (that is the "reserve"
+step of the 2026-08-16 seam, now shared with `uncompressable`), so the other tasks
 re-compress around the fixed one, the override survives every later re-pack, and `fixedBlocksToday` remains
 the single source `computeAllotted` and `buildDayTimeline` share. Reset is the existing `∿ / ✎` toggle
 (`togglePredictManual`); V4.3 owns a dedicated Reset control. `blockResizable` restricts the gesture to
@@ -136,7 +209,7 @@ render uses. Resetting an already-auto block writes nothing, so it never leaves 
 
 | Shape | Test | Behaviour |
 |---|---|---|
-| Appointment (fixed) | Start has a time, `end` is set, span is at most one day, and rendering is on its start day | Occupies its literal clock span and shrinks the pool. |
+| Appointment (fixed) | Start has a time, `end` is set, span is at most one day, rendering is on its start day, **and `uncompressable` is true** | Occupies its literal clock span and shrinks the pool. Untick "Exact" and it leaves `fixedBlocksToday` for the compressible set, but `notBeforeMsOf` still holds its start — only the end floats. |
 | Point (keep-clear) | Start has a time, `end` is `null`, and `planned` is 0 | Reserves no duration; its clock divides packing intervals. |
 | Deadline (due-by) | `end` is set and start is untimed | Packs flexibly, with every minute before `dueMsOf`. |
 | Flex | No edge supplies a scheduling clock | Packs freely inside its active date window. |
@@ -181,6 +254,9 @@ Current invariants:
 - Archived and unpressed tasks do not allot or render as active work today; user pressing is never gated
   by the date window.
 - Point tasks reserve no duration but split allocatable runs at their clock.
+- No row is ever allotted more than `max(0, demand − spent)`; surplus stays unallocated rather than being
+  redistributed.
+- "Is this appointment-shaped?" is `clockSpanMinutes(t, B) != null`, never `hasStartTime && hasEndTime`.
 - Fixed tasks pass both the same-day and at-most-one-day guards.
 - Ghost draw width may depend on zoom; scheduling span must not.
 - Manual movement/resize remains undoable through `commit()`.

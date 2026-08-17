@@ -74,8 +74,14 @@ function make(){ return new (loadComponent())({ accent:'#3b82f6', showCriticalPa
 
 const DAY = 86400000;
 // A task whose [start,end] straddles today (so it is "active" for allotment).
+// The window is expressed as BARE DATES (local midnight ± a day), which is what this helper always
+// meant: a plain flexible task that happens to be in range, not an appointment. It used to use raw
+// `Date.now()`, whose incidental wall-clock time reads as a user-typed clock on BOTH edges — and as of
+// 2026-08-16 `normalizeTask` derives `uncompressable:true` from exactly that pair, which would have
+// turned every fixture in the suite into a reserved, never-compressed row. Callers that do want a
+// clocked span pass `start`/`end` (or `startClock`/`endClock`) explicitly through `over`.
 function activeTask(c, over){
-  const B = Date.now();
+  const B = c.startOfDay(Date.now());
   return c.normalizeTask(Object.assign({
     id:'x'+Math.random().toString(36).slice(2,7), name:'t', type:'Proportional',
     start:B-DAY, end:B+DAY, priority:4, deps:[], pct:0, planned:120, spent:0,
@@ -83,9 +89,16 @@ function activeTask(c, over){
 }
 
 // Configure a deterministic allotment pool: full day 00:00→endHHMM, no meals, no free-time reserve,
-// pack-from-now off. So pool (minutes) = the window length, independent of wall-clock time.
+// pack-from-now off, no inter-task breaks. So pool (minutes) = the window length, independent of
+// wall-clock time.
+// `breakMin:0` is stated explicitly as of 2026-08-16, when the default moved 0 → 3. It is not a new
+// exemption — it is this helper's existing contract written down. Every caller reasons "pool = the
+// window length" and none of them is a test ABOUT breaks; the break behaviour has its own fixture,
+// which sets breakMin itself (tests/scheduling.gen.test.js, "break: breakMin shrinks the pool").
+// Left implicit, the new default would silently subtract 3 minutes per packable family from every
+// pool in the suite and turn a dozen unrelated assertions into arithmetic about breaks.
 function cleanDay(c, endHHMM){
-  Object.assign(c.state.settings, { allotMode:'today', packFromNow:false, freeTime:0,
+  Object.assign(c.state.settings, { allotMode:'today', packFromNow:false, freeTime:0, breakMin:0,
     dayStart:'00:00', dayEnd:endHHMM,
     lunchStart:'00:00', lunchEnd:'00:00', dinnerStart:'00:00', dinnerEnd:'00:00' });
 }

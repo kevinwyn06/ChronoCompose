@@ -32,7 +32,10 @@ test('V5/F1: a column filter does not change anyone\'s allotment', () => withNow
 
   const truth = c.computeAllotted(c.state.tasks);    // ground truth: the FULL list
   assert.deepEqual(totals(allotVia(c)), totals(truth), 'unfiltered render matches the full-list map');
-  assert.strictEqual(truth.a.allotted, 150);         // 600 split 120:120:240
+  // 2026-08-16 (cap): 600-minute pool, Sigma demand 480, so every share is capped at the row's own
+  // figure — 120, 120, 240 — and 120 minutes stay free. The point of the test is unchanged: the
+  // numbers must not move when the sheet is filtered.
+  assert.strictEqual(truth.a.allotted, 120);
 
   /* Filter the sheet down to one row. The sheet may show one task; the DAY still has three. */
   c.state.colFilters = { name:{ contains:'Alpha' } };
@@ -41,9 +44,9 @@ test('V5/F1: a column filter does not change anyone\'s allotment', () => withNow
 
   const filtered = allotVia(c);
   assert.deepEqual(totals(filtered), totals(truth), 'allotment is identical with the filter active');
-  assert.strictEqual(filtered.a.allotted, 150, 'Alpha is NOT inflated to the whole pool');
-  assert.strictEqual(filtered.b.allotted, 150, 'a filtered-out task keeps its allotment');
-  assert.strictEqual(filtered.d.allotted, 300, 'a filtered-out task keeps its allotment');
+  assert.strictEqual(filtered.a.allotted, 120, 'Alpha is NOT inflated to the whole pool');
+  assert.strictEqual(filtered.b.allotted, 120, 'a filtered-out task keeps its allotment');
+  assert.strictEqual(filtered.d.allotted, 240, 'a filtered-out task keeps its allotment');
 }));
 
 test('V5/F1: a task in a COLLAPSED section still allots and still reaches the day', () => withNow(() => {
@@ -55,7 +58,8 @@ test('V5/F1: a task in a COLLAPSED section still allots and still reaches the da
   c.state.tasks = [r, m];
 
   const truth = c.computeAllotted(c.state.tasks);
-  assert.strictEqual(truth.m.allotted, 300);
+  // 2026-08-16 (cap): two 120-minute asks in a 600-minute pool — each gets exactly its 120.
+  assert.strictEqual(truth.m.allotted, 120);
 
   /* Collapse Admin — a persisted `pp-prefs` view state, so this is the every-load case. */
   c.state.collapsedSections = { s2: 1 };
@@ -66,8 +70,8 @@ test('V5/F1: a task in a COLLAPSED section still allots and still reaches the da
   const after = allotVia(c);
   assert.ok(!c._visTasks.some(t => t.id === 'm'), 'Mail really is out of the sheet projection');
   assert.deepEqual(totals(after), totals(truth), 'collapse changes nothing about the day');
-  assert.strictEqual(after.m.allotted, 300, 'the hidden task keeps its allotment');
-  assert.strictEqual(c.flexAllot('m'), 300, 'so flexAllot is non-zero…');
+  assert.strictEqual(after.m.allotted, 120, 'the hidden task keeps its allotment');
+  assert.strictEqual(c.flexAllot('m'), 120, 'so flexAllot is non-zero…');
 
   /* …and therefore it still reaches the timeline. Before the fix this was 0 minutes: neither
      packed nor listed as unscheduled — the task simply vanished from the day. */

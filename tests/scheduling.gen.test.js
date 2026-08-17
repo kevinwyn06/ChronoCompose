@@ -32,10 +32,16 @@ test('V2.1: pressed is today inclusion; unpressing removes it regardless of date
 
 test('V2.1: new and zero-planned tasks receive pressed/default-time defaults', () => {
   const c=make(); cleanDay(c,'02:00');
-  const t=c.normalizeTask({id:'new',name:'new',start:null,end:null,planned:0});
+  // 2026-08-16: a NEW task is `planned:null` ("no time given"), and that is what draws the default
+  // slice. A typed `planned:0` is now a decision to ask for nothing — giving it the default anyway
+  // was the owner's report, so that half is asserted the other way round.
+  const t=c.normalizeTask({id:'new',name:'new',start:null,end:null});
   assert.strictEqual(t.included,true,'new task defaults pressed');
+  assert.strictEqual(t.planned,null,'and carries no estimate rather than a zero one');
   const map=c.computeAllotted([t]);
   assert.strictEqual(map[t.id].allotted,c.DEFAULT_TASK_MINUTES);
+  const z=c.normalizeTask({id:'zero',name:'zero',start:null,end:null,planned:0});
+  assert.strictEqual(c.computeAllotted([z])[z.id].allotted,0,'a deliberate zero is allotted zero');
 });
 
 test('V2.1: latest running task is stronger pressed and pulled to now', () => {
@@ -360,7 +366,11 @@ function splitDay(c){
   cleanDay(c, '10:00');
   const ev = activeTask(c, { id:'ev', name:'Appt', eventId:'g1', allDay:false,
     start: B + 4 * H, end: B + 5 * H, planned: 60 });
-  const x = activeTask(c, { id:'x', name:'Split', planned: 120 });
+  // 2026-08-16: `planned` is now a CAP as well as a weight, so the fixture must ASK for the pool it
+  // is meant to hold. 540 = the 600-minute window minus the appointment's hour, i.e. exactly the
+  // whole flexible pool these tests were always written against; at the old 120 the task no longer
+  // reached past 04:00 and the appointment stopped splitting it.
+  const x = activeTask(c, { id:'x', name:'Split', planned: 540 });
   return { B, ev, x };
 }
 
@@ -504,9 +514,11 @@ test('multi-day: future-day computeAllotted uses spent = 0', () => {
   c.state.tasks = [t];
   const today = c.computeAllotted([t], B);
   const future = c.computeAllotted([t], B + 2 * DAY);
-  // sole active task → gets the whole pool minus spent today; future day ignores spent.
-  assert.strictEqual(today['t'].allotted, 600 - 45, 'today subtracts spent');
-  assert.strictEqual(future['t'].allotted, 600, 'future day ignores spent (spent = today only)');
+  // 2026-08-16: the sole active task's share is the whole 600-minute pool, capped at its own 120-minute
+  // ask minus what it has already spent TODAY: 120-45 = 75. The future day has no spend, so it is 120.
+  // What this test is about — future days ignore `spent` — is unchanged.
+  assert.strictEqual(today['t'].allotted, 120 - 45, 'today subtracts spent');
+  assert.strictEqual(future['t'].allotted, 120, 'future day ignores spent (spent = today only)');
 });
 
 // E2. A block dragged onto a FUTURE day pins for THAT day: buildDayTimeline(B_future) renders it as a
@@ -872,15 +884,19 @@ test('V4.2: an edge-drag sets a sticky allotment; the other tasks re-compress an
   pack(c, c.state.tasks);
   assert.strictEqual(c._allot['a'].allotted, 180,
     'a re-compression triggered by another task leaves the manual allotment alone');
-  assert.strictEqual(c._allot['b'].allotted, 420, 'the other task absorbed the whole rest of the pool');
+  // 2026-08-16: b's share is the whole 420-minute remainder, capped at the 60 minutes it now asks
+  // for. "Absorbs the whole rest of the pool" was the inflation this release removed.
+  assert.strictEqual(c._allot['b'].allotted, 60, 'the other task takes exactly its own new estimate');
 
   // …until it is reset, which is the existing ∿/✎ toggle — no second reset mechanism was invented.
   c._allot = c.computeAllotted(c.state.tasks, B);
   c.togglePredictManual('a');
   pack(c, c.state.tasks);
   assert.strictEqual(c.state.tasks.find(t => t.id === 'a').predictManual, false, 'reset clears the override');
-  assert.strictEqual(c._allot['a'].allotted + c._allot['b'].allotted, 600, 'and the pool is shared again');
-  assert.strictEqual(c._allot['a'].allotted, 300, 'back to proportional (60/60 planned ⇒ half each)');
+  // 2026-08-16: both tasks now ask for 60 of a 600-minute day, so they get 60 each and 480 minutes
+  // stay free. The point stands — the reset put `a` back on the same footing as everyone else.
+  assert.strictEqual(c._allot['a'].allotted, c._allot['b'].allotted, 'and the pool is shared again');
+  assert.strictEqual(c._allot['a'].allotted, 60, 'back to auto: each gets exactly its 60-minute ask');
 });
 
 // ── V4.3: snapping — priority snap-to-original, Alt-disable, Reset ───────────────────────────────
@@ -1022,6 +1038,8 @@ test('V4.3: releasing an edge-drag on the original clears the override rather th
     'the task is AUTO again — not manually pinned to the same number, which would freeze it out of the next re-compression');
   c.state.tasks.find(t => t.id === 'b').planned = 60;
   pack(c, c.state.tasks);
-  assert.strictEqual(c._allot['a'].allotted, 300,
-    'and it re-compresses with everyone else again (60/60 planned means half the pool each)');
+  // 2026-08-16: with both rows asking 60 of a 600-minute day, auto means 60 — not half the pool.
+  // What is being proved is that `a` moved when `b` changed, i.e. it really is auto again.
+  assert.strictEqual(c._allot['a'].allotted, 60,
+    'and it re-compresses with everyone else again (auto = its own 60-minute ask)');
 });

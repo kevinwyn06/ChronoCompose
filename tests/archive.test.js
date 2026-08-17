@@ -58,7 +58,10 @@ test('archived tasks are excluded from allotment and the day timeline', () => {
   c._allot = c.computeAllotted(c.state.tasks);
   assert.equal(c._allot['arch'].active, false);
   assert.equal(c._allot['arch'].allotted, 0);
-  assert.equal(c._allot['live'].allotted, 600, 'archived task does not compete for the pool');
+  // 2026-08-16: the live task's share is the whole 600-minute pool, capped at its own 120-minute ask.
+  // What this test proves is unchanged: the archived row contributes no demand, so `live` gets 100%
+  // of what it asked for rather than splitting the day with a task that is gone.
+  assert.equal(c._allot['live'].allotted, 120, 'archived task does not compete for the pool');
   const ids = c.buildDayTimeline().chunks.filter(x => x.type === 'scheduled').map(x => x.id);
   assert.ok(!ids.includes('arch'));
 });

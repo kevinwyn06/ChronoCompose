@@ -196,7 +196,9 @@ test("a split drop does not change the task's minutes for the day", () => {
     const {c, B} = dropFixture();
     const was = c.computeAllotted(c.state.tasks)['d1'].allotted;
     const wasDrawn = drawnMins(c, B, 'd1');
-    assert.equal(was, 1170, 'fixture: a 20-hour window minus a 30-minute lunch');
+    // 2026-08-16: the fixture's 20-hour window minus lunch is 1170 free minutes, but d1 only asked
+    // for 600 (planned:600) and the cap means it is never given more than it asked for.
+    assert.equal(was, 600, 'fixture: d1 receives its own 600-minute ask out of a much looser day');
     c.pinBlockAt('d1', B+12*H, 90, [], B, {partial:true, origStart:B});
     assert.equal(c.computeAllotted(c.state.tasks)['d1'].allotted, was,
       'the seam divides the SAME pool it would have divided with no pin at all');
@@ -285,5 +287,51 @@ test('a pin on another day is never touched by a split drop', () => {
     c.pinBlockAt('d1', B+12*H, 90, [], B, {partial:true, origStart:B});
     const other = Array.from(c.pinsOf(c.state.tasks[0])).filter(p=>p.day===B+DAY);
     assert.deepEqual(other.map(p=>p.dur), [45]);
+  });
+});
+
+// =======================================================================
+// THE BREAK RESERVE — a pin must not change how many breaks the pool pays for
+// =======================================================================
+test('a WHOLE pin leaves every task\'s daily total unchanged, breaks included', () => {
+  withNow(() => {
+    const c = make(); cleanDay(c, '08:00');
+    c.state.settings.breakMin = 3;              // the 2026-08-16 default; cleanDay's contract is 0
+    const B = c.startOfToday();
+    c.state.tasks = [activeTask(c, {id:'a', start:B-DAY, end:B+DAY, planned:300}),
+                     activeTask(c, {id:'b', start:B-DAY, end:B+DAY, planned:300})];
+    // BY HAND, before the pin. Window 00:00-08:00 = 480 free minutes; two packable families, so the
+    // break reserve is 2 x 3 = 6 and the pool is 474. Demand is 300 + 300 = 600 > 474, so both rows
+    // compress proportionally: 300/600 x 474 = 237 each, under each row's own 300-minute cap.
+    const was = c.computeAllotted(c.state.tasks);
+    assert.equal(was['a'].allotted, 237);
+    assert.equal(was['b'].allotted, 237);
+    // Hand-place b's whole 237 minutes at 00:00. It becomes a fixed block, so 237 minutes leave the
+    // free intervals: 480 - 237 = 243 raw. The break reserve MUST still count two families - b is
+    // hand-placed, not deleted - so the pool is 243 - 6 = 237 and a, alone in the pool, takes all of
+    // it (237 < its 300 cap). Every task's total for the day is therefore identical to the line above.
+    // Counting only the still-competing family gave 243 - 3 = 240 and granted a a free break.
+    c.pinBlockAt('b', B, 237, [], B);
+    const now = c.computeAllotted(c.state.tasks);
+    assert.equal(now['b'].allotted, 237, 'the pinned task holds exactly the minutes it was placed on');
+    assert.equal(now['a'].allotted, was['a'].allotted,
+      'and the drag is a MOVE, not a grant: no task gains a break\'s worth of minutes');
+  });
+});
+
+test('Alt free placement survives the DROP, not only the drag preview', () => {
+  withNow(() => {
+    const {c, B} = dropFixture();
+    /* pinBlockAt used to call snapPinStart with no opts, so the modes latched during the drag were
+       thrown away and the grid/neighbour magnet re-snapped the drop. Alt is the documented V4.3
+       free-placement modifier; discarded at the drop it is no modifier at all. */
+    c.pinBlockAt('d1', B + 12*H + 7*M, 20, [B + 12*H], B, {free:true});
+    assert.deepEqual(plain(c.pinsOf(c.state.tasks[0]), B), [[12*H + 7*M, 20]],
+      'Alt lands the block on the minute the pointer left it — no grid, no magnet');
+    /* Contrast, same drop without Alt: 12:07 is inside PIN_MAGNET of the 12:00 target, so it abuts. */
+    const {c:c2} = dropFixture();
+    c2.pinBlockAt('d1', B + 12*H + 7*M, 20, [B + 12*H], B);
+    assert.equal(c2.pinsOf(c2.state.tasks[0])[0].start, B + 12*H,
+      'and without it the neighbour magnet still wins, exactly as before');
   });
 });

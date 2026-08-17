@@ -339,7 +339,12 @@ class Component extends DCLogic {
        later in syncOnAuth. See plans/account-namespacing-plan.md. */
     try{ this._workspace = localStorage.getItem('pp-workspace') || 'anon'; }catch(e){ this._workspace = 'anon'; }
     this.DAY = 86400000;
-    this.DEFAULT_TASK_MINUTES = 30; /* PP-EXT V2.1: real draggable slice for zero-planned pressed work */
+    /* PP-EXT (owner 2026-08-16): 30 → 5. `planned:null` now means "never estimated", and an unestimated
+       task should ask the day for a token amount, not for half an hour off the top. NAMED COST: at 5
+       minutes the block is too small to grab in the timeline — a deliberate nudge to estimate. Fixed
+       appointments are unaffected: requestedMinutes reads their clock span before it reaches this. */
+    this.DEFAULT_TASK_MINUTES = 5;
+    /* /PP-EXT */
     this.HOUR = 3600000; /* PP-EXT (V1.3 fix): sub-day drag snap unit — used once zoomed into the hour grid */
     this.CAP_STRIP_H = 14; /* PP-EXT (21): height of the per-day capacity strip under a Week/4-Day column header */
     /* PP-EXT V5 (24a): per-column Included/Excluded band sizing in the Selection view. The split is
@@ -779,7 +784,10 @@ class Component extends DCLogic {
      promise a pool of hours that had already gone; planning from now is the honest default. The ⏱/☀
      toggle (renderPackToggle) still flips it and still persists, so "full day" is one click away. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:true, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:0, gcalPollSec:60,
+    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:3/* PP-EXT (owner 2026-08-16): 0 → 3. Back-to-back packing was never realistic —
+    every real transition between two tasks costs a minute or two, and a plan that denies it runs late from
+    the first hand-off. 3 is small enough that the pool barely moves and large enough to be honest. Existing
+    workspaces hold the old 0 in their persisted blob, so migrateSettings delivers this to them. */, gcalPollSec:60,
     gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     syncEnabled:false, /* PP-EXT B1: offline-first Supabase sync; off until the owner signs in (B2 flips it on). Funnel + updatedAt stamping are inert while false. */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
@@ -817,7 +825,29 @@ class Component extends DCLogic {
   /* /PP-EXT */
   loadTasks(){ try{ const s=this.lsGet('pp-tasks'); const a=s?JSON.parse(s):null; return Array.isArray(a)&&a.length?a:null; }catch(e){ return null; } }
   saveTasks(tasks){ try{ this.lsSet('pp-tasks', JSON.stringify(tasks||this.state.tasks)); }catch(e){} }
-  loadSettings(){ try{ return Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(this.lsGet('pp-settings')||'{}')); }catch(e){ return this.DEFAULT_SETTINGS(); } }
+  /* PP-EXT (owner 2026-08-16): settings-side sibling of runOnceMigrations. A DEFAULT change alone reaches
+     nobody who has ever opened Settings, because the persisted blob holds the old value — and every
+     workspace that has ever saved a setting has such a blob. Same guard store (`pp-migrations`), same
+     once-only contract: reading a stored 0 as "never chosen" is sound because 3 was never on offer before.
+     Once the flag is recorded, a user who deliberately types 0 keeps it forever.
+     PURE-ish: reads/writes only the pp-migrations flag and returns a NEW settings object, never mutating
+     the one it is handed. Unit-tested.
+     NOT PERSISTED HERE, on purpose: the single call site (`loadSettings`) runs while the constructor is
+     still building `this.state`, so `saveSettings` — which calls setState — cannot run yet. The flag is
+     already recorded, so the lift happens exactly once, and the migrated value persists on the user's next
+     settings write. Until then the in-memory value is the correct one, and that is what every reader uses. */
+  migrateSettings(s){
+    const out=Object.assign({}, s||{});
+    try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
+      if(!done['break-min-default']){
+        if((+out.breakMin||0)===0) out.breakMin=3;
+        done['break-min-default']=1; this.lsSet('pp-migrations', JSON.stringify(done));
+      }
+    }catch(e){}
+    return out;
+  }
+  /* /PP-EXT */
+  loadSettings(){ try{ return this.migrateSettings(Object.assign(this.DEFAULT_SETTINGS(), JSON.parse(this.lsGet('pp-settings')||'{}'))); }catch(e){ return this.DEFAULT_SETTINGS(); } }
   saveSettings(patch){ const s=Object.assign({}, this.state.settings, patch); this.setState({settings:s}); try{ this.lsSet('pp-settings', JSON.stringify(s)); }catch(e){} }
   loadGcal(){ const cfg=(window.PP_CONFIG&&window.PP_CONFIG.googleClientId)||''; /* PP-EXT: Client ID from config.js by default */
     try{ const saved=JSON.parse(this.lsGet('pp-gcal')||'{}');
@@ -841,10 +871,13 @@ class Component extends DCLogic {
       return raw; }catch(e){ return {}; } }
   saveRun(r){ try{ if(r && Object.keys(r).length) this.lsSet('pp-run', JSON.stringify(r)); else this.lsRemove('pp-run'); }catch(e){} }
   normalizeTask(t){
-    return Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
+    const n = Object.assign({ type:'Proportional', /* PP-EXT: default scheduling mode; architecture.md says normalizeTask guarantees type exists */
       spent:0, spentByDay:{}, /* PP-EXT: per-day timer ledger {ymd:minutes}; spent stays the lifetime total, spentByDay is the daily slice (getSpentOn). Fixes computeAllotted over-subtracting lifetime spent from today's pool. */
       goal:'', predictManual:false, calendarId:null, eventId:null, allDay:false,
-      planned:0, predicted:0, /* PP-EXT: numeric defaults — a missing planned would leak NaN into computeAllotted's pool */
+      planned:null, predicted:0, /* PP-EXT (owner 2026-08-16): `planned` is NULLABLE and the two falsy
+         values mean different things — null = "no time given" (requestedMinutes falls through to the
+         clock span or DEFAULT_TASK_MINUTES), 0 = "deliberately zero" (asks for and receives nothing).
+         `predicted` stays a plain number: it is only ever read behind predictManual. */
       /* PP-EXT: clock flags only disambiguate an explicit 00:00 from a bare midnight date.
          null = derive from the timestamp; true/false = an explicit user time choice. */
       startClock:null, endClock:null,
@@ -869,7 +902,21 @@ class Component extends DCLogic {
          Stays the same jsonb column / SYNC_FIELDS entry — an array is valid jsonb. */
       demo:false, /* PP-EXT V0.2: marks a task from the opt-in demo seed (loadDemo) — drives the dismissible "demo tasks" banner + Clear demo. Not in SYNC_FIELDS, so it never mirrors to the backend (signed-in demo becomes real data after a sync round-trip; the banner is a local convenience, chiefly for anon). */
       updatedAt:null, /* PP-EXT B1: row-level last-write-wins clock (epoch ms). Stamped by commit() when sync is on; null until then (see stampUpdated / applyRemoteSnapshot). */
+      /* PP-EXT (owner 2026-08-16): `uncompressable` — "this takes exactly its planned time, don't squeeze
+         it". TRI-STATE, and the null state is the owner's follow-up requirement ("uncompressable should
+         rederive"): null = NEVER DECIDED, so the value is derived from the task's clocks EVERY time it is
+         read, and a task that gains clock times later becomes Exact without the user touching anything.
+         A stored true/false is a DECISION the user made in the Time-needed control, and freezes.
+         The earlier shape stamped a boolean here on first normalize, which froze the derivation at
+         creation time — that is exactly the gap this replaces. The CONTROL is still two-valued (Flexible
+         / Exact): null is not an option a user can pick, only the state before they have picked, which is
+         why this is not the tri-state `blocking` control the owner turned down.
+         Every reader goes through `isUncompressable` — see its note for the day-fit trap it guards.
+         Mirrored (SYNC_FIELDS + supabase migration 0013), so the "never decided" state syncs as null and
+         each device derives the same answer from the same clocks. */
+      uncompressable:null,
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
+    return n;
   }
   /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
      New imports already set all-day planned to 0; this only scrubs previously-persisted data, once. Planned
@@ -926,6 +973,19 @@ class Component extends DCLogic {
       if(!done['implicit-own-calendar-tag']){ const n=this.stripOwnCalendarTag(tasks);
         done['implicit-own-calendar-tag']=1; this.lsSet('pp-migrations', JSON.stringify(done));
         if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-16): see migratePlannedNull. An ORDINARY once-flag, recorded
+         unconditionally — unlike `no-calendar-tags` below, this migration needs no data that is
+         unavailable at constructor time, so stamping the flag here cannot claim a sweep that did not
+         happen. */
+      if(!done['planned-null-unset']){ const n=this.migratePlannedNull(tasks); done['planned-null-unset']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-16): see migrateUncompressable. The key is DELIBERATELY NOT the earlier
+         `uncompressable-backfill`: a device that ran this branch before the re-derive change already has
+         that flag stamped and rows frozen by it, and reusing the key would skip exactly the devices that
+         need the sweep. */
+      if(!done['uncompressable-rederive']){ const n=this.migrateUncompressable(tasks); done['uncompressable-rederive']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* /PP-EXT */
       /* PP-EXT (owner 2026-08-14): "get rid of the calendar tags" — the retroactive half for EVERY
          calendar, not just the reserved one.
          This is the ONE flag in `runOnceMigrations` that is deliberately NOT recorded unconditionally, and
@@ -953,6 +1013,33 @@ class Component extends DCLogic {
   migrateRetireOff(tasks){
     let n=0; (tasks||[]).forEach(t=>{ if(t && t.included===false){ t.included=null; n++; } }); return n;
   }
+  /* PP-EXT (owner 2026-08-16): `planned:0` used to be the DEFAULT for a task nobody had estimated — the
+     value and "never chosen" were the same thing, so every existing workspace stores 0 for work whose
+     duration the user never expressed an opinion about. Reading it as "unset" is sound EXACTLY ONCE,
+     because no other meaning for 0 existed before this migration; from here on a typed 0 survives.
+     PURE (mutates the array it is handed, returns the count) → unit-tested. Idempotent. */
+  migratePlannedNull(tasks){
+    let n=0; (tasks||[]).forEach(t=>{ if(t && t.planned===0){ t.planned=null; n++; } }); return n;
+  }
+  /* PP-EXT (owner 2026-08-16): UNSTAMP `uncompressable` back to null wherever the stored value is merely
+     the derivation restated — "give me back the never-decided state". This inverts the migration that
+     shipped earlier on this branch, which stamped the derived boolean onto every row and, by doing so,
+     froze it: a task that gained clock times afterwards stayed Flexible forever. That gap is what the
+     owner asked to close, and `isUncompressable` closes it by deriving on READ — but only for rows whose
+     field is null, so the already-stamped rows have to be released.
+     The test for "no decision was made" is `stored === derived`. It is a heuristic in one direction only:
+     a user who explicitly picked the option that matched their clocks loses a decision that had no
+     observable effect at the time, and regains the derivation — which is the harmless side. A user whose
+     stored value CONTRADICTS the clocks (the only untick or tick that ever changed anything) is left
+     alone, because that is the decision worth preserving.
+     PURE (mutates, returns the count). Idempotent: a second run finds nulls and derived-equal values only.
+     The derivation is APPOINTMENT-SHAPED, not merely "both clocks" — see `isUncompressable`, whose
+     predicate this shares rather than restates. */
+  migrateUncompressable(tasks){
+    let n=0; (tasks||[]).forEach(t=>{ if(!t || t.uncompressable==null) return;
+      if(!!t.uncompressable === (this.clockSpanMinutes(t) != null)){ t.uncompressable=null; n++; } }); return n;
+  }
+  /* /PP-EXT */
   /* PP-EXT: parse a calendar all-day date ("YYYY-MM-DD") as LOCAL midnight. Using new Date(str) treats it as
      UTC, which shifts the day and injects a bogus time (e.g. 17:00) depending on the viewer's timezone. */
   parseYMD(s){ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s); return m ? new Date(+m[1],+m[2]-1,+m[3]).getTime() : new Date(s).getTime(); }
@@ -1718,6 +1805,18 @@ class Component extends DCLogic {
   fmtDur(min){ if(min==null) return '—'; const h=Math.floor(min/60), m=Math.round(min%60); return h+':'+String(m).padStart(2,'0'); }
   parseDur(str){ str=String(str).trim(); if(!str) return 0; if(str.includes(':')){ const p=str.split(':'); return Math.max(0,(parseInt(p[0])||0)*60+(parseInt(p[1])||0)); } return Math.max(0,Math.round((parseFloat(str)||0)*60)); }
   setDur(id,key,str){ const m=this.parseDur(str); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t[key]=m; }); }
+  /* PP-EXT (owner 2026-08-16): the Planned field alone is nullable, so it needs its own parser — a blank
+     box means "no estimate" (null), and a typed 0 means "deliberately zero". `parseDur` cannot express
+     the difference (it returns 0 for both) and must not be changed: every other duration field wants
+     blank-means-zero. PURE. */
+  parsePlannedDur(str){
+    const s=String(str==null?'':str).trim();
+    if(!s || s==='—') return null;
+    return this.parseDur(s);
+  }
+  setPlanned(id,str){ const m=this.parsePlannedDur(str);
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.planned=m; }); }
+  /* /PP-EXT */
   setDesc(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.description=val; }); }
   setStartType(id,val){ this.setType(id,val); }
 
@@ -2701,6 +2800,14 @@ class Component extends DCLogic {
   isFixedOn(t, B){
     if(this.isMilestone(t)) return false;
     if(!this.hasStartTime(t)) return false;
+    /* PP-EXT (owner 2026-08-16): the uncompressable gate, and it is the WHOLE mechanism behind "unticked
+       events preserve their start time but their end times may change". A fixed appointment used to be
+       unconditionally fixed with no way to let it compress. Unticked, the task falls out of
+       fixedBlocksToday and into the seam's compressible set — but `notBeforeMsOf` is deliberately NOT
+       touched, so it still returns the occurrence start and the packer cannot place it earlier. The
+       start holds; only the end floats. */
+    if(!this.isUncompressable(t)) return false;
+    /* /PP-EXT */
     const oc=this.occForDay(t, B);
     if(oc.start==null || oc.end==null) return false;
     if(this.startOfDay(oc.start)!==B) return false;
@@ -2721,6 +2828,30 @@ class Component extends DCLogic {
   blockingFromEvent(ev){ return (ev && ev.transparency==='transparent') ? false : null; }
   /* PP-EXT (10): the detail-panel toggle. Routed through commit() like every other task mutation. */
   setBlocking(id, v){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.blocking=(v==null?null:!!v); }); }
+  /* PP-EXT (owner 2026-08-16): resolve the tri-state `uncompressable` field. The ONLY reader of the raw
+     value — everything else asks this, so "null means derive" can never drift between callers, the same
+     rule `isBlockingTask` follows for `blocking`.
+     null (never decided) → DERIVE, on every read, from the task as it is NOW: true when the task is
+     APPOINTMENT-SHAPED, because a fixed appointment's duration is the thing it is least sensible to
+     compress. Deriving on read rather than stamping once is the point: add clock times to an existing
+     task and it becomes Exact immediately (owner, 2026-08-16, "uncompressable should rederive").
+     THE DAY-FIT HALF IS LOAD-BEARING, and it is the same trap `clockSpanMinutes` documents (fixed in
+     59b88cc): `hasStartTime`/`hasEndTime` DERIVE a clock from the timestamp when the flags are null, so
+     "both clocks" is broader than "appointment" — a plain multi-day window whose endpoints happen to sit
+     at non-midnight times qualifies. Such a row is poison: uncompressable puts it on the seam's RESERVE
+     path, taking its full ask off the top of the pool, while its over-a-day span means `isFixedOn` never
+     treats it as an appointment — so it would silently reserve against EVERY day. Rather than duplicate
+     the threshold we reuse `clockSpanMinutes`, which already asks exactly this question (both clocks +
+     fits a day, else null) and is already tested; `isFixedOn` has always applied the same test.
+     PURE with respect to the task, but `clockSpanMinutes` routes a recurring task through `occOf`, which
+     reads the instance occurrence caches — the same (already-tolerated) reach `isFixedOn` makes. */
+  isUncompressable(t){ if(!t) return false;
+    return t.uncompressable!=null ? !!t.uncompressable : (this.clockSpanMinutes(t) != null); }
+  /* The tick's writer. Writes an EXPLICIT boolean — the point of the control is to record a decision,
+     and a decision is what stops the derivation above from overriding it later. Routed through commit()
+     like every other task mutation. */
+  setUncompressable(id, v){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.uncompressable=!!v; }); }
+  /* /PP-EXT */
   /* Due instant for deadline clamping. All-day ends are already the exclusive next-day midnight; a date-only
      manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
      scheduled (occurrence-for-B); omitted ⇒ today. */
@@ -3998,32 +4129,95 @@ class Component extends DCLogic {
      Returns { [id]: {allotted, computed, active} }. `computed` = the auto value (for the override toggle). */
   /* PP-EXT S1: pure compression seam. The default stays linear/proportional-by-planned; feature records
      deliberately retain the full normalized task shape so a future learned implementation can use priority,
-     urgency/slack, labels, and other signals without changing computeAllotted or its callers. */
+     urgency/slack, labels, and other signals without changing computeAllotted or its callers.
+     PP-EXT (owner 2026-08-16): REWRITTEN. The old shape paid zero-planned tasks off the top, in full, and
+     never compressed them, so tasks carrying an estimate absorbed 100% of any shortfall — 8 unestimated
+     tasks on a 4h day left two 1-hour tasks with nothing. It also used `planned` only as a WEIGHT and
+     never as a TARGET, so a loose day inflated a 1-hour task to 11.5 hours. Both faces of one defect.
+     The shape now is: reserve → share → cap.
+       demand(f)    = f.demand (precomputed by computeAllotted for day B) or requestedMinutes(f)
+       reserved     = predictManual OR uncompressable rows → allotted = demand, off the top, never squeezed
+       pool         = max(0, availableMinutes − Σ reserved)
+       compressible = everything else, sharing `pool` in proportion to demand
+       allotted(f)  = min(share(f), max(0, demand(f) − spent(f)))     ← the cap
+     Surplus is LEFT UNALLOCATED on purpose: a loose day should show real free time rather than pad every
+     estimate. Deliberate over-subscription stays a feature — when demand exceeds the pool every
+     compressible row shrinks proportionally, which is what compression is for.
+     Invariants preserved: pure; the single caller-facing seam; Σ allotted over the COMPRESSIBLE rows
+     ≤ availableMinutes by construction (a reserve is honoured in full even on a day too small to hold it,
+     exactly as predictManual always was); ties break on original position so two calls agree. */
   compressionSeam(features, availableMinutes){
-    const rows=features||[], out={}, flexRows=[]; /* PP-EXT (28a) */
-    let fixedSum=0, propPlanSum=0, zeroCount=0;
+    /* `flexRows` collects the COMPRESSIBLE rows for the (28a) largest-remainder apportionment below —
+       that block is what this line exists for, and the marker moved down onto it (2026-08-16) now that
+       this line's other contents are the 2026-08-16 seam's, not 28a's. */
+    const rows=features||[], out={}, flexRows=[];
+    /* PURE **when `demand` is supplied** — which the production call site always does (computeAllotted
+       precomputes `f.demand` for day B). The fallback branch calls `requestedMinutes(f)` with no B, and
+       that reaches `occForDay`, which reads the instance caches `_occById`/`_horizon`; only a direct-call
+       test can take it. The fallback is kept rather than narrowed because it is what lets a unit test
+       hand the seam a bare feature list, and removing it would cost more in test ergonomics than the
+       (unreachable-in-production) impurity costs in correctness. `+x||0` rather than `Math.max(0,f.demand)`
+       because `Math.max(0, NaN)` is `NaN`, and one NaN demand would poison every share in the day. */
+    const demandOf=f=>(f && f.demand!=null) ? Math.max(0, (+f.demand)||0) : this.requestedMinutes(f);
+    /* PP-EXT (owner 2026-08-16): the two ways to qualify for "allotted = the figure, no compression".
+       `predictManual` is the existing one (a figure the user typed); `uncompressable` is the new tick
+       (Task 5). They share ONE path deliberately: this adds a second way to qualify, not a second
+       mechanism. `reserveOf` is the figure the row actually takes off the top — see the spent note in
+       the loop below — and the pool must be shrunk by exactly that, never by the raw demand. */
+    const isReserved=f=>!!(f && (f.predictManual || f.uncompressable));
+    const reserveOf=f=>f.predictManual ? demandOf(f) : Math.max(0, demandOf(f)-Math.max(0,(+f.spent)||0));
+    let reservedSum=0, demandSum=0;
+    rows.forEach(f=>{ if(isReserved(f)) reservedSum+=reserveOf(f); else demandSum+=demandOf(f); });
+    const pool=Math.max(0, Math.max(0,availableMinutes||0)-reservedSum);
     rows.forEach(f=>{
-      if(f.predictManual) fixedSum+=Math.max(0,f.predicted);
-      else if(Math.max(0,f.planned)>0) propPlanSum+=Math.max(0,f.planned);
-      else zeroCount++;
-    });
-    const afterManual=Math.max(0, Math.max(0,availableMinutes||0)-fixedSum);
-    const zeroEach=zeroCount?Math.min(this.DEFAULT_TASK_MINUTES, afterManual/zeroCount):0;
-    const pool=Math.max(0, afterManual-zeroEach*zeroCount);
-    rows.forEach(f=>{ const spent=Math.max(0,f.spent||0); let computed;
-      if(f.predictManual){
-        const pps=propPlanSum+Math.max(0,f.planned), pl=pool+Math.max(0,f.predicted);
-        computed=pps>0?Math.max(0,(Math.max(0,f.planned)/pps)*pl-spent):0;
-      }else if(Math.max(0,f.planned)===0){
-        computed=Math.max(0,zeroEach-spent);
-      }else{
-        const share=propPlanSum>0?(Math.max(0,f.planned)/propPlanSum)*pool:0;
-        computed=Math.max(0,share-spent);
-      }
-      const allotted=f.predictManual?Math.max(0,f.predicted):computed;
-      out[f.id]={allotted:allotted,computed:Math.round(computed)};
-      if(!f.predictManual) flexRows.push({id:f.id, v:allotted});
-      else out[f.id].allotted=Math.round(allotted);
+      const d=demandOf(f);
+      const spent=Math.max(0,(+f.spent)||0);
+      if(isReserved(f)){
+        /* PP-EXT (owner 2026-08-16): the two reserve reasons do NOT subtract `spent` alike, and the
+           asymmetry is deliberate.
+           `predictManual` keeps its historic behaviour exactly: the user re-typed a figure, which
+           reasonably means "give me this much MORE today", so the typed number is allotted verbatim.
+           `uncompressable` is reached from a CHECKBOX, and a checkbox cannot carry that meaning. Tick a
+           90-minute task you have already worked 40 minutes of today and the naive path would reserve 90
+           more minutes — double-booking the day, silently, off one click.
+           So a row reserved only because it is uncompressable is allotted max(0, demand − spent). That is
+           precedent, not invention: V5 block 34 already settled the same question for completed tasks —
+           "what is freed is the REMAINING demand only; the minutes already spent today stay spent".
+           `allotted` throughout computeAllotted means "minutes still to schedule today", and
+           `uncompressable` has to mean the same thing or it contradicts the model around it. */
+        const r = f.predictManual ? d : Math.max(0, d-spent);
+        /* PP-EXT (owner 2026-08-16, fix): `computed` is the AUTO value — the counterfactual share this
+           row would have received had it competed normally — NOT a copy of `allotted`. The 2026-08-16
+           rewrite briefly made the two identical, which broke the two consumers that exist precisely to
+           compare them: `togglePredictManual` (∿/✎, which seeds the manual figure from the auto one) and
+           the V4.3 edge-drag `orig` snap-back, whose whole job is to detect "the user dragged the block
+           back to where AUTO had it" and clear the override. With computed === allotted a drag-back can
+           never be recognised, so it rewrote the override instead of clearing it.
+           The counterfactual runs the SAME reserve → share → cap rules with this row moved from the
+           reserved side to the compressible side: its demand added back into `demandSum`, its reserve
+           added back into `pool`. It deliberately does NOT get the (28a) largest-remainder pass — that
+           apportions the real pool between the real compressible rows, and this row is not one of them;
+           the historic shape rounded the counterfactual independently too.
+           TWO details the historic shape got right and a naive rewrite loses:
+             · the WEIGHT is the row's AUTO demand (`f.autoDemand` — `requestedMinutes` with branch 1,
+               the manual figure, taken out), never `d`. A `predictManual` row's `d` IS the typed
+               override, so weighting the counterfactual by it answers "what would I get if I competed
+               while still overriding", which is not a question anyone asks. Weight by what the row
+               would ask for with the override off and `computed` is the number the ∿ toggle and the
+               V4.3 drag-back actually mean. (`uncompressable` rows are unaffected: nothing about that
+               tick changes `requestedMinutes`, so their auto demand equals `d`.)
+             · `cfPool` is re-derived from `availableMinutes` minus the OTHER reserves rather than
+               written as `pool + reserveOf(f)`: `pool` is clamped at 0, so on a day whose reserves
+               already exceed it the additive form would hand back minutes the day never had. */
+        const ad=(f.autoDemand!=null) ? Math.max(0,(+f.autoDemand)||0) : d;
+        const cfDemand=demandSum+ad, cfPool=Math.max(0, Math.max(0,availableMinutes||0)-(reservedSum-reserveOf(f)));
+        const cfShare=cfDemand>0?(ad/cfDemand)*cfPool:0;
+        const cf=Math.min(cfShare, Math.max(0, ad-spent));
+        out[f.id]={allotted:Math.round(r), computed:Math.round(cf)}; return; }
+      const share=demandSum>0?(d/demandSum)*pool:0;
+      const capped=Math.min(share, Math.max(0, d-spent)); /* the cap — no row outgrows its own ask */
+      out[f.id]={allotted:capped, computed:Math.round(capped)};
+      flexRows.push({id:f.id, v:capped});
     });
     /* PP-EXT (28a): whole-minute apportionment, NOT independent rounding.
        `Math.round` per row is what let the sheet charge a minute the day cannot draw: the packer fills
@@ -4031,9 +4225,15 @@ class Component extends DCLogic {
        the last task placed was drawn a minute short of the number printed beside its name — silently,
        with no Unscheduled entry. Largest-remainder (Hamilton) apportionment instead: every row gets
        floor(share), then the leftover whole minutes go to the largest fractional parts, so
-       Σ allotted = floor(Σ share) ≤ pool by construction and no row moves by a whole minute.
+       Σ allotted = floor(Σ capped) ≤ pool by construction and no row moves by a whole minute.
+       (It is Σ CAPPED, not Σ share, since 2026-08-16: the cap can hold a row below its share, and the
+       apportionment runs on what survives the cap.)
        Deterministic — ties break on the row's original position, so two calls on the same input agree.
-       Manual Predicts are excluded: a manual figure is a promise the user typed, not a share to shave. */
+       Reserved rows are excluded: a reserved figure is a promise, not a share to shave.
+       PP-EXT (owner 2026-08-16): this MUST run after the cap. Run before it, a row could be handed a
+       leftover whole minute that pushes it past its own estimate — the exact thing the cap exists for.
+       Because the cap can hold Σ share below the pool, `left` is derived from the CAPPED total, so the
+       surplus a loose day leaves is never redistributed. */
     const total=flexRows.reduce((a,r)=>a+r.v,0);
     const base=flexRows.map(r=>Math.floor(r.v));
     let left=Math.floor(total+1e-9)-base.reduce((a,v)=>a+v,0);
@@ -4043,6 +4243,7 @@ class Component extends DCLogic {
     flexRows.forEach((r,i)=>{ out[r.id].allotted=base[i]; out[r.id].computed=base[i]; });
     return out;
   }
+  /* /PP-EXT */
   computeAllotted(tasks, B, opts){
     const map={};
     const today=this.startOfToday();
@@ -4083,8 +4284,25 @@ class Component extends DCLogic {
     /* PP-EXT: break-between-tasks (settings.breakMin) reserves breakMin after each packed family in
        buildDayTimeline; shrink the pool by the same estimate (one break per packable family) so allotment
        stays within timeline capacity — the pool-agreement invariant. Overestimates when a family gets 0
-       allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled. */
+       allotted (safe: only under-allots), underestimates never, so nothing spuriously falls to Unscheduled.
+       PP-EXT (owner 2026-08-16, fix): the count is `acts.length` PLUS the families a WHOLE drag-pin took
+       out of `acts`. Counting only `acts` made the estimate move under a drag: pinning a task turns it
+       into a fixed block, so it leaves `cand` (via `map[t.id]`) and the estimate dropped by one break —
+       handing the remaining tasks `breakMin` extra minutes each time. That directly contradicts the (04)
+       invariant stated below: "the seam divides the SAME pool it would have divided with no pin at all —
+       every task's total for the day is then unchanged by a drag." It was invisible only because
+       `breakMin` defaulted to 0 until today; at the new default of 3 an e2e drag measured +3.04 min.
+       Clock-FIXED appointments are deliberately NOT counted: they were never in `acts` before the drag
+       either, so counting them would change the pool for a reason unrelated to any gesture.
+       The safety property is preserved: a pinned family gets no break in buildDayTimeline (it is not in
+       `flex`), so this now over-reserves by one break per pinned family — over-estimating only, exactly
+       the direction the paragraph above declares safe. */
     const brk=Math.max(0, this.state.settings.breakMin||0);
+    /* The families the break estimate counts: everything still competing, plus everything a whole
+       drag-pin has just moved out of the competition. Constant across a pin, which is the point. */
+    const brkFams=acts.length + tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B)
+      && !(t.parentId!=null && kb.byId[t.parentId]) && !this.doneOn(t, B)
+      && !this.isFixedOn(t, B) && this.hasFullDragPinToday(t, B)).length;
     const kc=this.keepClearToday(B, tasks); /* PP-EXT: same dividers buildDayTimeline uses; zero-width ⇒ pool unchanged, kept for lockstep */
     const di=this.dayIntervals(B, this.packStart(B), fixed, kc);
     const rawAvail=di.free.reduce((a,iv)=>a+(iv.end-iv.start)/60000, 0);
@@ -4112,10 +4330,25 @@ class Component extends DCLogic {
        (already stamped into `map` above, before this line) and LOGGED time (getSpentOn, a separate ledger).
        Drag-pins on a past day also survive, via the pinnedMin floor at the end of this method.
        TODAY AND FUTURE DAYS ARE UNTOUCHED — deliberate over-subscription there is a feature, not a defect. */
-    const avail=(B<today) ? 0 : Math.max(0, rawAvail + pinBack - brk*Math.max(0, acts.length));
+    const avail=(B<today) ? 0 : Math.max(0, rawAvail + pinBack - brk*Math.max(0, brkFams));
     const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
-    /* PP-EXT S1: one caller-facing compression seam; the default implementation is linear/proportional. */
-    const compressed=this.compressionSeam(acts.map(t=>Object.assign({},t,{spent:spentById[t.id]})), avail);
+    /* PP-EXT S1: one caller-facing compression seam; the default implementation is linear/proportional.
+       PP-EXT (owner 2026-08-16): `demand` is precomputed HERE rather than inside the seam, because
+       requestedMinutes' both-clocks branch is day-aware and the seam has no B. Precomputing keeps the
+       seam's signature and its purity intact, and keeps the day-awareness in the one method that has B. */
+    const compressed=this.compressionSeam(
+      acts.map(t=>Object.assign({},t,{spent:spentById[t.id], demand:this.requestedMinutes(t, B),
+        /* `autoDemand` = what this task would ask day B for with the manual override OFF. Only the
+           seam's `computed` counterfactual reads it; `demand` — what the row actually asks for now —
+           is untouched, so no allotment moves. Same method, so the two figures cannot drift. */
+        autoDemand:this.requestedMinutes(
+          t.predictManual?Object.assign({},t,{predictManual:false}):t, B),
+        /* PP-EXT (owner 2026-08-16): RESOLVE the tri-state here, so the seam keeps receiving a plain
+           boolean and stays the pure, day-unaware function its tests exercise directly. A raw null
+           would read as "flexible" inside the seam and quietly drop every never-decided appointment
+           off the reserve path — the whole defect the derivation exists to prevent. */
+        uncompressable:this.isUncompressable(t)})), avail);
+    /* /PP-EXT */
     /* PP-EXT (21): capacity out-param. The indicator MUST read the same two numbers the seam divides, or it
        would drift from the grid the way the retired `scheduledLoadOn` did. `demand` is the RAW ask of the
        flexible tasks competing on day B — per-day semantics, so a task in a multi-day window contributes its
@@ -4132,7 +4365,9 @@ class Component extends DCLogic {
                          erasing it. A completed task with no logged time contributes nothing, correctly.
          Neither figure caps anything; both are still reporting-only, and `acts` — the set the seam
          divides the pool between — is the same set both are derived from, so they cannot drift. */
-      opts.capacity.remaining = Math.round(acts.reduce((a,t)=>a + this.requestedMinutes(t), 0));
+      /* PP-EXT (owner 2026-08-16): `, B` — the readout must divide the SAME demand figures the seam
+         does (precomputed with B at the call site above), or the indicator drifts from the grid. */
+      opts.capacity.remaining = Math.round(acts.reduce((a,t)=>a + this.requestedMinutes(t, B), 0));
       opts.capacity.demand = opts.capacity.remaining
         + Math.round(fin.reduce((a,t)=>a + Math.max(0, this.getSpentOn(t, B)), 0));
       /* /PP-EXT */
@@ -4192,12 +4427,39 @@ class Component extends DCLogic {
      already fixed in place. `allotted` stays the total everywhere it is displayed. */
   flexAllot(id){ const a=this.allotOf(id); return Math.max(0, (a.allotted||0) - (a.pinnedMin||0)); }
   /* PP-EXT (21): what ONE flexible task asks a day for, before any compression — the exact quantity
-     `compressionSeam` divides the pool between. A manual Predict overrides Planned; a zero-planned task
-     asks for DEFAULT_TASK_MINUTES, which is what the seam grants it. PURE. */
-  requestedMinutes(t){ if(!t) return 0;
+     `compressionSeam` divides the pool between.
+     PP-EXT (owner 2026-08-16): THE single definition of what one task asks day B for. Four branches, in
+     order, and the order is the whole design:
+       1. predictManual → the typed figure (a promise the user made; nothing overrides it)
+       2. planned != null → the figure, so a deliberate 0 asks for 0 and competes normally
+       3. both clocks set → the occurrence span, because a fixed appointment carries its duration in its
+          clocks and not in a typed estimate. WITHOUT THIS BRANCH the DEFAULT_TASK_MINUTES 30→5 change
+          would silently shrink every unestimated appointment to five minutes.
+       4. otherwise → DEFAULT_TASK_MINUTES
+     PURE. `B` is optional and only branch 3 reads it (recurrence-aware occurrence lookup). */
+  requestedMinutes(t, B){ if(!t) return 0;
     if(t.predictManual) return Math.max(0, t.predicted||0);
-    const p=Math.max(0, t.planned||0);
-    return p>0 ? p : this.DEFAULT_TASK_MINUTES; }
+    if(t.planned!=null) return Math.max(0, +t.planned||0);
+    const sp=this.clockSpanMinutes(t, B);
+    return sp!=null ? sp : this.DEFAULT_TASK_MINUTES; }
+  /* PP-EXT (owner 2026-08-16): the occurrence span in whole minutes when BOTH edges carry a user-typed
+     clock, else null. Deliberately null (not 0) for every other shape, so requestedMinutes can tell
+     "no span to read" from "a zero-length span". PURE.
+     THE DAY-FIT RULE IS LOAD-BEARING. `hasStartTime`/`hasEndTime` DERIVE a clock from the timestamp when
+     the flags are null, so without it a plain multi-day window at non-midnight timestamps reads as a
+     "clocked span" and asks the day for its whole raw length — a 2-day window would demand 2880 minutes,
+     against a method whose entire contract is a PER-DAY figure. The threshold is not a new invention: it
+     is exactly `isFixedOn`'s existing test, and for the same reason. This branch exists to read a fixed
+     appointment's duration, and an appointment that does not fit in a day is not one — such a task falls
+     through to DEFAULT_TASK_MINUTES like any other unestimated work. */
+  clockSpanMinutes(t, B){
+    if(!t || !this.hasStartTime(t) || !this.hasEndTime(t)) return null;
+    const oc=this.occForDay(t, B);
+    if(oc.start==null || oc.end==null || oc.end<=oc.start) return null;
+    if(oc.end-oc.start > this.DAY) return null;
+    return Math.round((oc.end-oc.start)/60000);
+  }
+  /* /PP-EXT */
   /* PP-EXT (21): the capacity readout — "how much have I said yes to, against how much time exists".
      PURE-ish (reads state.tasks by default, no caching, no side effects).
 
@@ -7010,11 +7272,15 @@ class Component extends DCLogic {
      promised. Ordering note for anyone re-running this on a fresh backend: the sections table must exist
      before a client with this field ships, or tasks arrive filed under sections that cannot be pulled.
      Every name here must equal its Postgres column verbatim (the row is mirrored 1:1, no mapping layer):
-     that is the `t.pin` rename trap, and it is why `blocking` is the field name in normalizeTask too. */
+     that is the `t.pin` rename trap, and it is why `blocking` is the field name in normalizeTask too.
+     PP-EXT (owner 2026-08-16): `uncompressable` joins the list and needs supabase migration 0013 applied
+     FIRST — the 0012 ordering rule. Both this and `planned` going nullable change syncRowFp, so expect
+     ONE full re-push of every task row on the next sync, the same one-time cost 0008 and 0012 recorded.
+     That re-push is expected and documented, not a defect. */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking','sectionId']; }
+    'snoozeUntil','blocking','sectionId','uncompressable']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -8187,7 +8453,7 @@ class Component extends DCLogic {
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
       /* PP-EXT: break between tasks — reserves this many minutes of gap after each packed task */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Break between tasks (min)',
-          this.infoNote('Minutes of breathing room reserved after each scheduled task in the day timeline (0 = back-to-back). Reduces the allotment pool so tasks still fit around their breaks; meals and fixed events already count as breaks.')),
+          this.infoNote('Minutes of breathing room reserved after each scheduled task in the day timeline. Default 3; set 0 for back-to-back. Reduces the allotment pool so tasks still fit around their breaks; meals and fixed events already count as breaks.')),
         inp(s.breakMin,v=>this.saveSettings({breakMin:Math.max(0,parseInt(v)||0)}))),
       /* PP-EXT: auto-archive (ROADMAP Phase 3; immediate by default since Phase 9) */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Archive done after (days)',
@@ -8771,7 +9037,13 @@ class Component extends DCLogic {
      PP-EXT (11): `opts.free` (Alt) keeps the drop contiguous; otherwise it may land as several records. */
   pinBlockAt(id, rawStart, dur, targets, B, opts){
     if(B==null) B=this.startOfDay(this.state.nowTick||Date.now());
-    const start=this.snapPinStart(rawStart, dur, B, targets), d=Math.round(dur);
+    /* PP-EXT (owner 2026-08-16, fix): `opts` is FORWARDED to the snap. Without it the drop re-snapped by
+       the grid and the neighbour magnet, silently discarding the free/orig modes the drag had latched —
+       so Alt, the documented free-placement modifier (V4.3), did nothing at the one moment it matters.
+       Every non-Alt drop is byte-identical: `snapPinStart` only branches on `opts.free`/`opts.orig`, and
+       `opts` here carries neither `orig` nor anything else it reads. The re-snap stays idempotent under
+       Alt too — `rawStart` is the already-snapped preview, and the free branch is round-to-the-minute. */
+    const start=this.snapPinStart(rawStart, dur, B, targets, opts), d=Math.round(dur);
     const partial=!!(opts&&opts.partial), origStart=opts?opts.origStart:null;
     /* PP-EXT (11): one drop → one or more records. `recs` is the contiguous single record whenever the
        split is suppressed (Alt), unnecessary (nothing blocking in the way) or impossible (the minutes
@@ -10153,7 +10425,7 @@ class Component extends DCLogic {
     const h=React.createElement; const al=this.allotOf(t.id);
     return h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'6px',width:'100%',fontVariantNumeric:'tabular-nums'}},
       h('input',{className:'pp-num',type:'text',key:'flow-planned-'+t.planned,defaultValue:this.fmtDur(t.planned),title:'Planned time',
-        onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),onBlur:e=>this.setDur(t.id,'planned',e.target.value),
+        onClick:e=>e.stopPropagation(),onMouseDown:e=>e.stopPropagation(),onBlur:e=>this.setPlanned(t.id,e.target.value),
         onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},style:{width:'42px',flex:'none',textAlign:'right'}}),
       h('span',{style:{color:'var(--text-faint2)',fontSize:'11px'}},'→'),
       h('span',{title:al.active?'Allotted today':'Not included today',style:{minWidth:'38px',textAlign:'right',fontSize:'11.5px',fontWeight:650,
@@ -10621,7 +10893,7 @@ class Component extends DCLogic {
         h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flex:'none'}},
           h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}},'Planned'),
           h('input',{className:'pp-num',type:'text',key:'pl'+t.planned,defaultValue:this.fmtDur(t.planned),placeholder:'0:00',
-            onBlur:e=>this.setDur(t.id,'planned',e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
+            onBlur:e=>this.setPlanned(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
             style:{width:'58px',textAlign:'right',fontSize:'12px',padding:'4px 7px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}}))); };
     return h('div',{style:{flex:1,minHeight:0,overflow:'auto',padding:'14px',display:'flex',flexDirection:'column',gap:'8px'}},
       unplanned.map(row));
@@ -11005,7 +11277,7 @@ class Component extends DCLogic {
         h('span',{onClick:()=>this.openDetail(t.id),style:{flex:1,minWidth:0,fontSize:'12.5px',color:'var(--text)',cursor:'pointer',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name),
         h('span',{style:{fontSize:'10.5px',color:'var(--text-mut2)'}},'Planned'),
         h('input',{className:'pp-num',type:'text',key:'pl'+t.planned,defaultValue:this.fmtDur(t.planned),placeholder:'0:00',
-          onBlur:e=>this.setDur(t.id,'planned',e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
+          onBlur:e=>this.setPlanned(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
           style:{width:'56px',textAlign:'right',fontSize:'12px',padding:'3px 6px',borderRadius:'6px',border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text)'}})))
       : h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-faint)'}},'Nothing needs planning — every task has a Planned budget.'));
     /* PP-EXT C2: text-primary two-column restructure. Left = large free-text editor (dominant, ~66%);
@@ -12615,7 +12887,10 @@ class Component extends DCLogic {
             h('div',{style:{display:'flex',flexDirection:'column'}}, ...this.inclActionRows(t))); })();
     const durInput=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
       style:{textAlign:'left',width:'90px',border:'1px solid var(--divider)'},
-      onBlur:e=>this.setDur(t.id,key,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
+      /* PP-EXT (owner 2026-08-16): this helper is shared by `planned` and `predicted`; only `planned` is
+         nullable, so branch on the key rather than making every duration field blank-means-null. */
+      onBlur:e=>{ if(key==='planned') this.setPlanned(t.id,e.target.value); else this.setDur(t.id,key,e.target.value); },
+      onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
     const prioRow=h('div',{onClick:()=>this.cyclePriority(t.id),title:'Click to change',
       style:{display:'flex',alignItems:'center',gap:'9px',cursor:'pointer'}},
       this.flagSvg(t.priority,t.priority!==4,17),
@@ -12678,6 +12953,30 @@ class Component extends DCLogic {
         opt(null,'Auto','Inherit the default (blocking), or the calendar event’s busy/free setting on import.'),
         opt(true,'Blocking','Nothing else may be scheduled through this span.'),
         opt(false,'Background','A container you work inside — other tasks may be scheduled within it.')); })() : null;
+
+    /* PP-EXT (owner 2026-08-16): the uncompressable tick. Ticked = allotted is exactly requestedMinutes
+       (less anything already spent today), reserved off the top and never compressed. Unticked on a
+       clocked task = the start holds and the end floats. Offered for every non-milestone task, not only
+       clocked ones: an unclocked task can be declared uncompressable too, which is how "this really does
+       take 90 minutes" is expressed without inventing a clock time for it. Two options rather than three
+       even though the FIELD is tri-state: null means "not decided yet, follow the clocks", which is a
+       state the control shows the resolved answer for and never offers as a choice — picking either
+       option is precisely the act of deciding, and deciding is what stops the re-derivation.
+       Mirrors blockingCtl's markup and its HIT_MIN_PX hit box exactly; no new control primitive. */
+    const uncompCtl = this.isMilestone(t) ? null : (()=>{
+      const cur = this.isUncompressable(t);
+      const opt=(val,label,title)=>{ const on = (cur===val);
+        return h('div',{key:String(val),onClick:()=>this.setUncompressable(t.id, val),title,
+          role:'button',tabIndex:0,'aria-pressed':on,
+          onKeyDown:e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); this.setUncompressable(t.id, val); } },
+          style:{flex:1,minHeight:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
+            cursor:'pointer',fontSize:'12px',borderRadius:'var(--r-2)',
+            color:on?'var(--on-accent)':'var(--text-mut2)',background:on?(this._accent||'#3f7bd6'):'var(--field-bg)',
+            border:'1px solid '+(on?'transparent':'var(--field-border)')}}, label); };
+      return h('div',{style:{display:'flex',gap:'5px'}},
+        opt(false,'Flexible','This task shares the day with everything else and shrinks when the day is full.'),
+        opt(true,'Exact','This takes exactly its planned time — reserved off the top and never squeezed.')); })();
+    /* /PP-EXT */
 
     /* PP-EXT (owner 2026-08-12): "Everything in the right click menu should be in the more expansive
        detail menu." The row menu had five things this panel did not — task TYPE (new in the same pass),
@@ -12748,6 +13047,9 @@ class Component extends DCLogic {
         field('Spent',spentField,{flex:1})),
       field(h('span',null,'Allotted (remaining)',this.infoNote('Auto-scheduled time for this task today: its share of the day’s free time (window minus meals, reserved free time and fixed blocks), scaled by remaining Planned work and split across active tasks by priority then due date. Click ∿ auto → ✎ manual to pin a fixed amount off the top (a Predict override) instead of the computed value.')),allotField),
       blockingCtl?field(h('span',null,'Busy type',this.infoNote('Whether this appointment’s time is blocking (nothing else is scheduled through it) or background (a container — like a Work day — you deliberately place other tasks inside). Auto follows the imported calendar event’s busy/free setting, and defaults to blocking.')),blockingCtl):null,
+      /* PP-EXT (owner 2026-08-16): the uncompressable tick, rendered in the same field row group. */
+      uncompCtl?field(h('span',null,'Time needed',this.infoNote('Flexible tasks share the day and shrink when it is full. Exact tasks take their planned time in full — the day reserves it off the top and never squeezes it. An appointment with both a start and an end time is Exact by default; setting it Flexible keeps its start but lets its end move.')),uncompCtl):null,
+      /* /PP-EXT */
       t.eventId?field('Calendar',valTxt('🗓 linked'+(t.labels&&t.labels.length?(' · @'+t.labels[t.labels.length-1]):''),'var(--text-2)')):null,
       field('Priority',prioRow),
       field('Progress',pctBig),

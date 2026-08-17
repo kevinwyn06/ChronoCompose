@@ -28,14 +28,21 @@ const { bootToday, cleanDaySettings, timelineBlocks, settleTimeline, task } = re
 
 const WINDOW_END = '10:00';
 
-/* Window 00:00–10:00, an appointment at 02:00–03:00, one flexible task. `allotMode:'today'` hands the
-   single flexible task the whole remaining pool, so it is drawn across the appointment and the packer
-   splits it: 00:00–02:00 and 03:00–10:00. The split is asserted, never assumed. */
+/* Window 00:00–10:00, an appointment at 02:00–03:00, one flexible task, which the packer splits into
+   00:00–02:00 and 03:00–…. The split is asserted, never assumed.
+
+   `planned` was 120 until 2026-08-16, when it stopped producing a split. The old seam handed a lone
+   flexible task the WHOLE remaining pool (540 minutes here) whatever it had asked for, so 120 minutes
+   of planning was drawn across the appointment. The new rule caps every row at its own ask and leaves
+   the surplus unallocated — the owner-reported defect in the other direction — so a 120-minute task
+   now fits entirely in the 120-minute gap before 02:00 and is drawn in one piece.
+   Recomputed by hand: the task must ask for MORE than the 120 minutes that precede the appointment,
+   so 300. It is then drawn 00:00–02:00 (120) and 03:00–06:00 (the remaining 180). */
 const splitFixture = () => ({
   settings: cleanDaySettings(WINDOW_END),
   tasks: [
     task('appt', 'Standup', { start: '0d+2h', end: '0d+3h', startClock: true, endClock: true, planned: 60 }),
-    task('split', 'Split task', { start: '0d', end: '+2d', planned: 120 }),
+    task('split', 'Split task', { start: '0d', end: '+2d', planned: 300 }),
   ],
 });
 

@@ -12,7 +12,8 @@ Scheduling-specific fields:
 | Field | Meaning |
 |---|---|
 | `start` / `end` | Epoch milliseconds or `null`; bare dates sit at local midnight. |
-| `planned` | Planned duration in minutes; participates in derived shape discrimination. |
+| `planned` | Planned duration in minutes, **nullable since 2026-08-16 and three-valued**: `null` = no time given (renders `—`), `0` = deliberately zero (renders `0:00`), `> 0` = an estimate. Participates in derived shape discrimination; `requestedMinutes` is the only place the three cases are resolved. Mirrored column made nullable by migration `0013`. |
+| `uncompressable` | Tri-state, 2026-08-16. `true` = "Exact": the day reserves this task's figure off the top and never compresses it, and it is a precondition of `isFixedOn`. `false` = "Flexible". `null` = **never decided**, and `isUncompressable(t)` — the only reader — derives the answer from `clockSpanMinutes(t) != null` on every read, so a task that gains clocks later becomes Exact by itself. A stored `true`/`false` is a decision and outranks the derivation. In `SYNC_FIELDS`; **nullable** column added by migration `0013`. |
 | `included` | `true` means pressed into today; `false`/legacy `null` are unpressed. New tasks default pressed. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
@@ -145,7 +146,29 @@ silently asserts against a no-op.
 
 Current flags, in execution order: `allday-planned-zero`, `schedule-pins-removed`,
 `sections-from-primary-tag`, `retire-off`, `drag-pin-list`, `strip-section-tags` (2026-08-13),
-`implicit-own-calendar-tag` (2026-08-13).
+`implicit-own-calendar-tag` (2026-08-13), `planned-null-unset` (2026-08-16), `uncompressable-rederive`
+(2026-08-16).
+
+One further flag, `break-min-default` (2026-08-16), shares the `pp-migrations` ledger but does **not** run
+from `runOnceMigrations`: it lives in `migrateSettings`, whose only call site is `loadSettings`, and it
+deliberately does not persist the migrated settings object — `saveSettings` calls `setState` and the
+constructor is still building `this.state` at that point. The flag is recorded immediately, so the lift
+happens once; the value persists on the user's next settings write, and until then the in-memory value is
+the one every reader sees.
+
+**The three 2026-08-16 additions ship the allotment fix to existing workspaces.**
+
+- **`planned-null-unset`** rewrites the stored `0` that used to mean "unset" to `null`, so `0` can start
+  meaning "deliberately zero". Without it the fix reaches only tasks created after the upgrade.
+- **`break-min-default`** writes `settings.breakMin = 3` onto any workspace still holding `0`. A default
+  change alone reaches nobody who has ever saved settings, which is why this is a migration and not just a
+  new value in `DEFAULT_SETTINGS`.
+- **`uncompressable-rederive`** clears `uncompressable` back to `null` on every row whose stored value only
+  restates the clock derivation, releasing the rows an earlier build of this branch froze by stamping them.
+  A value that **contradicts** the derivation is the only evidence of a real user decision, and is kept.
+  The predicate is `clockSpanMinutes` — *not* `hasStartTime && hasEndTime`, which is a wider set and would
+  treat plain multi-day windows as reserved-off-the-top while they never qualify as `isFixedOn`. The key is
+  deliberately not the earlier `uncompressable-backfill`, which some devices already have marked done.
 
 **The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
 

@@ -98,6 +98,14 @@ async function seed(page, data = {}) {
       /* 04: `t.pin` became a LIST; leaving this unmarked would let migrateDragPinList rewrite a
          pin-carrying fixture on boot, which is exactly what this key exists to prevent. */
       'drag-pin-list': 1,
+      /* Allotment rules 2026-08-16. `migratePlannedNull` rewrites EVERY stored `planned:0` to `null`
+         exactly once (before that pass, 0 and "never estimated" were the same value). Left unmarked it
+         would erase the one distinction a fixture now has to be able to express, and a spec seeding
+         `planned:0` would boot showing `—`. `uncompressable-rederive` is marked for the same reason:
+         it RELEASES to null every stored value that merely restates the clock derivation, so a fixture
+         that seeds the field explicitly would otherwise be un-seeded on boot. (The older
+         `uncompressable-backfill` key no longer exists in the app; only this one is live.) */
+      'planned-null-unset': 1, 'uncompressable-rederive': 1,
     }));
   }, [payload, MIDNIGHT_EXPR]);
 }

@@ -8,11 +8,14 @@ const { make, activeTask, cleanDay, DAY } = require('./_load.js');
 // ---------------------------------------------------------------------------
 // normalizeTask numeric defaults (a missing planned leaked NaN into the pool)
 // ---------------------------------------------------------------------------
-test('normalizeTask defaults planned/predicted to 0', () => {
+test('normalizeTask defaults planned to null and predicted to 0', () => {
   const c = make();
   const t = c.normalizeTask({ id: 'a', name: 'x' });
-  assert.equal(t.planned, 0);
-  assert.equal(t.predicted, 0);
+  // Changed 2026-08-16 (allotment fix): `planned` became NULLABLE so "never estimated" (null) is
+  // distinguishable from "deliberately zero" (0). The NaN concern this test was written for is
+  // unchanged — every arithmetic reader coerces with `+t.planned||0`, which maps null to 0.
+  assert.equal(t.planned, null, 'no estimate given → null, not 0');
+  assert.equal(t.predicted, 0, 'predicted stays a plain number — it is only read behind predictManual');
 });
 
 test('computeAllotted stays finite when a task lacks planned', () => {

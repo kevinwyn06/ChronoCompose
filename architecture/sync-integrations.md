@@ -11,6 +11,25 @@ Migrations `0001`–`0007` cover schema/grants, Google token custody, second-lev
 Google push notifications, and nullable scheduling clock flags. Migration `0007` removes the obsolete
 schedule-pin columns. Reconcile migration history before any database push.
 
+**Migration `0013` (2026-08-16) IS APPLIED** — run against the live project on 2026-08-16 and verified
+against `information_schema`: `planned | YES | integer`, `uncompressable | YES | boolean`.
+`supabase/migrations/0013_uncompressable.sql` adds
+the `uncompressable` boolean — **nullable, no default**, because the client field is tri-state and `null`
+carries the meaningful "never decided → derive from the clocks" state — and drops the `not null` on `planned`. Both are required by the 2026-08-16 allotment work; see
+`scheduling.md`.
+
+- **Ordering is load-bearing, and it restates 0012's lesson:** apply 0013 **before** any client carrying
+  `uncompressable` in `SYNC_FIELDS` talks to the backend, or every task write references a column that does
+  not exist.
+- **`drop not null` on `planned` is not a formality.** `0001_init.sql` declares `planned int not null
+  default 0` and no migration since had touched its nullability, so without this the first client to send
+  `null` for an unestimated task gets a constraint violation on every row it owns. The statement is
+  idempotent (`drop not null` on an already-nullable column is a no-op, not an error).
+- Adding a field to `SYNC_FIELDS` changes `syncRowFp`, so expect **one full re-push of every task row** on
+  first sync — the same one-time cost 0008 and 0012 each recorded, not a sign of anything wrong.
+- Verify against `information_schema`, not the SQL editor's "Success. No rows returned" (0011's lesson).
+  The query is in the migration's footer; expect `planned | YES` and `uncompressable | YES | boolean`.
+
 ## Google Calendar
 
 `gcalImport`, `mergeCalendarEvents`, and `pruneDeletedEvents` implement pull/merge. Outbound operations

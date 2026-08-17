@@ -44,7 +44,12 @@ test('…across a wide sweep of pools and task counts, not just the one case tha
       const out = c.compressionSeam(feats, pool);
       const s = sum(out);
       assert.ok(s <= pool, 'pool ' + pool + ' / ' + n + ' tasks charged ' + s);
-      worst = Math.max(worst, pool - s);
+      // 2026-08-16: the reference is now min(pool, Σdemand), not the pool. Above Σdemand the seam
+      // deliberately leaves the surplus UNALLOCATED — no task is given more time than it asked for —
+      // so measuring the residue against the raw pool would be measuring the new rule, not rounding.
+      const demand = feats.reduce((a, f) => a + f.planned, 0);
+      const target = Math.min(pool, demand);
+      worst = Math.max(worst, target - s);
     }
   }
   assert.ok(worst < 1.0000001, 'and it never under-charges by a whole minute either (worst ' + worst + ')');
@@ -53,7 +58,10 @@ test('…across a wide sweep of pools and task counts, not just the one case tha
 test('no single task loses or gains a whole minute against its true share', () => {
   const c = make();
   const feats = [27, 44, 61, 15, 90].map((p, i) => ({ id: 't' + i, planned: p, spent: 0 }));
-  const pool = 337;
+  // 2026-08-16: the pool must be BELOW Σplanned (27+44+61+15+90 = 237) for this to be a test of
+  // apportionment at all — above it every share is capped at the row's own figure and the "true
+  // share" is no longer what anyone should receive. 137 keeps every row genuinely compressed.
+  const pool = 137;
   const out = c.compressionSeam(feats, pool);
   const planSum = feats.reduce((a, f) => a + f.planned, 0);
   feats.forEach(f => {

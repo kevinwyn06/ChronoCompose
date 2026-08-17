@@ -53,11 +53,14 @@ test.describe('capacity indicator', () => {
   test('an over-subscribed day reports the FULL ask against the pool, not a clamped one', async ({ page }) => {
     await bootToday(page, overFixture());
     const cap = await readCapacity(page);
-    expect(cap.pool, 'a 00:00–09:00 window is 540 free minutes').toBe(540);
+    /* 2026-08-16: `settings.breakMin` defaults 3 (was 0), and `computeAllotted` shrinks the pool by one
+       break per packable family so allotment stays inside timeline capacity. Six families → 540 − 6×3
+       = 522 minutes = 8h 42m. Recomputed from the rule; the 540 below is the raw window, unchanged. */
+    expect(cap.pool, 'a 00:00–09:00 window is 540 raw minutes, less six 3-minute breaks').toBe(522);
     expect(cap.demand, 'six 3-hour tasks = 1080 minutes asked for').toBe(1080);
     expect(cap.over).toBe(true);
     expect(cap.text, 'both figures are printed in words, with units').toContain('18h asked');
-    expect(cap.text).toContain('9h free');
+    expect(cap.text).toContain('8h 42m free');
     expect(cap.text, 'never bare h:mm — it would read as a clock time next to the date').not.toContain('18:00');
   });
 
@@ -74,7 +77,8 @@ test.describe('capacity indicator', () => {
   test('an under-subscribed day reads correctly and carries no alarm state', async ({ page }) => {
     await bootToday(page, underFixture());
     const cap = await readCapacity(page);
-    expect(cap.pool).toBe(540);
+    /* One packable family → 540 − 1×3 = 537. Same breakMin default as above. */
+    expect(cap.pool).toBe(537);
     expect(cap.demand).toBe(90);
     expect(cap.over, 'under the pool, so nothing is marked').toBe(false);
     expect(cap.text).toContain('1h 30m asked');
@@ -95,6 +99,7 @@ test.describe('capacity indicator', () => {
       else expect(c.cap, 'today and every future day report').not.toBeNull();
     });
     // The fixture's window is -1d..+3d, so today itself carries the full 1080-minute ask.
-    expect(cols.find((c) => c.today).cap).toEqual({ demand: 1080, pool: 540 });
+    /* Same 540 − 6×3 = 522 pool as the Today readout: one indicator, one rule. */
+    expect(cols.find((c) => c.today).cap).toEqual({ demand: 1080, pool: 522 });
   });
 });
