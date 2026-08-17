@@ -23,7 +23,7 @@ test.describe('click vs drag disambiguation on a sheet row', () => {
   test('a press that moves under the 4px threshold is a click and opens details', async ({ page }) => {
     await boot(page);
     const row = await firstRow(page);
-    const box = await row.boundingBox();
+    const box = await row.locator('[data-cellk="name"]').boundingBox(); /* the row's neutral surface — see selection-keyboard.spec.js */
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
 
     await page.mouse.move(x, y);
@@ -37,7 +37,7 @@ test.describe('click vs drag disambiguation on a sheet row', () => {
   test('a press that moves past the threshold is a drag and does NOT open details', async ({ page }) => {
     await boot(page);
     const row = await firstRow(page);
-    const box = await row.boundingBox();
+    const box = await row.locator('[data-cellk="name"]').boundingBox(); /* the row's neutral surface — see selection-keyboard.spec.js */
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
 
     await page.mouse.move(x, y);
@@ -54,7 +54,7 @@ test.describe('click vs drag disambiguation on a sheet row', () => {
     page.on('pageerror', (e) => errors.push(String(e)));
     await boot(page);
     const row = await firstRow(page);
-    const box = await row.boundingBox();
+    const box = await row.locator('[data-cellk="name"]').boundingBox(); /* the row's neutral surface — see selection-keyboard.spec.js */
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
 
     await page.mouse.move(x, y);
@@ -64,7 +64,7 @@ test.describe('click vs drag disambiguation on a sheet row', () => {
 
     /* A plain click after the drag must work: the suppression flag is one-shot, not sticky.
        Re-locate the row — the drag may have reordered the sheet under the old coordinates. */
-    await (await firstRow(page)).click();
+    await (await firstRow(page)).locator('[data-cellk="name"]').click(); /* the name cell, for the reason above */
     await expect(detail(page)).toBeVisible();
     expect(errors, 'page errors during drag').toEqual([]);
   });

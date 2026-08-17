@@ -50,7 +50,12 @@ async function selectedRowIds(page) {
 const closeSheet = (page) => page.getByRole('button', { name: 'Close (Esc)' });
 
 async function litRow(page, n) {
-  const box = await rows(page).nth(n).boundingBox();
+  /* Anchored on the NAME cell rather than the row's geometric centre: every other data column in
+     the sheet is an interactive control (the Planned input, the %-done drag track, the Time-needed
+     chip), so a row's midpoint is whichever column the current widths happen to put there — adding
+     one column moved it onto the Planned input and turned this into a false failure. The name cell
+     is the row's neutral surface, and where a user actually presses to open or drag a task. */
+  const box = await rows(page).nth(n).locator('[data-cellk="name"]').boundingBox();
   if (!box) throw new Error('row ' + n + ' had no box');
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect(detailOpen(page)).toBeVisible();

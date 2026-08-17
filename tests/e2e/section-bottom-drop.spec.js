@@ -45,7 +45,12 @@ async function storedSections(page) {
  * does under a human hand.
  */
 async function dragBelowRow(page, fromId, toId, midDrag) {
-  const a = await rowOf(page, fromId).boundingBox();
+  /* Anchored on the NAME cell rather than the row's geometric centre: every other data column in
+     the sheet is an interactive control (the Planned input, the %-done drag track, the Time-needed
+     chip), so a row's midpoint is whichever column the current widths happen to put there — adding
+     one column moved it onto the Planned input and turned this into a false failure. The name cell
+     is the row's neutral surface, and where a user actually presses to open or drag a task. */
+  const a = await rowOf(page, fromId).locator('[data-cellk="name"]').boundingBox();
   const b = await rowOf(page, toId).boundingBox();
   const targetY = b.y + b.height - 3; /* unambiguously the lower half, and still inside the row */
   await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);

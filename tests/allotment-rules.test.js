@@ -434,3 +434,25 @@ test('the counterfactual is weighted by the AUTO demand, not by the manual overr
   assert.equal(m['rz'].allotted, 240, 'the override is honoured');
   assert.equal(m['rz'].computed, 100, 'and `computed` is the auto value the V4.3 drag-back snaps to');
 });
+
+// Owner, 2026-08-17: "I wanted it as a column, not as something inside the detail panel."
+test('Time needed is a first-class sheet column, sortable on the RESOLVED value', () => {
+  const c = make();
+  const day = c.startOfToday();
+  const keys = c.colDefs().map(col => col.k);
+  assert.ok(keys.includes('exact'), 'the column exists in colDefs, so hide/reorder/resize/reset all reach it');
+  assert.equal(c.colDefs().find(col => col.k === 'exact').l, 'Time needed',
+    'and it carries the same label the detail-panel control does — one name for one concept');
+  assert.equal(c.colType('exact'), 'bool',
+    'bool, like `incl`: the filter widget is a yes/no, not a number box');
+  assert.ok(c.SORT_KEYS().includes('exact'), 'sortable');
+
+  const derived = c.normalizeTask({ id: 'e1', name: 'Appt', start: day + 9 * HOUR, end: day + 10 * HOUR,
+    startClock: true, endClock: true });
+  const decidedOff = Object.assign({}, derived, { uncompressable: false });
+  assert.equal(c.sortValue(derived, 'exact'), 1,
+    'a never-decided appointment sorts as Exact — the sort asks the resolved question, not the stored one');
+  assert.equal(c.sortValue(decidedOff, 'exact'), 0, 'and an explicit Flexible sorts as Flexible');
+  assert.equal(c.sortValue(c.normalizeTask({ id: 'e2', name: 'Bare' }), 'exact'), 0,
+    'an unclocked, undecided task sorts as Flexible');
+});

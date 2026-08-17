@@ -170,6 +170,31 @@ The in-bar `n%` readout is unchanged (white with a text shadow, its own contrast
 fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, and `PCT_GRAB_PX` /
 `BAR_GRIP_PX` / `PCT_LABEL_MIN_W`.
 
+### The `Time needed` column
+
+Owner, 2026-08-17: *"I wanted it as a column, not as something inside the detail panel."* `colDefs()`
+carries `{k:'exact', w:104, l:'Time needed'}`, visible by default, between `% Done` and `actions`, and
+`name` was trimmed 354 → 250 so the **pixel total stays 730** — block 26's rule is that every visible
+column fits the first-run pane floor of `min(<total>px, 55%)`, and `sheet-default-width.spec.js` asserts it
+at three viewports.
+
+The cell shows `isUncompressable(t)` — the *resolved* value — so a never-decided task reads its answer off
+its own clocks and changes when they do. Decided and derived are drawn differently on purpose (solid chip
+vs faint italic), the same distinction the Planned column draws between `—` and `0:00`. Clicking toggles
+through `setUncompressable`, the one mutator the detail panel's control also uses, so the two surfaces
+cannot drift. Sorting is a `bool` key on the resolved value.
+
+**The hit target is the chip, not the cell**, and that is a correction the e2e layer forced: a row-wide
+toggle meant clicking the *centre of a row* stopped opening the task, because adding a column moved the
+row's midpoint into this cell. `% Done` earns its full-cell surface because position along it *encodes*
+the value; a two-state chip encodes nothing, so it takes a `HIT_MIN_PX` chip and leaves the rest of the
+cell to `rowClick`.
+
+Row cells carry **`data-cellk`** — deliberately not `data-colk`, which is the *header* cell's identity
+(the reorder hit test walks up to it, the width spec selects it). It exists so a spec can address a cell by
+column instead of doing arithmetic on the row's box; five specs used to click a row's geometric centre and
+so silently depended on which column the current widths put there.
+
 ### The `% Done` column
 
 Owner, same report: *"I would prefer to add percent complete back as a column which then updates the gantt

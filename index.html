@@ -1381,13 +1381,25 @@ class Component extends DCLogic {
        with the name; the only numeric readout is planned → allotted, flush right. Actions retain today's
        inclusion, timer, and add-time controls without reintroducing data columns. */
     return [
-      {k:'check',w:50,lock:true},{k:'name',w:354,l:'Task'},
+      /* PP-EXT (owner 2026-08-17): `name` gives up 104px — exactly the width of the new `Time needed`
+         column below — so the sheet's PIXEL TOTAL is unchanged at 730. Block 26's rule is that every
+         visible column fits inside the first-run pane, whose floor is `min(<column total>px, 55%)`;
+         growing the total pushes `Actions` past the right edge at 1280 wide, which
+         `tests/e2e/sheet-default-width.spec.js` asserts at three viewports precisely so a new column
+         cannot regress it silently. It did catch this one. A name still gets the widest column by a
+         factor of two, and it ellipsizes rather than wrapping, so nothing becomes unreadable. */
+      {k:'check',w:50,lock:true},{k:'name',w:250,l:'Task'},
       {k:'planned',w:126,l:'Planned → Allotted'},
       /* PP-EXT (owner 2026-08-15): "I would prefer to add percent complete back as a column which then
          updates the gantt bars." Visible by default. It needs no special handling anywhere else — hide,
          reorder, resize and reset all read `colDefs()` — and it writes through `setPct`, the same single
          mutator the Gantt band uses, so the two surfaces cannot drift. */
       {k:'pct',w:96,l:'% Done'},
+      /* PP-EXT (owner 2026-08-17): "I wanted it as a column, not as something inside the detail panel."
+         Same one-line cost as `% Done` above, and for the same reason: hide, reorder, resize and reset all
+         read `colDefs()`, and the cell writes through `setUncompressable` — the one mutator the detail
+         panel's Time-needed control uses — so the two surfaces cannot drift. Visible by default. */
+      {k:'exact',w:104,l:'Time needed'},
       {k:'actions',w:104,l:'Actions',lock:true}
     ];
   }
@@ -3210,14 +3222,17 @@ class Component extends DCLogic {
      level, subtrees stay glued under their parent, and the manual pp-tasks order is the stable
      tiebreak + the exact order restored when the sort is cleared (sort.key null). Filters (column +
      smart chips) feed the sheet, the row-aligned Gantt, AND the calendar chips off one dataset. */
-  SORT_KEYS(){ return ['name','incl','start','end','dur','planned','spent','predicted','pct','priority','tags','calendar']; }
+  /* PP-EXT (owner 2026-08-17): `exact` joins the sortable keys with the column. It is a BOOL key, like
+     `incl`, so it sorts on the RESOLVED value — grouping every reserved task together is the question a
+     user sorting this column is asking, and whether the answer was typed or derived is not part of it. */
+  SORT_KEYS(){ return ['name','incl','start','end','dur','planned','spent','predicted','pct','exact','priority','tags','calendar']; }
   SMART_CHIPS(){ return [
     {k:'activeToday', l:'Active today'}, {k:'startable', l:'Startable'}, {k:'unplanned', l:'Unplanned'},
     {k:'overdue', l:'Overdue'}, {k:'running', l:'Running'} ]; }
   colType(k){ /* type drives the comparator + the filter widget */
     if(k==='name'||k==='tags'||k==='calendar') return 'text';
     if(k==='start'||k==='end') return 'date';
-    if(k==='incl') return 'bool';
+    if(k==='incl'||k==='exact') return 'bool';
     return 'num'; /* dur, planned, spent, predicted, pct, priority */
   }
   /* A comparable primitive for a sort/filter key; '' / null mean "empty" (always sorted last). */
@@ -3232,6 +3247,7 @@ class Component extends DCLogic {
       case 'spent':     return this.spentDisplay(t); /* PP-EXT: sort matches the shown scope (today/life) */
       case 'predicted': return +t.predicted||0;
       case 'pct':       return +t.pct||0;
+      case 'exact':     return this.isUncompressable(t) ? 1 : 0; /* PP-EXT (owner 2026-08-17): resolved, never raw */
       case 'priority':  return +t.priority||4; /* 1=highest → ascending shows P1 first */
       case 'tags':      return ((t.labels||[]).slice().sort()[0]||'').toLowerCase();
       case 'calendar':  return (this.calNameOf(t)||'').toLowerCase();
@@ -7898,9 +7914,17 @@ class Component extends DCLogic {
       const map=this.sectionsToMap(this.state.sections); const remoteMap={};
       (data||[]).forEach(r=>{ const inc=this.normalizeSection(Object.assign({}, r.data||{}, {id:r.id})); remoteMap[r.id]=inc;
         if(this.kvMergeDecision(map[r.id], inc, tomb[this.kvTombKey('sections', r.id)])==='set') map[r.id]=inc; });
+      /* PP-EXT (owner 2026-08-17, fix): compute the push-back from the LOCAL MERGED VALUE, never from
+         `this.state.sections` after `saveSections`. `setState` is async in React — the tasks path says so
+         in as many words ("do NOT read this.state.tasks after setState") and the habits/journal branches
+         above both diff against their own local variable for exactly this reason. Reading state here read
+         the PRE-merge sections, so the ops enqueued back to the backend were computed against a stale
+         picture: a section this device had an older copy of would be re-pushed over the newer remote row,
+         undoing on the backend what the merge had just correctly accepted locally. */
+      const merged=this.sectionsFromMap(map);
       this._syncApplying=true;
-      try{ this.saveSections(this.sectionsFromMap(map)); } finally{ this._syncApplying=false; }
-      const ops=this.computeKvOps(remoteMap, this.sectionsToMap(this.state.sections)).filter(o=>o.op!=='delete');
+      try{ this.saveSections(merged); } finally{ this._syncApplying=false; }
+      const ops=this.computeKvOps(remoteMap, this.sectionsToMap(merged)).filter(o=>o.op!=='delete');
       if(ops.length) this.syncKvEnqueue('sections', ops);
     }).catch(e=>this.syncError(e));
   }
@@ -11832,7 +11856,14 @@ class Component extends DCLogic {
     const pcol=this.PCOL[t.priority]||'var(--pri-default)';
     const seqOf=this._seqOf||{};
 
-    const cell=(c,content,extra)=>h('div',{key:c.k,style:Object.assign({flex:'0 0 '+c.w+'px',padding:'0 9px',
+    /* PP-EXT (owner 2026-08-17): row cells carry `data-cellk`. DELIBERATELY NOT `data-colk`, which is
+       the HEADER cell's identity (the column-reorder hit test walks up to it, and the width specs select
+       it): one attribute for both would make every `[data-colk="x"]` query ambiguous. It exists so a
+       caller can address a
+       cell BY COLUMN instead of by arithmetic on the row's box: several e2e specs clicked a row's
+       geometric centre as a stand-in for "click the row", and adding a column moved that midpoint onto
+       the Planned input — a coincidence of column widths silently deciding whether they passed. */
+    const cell=(c,content,extra)=>h('div',{key:c.k,'data-cellk':c.k,style:Object.assign({flex:'0 0 '+c.w+'px',padding:'0 9px',
       display:'flex',alignItems:'center',height:'100%',borderRight:'1px solid var(--row-border)',minWidth:0},extra||{})},content);
 
     /* PP-EXT V2.11: built from the shared builder (see taskDueRecurChip) so the sheet row and the plan
@@ -11966,9 +11997,43 @@ class Component extends DCLogic {
             fontVariantNumeric:'tabular-nums',padding:'0 6px',pointerEvents:'auto',
             color:pctNum>=50?'#fff':'var(--text)',textShadow:pctNum>=50?'0 1px 2px rgba(0,0,0,0.55)':'none'}},
           pctNum+'%')));
+    /* PP-EXT (owner 2026-08-17): the Time-needed cell — the column form of the detail panel's
+       Flexible / Exact control, writing through the same `setUncompressable`.
+       It shows the RESOLVED answer (`isUncompressable`), so a task that has never been decided reads the
+       derivation off its own clocks and changes by itself when those clocks change. Decided and derived
+       are drawn differently on purpose, and it is the same distinction the Planned column draws between
+       `—` and `0:00`: a solid chip is a value the user chose, a faint italic one is the app's inference,
+       which is a thing you may want to correct rather than a thing you set. Clicking toggles, which is
+       also how a derived value becomes a decision.
+       THE HIT TARGET IS THE CHIP, NOT THE CELL, and that is a correction the e2e layer forced: the first
+       cut made the whole cell interactive (`% Done` does, so it looked like the house style) and three
+       specs went red because clicking the CENTRE OF A ROW stopped opening the task. They were right —
+       adding a column moved the row's midpoint into this cell, and a row-wide toggle means a large part
+       of every row silently stops being "open this task". `% Done` earns its full-cell surface because
+       position along it ENCODES the value (it is a drag track); a two-state chip encodes nothing, so it
+       takes a chip-sized target with a `HIT_MIN_PX` floor — generous, per the tenet, without annexing
+       the row. `onMouseDown`/`onClick` are stopped on the chip alone so a toggle does not also bubble to
+       `rowClick`; anywhere else in the cell still opens the detail sheet, as every other blank space in
+       the row does. */
+    const uncompOn=this.isUncompressable(t), uncompSet=(t.uncompressable!=null);
+    const uncompCell=h('div',{style:{width:'100%',height:'100%',display:'flex',alignItems:'center'}},
+      h('span',{'data-exact-cell':t.id,role:'button','aria-pressed':uncompOn,
+        onMouseDown:e=>{ e.preventDefault(); e.stopPropagation(); this.setUncompressable(t.id, !uncompOn); },
+        onClick:e=>e.stopPropagation(), onDoubleClick:e=>e.stopPropagation(),
+        title:'Time needed · '+(uncompOn?'Exact':'Flexible')+(uncompSet?'' : ' (from this task’s times — not set by you)')
+          +' — click to '+(uncompOn?'let it compress':'reserve its full time'),
+        style:{display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
+          minHeight:this.HIT_MIN_PX+'px',minWidth:'62px',boxSizing:'border-box',
+          fontSize:'10.5px',fontWeight:600,lineHeight:1,padding:'3px 9px',borderRadius:'var(--r-2)',
+          fontStyle:uncompSet?'normal':'italic',
+          color:uncompOn?(uncompSet?'var(--on-accent)':(this._accent||'#3f7bd6')):'var(--text-mut2)',
+          background:uncompOn&&uncompSet?(this._accent||'#3f7bd6'):'var(--field-bg)',
+          border:'1px solid '+(uncompOn?(this._accent||'#3f7bd6'):'var(--field-border)'),
+          opacity:uncompSet?1:0.85}},
+        uncompOn?'Exact':'Flexible'));
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
-      name:nameBlock, planned:flowCell, pct:pctCell, actions:actionsCell,
+      name:nameBlock, planned:flowCell, pct:pctCell, exact:uncompCell, actions:actionsCell,
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;

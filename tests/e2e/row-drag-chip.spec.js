@@ -45,7 +45,12 @@ test.describe('row drag chip tracks the pointer', () => {
     await boot(page);
 
     const row = page.locator('[data-task-id]:not([data-card-id])').first();
-    const box = await row.boundingBox();
+    /* Anchored on the NAME cell rather than the row's geometric centre: every other data column in
+       the sheet is an interactive control (the Planned input, the %-done drag track, the Time-needed
+       chip), so a row's midpoint is whichever column the current widths happen to put there — adding
+       one column moved it onto the Planned input and turned this into a false failure. The name cell
+       is the row's neutral surface, and where a user actually presses to open or drag a task. */
+    const box = await row.locator('[data-cellk="name"]').boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.down();
     /* Past the 4px promotion threshold, and far enough vertically that the drop index changes —

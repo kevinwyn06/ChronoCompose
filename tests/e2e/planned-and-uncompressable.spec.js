@@ -19,6 +19,13 @@
 const { test, expect } = require('@playwright/test');
 const { boot, bootToday, cleanDaySettings, settleTimeline } = require('./_seed');
 
+/* The DETAIL PANEL's Time-needed option. Explicitly not `getByRole('button', {name})` alone: as of
+ * 2026-08-17 the sheet has a Time-needed COLUMN whose chip carries the same role and the same label on
+ * every row, so an unscoped query matches both surfaces. Excluding the chip keeps each test pointed at
+ * the surface it is actually about. */
+const panelOption = (page, label) =>
+  page.locator(`[role="button"]:not([data-exact-cell])`).filter({ hasText: new RegExp('^' + label + '$') });
+
 /** The stored task, straight out of `pp-tasks` (unscoped: e2e runs anonymous). */
 const stored = (page, id) => page.evaluate((tid) => {
   const raw = JSON.parse(localStorage.getItem('pp-tasks') || '[]');
@@ -111,7 +118,7 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
     /* Through the real UI: the timeline block's click handler opens the detail panel, and the
        "Time needed" control lives there as two role="button" options mirroring `blockingCtl`. */
     await page.locator('[data-tl-task="appt"]').first().click();
-    const flexible = page.getByRole('button', { name: 'Flexible', exact: true });
+    const flexible = panelOption(page, 'Flexible');
     await expect(flexible, 'the detail panel offers the Time needed control').toBeVisible();
     await flexible.click();
 
@@ -140,7 +147,7 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
     const before = await apptBox(page);
 
     await page.locator('[data-tl-task="appt"]').first().click();
-    const exact = page.getByRole('button', { name: 'Exact', exact: true });
+    const exact = panelOption(page, 'Exact');
     await expect(exact).toBeVisible();
     await exact.click();
     await expect.poll(async () => (await stored(page, 'appt')).uncompressable).toBe(true);
@@ -153,5 +160,76 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
     expect(Math.abs(after.y - before.y), 'still starting at 10:30').toBeLessThan(1.5);
     /* The same 23 → 90 in reverse. */
     expect(after.height, 'Exact takes its planned time in full').toBeGreaterThan(before.height * 1.5);
+  });
+});
+
+/* Owner, 2026-08-17: *"I wanted it as a column, not as something inside the detail panel."*
+ * Two things only a real mount can prove: the cell is actually THERE in the sheet row, and clicking it
+ * writes through to storage without also opening the detail panel (the toggle stops the click that
+ * `rowClick` listens for — a regression here would open the sheet on every toggle). The derived-vs-decided
+ * distinction is asserted on the STORED value: a never-decided task reads Exact from its clocks while
+ * storing nothing, and one click turns that inference into a decision.
+ */
+test.describe('the Time needed column', () => {
+  const cell = (page, id) => page.locator(`[data-task-id="${id}"] [data-exact-cell="${id}"]`);
+
+  const fixture = {
+    tasks: [
+      { id: 'appt', name: 'Standing meeting', type: 'Proportional', included: true, planned: null,
+        start: '0d+10h30m', end: '0d+12h', startClock: true, endClock: true },
+      { id: 'bare', name: 'No times at all', type: 'Proportional', included: true, planned: 60,
+        start: '0d', end: '+1d' },
+    ],
+  };
+
+  test('renders the resolved value per row, and a click makes it a decision', async ({ page }) => {
+    await boot(page, fixture);
+
+    /* Derived, both directions, with nothing stored on either row. */
+    /* Absent and null are the SAME state — "never decided". The seed writes the fixture row verbatim,
+       so the key is simply missing until something saves; `?? null` folds the two rather than pinning
+       an incidental difference between a seeded row and a saved one. */
+    expect((await stored(page, 'appt')).uncompressable ?? null,
+      'the fixture decides nothing — that is the never-decided state').toBe(null);
+    await expect(cell(page, 'appt'), 'a clocked same-day appointment reads Exact off its own clocks')
+      .toHaveText('Exact');
+    await expect(cell(page, 'bare'), 'an unclocked task reads Flexible').toHaveText('Flexible');
+
+    /* One click on the cell — not the detail panel — writes an explicit decision. */
+    await cell(page, 'appt').click();
+    await expect.poll(async () => (await stored(page, 'appt')).uncompressable,
+      { message: 'the column writes through setUncompressable, like the panel control' }).toBe(false);
+    await expect(cell(page, 'appt')).toHaveText('Flexible');
+
+    /* And it must NOT have opened the detail sheet on the way. */
+    await expect(panelOption(page, 'Exact'),
+      'toggling a cell is not a row click — the detail panel stays shut').toHaveCount(0);
+
+    /* Back again, so a control that merely destroys the field cannot pass. */
+    await cell(page, 'appt').click();
+    await expect.poll(async () => (await stored(page, 'appt')).uncompressable).toBe(true);
+    await expect(cell(page, 'appt')).toHaveText('Exact');
+  });
+
+  /* The same task id, same stored `uncompressable` (none), differing ONLY in whether it carries clock
+   * times — which is what "re-derives" means at the render layer: the cell is a function of the task's
+   * current clocks, not of a value stamped when the row was created. The read-time derivation itself is
+   * pinned in the unit layer; this is the half that needs a real mount.
+   * Driven as two seeds rather than by editing a task mid-session because `boot` seeds through
+   * `addInitScript`, so a reload would re-seed the fixture and erase the edit under test. */
+  test('the cell follows the task’s clocks, not a value stamped at creation', async ({ page }) => {
+    await boot(page, fixture);
+    await expect(cell(page, 'bare'), 'no clocks → Flexible').toHaveText('Flexible');
+    expect((await stored(page, 'bare')).uncompressable ?? null, 'and nothing is stored either way').toBe(null);
+
+    const clocked = JSON.parse(JSON.stringify(fixture));
+    clocked.tasks[1] = Object.assign(clocked.tasks[1], {
+      start: '0d+9h', end: '0d+10h', startClock: true, endClock: true });
+    await boot(page, clocked);
+
+    await expect(cell(page, 'bare'), 'the same undecided task, now clocked, reads Exact')
+      .toHaveText('Exact');
+    expect((await stored(page, 'bare')).uncompressable ?? null,
+      'still a derivation, not a stored decision').toBe(null);
   });
 });
