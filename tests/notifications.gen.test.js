@@ -19,54 +19,54 @@ function keys(list){ return list.map(s=>s.key); }
 function byType(list, type){ return list.filter(s=>s.type===type); }
 
 // ---------------------------------------------------------------------------
-// notifyPlan — clocked-start heads-up (T−5, urgent)
+// notifyPlan — the day's FIRST task start (owner 2026-08-16: `startPin` merged into `taskBoundary`,
+// and the 5-minute lead window is gone — it fires AT the start, not before it).
 // ---------------------------------------------------------------------------
-test('clocked start fires in the 5-min lead window, urgent, once', () => {
+test('the day\'s first clocked start fires at the start instant, once', () => {
   const c = make();
   const B = c.startOfToday(), now = B + 9*HOUR;
-  // starts in 2 min → inside [start−LEAD, start)
-  c.state.tasks = [ T(c, {id:'A', name:'Standup', start:now+2*MIN, end:B+18*HOUR}) ];
-  const plan = c.notifyPlan(now, {});
-  const s = byType(plan, 'startPin');
-  assert.equal(s.length, 1);
-  assert.equal(s[0].urgent, true);
-  assert.equal(s[0].key, 'start:A:'+(now+2*MIN));
+  c.state.tasks = [ T(c, {id:'A', name:'Standup', start:now, end:B+18*HOUR}) ];
+  const s = byType(c.notifyPlan(now, {}), 'taskBoundary');
+  assert.equal(s.length, 1, 'the first start of the day is its own trigger');
+  assert.equal(s[0].urgent, false, 'no boundary is urgent now that the heads-up is gone');
+  assert.equal(s[0].key, 'bnd:'+now, 'the key is the instant, so one instant can only fire once');
 });
 
-test('clocked start does NOT fire before the lead window or after the start', () => {
+test('a start does NOT fire early — there is no lead time any more', () => {
   const c = make();
   const B = c.startOfToday(), now = B + 9*HOUR;
-  const early = T(c, {id:'E', start:now+30*MIN, end:B+18*HOUR}); // >5 min away
-  const past  = T(c, {id:'P', start:now-1*MIN,  end:B+18*HOUR}); // already started
-  c.state.tasks = [early, past];
-  assert.equal(byType(c.notifyPlan(now, {}), 'startPin').length, 0);
+  const soon = T(c, {id:'E', start:now+2*MIN, end:B+18*HOUR});   // was inside the old 5-min lead window
+  const later = T(c, {id:'L', start:now+30*MIN, end:B+18*HOUR});
+  c.state.tasks = [soon, later];
+  assert.equal(c.notifyPlan(now, {}).length, 0,
+    'the old T−5 heads-up is deleted: nothing fires before the boundary itself');
 });
 
-test('clocked start respects the fired ledger (dedup)', () => {
+test('the boundary respects the fired ledger (dedup)', () => {
   const c = make();
   const B = c.startOfToday(), now = B + 9*HOUR;
-  const start = now + 2*MIN;
-  c.state.tasks = [ T(c, {id:'A', start, end:B+18*HOUR}) ];
-  assert.equal(c.notifyPlan(now, {['start:A:'+start]: now}).length, 0);
+  c.state.tasks = [ T(c, {id:'A', start:now, end:B+18*HOUR}) ];
+  assert.equal(c.notifyPlan(now, {['bnd:'+now]: now}).length, 0, 'already fired at this instant');
 });
 
-test('an explicitly untimed start gets no start notification', () => {
+test('an explicitly untimed start gets no boundary notification', () => {
   const c = make();
   const B = c.startOfToday(), now = B + 9*HOUR;
-  c.state.tasks = [ T(c, {id:'A', startClock:false, start:now+2*MIN, end:B+18*HOUR}) ];
-  assert.equal(byType(c.notifyPlan(now, {}), 'startPin').length, 0);
+  c.state.tasks = [ T(c, {id:'A', startClock:false, start:now, end:B+18*HOUR}) ];
+  assert.equal(c.notifyPlan(now, {}).length, 0, 'no written clock ⇒ not a boundary');
 });
 
 // ---------------------------------------------------------------------------
-// notifyPlan — scheduled-block end (normal), only for fixed appointments
+// notifyPlan — block end (was `blockEnd`, now the "has ended" half of `taskBoundary`)
 // ---------------------------------------------------------------------------
 test('fixed appointment end fires within the grace window, normal urgency', () => {
   const c = make();
   const B = c.startOfToday(), now = B + 9*HOUR;
   c.state.tasks = [ T(c, {id:'A', name:'Focus', start:B+7*HOUR, end:now-1*MIN}) ];
-  const s = byType(c.notifyPlan(now, {}), 'blockEnd');
-  assert.equal(s.length, 1);
+  const s = byType(c.notifyPlan(now, {}), 'taskBoundary');
+  assert.equal(s.length, 1, 'the end of every block is a trigger');
   assert.equal(s[0].urgent, false);
+  assert.equal(s[0].body, 'Focus has ended', 'end half alone when nothing starts at that instant');
 });
 
 test('block end does not fire long after the end or for a clocked start without an end', () => {
@@ -75,39 +75,30 @@ test('block end does not fire long after the end or for a clocked start without 
   const stale   = T(c, {id:'S', start:B+2*HOUR, end:now-30*MIN}); // grace passed
   const noEnd   = T(c, {id:'N', start:B+2*HOUR, end:null});
   c.state.tasks = [stale, noEnd];
-  assert.equal(byType(c.notifyPlan(now, {}), 'blockEnd').length, 0);
+  assert.equal(c.notifyPlan(now, {}).length, 0,
+    'NOTIFY_GRACE_MS still bounds the window, and a task with no end ends no block');
 });
 
-// ---------------------------------------------------------------------------
-// notifyPlan — deadline at risk (urgent, once/day)
-// ---------------------------------------------------------------------------
-test('deadline-at-risk fires when remaining work exceeds time left before due', () => {
+test('one instant that both ends a block and starts the next emits ONE spec', () => {
   const c = make();
-  const B = c.startOfToday(), now = B + 19*HOUR;
-  // due at 20:00 (has a clock ⇒ dueMsOf = end); 60 min left, 600 min of work remaining
-  c.state.tasks = [ T(c, {id:'A', name:'Report', planned:600, pct:0, start:B-DAY, end:B+20*HOUR}) ];
-  const s = byType(c.notifyPlan(now, {}), 'deadlineRisk');
-  assert.equal(s.length, 1);
-  assert.equal(s[0].urgent, true);
-  assert.equal(s[0].key, 'risk:A:'+B); // throttle key is per-day
-});
-
-test('deadline-at-risk stays silent when the work still fits', () => {
-  const c = make();
-  const B = c.startOfToday(), now = B + 19*HOUR;
-  c.state.tasks = [ T(c, {id:'A', planned:30, pct:0, start:B-DAY, end:B+20*HOUR}) ]; // 30 min work, 60 left
-  assert.equal(byType(c.notifyPlan(now, {}), 'deadlineRisk').length, 0);
-});
-
-test('deadline-at-risk ignores completed tasks and is deduped per day', () => {
-  const c = make();
-  const B = c.startOfToday(), now = B + 19*HOUR;
+  const B = c.startOfToday(), now = B + 9*HOUR;
   c.state.tasks = [
-    T(c, {id:'done', planned:600, pct:100, start:B-DAY, end:B+20*HOUR}),
-    T(c, {id:'A',    planned:600, pct:0,   start:B-DAY, end:B+20*HOUR}),
+    T(c, {id:'A', name:'Work',     start:B+8*HOUR, end:now}),
+    T(c, {id:'B', name:'Exercise', start:now,      end:B+10*HOUR}),
   ];
-  assert.equal(byType(c.notifyPlan(now, {}), 'deadlineRisk').length, 1);            // 'done' excluded
-  assert.equal(c.notifyPlan(now, {['risk:A:'+B]: now}).length, 0);                  // already fired today
+  const plan = c.notifyPlan(now, {});
+  assert.equal(plan.length, 1, 'the instant is the key, so the pair cannot double-fire');
+  assert.equal(plan[0].body, 'Work has ended · Exercise will start', 'both halves, one notification');
+});
+
+// deadlineRisk had three cases here. Owner 2026-08-16: "its just a nuisance alarm" — the type is
+// deleted outright, so the replacement assertion is that a would-have-fired setup now stays silent.
+test('a task whose remaining work exceeds the time left no longer notifies at all', () => {
+  const c = make();
+  const B = c.startOfToday(), now = B + 19*HOUR;
+  // due at 20:00; 60 min left, 600 min of work remaining — the old deadlineRisk trigger exactly.
+  c.state.tasks = [ T(c, {id:'A', name:'Report', planned:600, pct:0, start:B-DAY, end:B+20*HOUR}) ];
+  assert.equal(c.notifyPlan(now, {}).length, 0, 'deadlineRisk is deleted; no nuisance alarm fires');
 });
 
 // ---------------------------------------------------------------------------
@@ -128,10 +119,10 @@ test('milestones and archived tasks produce no notifications', () => {
 // ---------------------------------------------------------------------------
 test('notifyOn defaults ON and respects an explicit false', () => {
   const c = make();
-  assert.equal(c.notifyOn('startPin'), true);                 // unset ⇒ on
-  c.state.settings.notify = { startPin:false };
-  assert.equal(c.notifyOn('startPin'), false);
-  assert.equal(c.notifyOn('deadlineRisk'), true);             // sibling still on
+  assert.equal(c.notifyOn('taskBoundary'), true);             // unset ⇒ on
+  c.state.settings.notify = { taskBoundary:false };
+  assert.equal(c.notifyOn('taskBoundary'), false);
+  assert.equal(c.notifyOn('morningSummary'), true);           // sibling still on
 });
 
 // ---------------------------------------------------------------------------

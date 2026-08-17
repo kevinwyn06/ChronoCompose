@@ -379,7 +379,9 @@ class Component extends DCLogic {
     /* PP-EXT Phase 8: browser notifications. LEAD = how early the clocked-start heads-up fires; GRACE = a
        just-missed trigger won't re-fire on reload/tick if its moment passed more than this ago; SUMMARY_TTL =
        morning-popup auto-dismiss. Fired-once ledger + last morning-summary day persist in pp-notify. */
-    this.NOTIFY_LEAD_MS = 5*60000;
+    /* PP-EXT (owner 2026-08-16): the old 5-minute lead constant retired with the clocked-start
+       heads-up — boundary notifications have no lead time at all. NOTIFY_GRACE_MS stays: it keeps a
+       missed tick from dropping one. */
     this.NOTIFY_GRACE_MS = 5*60000;
     this.SUMMARY_TTL_MS = 12000;
     this._notify = this.loadNotify();
@@ -791,7 +793,11 @@ class Component extends DCLogic {
        See architecture/ui-runtime.md § "Gantt bar legend". */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
-    notify:{ startPin:true, deadlineRisk:true, blockEnd:true, morningSummary:true, pomodoro:true }, /* PP-EXT Phase 8/10: per-trigger toggles; only fire once OS permission is granted (opt-in) */
+    /* PP-EXT Phase 8/10 + (owner 2026-08-16): per-trigger toggles; only fire once OS permission is
+       granted (opt-in). The old start/end pair merged into one `taskBoundary` and the deadline-risk
+       alarm was deleted outright (owner: "its just a nuisance alarm"). Legacy keys in a persisted blob are simply
+       never read again — `notifyOn` defaults ON for an absent key, so the new toggle needs no migration. */
+    notify:{ taskBoundary:true, morningSummary:true, pomodoro:true },
     usageTracking:true /* PP-EXT (31): alpha usage tracker — ON by default for this build at the owner's
        request ("track my alpha test usage analytics"), and DISCOVERABLE rather than silent: a ● REC pill
        sits in the shell whenever it is recording. Settings › Data turns it off. Local-only: it is never
@@ -2441,27 +2447,46 @@ class Component extends DCLogic {
     try{ Notification.requestPermission().then(()=>this.forceUpdate()); }catch(e){} }
   clockLabel(ms){ const d=new Date(ms); let hh=d.getHours(), mm=d.getMinutes(); const ap=hh<12?'a':'p'; hh=(hh%12)||12; return hh+':'+String(mm).padStart(2,'0')+ap; }
 
-  /* Pure decision: which browser notifications are DUE at `now` and not yet in `fired`. IO-free & unit-tested
-     (mirrors autoTimerPlan). Each spec: {key, type, urgent, title, body}. Enable/permission gating is in notifyTick. */
-  notifyPlan(now, fired){ const out=[]; fired=fired||{}; const dayKey=this.startOfDay(now);
-    (this.state.tasks||[]).forEach(t=>{
-      if(this.isMilestone(t)||t.archivedAt) return;
-      const active=this.isActiveToday(t); const oc=this.occOf(t);
-      /* Urgent: clocked task about to start (T−LEAD .. start) */
-      if(active && this.hasStartTime(t) && oc.start!=null){ const k='start:'+t.id+':'+oc.start;
-        if(!fired[k] && now>=oc.start-this.NOTIFY_LEAD_MS && now<oc.start)
-          out.push({key:k, type:'startPin', urgent:true, title:'Starting soon', body:t.name+' starts at '+this.clockLabel(oc.start)}); }
-      /* Normal: a fixed appointment just ended */
-      if(active && this.isFixedToday(t) && oc.end!=null){ const k='blockend:'+t.id+':'+oc.end;
-        if(!fired[k] && now>=oc.end && now<oc.end+this.NOTIFY_GRACE_MS)
-          out.push({key:k, type:'blockEnd', urgent:false, title:'Block ended', body:t.name+' — scheduled block is over'}); }
-      /* Urgent: deadline at risk — remaining work exceeds the time left before it's due (throttled once/day) */
-      if((+t.pct||0)<100){ const due=this.dueMsOf(t, this.startOfToday());
-        if(due!=null && due>now){ const remainingMin=Math.max(0,(+t.planned||0)*(1-(+t.pct||0)/100)); const leftMin=(due-now)/60000;
-          if(remainingMin>0 && remainingMin>leftMin){ const k='risk:'+t.id+':'+dayKey;
-            if(!fired[k]) out.push({key:k, type:'deadlineRisk', urgent:true, title:'Deadline at risk',
-              body:t.name+': needs '+this.fmtDur(Math.round(remainingMin))+' but only '+this.fmtDur(Math.round(leftMin))+' left before due'}); } } }
-    }); return out; }
+  /* Pure decision: which browser notifications are DUE at `now` and not yet in `fired`. IO-free &
+     unit-tested (mirrors autoTimerPlan). Each spec: {key, type, urgent, title, body}. Enable/permission
+     gating is in notifyTick.
+     PP-EXT (owner 2026-08-16): ONE type, `taskBoundary`, built from two optional halves — "X has ended"
+     and "Y will start" — so one half, the other, or the pair render from a single builder. The trigger
+     set is EVERY clocked start of a task active today ∪ the end of EVERY block ("block" keeps the
+     meaning it always had — a task fixed on today), and there is no lead time at all: a boundary fires
+     AT the boundary. Grouping by instant is what buys "no info loss, less nuisance" (owner, on review):
+     back-to-back tasks merge into one notification, while a GAP still announces both sides — the end at
+     its instant, the next start at its own. An earlier draft fired only the day's FIRST start, which was
+     silently correct for back-to-back days and lost the start half whenever there was a gap; the owner
+     ruled that starts are never dropped. The deadline-risk alarm was deleted — "its just a nuisance
+     alarm." Reduction happens in the merge and in the retired lead time, never by dropping a start. */
+  boundaryBody(ended, starting){
+    const parts=[];
+    if(ended && ended.length) parts.push(ended.join(', ')+(ended.length>1?' have ended':' has ended'));
+    if(starting && starting.length) parts.push(starting.join(', ')+' will start');
+    return parts.join(' · ');
+  }
+  notifyPlan(now, fired){ const out=[]; fired=fired||{};
+    const rows=(this.state.tasks||[])
+      .filter(t=>t && !this.isMilestone(t) && !t.archivedAt && this.isActiveToday(t))
+      .map(t=>({t, oc:this.occOf(t)}));
+    const startRows=rows.filter(r=>this.hasStartTime(r.t) && r.oc.start!=null);
+    const endRows=rows.filter(r=>this.isFixedToday(r.t) && r.oc.end!=null);
+    const instants={};
+    startRows.forEach(r=>{ instants[r.oc.start]=1; });
+    endRows.forEach(r=>{ instants[r.oc.end]=1; });
+    Object.keys(instants).map(Number).sort((a,b)=>a-b).forEach(ms=>{
+      const k='bnd:'+ms;
+      if(fired[k]) return;
+      if(!(now>=ms && now<ms+this.NOTIFY_GRACE_MS)) return;
+      const ended=endRows.filter(r=>r.oc.end===ms).map(r=>r.t.name);
+      const starting=startRows.filter(r=>r.oc.start===ms).map(r=>r.t.name);
+      const body=this.boundaryBody(ended, starting);
+      if(!body) return;
+      out.push({key:k, type:'taskBoundary', urgent:false,
+        title:ended.length?'Block ended':'Starting now', body:body});
+    });
+    return out; }
 
   /* Map a spec's type → its settings toggle. */
   notifyTypeEnabled(type){ return this.notifyOn(type); }
@@ -8191,15 +8216,12 @@ class Component extends DCLogic {
         return h('div',{style:{padding:'2px 0 8px'}},
           h('button',{className:'pp-tbtn',onClick:()=>this.requestNotifyPermission()},'Enable browser notifications'),
           h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',paddingTop:'4px'}},'Notifications only fire while this tab is open (no backend). Nothing is sent until you enable them.')); })(),
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Clocked-start heads-up (5 min before)',
-          this.infoNote('An urgent notification 5 minutes before a task’s clocked start.')),
-        toggle(this.notifyOn('startPin'),()=>this.saveSettings({notify:Object.assign({},s.notify,{startPin:!this.notifyOn('startPin')})}))),
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Deadline at risk',
-          this.infoNote('An urgent notification when a task’s remaining work no longer fits in the time left before it’s due. Fires at most once per task per day.')),
-        toggle(this.notifyOn('deadlineRisk'),()=>this.saveSettings({notify:Object.assign({},s.notify,{deadlineRisk:!this.notifyOn('deadlineRisk')})}))),
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Scheduled block ended',
-          this.infoNote('A normal notification when a fixed appointment reaches its end.')),
-        toggle(this.notifyOn('blockEnd'),()=>this.saveSettings({notify:Object.assign({},s.notify,{blockEnd:!this.notifyOn('blockEnd')})}))),
+      /* PP-EXT (owner 2026-08-16): three toggles collapse into one — the start/end pair merged into
+         `taskBoundary` and the deadline-risk alarm was deleted outright ("its just a nuisance alarm"). */
+      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Task boundaries',
+          this.infoNote('One notification when your first task of the day starts and at the end of every scheduled block — “Work has ended · Exercise will start”. No lead time; it fires at the boundary itself.')),
+        toggle(this.notifyOn('taskBoundary'),()=>this.saveSettings({notify:Object.assign({},s.notify,{taskBoundary:!this.notifyOn('taskBoundary')})}))),
+      /* /PP-EXT */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Morning summary popup',
           this.infoNote('An in-app popup on the first open of each day with today’s counts and the tasks that still need planning. Auto-dismisses; not a browser notification (works without permission).')),
         toggle(this.notifyOn('morningSummary'),()=>this.saveSettings({notify:Object.assign({},s.notify,{morningSummary:!this.notifyOn('morningSummary')})}))),
