@@ -70,6 +70,16 @@ async function seed(page, data = {}) {
           + (m[2] ? parseInt(m[2], 10) : 0) * 3600000
           + (m[3] ? parseInt(m[3], 10) : 0) * 60000;
       }
+      /* Recurrence bounds are dates too. Keep them relative for the same reason as task edges: a
+         finite recurring-run gesture fixture must not become wholly past as the wall clock advances. */
+      if (o.recur && typeof o.recur.until === 'string') {
+        const m = OFF.exec(o.recur.until);
+        if (m) {
+          o.recur = Object.assign({}, o.recur, { until: midnight + parseInt(m[1], 10) * DAYMS
+            + (m[2] ? parseInt(m[2], 10) : 0) * 3600000
+            + (m[3] ? parseInt(m[3], 10) : 0) * 60000 });
+        }
+      }
       return o;
     };
     if (!already) {

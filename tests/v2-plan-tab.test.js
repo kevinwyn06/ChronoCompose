@@ -135,10 +135,11 @@ test('the retired matrix renderer still builds its quadrants when called directl
 
 // --- the left pane's width floor, re-derived (block 26 gave it one; 27a must not drop it) ---
 
-test('the list surface keeps block 26 sheet floor exactly', () => {
+test('the list surface no longer forces block 26 sheet floor after the draggable divider redesign', () => {
   const c = make();
-  assert.equal(c.leftPaneMinWidth('list', 0), c.sheetPaneMinWidth());
-  assert.ok(/^min\(\d+px, 55%\)$/.test(c.leftPaneMinWidth('list', 0)), 'still a capped px floor');
+  assert.equal(c.leftPaneMinWidth('list', 0), '0px');
+  assert.equal(c.leftPaneMaxWidth('list'), c.sheetMinWidthPx() + 'px',
+    'the sheet may compress but cannot grow into blank space past its last visible column');
 });
 
 test('a triage surface gets a floor of its own, per rendered column', () => {
@@ -186,7 +187,7 @@ test('the triage default sits inside the splitter clamp the user could drag to',
   const c = make();
   const d = c.splitDefault('triage');
   assert.ok(d >= 28 && d <= 78, 'within the 28–78 clamp in onMouseMove');
-  assert.ok(d > c.splitDefault('cal'), 'card columns need more of the board than the Gantt split');
+  assert.ok(d <= c.splitDefault('cal'), 'the sheet now opens to its content edge; its px cap prevents whitespace');
 });
 
 test('setLeftSurface banks the width it leaves and restores the one it enters', () => {

@@ -1,4 +1,7 @@
-/* Block 26 — F13 (the motto is clipped off-screen by default) and F15 (a control labelled
+/* Block 46 deliberately supersedes Block 26's all-columns-fit floor. The sheet now opens to its
+ * content edge, may be compressed by dragging the divider, and may never expand into nuisance
+ * whitespace beyond its last visible column. The divider behavior needs trusted pointer input.
+ * F15 (a control labelled
  * `placeholder` ships on the moat surface).
  *
  * F13 is a LAYOUT defect, so it is only provable against a real box model: the mock DOM has no
@@ -49,7 +52,7 @@ async function sheetGeometry(page, colKey) {
 
 for (const view of ['today', 'schedule']) {
   for (const { w, h } of WIDTHS) {
-    test(`${view} view at ${w}x${h}: the motto column and the row actions are inside the sheet`, async ({ page }) => {
+    test(`${view} view at ${w}x${h}: the first-run sheet opens exactly to its content edge`, async ({ page }) => {
       await page.setViewportSize({ width: w, height: h });
       /* No `viewSplit` in prefs — this is the FIRST-RUN width, which is what F13 is about.
          A user who has dragged the splitter was never the broken case. */
@@ -64,9 +67,11 @@ for (const view of ['today', 'schedule']) {
         expect(g.cellRight, `${k} column ends inside the sheet at ${w}px`).toBeLessThanOrEqual(g.paneRight + 1);
       }
 
-      /* …and no horizontal scrollbar, i.e. nothing is merely reachable by scrolling. */
+      /* First run is uncompressed: all columns fit, but the superseding rule is now the right-edge
+         clamp rather than a permanent min-width floor. */
       const g = await sheetGeometry(page, 'actions');
       expect(g.scrollWidth, `sheet does not scroll horizontally at ${w}px`).toBeLessThanOrEqual(g.clientWidth + 1);
+      expect(g.paneRight - g.cellRight, `no nuisance whitespace follows Actions at ${w}px`).toBeLessThanOrEqual(18);
 
       /* The right pane must survive the floor — a sheet that ate the whole board would pass
          every assertion above. */
@@ -83,6 +88,107 @@ for (const view of ['today', 'schedule']) {
     });
   }
 }
+
+test('trusted divider drag compresses, persists, and clamps when dragged back past Actions', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await boot(page, { prefs: { mainView: 'today' }, seedOnce: true });
+  const divider = page.locator('[data-pane-divider="sheet"]');
+  await expect(divider).toBeVisible();
+
+  const before = await sheetGeometry(page, 'actions');
+  const d0 = await divider.boundingBox();
+  await page.mouse.move(d0.x + d0.width / 2, d0.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(d0.x - 180, d0.y + 40, { steps: 8 });
+  await page.mouse.up();
+
+  const compressed = await sheetGeometry(page, 'actions');
+  expect(compressed.clientWidth).toBeLessThan(before.clientWidth - 100);
+  expect(compressed.scrollWidth).toBeGreaterThan(compressed.clientWidth + 100);
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-prefs')).viewSplit.agenda);
+  expect(saved).toBeGreaterThan(0);
+
+  const d1 = await divider.boundingBox();
+  await page.mouse.move(d1.x + d1.width / 2, d1.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(1500, d1.y + 40, { steps: 10 });
+  await page.mouse.up();
+
+  const clamped = await sheetGeometry(page, 'actions');
+  expect(clamped.cellRight).toBeLessThanOrEqual(clamped.paneRight + 1);
+  expect(clamped.paneRight - clamped.cellRight).toBeLessThanOrEqual(18);
+
+  await page.reload();
+  await page.locator('[data-colk="actions"]').waitFor({ state: 'visible', timeout: 15000 });
+  const reloaded = await sheetGeometry(page, 'actions');
+  expect(reloaded.clientWidth).toBeCloseTo(clamped.clientWidth, 0);
+});
+
+test('wide viewport with few columns still permits trusted-pointer compression below the content edge', async ({ page }) => {
+  await page.setViewportSize({ width: 2400, height: 1200 });
+  await boot(page, { prefs: {
+    mainView: 'today',
+    colHidden: { start: true, end: true, labels: true, pct: true, exact: true },
+  }});
+  const divider = page.locator('[data-pane-divider="sheet"]');
+  await expect(divider).toBeVisible();
+
+  const before = await sheetGeometry(page, 'actions');
+  const d = await divider.boundingBox();
+  await page.mouse.move(d.x + d.width / 2, d.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(d.x - 100, d.y + 40, { steps: 8 });
+  await page.mouse.up();
+
+  const compressed = await sheetGeometry(page, 'actions');
+  expect(compressed.clientWidth).toBeLessThan(before.clientWidth - 60);
+  expect(compressed.scrollWidth).toBeGreaterThan(compressed.clientWidth + 60);
+  expect(compressed.clientWidth).toBeGreaterThan(150);
+});
+
+test('the last-column clamp follows real column resize, hide, and reorder interactions', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 1000 });
+  await boot(page, { prefs: { mainView: 'today' } });
+  const pane = page.locator('[data-sheet-pane="1"]');
+  const width0 = (await pane.boundingBox()).width;
+
+  /* Resize Task through its real 8px header grip. The pane grows because the last visible edge moved. */
+  const grip = page.locator('[data-colk="name"] .pp-rsz');
+  const gb = await grip.boundingBox();
+  const gx = gb.x + 1, gy = gb.y + gb.height / 2;
+  expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y).classList.contains('pp-rsz'), { x: gx, y:gy })).toBe(true);
+  await page.mouse.move(gx, gy);
+  await page.mouse.down();
+  await page.mouse.move(gx + 80, gy, { steps: 6 });
+  await page.mouse.up();
+  const savedNameW = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-prefs')).colW.name);
+  expect(savedNameW).toBeGreaterThan(110);
+  const width1 = (await pane.boundingBox()).width;
+  expect(width1).toBeGreaterThan(width0 + 40);
+
+  /* Hide Time needed through the header context menu. The cap contracts immediately. */
+  await page.locator('[data-colk="exact"]').click({ button: 'right' });
+  await page.getByText(/Hide.*Time needed/).click();
+  await expect(page.locator('[data-colk="exact"]')).toHaveCount(0);
+  const width2 = (await pane.boundingBox()).width;
+  expect(width2).toBeLessThan(width1 - 60);
+
+  /* Reordering changes identity, not total width, so it must neither loosen nor shrink the clamp. */
+  const start = page.locator('[data-colk="start"]');
+  const end = page.locator('[data-colk="end"]');
+  const sb = await start.boundingBox();
+  const eb = await end.boundingBox();
+  await page.mouse.move(eb.x + eb.width / 2, eb.y + eb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(sb.x + sb.width / 2, sb.y + sb.height / 2, { steps: 6 });
+  await page.mouse.up();
+  const order = await page.locator('[data-colk]').evaluateAll((els) => els.map((e) => e.getAttribute('data-colk')));
+  expect(order.indexOf('end')).toBeLessThan(order.indexOf('start'));
+  expect((await pane.boundingBox()).width).toBeCloseTo(width2, 0);
+
+  const g = await sheetGeometry(page, 'actions');
+  expect(g.paneRight - g.cellRight).toBeLessThanOrEqual(18);
+});
 
 /* F15 — the literal word shipped in italics at the bottom-right of the Music bar, on the Today view,
    which is the app's declared moat surface. Asserted as "nowhere in the rendered text", not as

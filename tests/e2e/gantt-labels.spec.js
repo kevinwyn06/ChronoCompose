@@ -15,7 +15,7 @@
  *   • no `[data-ganttname]` node exists, and no bar renders its task's name as text;
  *   • identification is not lost — the name is still in each bar's `title`;
  *   • a daily recurring task, the exact shape that broke it, adds NO occurrences of its name to the
- *     rendered chart text no matter how many bars it draws.
+ *     rendered chart text when its consecutive occurrence days merge into one plain run.
  */
 const fs = require('fs');
 const path = require('path');
@@ -27,7 +27,7 @@ fs.mkdirSync(SHOTS, { recursive: true });
 const shot = (name) => path.join(SHOTS, `${name}.png`);
 
 /* One of each labelling path block 27b had: a wide solid bar, a narrow one, a milestone, and a
-   dateless double-ghost — plus the DAILY repeat that the old fixture never contained. */
+   now-empty fully dateless row — plus the DAILY repeat that the old fixture never contained. */
 const NAMES = {
   long: 'Ship the release',
   short: 'Renew passport',
@@ -100,14 +100,16 @@ test.describe('Gantt bars carry no name text', () => {
   test('identification survives: every bar still names its task in a tooltip', async ({ page }) => {
     await bootGantt(page, 'dark');
     const titles = (await ganttTitles(page)).join(' | ');
-    for (const want of Object.values(NAMES)) {
+    for (const want of [NAMES.long, NAMES.short, NAMES.ms, NAMES.daily]) {
       expect(titles, `"${want}" is still reachable via a title tooltip`).toContain(want);
     }
+    expect(titles, 'the fully dateless row has no bar or tooltip under Chain 6 day geometry')
+      .not.toContain(NAMES.ghost);
   });
 
-  test('a daily repeat adds no name text however many bars it draws', async ({ page }) => {
-    /* The density case the old fixture lacked. `g-daily` repeats every day across the whole chart, so
-       under block 27b this row alone painted "Morning standup" once per visible occurrence. */
+  test('a daily repeat adds no name text when its occurrence days merge', async ({ page }) => {
+    /* The density case the old fixture lacked. `g-daily` repeats every day across the whole chart;
+       Chain 6 block 44 now projects those consecutive days as one plain continuous bar. */
     await bootGantt(page, 'dark');
 
     const bars = await page.locator('[data-gantt-task-id]').count();
@@ -122,11 +124,12 @@ test.describe('Gantt bars carry no name text', () => {
     const titles = (await ganttTitles(page)).join(' | ');
     expect(titles, 'the repeating task is still named in a tooltip').toContain(NAMES.daily);
 
-    /* NOTE: the collapsed-recurrence strip's RULE chip ("Daily · N×") is deliberately NOT asserted
-       here. It only renders once `recurTooDense` fires, which at this fixture's default zoom it does
-       not — the occurrences are 42px apart and draw as individual blocks. Asserting it at this zoom
-       would pass for the wrong reason or force zoom machinery into a spec that is about text density.
-       The chip's survival is pinned in tests/gantt.test.js, which calls ganttRecurStrip directly. */
+    const run = page.locator(`[title^="${NAMES.daily} · occ"]`);
+    await expect(run, 'daily occurrences render as one continuous future run').toHaveCount(1);
+    const background = await run.evaluate(el => getComputedStyle(el).backgroundImage);
+    expect(background, 'the merged run has no recurrence hatch').toBe('none');
+
+    expect(text, 'the retired recurrence-strip rule chip is absent').not.toContain('Daily ·');
   });
 
   test('the chart reads cleanly in both themes', async ({ page }) => {

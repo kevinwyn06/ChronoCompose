@@ -43,16 +43,6 @@
   --grid-strong:rgba(255,255,255,0.07);--grid-weak:rgba(255,255,255,0.035);
   --scroll-thumb:#3a3a3c;--scroll-thumb-hover:#4a4a4d;--toggle-off:#3a3b40;--split-bar:#101011;
   --bar-ring:rgba(255,255,255,0.85);
-  /* PP-EXT (owner 2026-08-12): ghost-bar paint. Was a single hardcoded rgba(148,163,184,0.16) in JS,
-     used unchanged in BOTH themes — which is why the owner read it as washed out in each ("greyish and
-     just hard on the eyes whether in light or dark mode"). Now a token per theme, and considerably more
-     opaque: a derived date is meant to look derived, not to look absent. */
-  /* PP-EXT (owner 2026-08-13): `--ghost-flat` is retired and replaced by `--ghost-core`, the CENTRE
-     colour of the double-ghost's symmetric gradient (transparent → core → transparent). Flat grey said
-     "inert"; an accent core that fades out on BOTH sides says "we don't know either end", which is the
-     actual meaning, and keeps the half-ghost's rule intact — a solid bordered edge is the real one, and
-     a double-ghost has neither. Per theme, never one rgba: see the note this replaces. */
-  --ghost-core:rgba(91,155,240,0.52);--ghost-dots:rgba(198,208,222,0.78);
   /* PP-EXT (owner 2026-08-13b): section-header band. It used to paint --top-bg, which is four units from
      --sheet-bg here, so the band was carried entirely by a hairline rule instead of by a surface. Per
      theme, deliberately NOT one shared rgba — that is exactly the 2026-08-12 ghost-contrast defect. */
@@ -79,11 +69,6 @@
   --grid-strong:rgba(0,0,0,0.08);--grid-weak:rgba(0,0,0,0.04);
   --scroll-thumb:#d6d6d3;--scroll-thumb-hover:#c2c2bf;--toggle-off:#cfcfcb;--split-bar:#e6e6e3;
   --bar-ring:rgba(0,0,0,0.5);
-  /* PP-EXT (owner 2026-08-12): see the dark-theme note. A grey that reads on #191919 disappears on
-     white, so the light values are DARKER rather than the same rgba at a different alpha. */
-  /* PP-EXT (owner 2026-08-13): `--ghost-core` — same role as the dark-theme note, deeper blue because
-     a mid blue at 50% alpha over #fcfcfb is a pastel. */
-  --ghost-core:rgba(37,99,214,0.50);--ghost-dots:rgba(71,85,105,0.72);
   /* PP-EXT (owner 2026-08-13b): see the dark-theme note. Sheet rows are white here, so the band goes
      DARKER; the dark theme's lighter grey would be invisible against white. */
   --sec-head-bg:#eeedea;--sec-head-border:#dcdbd6;
@@ -345,7 +330,6 @@ class Component extends DCLogic {
        appointments are unaffected: requestedMinutes reads their clock span before it reaches this. */
     this.DEFAULT_TASK_MINUTES = 5;
     /* /PP-EXT */
-    this.HOUR = 3600000; /* PP-EXT (V1.3 fix): sub-day drag snap unit — used once zoomed into the hour grid */
     this.CAP_STRIP_H = 14; /* PP-EXT (21): height of the per-day capacity strip under a Week/4-Day column header */
     /* PP-EXT V5 (24a): per-column Included/Excluded band sizing in the Selection view. The split is
        expressed in flexbox (see selectionHalfFlex) so the browser reproduces selectionSplitHeights
@@ -427,15 +411,15 @@ class Component extends DCLogic {
     this._syncKvSending = false;               // PP-EXT B3a: in-flight guard for the habits/journal blob flush
     this.ARCH_SWEEP_MS = 3600000;              // PP-EXT: auto-archive sweep runs at most hourly
     this.rowH = 40;
-    /* PP-EXT (V5 F13, block 26): the task sheet's own width floor. `colDefs()` totals 730px (634px before `% Done`) and the
-       'agenda' split defaulted to 20% (~250px at 1280) — so `Planned → Allotted`, the motto rendered
-       as UI, plus every row action, sat outside the pane on first run. A percentage default cannot fix
-       that, because the same percentage is too small at one window width and wasteful at another; the
-       requirement is in PIXELS (the columns are fixed-width). So the pane carries a px floor derived
-       from the VISIBLE columns, capped as a fraction of the board so a narrow window still leaves the
-       right pane something. Both terms live in CSS `min()`, so it re-resolves on resize with no JS. */
+    /* PP-EXT (Chain 6 block 46): sheet-divider bounds. Block 26's permanent width floor is superseded:
+       the sheet now opens at its visible-column edge, may be compressed by the user, and may never grow
+       into blank space past that edge. Percentages remain the persisted representation because each
+       scheduling view already owns one in pp-prefs; the live maximum is re-derived from column pixels. */
     this.SHEET_COL_PAD_PX = 20;      // gutter beyond the column total: vertical scrollbar + the splitter's border
-    this.SHEET_MAX_FRAC = 55;        // % of the board the sheet floor may claim before it stops growing
+    this.SHEET_PANE_MIN_PX = 240;    // responsive compression floor; percentage-only floors lock wide boards
+    this.SHEET_MAX_FRAC = 55;        // % cap for the separate triage-card floor
+    this.PANE_MIN_FRAC = 28;         // ordinary drag floor; a narrower last-column cap outranks it
+    this.PANE_MAX_FRAC = 78;         // right pane always keeps a usable share; triage retains this clamp
     /* PP-EXT V5 (block 27a): the SAME floor problem, re-derived for the triage grids now that they can be
        Overview's left pane. The sheet's floor comes from fixed-width COLUMNS; a triage grid has no fixed
        columns, but a planCard stops being readable (name + chips + the inclusion glyph) below ~168px, and
@@ -444,7 +428,7 @@ class Component extends DCLogic {
     this.TRIAGE_COL_MIN_PX = 168;    // narrowest a planCard column may get before it stops being readable
     this.barH = 20; /* PP-EXT (C1): a few px taller than the old 16 → a bigger vertical drag target on the Gantt bar */
     this.headH = 48;
-    /* PP-EXT (C1/C2): Gantt-bar draggability + sub-day zoom. */
+    /* PP-EXT (C1/Chain 6): Gantt-bar draggability + continuous day zoom. */
     /* PP-EXT: GANTT_LABEL_MIN_PX retired 2026-08-12 with the Gantt bar names — see ganttSideRow. */
     /* PP-EXT (owner 2026-08-12): the two values `type` takes as a SCHEDULING MODE. Named because the
        milestone⇄task converter now writes them from three surfaces, and `type` is not a category —
@@ -486,40 +470,8 @@ class Component extends DCLogic {
        These are the browser's own double-click tolerances, named rather than inlined. */
     this.ROW_DBLCLICK_MS = 400;      // max gap between the two presses
     this.ROW_DBLCLICK_PX = 6;        // max travel between them (viewport px)
-    /* PP-EXT (V1.2 round2 — anchored ghosts): a half-ghost dissolves ALONG the bar, from the committed
-       edge toward the derived one. Two mirrored ramps drive it: the fill fades colour OUT, the dotted
-       outline mask fades dots IN, so "solid + no dots" and "no colour + dots" are the same axis read
-       twice. Stops are percentages of bar width. */
-    /* PP-EXT (owner 2026-08-12, contrast): the ramps were retuned after the first real-workspace
-       session — "contrast too low for tasks like Heritage Day; it's greyish and just hard on the eyes
-       whether in light or dark mode". Heritage Day is the exact shape that read worst: a due date with
-       no start, so a half-ghost, and at HOLD 12 only the leftmost eighth of the bar carried any task
-       colour at all — the other 88% was a fade to transparent over the chart background. The anchor
-       semantics from V1.2 round2 are UNCHANGED (colour still sits at the committed edge and dissolves
-       toward the derived one); the dissolve simply starts much later and the dots hold with it, so the
-       bar reads as a bar first and as derived second. */
-    this.GHOST_FILL_HOLD = 45;       // % of the bar that stays at full task colour next to the committed edge
-    this.GHOST_FILL_FADE = 100;      // % where the colour has fully dissolved to transparent
-    this.GHOST_DOTS_HOLD = 40;       // % nearest the committed edge where the dotted outline is fully hidden
-    this.GHOST_DOTS_FADE = 85;       // % where the dotted outline reaches full opacity
-    /* Theme tokens, not a literal: one hardcoded rgba cannot serve a #191919 and a #ffffff chart. */
-    /* PP-EXT (owner 2026-08-13): the double-ghost is a SYMMETRIC gradient — transparent at both edges,
-       accent core in the middle — replacing the old flat grey. The half-ghost ramp above encodes "the
-       solid bordered edge is the real one"; a double-ghost has no real edge, so neither side may look
-       committed, and a symmetric fade is the only shape that says that. Stops are percentages of bar
-       width and are mirrored about 50% by construction (HI = 100 − LO). The dotted outline stays
-       unmasked, all round, at full opacity — it is what still marks the bar as derived. */
-    this.GHOST_BOTH_CORE = 'var(--ghost-core)'; // centre colour; per-theme token, never a literal
-    this.GHOST_BOTH_LO = 38;         // % where the core reaches full opacity coming in from the left
-    this.GHOST_BOTH_HI = 62;         // % where it starts fading back out to the right (= 100 − LO)
-    /* PP-EXT (V1.2 round3): a ghost's derived extent is ALWAYS 1 day in data (ghostSpan is pure and now feeds
-       scheduling — making it zoom-dependent would mean zooming the chart changes what gets allotted). But 1 day
-       at year zoom is a sliver, so the DRAWING gets a floor of `max(1 day, GHOST_VIEW_FRAC × visible width)`.
-       The 1-day term wins while fewer than 1/FRAC days are on screen; past that the ghost stays a constant
-       share of the view. Render-only — it never reaches `start`/`end`. */
-    this.GHOST_VIEW_FRAC = 0.2;      // ghost draw-width floor as a fraction of the visible chart (owner: "like 1/5")
     this.GANTT_DAYW_MIN = 3;         // Ctrl/Cmd+scroll zoom lower bound (px per day)
-    this.GANTT_DAYW_MAX = 720;       // …upper bound: 720px/day ⇒ 30px/hr, wide enough to grab sub-day (hourly) blocks
+    this.GANTT_DAYW_MAX = 720;       // continuous day zoom upper bound; bars and grid remain day-granular
     /* PP-EXT (V1.3 fix2): Ctrl/Cmd+scroll zoom is EXPONENTIAL and PROPORTIONAL to wheel deltaY, so total
        zoom tracks how far you actually scrolled — independent of whether the OS chunks a gesture into a
        few big wheel events (mouse) or many tiny ones (trackpad). The old flat "15% per event" flew past on
@@ -536,7 +488,6 @@ class Component extends DCLogic {
        edge case, and no intermediate level the user has to step through to read a dense afternoon. */
     this.DRAWER_ZOOM_FIT = 1;        // the whole day fitted to the pane — the default, no scroll
     this.DRAWER_ZOOM_EXPANDED = 3;   // the one expanded level: 3× taller, the drawer wrapper scrolls
-    this.GANTT_HOUR_GRID_DAYW = 240; // at/above this px-per-day, draw hour gridlines + ticks (240 ⇒ 10px/hr)
     this.PCT_STEP = 5;            // PP-EXT: % Done increment for the −/+ buttons (matches setPct's 5% snap)
     /* PP-EXT (V1.4): the repeat presets the bar's right-click menu offers. `recur` shapes are IDENTICAL to
        what parseDateText emits (kind/n/label), so a menu-set repeat and a typed "every week" are the same
@@ -723,7 +674,7 @@ class Component extends DCLogic {
     /* PP-EXT V0.1: first-run landing = Dashboard (Dash), not raw Gantt — lead with the auto-scheduling moat
        (product-vision §10.1 / ROADMAP V0). Only when there's no saved pf.mainView; a returning user's choice wins. */
     const ppMainView = (pf.mainView==='calendar') ? 'month' : (pf.mainView || 'dashboard');
-    const ppViewSplit = Object.assign({cal:50, agenda:20}, pf.viewSplit||{});
+    const ppViewSplit = Object.assign({cal:78, agenda:78}, pf.viewSplit||{});
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
       splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
       detailId:null, menu:null,
@@ -1424,9 +1375,13 @@ class Component extends DCLogic {
          visible column fits inside the first-run pane, whose floor is `min(<column total>px, 55%)`;
          growing the total pushes `Actions` past the right edge at 1280 wide, which
          `tests/e2e/sheet-default-width.spec.js` asserts at three viewports precisely so a new column
-         cannot regress it silently. It did catch this one. A name still gets the widest column by a
-         factor of two, and it ellipsizes rather than wrapping, so nothing becomes unreadable. */
-      {k:'check',w:50,lock:true},{k:'name',w:250,l:'Task'},
+         cannot regress it silently. It did catch this one. Block 45 keeps that total until the pane
+         divider changes in block 46; the compact name and date cells ellipsize rather than wrap. */
+      /* PP-EXT (owner 2026-08-17, Chain 6 block 45): Start and End return as ordinary columns. Their
+         compact two-line cells carry date plus an explicit clock, and hand off to the existing picker.
+         Keeping the pre-divider pixel total at 730 is deliberate: block 46 owns changing pane geometry. */
+      {k:'check',w:50,lock:true},{k:'name',w:110,l:'Task'},
+      {k:'start',w:70,l:'Start'},{k:'end',w:70,l:'End'},
       {k:'planned',w:126,l:'Planned → Allotted'},
       /* PP-EXT (owner 2026-08-15): "I would prefer to add percent complete back as a column which then
          updates the gantt bars." Visible by default. It needs no special handling anywhere else — hide,
@@ -2731,7 +2686,8 @@ class Component extends DCLogic {
   /* PP-EXT (V1.2 ghost blocks): derive a render-time span for a task whose start and/or end are still
      null, WITHOUT mutating the task — the nulls stay in data (so gcal-outbound keeps skipping dateless
      tasks, and the task can never go overdue on a date it was never given). `today` = start-of-today ms.
-     Returns {start,end,ghostStart,ghostEnd}: ghostStart/ghostEnd flag which edge is derived (grey/dotted).
+     Returns {start,end,ghostStart,ghostEnd}: ghostStart/ghostEnd flag which edge is derived for
+     scheduling and open-edge drag semantics; Chain 6 block 47 removed their paint meaning.
        • solid (both set)      → the real span, no ghosts.
        • double-ghost (both null) → today→today+DAY, re-derived each day (always actionable, never overdue).
        • half-ghost (start set)   → a non-overdue derived end = max(start,today)+DAY.
@@ -2744,28 +2700,6 @@ class Component extends DCLogic {
     if(s!=null && e==null) return {start:s, end:Math.max(s,today)+DAY, ghostStart:false, ghostEnd:true};
     return {start:Math.min(today, e-DAY), end:e, ghostStart:true, ghostEnd:false};
   }
-  /* PP-EXT (V1.2 round2): the ghost bar's PAINT, split out of renderBar so it is IO-free and unit-testable.
-     Takes an occurrence's ghost flags + the bar's base colour; returns the style pieces or null for a solid
-     bar. The key insight is that a half-ghost has no committed *region*, only a committed *edge* — ghostSpan
-     derives the whole width — so the paint is an ANCHOR signal, not a real-vs-derived split: the bar is fully
-     the task's colour at the edge you actually set and dissolves toward the edge you didn't.
-       • solid        → null (caller paints the usual rounded, flat-colour bar).
-       • double-ghost → flat grey, dotted outline all round at full opacity, no anchor (nothing is committed).
-       • half-ghost   → anchor 'l' (start set, dissolves right) or 'r' (due set, dissolves left); the fill
-                        ramps colour→transparent while `mask` ramps the dotted outline transparent→opaque,
-                        so dots fade IN exactly as colour fades OUT.
-     `anchor` also tells the caller which side gets the solid base-coloured border (the committed edge reads
-     as the task, not as an absence). */
-  /* PP-EXT (V1.2 round3): the span a ghost is DRAWN across, which is not the span it derives. `ghostSpan` keeps
-     its 1-day derived extent in data; this widens the drawing so a ghost stays legible when zoomed out, growing
-     AWAY from the committed edge so the anchor never moves:
-       • anchor left  (start real, end ghost) → grows right
-       • anchor right (due real, start ghost) → grows left, so the due date stays pinned to its column
-       • double-ghost (no anchor)             → grows right from today
-     A ghost already wider than the floor (e.g. a deadline with a month of runway) is returned untouched — the
-     floor is a `max`, never a shrink. Solid bars pass straight through. PURE (ms + px in, ms out) → unit-tested.
-     Both the renderer and startBarDrag call this, so a ghost edge is dragged from where it is actually DRAWN
-     rather than from its hidden derived date (which would make the bar jump on the first pixel of the gesture). */
   /* PP-EXT (owner 2026-08-12): where a dateless REPEAT anchors its series. `ghostSpan` is the right
      answer for a one-off (derive a single 1-day window from today), but wrong for a repeat in one
      specific way: when a start is set and a due is not, ghostSpan returns `end = max(start,today)+DAY`,
@@ -2780,73 +2714,12 @@ class Component extends DCLogic {
     const start = t.start!=null ? t.start : (t.end!=null ? t.end : today);
     return {start, end:start+this.DAY, ghostStart:t.start==null, ghostEnd:t.end==null};
   }
-  ghostDrawSpan(o, dayW, viewW){
-    if(!o || !o.ghost) return {start:o.start, end:o.end};
-    /* PP-EXT (owner 2026-08-12): a RECURRING ghost occurrence is never widened to the view floor. The
-       floor exists so a lone dateless task stays grabbable when zoomed out; applied per occurrence it
-       would give a daily repeat ~75 bars each a fifth of the viewport wide, stacked on top of each
-       other. A series is findable because it tiles — it does not need any one member enlarged. */
-    if(o.occ) return {start:o.start, end:o.end};
-    const minMs = Math.max(this.DAY, (viewW||0)*this.GHOST_VIEW_FRAC/(dayW||1)*this.DAY);
-    if(o.end - o.start >= minMs) return {start:o.start, end:o.end};
-    if(o.ghostStart && !o.ghostEnd) return {start:o.end-minMs, end:o.end};   /* anchored on the due date */
-    return {start:o.start, end:o.start+minMs};                               /* anchored on the start, or floating on today */
-  }
-  /* PP-EXT: the Gantt viewport width in px (0 before the scroller mounts — callers fall back to the 1-day floor). */
-  ganttViewW(){ const el=this.ganttScrollEl; return (el && el.clientWidth) || 0; }
-  ghostPaint(o, base){
-    if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return null;
-    /* PP-EXT (owner 2026-08-13): double-ghost = symmetric fade. `anchor:null` and `mask:null` are
-       unchanged — no edge is bordered, and the dots stay unmasked all round — only the fill differs. */
-    if(o.ghostStart && o.ghostEnd) return {anchor:null, mask:null,
-      fill:'linear-gradient(to right, transparent 0%, '+this.GHOST_BOTH_CORE+' '+this.GHOST_BOTH_LO+'%, '
-        +this.GHOST_BOTH_CORE+' '+this.GHOST_BOTH_HI+'%, transparent 100%)'};
-    const dir = o.ghostEnd ? 'to right' : 'to left';   /* dissolve AWAY from the committed edge */
-    return {
-      anchor: o.ghostEnd ? 'l' : 'r',
-      fill: 'linear-gradient('+dir+', '+base+' 0%, '+base+' '+this.GHOST_FILL_HOLD+'%, transparent '+this.GHOST_FILL_FADE+'%)',
-      mask: 'linear-gradient('+dir+', transparent '+this.GHOST_DOTS_HOLD+'%, #000 '+this.GHOST_DOTS_FADE+'%)'
-    };
-  }
-  /* PP-EXT (owner 2026-08-15): the %-done FILL. Replaces the flat `rgba(255,255,255,0.28)` veil, which was
-     a translucent white over one accent — readable only as a change in tint, and on a ghost (whose base is
-     already dissolving to transparent) there was almost nothing left to lighten, so the two halves of the
-     bar converged. Owner: "the contrast is not high enough on the left and right of the percent complete
-     bar, especially for ghost bars which already have a gradient."
-
-     The rule is now one colour, not an overlay: the done portion is `--success-strong`, the rest keeps the
-     task's base colour. This REMOVES a channel rather than adding one — green already meant "100% done"
-     as a fill value, and under this rule a 100% bar is entirely green by construction, so the special case
-     and its legend row both disappear.
-
-     A ghost keeps its gradient exactly as it is: the green receives the SAME ramp as the base beneath it,
-     expressed as an alpha mask so ghostPaint stays the single definition of the shape. The mask is written
-     in BAR percentages, so `maskSize` scales it back up — the overlay is only `pct%` of the bar wide, and a
-     gradient laid on it directly would compress the whole ramp into the filled part.
-
-     PURE: occurrence + pct + base in, {width, background, mask, maskSize} or null out, so the ghost × pct
-     matrix is provable in the unit layer rather than by eye on a chart (the `ghostPaint`/`pctGrabZone`
-     precedent). `base` is accepted but unused by the fill itself — it is the caller's job to paint the
-     remainder — and is kept in the signature because the ramp shape is derived from the same occurrence
-     the base is painted from. */
-  pctFillPaint(o, pct, base){
+  /* PP-EXT (Chain 6 block 47): percent complete is a plain solid success fill. Ghost masks retired
+     with ghost paint; date completeness no longer changes a bar's visual treatment. */
+  pctFillPaint(pct){
     const p=Math.max(0,Math.min(100,+pct||0));
     if(p<=0) return null;
-    const green='var(--success-strong)';
-    const out={width:p+'%', background:green, mask:null, maskSize:null};
-    if(!o || !o.ghost || (!o.ghostStart && !o.ghostEnd)) return out;
-    /* Same ramps as ghostPaint, with the colour stops replaced by alpha stops. */
-    if(o.ghostStart && o.ghostEnd){
-      out.mask='linear-gradient(to right, transparent 0%, #000 '+this.GHOST_BOTH_LO+'%, '
-        +'#000 '+this.GHOST_BOTH_HI+'%, transparent 100%)';
-    }else{
-      const dir=o.ghostEnd?'to right':'to left';
-      out.mask='linear-gradient('+dir+', #000 0%, #000 '+this.GHOST_FILL_HOLD+'%, transparent '+this.GHOST_FILL_FADE+'%)';
-    }
-    /* The ramp is authored across the whole bar; the overlay is p% of it. Scaling the mask by 100/p and
-       anchoring it left puts every stop back on the bar pixel it names. */
-    out.maskSize=(10000/p)+'% 100%';
-    return out;
+    return {width:p+'%', background:'var(--success-strong)'};
   }
   /* /PP-EXT */
   /* PP-EXT: the occurrence relevant to day B (multi-day timelines). For today (or B omitted) this is the exact
@@ -4776,20 +4649,29 @@ class Component extends DCLogic {
     const {kind,taskId,occIdx,payload}=sp;
     if(kind==='date'){
       const delta=payload.deltaMs||0, mode=payload.mode||'move';
+      const deltaDays=Math.round(delta/this.DAY), shift=ms=>this.addLocalDays(ms,deltaDays);
       const occs=this._occById[taskId]||[]; const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0,end:0};
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===taskId); if(!t||!t.recur) return;
         const r=t.recur; r.overrides=r.overrides||{}; r.shifts=r.shifts||[];
         if(scope==='this'){
-          let s=cur.start,en=cur.end;
-          if(mode==='move'){s+=delta;en+=delta;} else if(mode==='start'){s=Math.min(en-this.DAY,s+delta);} else if(mode==='end'){en=Math.max(s+this.DAY,en+delta);}
-          r.overrides[occIdx]={...(r.overrides[occIdx]||{}),start:s,end:en};
+          /* PP-EXT (Chain 6 merged-run interaction): "This run" is still one commit/undo entry, but
+             its body and edges have different membership. A body move writes every projected member;
+             the left grip writes only the first occurrence and the right grip only the last. */
+          const runIdxs=(payload.runOccIdxs&&payload.runOccIdxs.length)?payload.runOccIdxs:[occIdx];
+          const targetIdxs=mode==='start'?[runIdxs[0]]:mode==='end'?[runIdxs[runIdxs.length-1]]:runIdxs;
+          targetIdxs.forEach(idx=>{
+            const member=occs.find(o=>o.idx===idx); if(!member) return;
+            let s=member.start,en=member.end;
+            if(mode==='move'){s=shift(s);en=shift(en);} else if(mode==='start'){s=Math.min(this.addLocalDays(en,-1),shift(s));} else if(mode==='end'){en=Math.max(this.addLocalDays(s,1),shift(en));}
+            r.overrides[idx]={...(r.overrides[idx]||{}),start:s,end:en};
+          });
         } else if(scope==='subsequent'){
-          if(mode==='move'){ r.shifts.push({from:occIdx,offset:delta}); }
-          else { let s=cur.start,en=cur.end; if(mode==='start')s=Math.min(en-this.DAY,s+delta); else en=Math.max(s+this.DAY,en+delta); r.overrides[occIdx]={...(r.overrides[occIdx]||{}),start:s,end:en}; }
+          if(mode==='move'){ r.shifts.push({from:occIdx,days:deltaDays}); }
+          else { let s=cur.start,en=cur.end; if(mode==='start')s=Math.min(this.addLocalDays(en,-1),shift(s)); else en=Math.max(this.addLocalDays(s,1),shift(en)); r.overrides[occIdx]={...(r.overrides[occIdx]||{}),start:s,end:en}; }
         } else {
-          if(mode==='move'){ t.start+=delta; t.end+=delta; }
-          else if(mode==='start'){ t.start=Math.min(t.end-this.DAY,t.start+delta); }
-          else { t.end=Math.max(t.start+this.DAY,t.end+delta); }
+          if(mode==='move'){ t.start=shift(t.start); t.end=shift(t.end); }
+          else if(mode==='start'){ t.start=Math.min(this.addLocalDays(t.end,-1),shift(t.start)); }
+          else { t.end=Math.max(this.addLocalDays(t.start,1),shift(t.end)); }
         }
       });
     } else if(kind==='delete'){
@@ -4963,8 +4845,8 @@ class Component extends DCLogic {
     const out=[];
     for(let i=i0;i<i0+this.RECUR_MAX;i++){
       const baseRaw=this.occStart(t.start,r,i);
-      let off=0; shifts.forEach(s=>{ if(i>=s.from) off+=s.offset; });
-      const baseSt=baseRaw+off; let st=baseSt, en=baseSt+dur;
+      let off=0, dayShift=0; shifts.forEach(s=>{ if(i>=s.from){ if(Number.isFinite(s.days)) dayShift+=s.days; else off+=(s.offset||0); } });
+      const baseSt=this.addLocalDays(baseRaw,dayShift)+off; let st=baseSt, en=this.addLocalDays(baseRaw+dur,dayShift)+off;
       const o=ov[i];
       if(o&&o.deleted){ if(baseRaw>cap && i>i0) break; continue; }
       if(o&&o.start!=null){ st=o.start; en=o.end!=null?o.end:o.start+dur; }
@@ -5069,7 +4951,7 @@ class Component extends DCLogic {
     const out={start:r.start, end:r.end, clamped:false};
     if(floor==null || mode==='end' || r.start==null || !(r.start<floor)) return out;
     if(mode==='start'){
-      if(r.end==null || floor > r.end-this.DAY) return out;
+      if(r.end==null || floor > this.addLocalDays(r.end,-1)) return out;
       return {start:floor, end:r.end, clamped:true};
     }
     const d=floor-r.start;
@@ -5139,13 +5021,12 @@ class Component extends DCLogic {
 
   /* ---------- timeline ---------- */
   timelineFrom(min,max){
-    const D=this.DAY;
     const s=new Date(min); s.setHours(0,0,0,0);
     s.setDate(s.getDate() - ((s.getDay()+6)%7) - 2);
     const e=new Date(max); e.setHours(0,0,0,0);
     e.setDate(e.getDate() + (6-((e.getDay()+6)%7)) + 3);
     const start=s.getTime();
-    const days=Math.max(28,Math.ceil((e.getTime()-start)/D));
+    const days=Math.max(28,this.ganttDayIndex(e.getTime(),start));
     return {start,days};
   }
   timeline(tasks){
@@ -5153,9 +5034,36 @@ class Component extends DCLogic {
     const min=Math.min(...tasks.map(t=>t.start)), max=Math.max(...tasks.map(t=>t.end));
     return this.timelineFrom(min,max);
   }
-  xOf(ms){ return (ms-this._tl.start)/this.DAY*this.state.dayW; }
+  /* PP-EXT (Chain 6 review): Gantt columns are CIVIL dates, not fixed 86,400,000ms buckets.
+     These helpers are the shared conversion for headers, bars, open-edge origins and date drags.
+     addLocalDays preserves the instant's local clock across 23/25-hour Vancouver DST days. */
+  localDayOrdinal(ms){ const d=new Date(ms); return Date.UTC(d.getFullYear(),d.getMonth(),d.getDate())/this.DAY; }
+  addLocalDays(ms,n){ const d=new Date(ms); d.setDate(d.getDate()+n); return d.getTime(); }
+  ganttDayIndex(ms,origin){ return this.localDayOrdinal(ms)-this.localDayOrdinal(origin); }
+  ganttDayAt(origin,index){ return this.addLocalDays(origin,index); }
+  xOf(ms){
+    const sod=this.startOfDay(ms), next=this.addLocalDays(sod,1);
+    return (this.ganttDayIndex(sod,this._tl.start)+(ms-sod)/(next-sod))*this.state.dayW;
+  }
+  /* PP-EXT (Chain 6 block 43): pure day-index geometry for Gantt bars. Both finite edges are
+     inclusive. A missing edge is clamped to the current virtual render window, so it continues
+     through the viewport without manufacturing a fake distant date; scrolling/zooming changes
+     d0/d1 and recomputes the clamp. Two missing edges mean no bar at all. */
+  ganttDayBarGeometry(startDay,endDay,dayW,d0,d1){
+    if(startDay==null && endDay==null) return null;
+    let first=startDay, last=endDay;
+    if(first==null) first=d0;
+    else if(endDay==null) first=Math.max(first,d0);
+    if(last==null) last=d1-1;
+    else if(startDay==null) last=Math.min(last,d1-1);
+    if(first>=d1 || last<d0 || last<first) return null;
+    return {left:first*dayW,width:(last-first+1)*dayW,first,last};
+  }
   /* PP-EXT (C2): clamp a proposed day-width to the zoom bounds (pure — testable without a DOM). */
   clampDayW(v){ return Math.max(this.GANTT_DAYW_MIN, Math.min(this.GANTT_DAYW_MAX, v)); }
+  /* PP-EXT (Chain 6 block 47): the continuous zoom has exactly three semantic labels. Wider
+     day columns remain Day; the retired Hour level no longer changes the grid or its name. */
+  ganttZoomLabel(dayW){ return dayW>=64?'Day':(dayW>=36?'Week':'Month'); }
   /* PP-EXT (V1.3 fix2): one wheel event → the next day-width. Exponential and proportional to the
      (pixel-normalized) scroll delta so a gesture zooms by how far it scrolled, not by how many events the
      device emitted; per-event step capped so no single tick flies. Pure — testable without a DOM. */
@@ -5184,17 +5092,10 @@ class Component extends DCLogic {
   effBarEnd(st, en){ return en>st ? en : st+this.DAY; }
 
   /* ---------- drag ---------- */
-  /* PP-EXT (V1.3 bar-as-editor): pure drag math, unit-tested in tests/datepick.test.js.
-     snapDragMs: horizontal pixels dragged → a snapped time delta in ms. Snaps to whole DAYS at
-     day/week/month zoom; once zoomed into the hour grid (dayW >= GANTT_HOUR_GRID_DAYW) it snaps to
-     whole HOURS instead, so a small drag on a narrow bar (e.g. a 1-day ghost) still registers and
-     the bar tracks the cursor rather than sitting dead until you cross a whole day-column. all-day
-     tasks stay day-snapped at every zoom — they own midnight-based exclusive ends (V1.3 fix). */
-  snapDragMs(dx,dayW,allDay){
-    const unit = (!allDay && dayW >= this.GANTT_HOUR_GRID_DAYW) ? this.HOUR : this.DAY;
-    const pxPerUnit = dayW * unit / this.DAY; /* DAY -> dayW px; HOUR -> dayW/24 px */
-    return Math.round(dx/pxPerUnit) * unit;
-  }
+  /* PP-EXT (Chain 6 block 43): pure bar-drag math, unit-tested in tests/datepick.test.js. */
+  /* PP-EXT (Chain 6 block 43): bars encode dates only, so every drag uses the same whole-day
+     unit at every zoom. `allDay` remains in the signature for the existing call site. */
+  snapDragMs(dx,dayW,allDay){ return Math.round(dx/dayW) * this.DAY; }
   /* PP-EXT (V1.3 fix): Ctrl/Cmd-scroll zoom anchored on the cursor. Given the old/new px-per-day, the
      scroller's current scrollLeft, and the cursor's x offset from the scroller's left edge, return the
      scrollLeft that keeps the timeline instant under the cursor pinned in place (so the gantt zooms
@@ -5208,11 +5109,12 @@ class Component extends DCLogic {
      edge keeps its data value (null stays null), so dragging one edge of a ghost never stamps the other
      (the V1.2→V1.3 de-ghost rule). A body 'move' places the whole span (both edges become real). */
   barDragEdit(mode,deltaMs,origStart,origEnd,dataStart,dataEnd){
-    if(mode==='start') return {start:Math.min(origEnd-this.DAY, origStart+deltaMs), end:dataEnd};
-    if(mode==='end')   return {start:dataStart, end:Math.max(origStart+this.DAY, origEnd+deltaMs)};
-    return {start:origStart+deltaMs, end:origEnd+deltaMs}; /* move */
+    const days=Math.round(deltaMs/this.DAY), shift=ms=>this.addLocalDays(ms,days);
+    if(mode==='start') return {start:Math.min(this.addLocalDays(origEnd,-1), shift(origStart)), end:dataEnd};
+    if(mode==='end')   return {start:dataStart, end:Math.max(this.addLocalDays(origStart,1), shift(origEnd))};
+    return {start:shift(origStart), end:shift(origEnd)}; /* move */
   }
-  startBarDrag(e,task,occIdx,mode){
+  startBarDrag(e,task,occOrIdx,mode){
     /* PP-EXT (2026-08-12): PRIMARY BUTTON ONLY. Without this guard a right-press started a bar drag,
        and because `onMouseUp` reads a zero-distance drag as a click, releasing the right button opened
        the DETAIL PANEL instead of the bar menu — the third gesture in the owner's Gantt item.
@@ -5221,22 +5123,32 @@ class Component extends DCLogic {
     if(e.button!==0) return;
     e.preventDefault(); e.stopPropagation();
     this.dragMoved=false;
-    const occ=(this._occById[task.id]||[]).find(o=>o.idx===occIdx) || {idx:occIdx,start:task.start,end:task.end};
+    const projectedOcc=(occOrIdx&&typeof occOrIdx==='object')?occOrIdx:null;
+    const occIdx=projectedOcc?projectedOcc.idx:occOrIdx;
+    const occ=projectedOcc || (this._occById[task.id]||[]).find(o=>o.idx===occIdx) || {idx:occIdx,start:task.start,end:task.end};
     /* PP-EXT: subtasks — moving a parent bar carries its whole subtree by the same delta */
     let subs=null;
     if(!task.recur && mode==='move'){
       const kidIds=this.expandSubtrees([task.id]).filter(id=>id!==task.id);
       if(kidIds.length){ subs={}; this.state.tasks.forEach(t=>{ if(kidIds.includes(t.id)) subs[t.id]={s:t.start,e:t.end}; }); }
     }
-    /* PP-EXT (V1.3): keep the raw null-able data edges alongside the effective (occ) ones so barDragEdit
-       can leave an untouched ghost edge null instead of stamping its derived value. */
-    /* PP-EXT (V1.2 round3): a ghost is drawn wider than it derives (ghostDrawSpan), so the gesture has to start
-       from the DRAWN edge — anchoring it to the hidden derived date made the bar jump on the first pixel. Only
-       the ghost edges move; a committed edge keeps its real date. */
-    const dw=this.ghostDrawSpan(occ, this.state.dayW, this.ganttViewW());
-    const oStart = (occ.ghost && occ.ghostStart) ? dw.start : occ.start;
-    const oEnd   = (occ.ghost && occ.ghostEnd)   ? dw.end   : occ.end;
-    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:oStart,origEnd:oEnd,dataStart:task.start,dataEnd:task.end,subs};
+    /* PP-EXT (Chain 6 block 47): an open edge is drawn at the live viewport edge by day geometry,
+       so its drag origin must be that same edge. The finite `ghostSpan` occurrence remains scheduling
+       data only; using it here would make the bar jump inward on the first drag pixel. */
+    const vw=this._vwin||{d0:0,d1:(this._tl&&this._tl.days)||0};
+    const viewStart=this._tl ? this.ganttDayAt(this._tl.start,vw.d0) : occ.start;
+    /* d1 is exclusive geometry. Timed task ends are stored as the last PAINTED, inclusive date;
+       all-day ends are stored as the following exclusive boundary, matching Google/ICAL semantics.
+       Giving both shapes the inclusive origin made an all-day edge repaint correctly but store a
+       boundary one civil day too early. */
+    const viewEnd=this._tl ? this.ganttDayAt(this._tl.start,Math.max(vw.d0,vw.d1-1)) : occ.end;
+    const viewEndExclusive=this._tl ? this.ganttDayAt(this._tl.start,Math.max(vw.d0,vw.d1)) : occ.end;
+    const oStart = (occ.ghost && occ.ghostStart) ? viewStart : occ.start;
+    const oEnd   = (occ.ghost && occ.ghostEnd)   ? (task.allDay?viewEndExclusive:viewEnd) : occ.end;
+    this.dragState={id:task.id,occIdx,mode,recurring:!!task.recur,allDay:!!task.allDay,startX:e.clientX,deltaMs:0,origStart:oStart,origEnd:oEnd,dataStart:task.start,dataEnd:task.end,subs,
+      /* PP-EXT (Chain 6 merged-run interaction): a painted run is one gesture unit. Keep its explicit
+         membership on the transient drag instead of silently reducing it to the first occurrence id. */
+      runOccIdxs:projectedOcc&&projectedOcc.runOccIdxs?[...projectedOcc.runOccIdxs]:[occIdx]};
     /* PP-EXT (deps gap 1): capture the dependency floor ONCE, at pointer-down, from the same
        `depFloorFor` the post-commit `autoSchedule` uses — so the drag-time clamp and the authority cannot
        produce different numbers. Predecessors do not move during this gesture; the dragged subtree does,
@@ -5317,7 +5229,9 @@ class Component extends DCLogic {
   }
   /* PP-EXT (2026-08-12): primary button only — same guard as startBarDrag. A non-primary press here
      began a drag AND swallowed the browser's context menu through preventDefault. */
-  startSplit(e){ if(e.button!==0) return; e.preventDefault(); this.splitDrag=true; }
+  /* PP-EXT (Chain 6 block 46): remember which surface owns the gesture. A task sheet clamps at the last
+     visible column; the Selection grid retains its independent percentage bounds. */
+  startSplit(e){ if(e.button!==0) return; e.preventDefault(); this.splitDrag={key:this.leftSplitKey()}; }
   startColDrag(e,key,w){ if(e.button!==0) return; e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w}; }
   /* PP-EXT V2.9 §1: called at DRAG BEGIN, not at mousedown — suppressing at mousedown would kill caret
      placement on the very click that also opens an inline editor. Two things happen here, and the second
@@ -5676,7 +5590,7 @@ class Component extends DCLogic {
     }
     if(this.dragState){
       const d=this.dragState; const dx=e.clientX-d.startX;
-      const dm=this.snapDragMs(dx,this.state.dayW,d.allDay); /* PP-EXT (V1.3 fix): px→snapped ms (day, or hour when zoomed in) */
+      const dm=this.snapDragMs(dx,this.state.dayW,d.allDay); /* PP-EXT (Chain 6 block 43): px → whole-day delta at every zoom */
       if(dm!==0) this.dragMoved=true;
       d.deltaMs=dm;
       if(d.recurring){ this.forceUpdate(); return; }
@@ -5695,7 +5609,10 @@ class Component extends DCLogic {
       const sdm=(cl.clamped && r.start!=null && cl.start!=null) ? dm+(cl.start-r.start) : dm;
       const tasks=this.state.tasks.map(t=>{
         if(t.id!==d.id){
-          if(d.subs && d.subs[t.id]) return {...t,start:d.subs[t.id].s+sdm,end:d.subs[t.id].e+sdm}; /* PP-EXT: subtree follows */
+          if(d.subs && d.subs[t.id]){
+            const steps=Math.round(sdm/this.DAY);
+            return {...t,start:this.addLocalDays(d.subs[t.id].s,steps),end:this.addLocalDays(d.subs[t.id].e,steps)}; /* PP-EXT: subtree follows */
+          }
           return t;
         }
         return {...t,start:cl.start,end:cl.end};
@@ -5709,7 +5626,7 @@ class Component extends DCLogic {
     } else if(this.splitDrag && this.boardEl){
       const r=this.boardEl.getBoundingClientRect();
       let pct=((e.clientX-r.left)/r.width)*100;
-      pct=Math.max(28,Math.min(78,pct));
+      pct=this.clampSplitPct(pct, this.splitDrag.key, r.width, this.uiScale());
       this.setState({splitPct:pct});
     }
   }
@@ -5803,7 +5720,7 @@ class Component extends DCLogic {
     if(this.dragState){
       const d=this.dragState;
       if(d.recurring){
-        if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaMs||0)});
+        if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaMs||0),runOccIdxs:[...(d.runOccIdxs||[d.occIdx])]});
       } else if(!this.dragMoved){
         if(this.history.length) this.history.pop();
         /* PP-EXT (V1.3): a click (no drag) on a date EDGE opens the calendar+NL popup for that edge —
@@ -5881,6 +5798,19 @@ class Component extends DCLogic {
     const p=n=>String(n).padStart(2,'0');
     const yr = this.state.showYears ? (', '+String(d.getFullYear()).slice(2)) : '';
     return wd+' '+mo+' '+p(d.getDate())+yr + (dateOnly ? '' : (', '+p(d.getHours())+':'+p(d.getMinutes()))); /* PP-EXT */
+  }
+  /* PP-EXT (owner 2026-08-17, Chain 6 block 45): compact sheet date cells. A timestamp at midnight is
+     not itself evidence of a clock; the model's explicit-clock predicates own that distinction. All-day
+     ends are exclusive in storage, so display their inclusive final day just like the shared picker. */
+  sheetDateParts(t,key,overrideMs){
+    let ms=overrideMs!==undefined?overrideMs:(t&&t[key]);
+    if(ms==null) return {date:'—',time:null};
+    if(t&&t.allDay&&key==='end') ms-=1;
+    const d=new Date(ms);
+    const date=d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    const timed=!!(t&&!t.allDay&&(key==='start'?this.hasStartTime(t):this.hasEndTime(t)));
+    const time=timed?d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'}):null;
+    return {date,time};
   }
   /* PP-EXT V1.5: pure due-chip bucket. All-day ends are exclusive, so classify their visible
      due day (end-1ms). Specific today/tomorrow buckets outrank the <=1-week bucket.
@@ -6543,7 +6473,7 @@ class Component extends DCLogic {
       viewtoggle: this.renderViewToggle(),                 /* PP-EXT: Gantt|Calendar main-view toggle */
       topcontext: this.renderTopContext(),                 /* PP-EXT: context-aware top-bar slot (Plan/Focus/Review, Journal nav, Archive count) */
       toggleSettings:()=>{ this.trackAction('dialog',{ name:'settings', open:!this.state.settingsOpen }); /* PP-EXT (31) */ this.setState(s=>({settingsOpen:!s.settingsOpen})); },
-      zoomLabel: this.state.dayW>=this.GANTT_HOUR_GRID_DAYW?'Hour':(this.state.dayW>=64?'Day':(this.state.dayW>=36?'Week':'Month')),/* PP-EXT (C2): Hour level */
+      zoomLabel: this.ganttZoomLabel(this.state.dayW),
     };
   }
   /* PP-EXT: top-bar context slot — replaces the removed per-page header bands (Dashboard/Journal/Archive
@@ -7138,6 +7068,7 @@ class Component extends DCLogic {
     const h=React.createElement; const sp=this.state.scopePrompt;
     const t=this.state.tasks.find(x=>x.id===sp.taskId); if(!t) return null;
     const isDel=sp.kind==='delete'; const occN=sp.occIdx+1;
+    const isRun=!isDel && sp.payload && sp.payload.runOccIdxs && sp.payload.runOccIdxs.length>1;
     const opt=(label,desc,scope,danger)=>h('div',{onClick:()=>this.applyScope(scope),
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',onMouseLeave:e=>e.currentTarget.style.background='var(--field-bg)',
       style:{padding:'12px 14px',background:'var(--field-bg)',border:'1px solid var(--field-border)',borderRadius:'9px',cursor:'pointer',marginBottom:'9px'}},
@@ -7148,7 +7079,9 @@ class Component extends DCLogic {
       h('div',{style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.5px',color:'#a98be6',textTransform:'uppercase',marginBottom:'6px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},'🔁 '+t.name),
       h('div',{style:{fontSize:'16px',fontWeight:700,color:'var(--text-strong)',marginBottom:'4px'}}, isDel?'Delete repeating task':'Edit repeating task'),
       h('div',{style:{fontSize:'12.5px',color:'var(--text-mut)',marginBottom:'16px'}}, isDel?'Which occurrences should be removed?':'Which occurrences should change?'),
-      opt('This occurrence only', 'Occurrence '+occN+(isDel?' is removed. Others stay.':'. Others stay on the original schedule.'), 'this', isDel),
+      opt(isRun?'This run':'This occurrence only', isRun
+        ? ('Occurrences '+(sp.payload.runOccIdxs[0]+1)+'–'+(sp.payload.runOccIdxs[sp.payload.runOccIdxs.length-1]+1)+' change together. Other runs stay on the original schedule.')
+        : ('Occurrence '+occN+(isDel?' is removed. Others stay.':'. Others stay on the original schedule.')), 'this', isDel),
       opt('This and following', 'Occurrence '+occN+' onward'+(isDel?' are removed.':' shift by the same amount.'), 'subsequent', isDel),
       opt(isDel?'All occurrences (delete task)':'All occurrences', isDel?'Removes the entire repeating task.':'Every occurrence shifts together.', 'all', isDel),
       h('div',{onClick:()=>this.closeScope(),style:{textAlign:'center',marginTop:'2px',padding:'9px',fontSize:'12.5px',color:'var(--text-mut2)',cursor:'pointer'}},'Cancel'));
@@ -8908,10 +8841,9 @@ class Component extends DCLogic {
     this.setState({mainView:v, splitPct:(this.state.viewSplit&&this.state.viewSplit[key])!=null?this.state.viewSplit[key]:this.splitDefault(key), hoverDay:null});
     this.savePrefs({mainView:v});
   }
-  /* PP-EXT (V5 F13, block 26): 20 → 34. 20% is below the splitter's own 28% clamp (`onMouseMove`), so
-     the first-run sheet was narrower than the user could ever have dragged it. 34% is inside the clamp
-     and, together with `sheetPaneMinWidth()`, keeps all four columns on screen at every window width. */
-  splitDefault(key){ return key==='triage'?62:(key==='agenda'?34:50); }
+  /* PP-EXT (Chain 6 block 46): an untouched sheet asks for the drag maximum, then its px max-width stops
+     it exactly at the last visible column. A saved smaller percentage is an intentional compression. */
+  splitDefault(key){ return key==='triage'?62:this.PANE_MAX_FRAC; }
   /* PP-EXT V5 (block 27a): the left pane no longer always holds the sheet, so the remembered split width is
      keyed off WHAT IS IN IT, not only off the right pane's view. A triage grid wants roughly two thirds of
      the board (three or four card columns); the sheet wants what block 26 gave it. Keeping them under
@@ -8923,20 +8855,29 @@ class Component extends DCLogic {
     const activeView=(this.state.mainView==='dashboard')?(this.state.planView||this._lastPlanner||'gantt'):this.state.mainView;
     return this.splitKeyFor(activeView);
   }
-  /* PP-EXT V5 (block 27a): re-derived from block 26's `sheetPaneMinWidth()` rather than deleted — the left
-     pane still needs a px floor, it just no longer always contains columns. `nCols` is the Selection grid's
-     rendered column count (origins collapse when empty); the matrix is always 2 wide. */
+  /* PP-EXT V5 (block 27a), updated by Chain 6 block 46: triage retains its own px floor. The list no
+     longer does: its max follows the visible columns and the divider is allowed to compress it. */
   triageMinWidthPx(nCols){ return Math.max(1,nCols|0)*this.TRIAGE_COL_MIN_PX + this.SHEET_COL_PAD_PX; }
   leftPaneMinWidth(surface, nCols){
     if(surface==='select'||surface==='matrix')
       return 'min('+this.triageMinWidthPx(surface==='matrix'?2:nCols)+'px, '+this.SHEET_MAX_FRAC+'%)';
-    return this.sheetPaneMinWidth();
+    return '0px';
   }
-  /* PP-EXT (V5 F13, block 26): the sheet pane's width floor, in px, derived from the columns actually
-     visible — hide a column and the floor drops with it. Paired with SHEET_MAX_FRAC in a CSS `min()`
-     so the floor never eats the whole board on a narrow window. */
+  leftPaneMaxWidth(surface){ return (surface==='select'||surface==='matrix')?null:(this.sheetMinWidthPx()+'px'); }
+  /* PP-EXT Chain 6 block 46: visible-column edge in local CSS px. Hide/resize re-derive it on render. */
   sheetMinWidthPx(){ return this.visibleCols().reduce((a,c)=>a+c.w,0) + this.SHEET_COL_PAD_PX; }
-  sheetPaneMinWidth(){ return 'min('+this.sheetMinWidthPx()+'px, '+this.SHEET_MAX_FRAC+'%)'; }
+  /* `boardWidth` is rendered px (getBoundingClientRect), while column widths are local CSS px inside the
+     app's zoom wrapper. Convert with the measured scale before comparing; hardcoding 0.8 would drift. */
+  clampSplitPct(pct,key,boardWidth,scale){
+    const lo=this.PANE_MIN_FRAC, hi=this.PANE_MAX_FRAC;
+    if(key==='triage'||!(boardWidth>0)) return Math.max(lo,Math.min(hi,pct));
+    const z=(scale>0)?scale:1;
+    const edgePct=Math.min(hi, this.sheetMinWidthPx()*z/boardWidth*100);
+    /* PP-EXT Chain 6 review: the content edge is only the MAXIMUM. Reusing it as the minimum made
+       min===max on wide boards with few columns, so the advertised compression gesture did nothing. */
+    const usableMinPct=Math.min(lo, this.SHEET_PANE_MIN_PX*z/boardWidth*100);
+    return Math.min(edgePct, Math.max(usableMinPct,pct));
+  }
   /* PP-EXT B1: icon system — small inline-SVG map replacing emoji-as-UI-chrome (view tabs, sidebar nav,
      dashboard module chips, pomodoro bar). Each entry is a path/shape list drawn on a 24x24 grid; pp_icon()
      wraps it in an <svg> sized off the B0 type scale (default matches --fs-4) using stroke=currentColor so it
@@ -10516,10 +10457,10 @@ class Component extends DCLogic {
       this.renderFilterBar(h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
         this.renderLeftSurfaceToggle(), this.renderViewToggle(planView, v=>this.setPlanView(v)))),
       h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'},ref:el=>this.boardEl=el},
-        h('div',{'data-left-surface':surface,
-          style:{flex:'0 0 '+this.state.splitPct+'%',/* PP-EXT V5 F13 (block 26), re-derived in block 27a: px floor from whatever the pane actually holds — sheet columns, or triage card columns */minWidth:this.leftPaneMinWidth(surface,nCols),display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
+        h('div',{'data-left-surface':surface,'data-sheet-pane':surface==='list'?'1':undefined,
+          style:{flex:'0 0 '+this.state.splitPct+'%',/* PP-EXT Chain 6 block 46: list may compress, but cannot expand past its live visible-column edge; triage keeps its own floor. */minWidth:this.leftPaneMinWidth(surface,nCols),maxWidth:this.leftPaneMaxWidth(surface),display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
           left),
-        h('div',{onMouseDown:e=>this.startSplit(e),
+        h('div',{'data-pane-divider':surface==='list'?'sheet':'triage',onMouseDown:e=>this.startSplit(e),
           style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
         h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
           this.renderMainPane(tasks, planView))));
@@ -11653,9 +11594,9 @@ class Component extends DCLogic {
         h('div',{style:{display:'flex',flexDirection:'column',flex:1,minWidth:0,minHeight:0}},
           this.renderFilterBar(),
           h('div',{ref:el=>this.boardEl=el, style:{display:'flex',flex:1,minWidth:0,minHeight:0,width:'100%'}},
-            h('div',{style:{flex:'0 0 '+this.state.splitPct+'%',/* PP-EXT V5 F13 (block 26): px floor from the visible columns, so the motto column and the row actions are never clipped at any window width */minWidth:this.sheetPaneMinWidth(),display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
+            h('div',{'data-sheet-pane':'1',style:{flex:'0 0 '+this.state.splitPct+'%',/* PP-EXT Chain 6 block 46: divider may compress the sheet; maxWidth follows visible column pixels so it never creates trailing whitespace. */minWidth:0,maxWidth:this.sheetMinWidthPx()+'px',display:'flex',flexDirection:'column',background:'var(--sheet-bg)'}},
               this.renderSheet(tasks)),
-            h('div',{onMouseDown:e=>this.startSplit(e),
+            h('div',{'data-pane-divider':'sheet',onMouseDown:e=>this.startSplit(e),
               style:{flex:'0 0 6px',cursor:'col-resize',background:'var(--split-bar)',borderLeft:'1px solid var(--top-border)',borderRight:'1px solid var(--top-border)'}}),
             h('div',{style:{flex:1,minWidth:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
               this.renderMainPane(tasks)))); /* PP-EXT: main-view selector picks the right pane */
@@ -12106,6 +12047,21 @@ class Component extends DCLogic {
        cards cannot show different chips for the same task. `_disp` is the same fact bundle both use. */
     const _disp={curOcc,recIdx,dispPct,dispEnd,done,pcol};
     const dueRecurChip=this.taskDueRecurChip(t,_disp);
+    /* PP-EXT (owner 2026-08-17, Chain 6 block 45): both date columns use the existing picker rather than
+       inventing an editor. The current recurrence occurrence is display-only; the picker retains the
+       established task/occurrence mutation semantics. */
+    const dateCell=(key,ms)=>{ const p=this.sheetDateParts(t,key,ms);
+      return h('div',{'data-date-cell':key,onMouseDown:e=>e.stopPropagation(),
+        onClick:e=>{e.stopPropagation();this.openDatePick(e,t.id,key);},
+        title:'Edit '+(key==='start'?'start':'end')+' date',
+        style:{width:'100%',height:'100%',display:'flex',flexDirection:'column',justifyContent:'center',
+          cursor:'pointer',fontVariantNumeric:'tabular-nums',lineHeight:1.15,minWidth:0}},
+        h('span',{style:{fontSize:'10.5px',color:p.date==='—'?'var(--text-faint2)':'var(--text-2)',
+          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},p.date),
+        p.time?h('span',{'data-date-clock':'1',style:{fontSize:'9.5px',color:'var(--text-mut2)',
+          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},p.time):null); };
+    const startDateCell=dateCell('start',curOcc?curOcc.start:t.start);
+    const endDateCell=dateCell('end',dispEnd);
 
     // ---- distinct milestone row ----
     // PP-EXT (Phase D bugfix): was a flat flex strip with its own fixed-width grip/diamond/seq offsets that
@@ -12138,7 +12094,7 @@ class Component extends DCLogic {
            sizes children to content. */
         dueRecurChip ? h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0}}, dueRecurChip) : null);
       const mDash=h('span',{style:{fontSize:'12px',color:'var(--text-faint2)'}},'—');
-      const mContent={name:mNameBlock};
+      const mContent={name:mNameBlock,start:startDateCell,end:endDateCell};
       return h('div',{key:t.id,'data-task-id':t.id,
         onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
         onMouseDown:e=>this.rowPointerDown(e,t.id,i),
@@ -12205,7 +12161,7 @@ class Component extends DCLogic {
        `onClick` is stopped because `startPctDrag` only stops the mousedown; without it the release would
        still bubble to `rowClick` and open the detail sheet on every value change. */
     const pctNum=Math.max(0,Math.min(100,Math.round(+dispPct||0)));
-    const pctFill=this.pctFillPaint(null, pctNum, null);
+    const pctFill=this.pctFillPaint(pctNum);
     const pctCell=h('div',{'data-pct-cell':t.id,
       onMouseDown:e=>this.startPctDrag(e,t,recIdx,e.currentTarget,'set'),
       onClick:e=>e.stopPropagation(), onDoubleClick:e=>e.stopPropagation(),
@@ -12269,7 +12225,7 @@ class Component extends DCLogic {
         uncompOn?'Exact':'Flexible'));
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
-      name:nameBlock, planned:flowCell, pct:pctCell, exact:uncompCell, actions:actionsCell,
+      name:nameBlock, start:startDateCell, end:endDateCell, planned:flowCell, pct:pctCell, exact:uncompCell, actions:actionsCell,
     };
     const extras={name:{paddingRight:'6px'}};
     const rd=this.state.rowDrag;
@@ -12332,8 +12288,6 @@ class Component extends DCLogic {
     const h=React.createElement;
     const tl=this._tl; const dayW=this.state.dayW;
     const totalW=tl.days*dayW;
-    const hourZoom=dayW>=this.GANTT_HOUR_GRID_DAYW; /* PP-EXT (C2): zoomed in past a day → show hour gridlines + ticks */
-    const hlbl=x=> x===0?'12a':(x<12?x+'a':(x===12?'12p':(x-12)+'p')); /* compact 12h hour label */
     /* PP-EXT: rows may be taller than rowH when an inline description panel is open in the sheet; precompute
        each row's Y top (yOfRow reads this._yTop) so bars/stripes/arrows stay aligned with the sheet. */
     /* PP-EXT V2.3: section rails consume identical vertical space on both panes. `_yTop` remains indexed by
@@ -12352,18 +12306,13 @@ class Component extends DCLogic {
     // header: week tier + day tier
     /* PP-EXT: cells are absolutely positioned (left = d*dayW) instead of flex-laid-out, so we can render only
        the visible window and still keep every cell aligned to its grid column. */
-    const weekCells=[]; const dayCells=[]; const hourTicks=[]; /* PP-EXT (C2): hourTicks populated only when hourZoom */
+    const weekCells=[]; const dayCells=[];
     for(let d=vd0; d<vd1; d++){
-      const ms=tl.start+d*this.DAY; const date=new Date(ms);
+      const ms=this.ganttDayAt(tl.start,d); const date=new Date(ms);
       const dow=date.getDay(); const weekend=(dow===0||dow===6);
-      /* PP-EXT (C2): when zoomed to the hour, pin the date to the top of the cell so the bottom row is free for
-         hour ticks; otherwise keep it centered as before. */
-      dayCells.push(h('div',{key:d,style:{position:'absolute',left:(d*dayW)+'px',width:dayW+'px',boxSizing:'border-box',height:'24px',display:'flex',alignItems:hourZoom?'flex-start':'center',justifyContent:'center',paddingTop:hourZoom?'1px':'0',
+      dayCells.push(h('div',{key:d,style:{position:'absolute',left:(d*dayW)+'px',width:dayW+'px',boxSizing:'border-box',height:'24px',display:'flex',alignItems:'center',justifyContent:'center',
         fontSize:'10px',color:weekend?'var(--text-faint)':'var(--text-mut2)',borderRight:'1px solid var(--col-border)',
         background:weekend?'var(--weekend)':'transparent'}}, date.getDate()));
-      if(hourZoom){ for(const hr of [3,6,9,12,15,18,21]){
-        hourTicks.push(h('div',{key:'ht'+d+'_'+hr,style:{position:'absolute',left:(d*dayW+hr/24*dayW)+'px',bottom:'0',
-          fontSize:'8px',color:'var(--text-faint)',transform:'translateX(1px)',pointerEvents:'none',whiteSpace:'nowrap'}}, hlbl(hr))); } }
       if(((date.getDay()+6)%7)===0 || d===vd0){
         const remaining=tl.days-d; const span=Math.min(7-((date.getDay()+6)%7),remaining);
         const mo=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][date.getMonth()];
@@ -12374,56 +12323,56 @@ class Component extends DCLogic {
     }
     /* /PP-EXT */
     const header=h('div',{title:'Click to drop a milestone on this date',
-      onClick:e=>{ const r=e.currentTarget.getBoundingClientRect(); const day=Math.floor((e.clientX-r.left)/dayW); this.addMilestoneAt(tl.start+day*this.DAY+12*3600000); },
+      onClick:e=>{ const r=e.currentTarget.getBoundingClientRect(); const day=Math.floor((e.clientX-r.left)/dayW); this.addMilestoneAt(this.ganttDayAt(tl.start,day)+12*3600000); },
       /* PP-EXT: NO borderBottom here — this outer div is auto-height (two 24px tiers = 48), so a 1px border would
          add outside → a 49px header that offsets every Gantt row 1px below the sheet's 48px header. The border
          lives on the day tier (fixed 24px → border-box absorbs it), keeping the header exactly headH like the sheet. */
       style:{position:'sticky',top:0,zIndex:6,background:'var(--top-bg)',minWidth:totalW+'px',cursor:'copy'}},
       /* PP-EXT: relative rows host the absolutely-positioned (windowed) header cells */
       h('div',{style:{position:'relative',height:'24px',minWidth:totalW+'px'}},weekCells),
-      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px'}}/* PP-EXT: header bottom border here (fixed height absorbs it) so total header = headH, aligned with the sheet */,dayCells,hourTicks/* PP-EXT (C2) */));
+      h('div',{style:{position:'relative',height:'24px',borderTop:'1px solid var(--col-border)',borderBottom:'1px solid var(--top-border)',minWidth:totalW+'px'}}/* PP-EXT: header bottom border here (fixed height absorbs it) so total header = headH, aligned with the sheet */,dayCells));
       /* /PP-EXT */
 
     // grid background  /* PP-EXT: windowed to [vd0,vd1] */
     const gridLines=[];
     for(let d=vd0; d<=Math.min(tl.days,vd1); d++){
-      const ms=tl.start+d*this.DAY; const dow=new Date(ms).getDay();
+      const ms=this.ganttDayAt(tl.start,d); const dow=new Date(ms).getDay();
       const strong=((new Date(ms).getDay()+6)%7)===0;
       gridLines.push(h('div',{key:'g'+d,style:{position:'absolute',top:0,bottom:0,left:(d*dayW)+'px',width:'1px',
         background:strong?'var(--grid-strong)':'var(--grid-weak)'}}));
-      /* PP-EXT (C2): hour gridlines within each day when zoomed in — 6/12/18 a touch stronger for orientation.
-         Windowed (only visible days) and skipped entirely below the hour-zoom threshold, so no extra render cost
-         at normal zoom. Purely decorative (pointer-events default none via being behind bars at low z). */
-      if(hourZoom && d<tl.days){ for(let hr=1; hr<24; hr++){
-        gridLines.push(h('div',{key:'gh'+d+'_'+hr,style:{position:'absolute',top:0,bottom:0,left:(d*dayW+hr/24*dayW)+'px',width:'1px',
-          background:'var(--grid-weak)',opacity:(hr%6===0)?0.7:0.35/* 6/12/18 a touch stronger */}})); } }
     }
     // weekend shading  /* PP-EXT: windowed to [vd0,vd1] */
     const weekendRects=[];
     for(let d=vd0; d<Math.min(tl.days,vd1); d++){
-      const dow=new Date(tl.start+d*this.DAY).getDay();
+      const dow=new Date(this.ganttDayAt(tl.start,d)).getDay();
       if(dow===0||dow===6) weekendRects.push(h('div',{key:'we'+d,style:{position:'absolute',top:0,bottom:0,left:(d*dayW)+'px',width:dayW+'px',background:'var(--weekend-col)'}}));
     }
     // today line
     const now=Date.now();
     const todayX=this.xOf(now);
-    const todayLine = (now>=tl.start && now<=tl.start+tl.days*this.DAY)
+    const todayLine = (now>=tl.start && now<=this.ganttDayAt(tl.start,tl.days))
       ? h('div',{style:{position:'absolute',top:0,bottom:0,left:todayX+'px',width:'2px',background:this._accent,opacity:0.8,zIndex:4}},
           h('div',{style:{position:'absolute',top:'-2px',left:'-4px',width:'10px',height:'10px',borderRadius:'50%',background:this._accent}}))
       : null;
 
-    // bars  /* PP-EXT: hide past repeat instances (first current/future one becomes the first shown);
-    //          window individual blocks; collapse repeats too dense to read into one strip */
+    // bars  /* PP-EXT (Chain 6 block 44): hide past repeat instances, merge consecutive occurrence
+    //          days into plain continuous runs, then window the resulting blocks. */
     const bars=[];
-    const wx0=tl.start+vd0*this.DAY, wx1=tl.start+vd1*this.DAY;
+    const wx0=this.ganttDayAt(tl.start,vd0), wx1=this.ganttDayAt(tl.start,vd1);
     const todayStart=this.startOfToday();
     tasks.forEach((t,i)=>{
       let occs=this._occById[t.id]||[];
       if(t.recur) occs=occs.filter(o=>o.start>=todayStart && this.occPct(t,o.idx)<100); /* PP-EXT: hide past + completed so the next instance leads */
-      if(t.recur && occs.length>2 && this.recurTooDense(occs,dayW)){
-        const strip=this.ganttRecurStrip(t,i,occs); if(strip) bars.push(strip); return;
-      }
-      occs.forEach(o=>{ if(o.end>=wx0 && o.start<=wx1) bars.push(this.ganttBlock(t,i,o)); });
+      if(t.recur) occs=this.mergeConsecutiveOccurrenceDays(occs);
+      occs.forEach(o=>{
+        /* PP-EXT (Chain 6 block 43): raw null edges are infinite for drawing only. Do not route
+           this through ghostSpan: that remains the finite scheduling predicate. Fully dateless rows
+           deliberately draw nothing. */
+        const openStart=t.start==null, openEnd=t.end==null;
+        if(openStart&&openEnd) return;
+        const inWindow=openStart ? o.end>=wx0 : (openEnd ? o.start<=wx1 : (o.end>=wx0&&o.start<=wx1));
+        if(inWindow){ const bar=this.ganttBlock(t,i,o); if(bar) bars.push(bar); }
+      });
     });
     // arrows
     const arrows=this.renderArrows(tasks,totalW,bodyH);
@@ -12461,56 +12410,33 @@ class Component extends DCLogic {
     const tailSpacer=h('div',{key:'ganttTailSpacer','data-gantt-tail':'1','aria-hidden':'true',
       style:{height:this.rowH+'px',minWidth:totalW+'px',pointerEvents:'none'}});
 
-    return h('div',{ref:el=>{this.ganttScrollEl=el; if(el&&!el._wz){el._wz=1; el.addEventListener('wheel',ev=>this.onWheelZoom(ev),{passive:false});}}, onScroll:e=>this.syncFromGantt(e),
+    return h('div',{'data-gantt-scroll':'1',ref:el=>{this.ganttScrollEl=el; if(el&&!el._wz){el._wz=1; el.addEventListener('wheel',ev=>this.onWheelZoom(ev),{passive:false});}}, onScroll:e=>this.syncFromGantt(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}},
       h('div',{onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
         style:{minWidth:totalW+'px'}}, header, body, tailSpacer));
   }
 
-  /* PP-EXT: repeat is "too dense" when the on-screen spacing between consecutive occurrence starts falls
-     below a comfortable click target — below that, individual blocks are illegible/unclickable and there are
-     so many they bog down rendering, so we draw a single summary strip instead. */
-  recurTooDense(occs,dayW){
-    const COLLAPSE_PX=36;
-    const stepDays=(occs[1].start-occs[0].start)/this.DAY;
-    if(!(stepDays>0)) return true;
-    return stepDays*dayW < COLLAPSE_PX;
-  }
-  /* PP-EXT: one hatched bar standing in for a whole dense recurrence — spans first→last occurrence, labeled
-     with the repeat rule and count. Selecting/opening acts on the master task; right-click opens the delete
-     scope chooser (same as an individual occurrence). Cheap: a single element regardless of occurrence count. */
-  ganttRecurStrip(t,rowI,occs){
-    const h=React.createElement;
-    const a=occs[0].start, b=occs[occs.length-1].end;
-    const left=this.xOf(a), w=Math.max(10,this.xOf(b)-left);
-    const top=this.yOfRow(rowI)+(this.rowH-this.barH)/2;
-    const crit=this._showCP && this._cpm.critical[t.id];
-    const sel=this.isSel(t.id);
-    const base=crit?'var(--danger)':(this._accent||'#3f7bd6');
-    const hatch='repeating-linear-gradient(-45deg,'+base+' 0 2px,transparent 2px 8px)';
-    const lbl=(t.recur&&t.recur.label)||'Repeats';
-    return h('div',{key:'rs'+t.id,
-      /* PP-EXT (V1.5 fix): own the row hover — see the note on hov in ganttBlock. */
-      onMouseEnter:()=>this.setState({hoverId:t.id}), onMouseLeave:()=>this.setState({hoverId:null}),
-      onMouseDown:e=>{e.stopPropagation(); this.setState({selectedIds:[t.id]});},
-      /* PP-EXT (owner 2026-08-04): single click opens details on the Gantt; double-click no longer does.
-         This strip has no drag machinery of its own, so it takes onClick directly rather than the
-         no-drag branch in the bar mouseup. */
-      onClick:e=>{e.stopPropagation(); this.openDetail(t.id);},
-      onContextMenu:e=>{e.preventDefault(); e.stopPropagation(); this.setState({selectedIds:[t.id]}); this.openScope('delete',t.id,this.mostRecentOccIdx(t));},
-      title:t.name+' · '+lbl+' · '+occs.length+' occurrences · zoom in to edit individually · click for details',
-      style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',
-        background:hatch,border:'1px solid '+base,borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'pointer',zIndex:5,overflow:'hidden',
-        boxShadow:sel?'0 0 0 2px var(--bar-ring)':'none',display:'flex',alignItems:'center'}},
-      /* PP-EXT (owner 2026-08-12): the task NAME is no longer drawn here. V5.27b put it after the chip
-         so a dense repeat was identifiable without hovering, but a daily rule renders one strip per row
-         across the whole chart, and the repeated name drowned the surface it was meant to clarify
-         (owner: "the name completely overwhelms the interface"). The rule chip stays — it is per-row,
-         not per-occurrence — and identification falls back to row alignment with the sheet plus the
-         `title` tooltip, which still carries the name. */
-      h('span',{key:'chip',style:{padding:'1px 6px',margin:'0 4px',fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',
-        background:base,borderRadius:'3px',whiteSpace:'nowrap',pointerEvents:'none',flex:'0 0 auto'}}, lbl+' · '+occs.length+'×'));
+  /* PP-EXT (Chain 6 block 44): pure recurrence paint projection. Occurrences whose START dates
+     occupy consecutive local calendar days become one ordinary run. The projection carries explicit
+     member ids and first/last occurrence bounds so gestures operate on the run rather than borrowing
+     the first occurrence's identity. Calendar ordinals use UTC construction from local Y/M/D so
+     DST-short/long days stay consecutive. */
+  mergeConsecutiveOccurrenceDays(occs){
+    const sorted=(occs||[]).filter(o=>o&&Number.isFinite(o.start)&&Number.isFinite(o.end))
+      .map(o=>Object.assign({},o)).sort((a,b)=>a.start-b.start||a.idx-b.idx);
+    if(!sorted.length) return [];
+    const project=o=>Object.assign({},o,{runOccIdxs:[o.idx],runFirstStart:o.start,runFirstEnd:o.end,
+      runLastStart:o.start,runLastEnd:o.end});
+    const runs=[]; let run=project(sorted[0]), lastDay=this.localDayOrdinal(run.start);
+    for(let i=1;i<sorted.length;i++){
+      const next=sorted[i], nextDay=this.localDayOrdinal(next.start);
+      if(nextDay<=lastDay+1){ run.end=Math.max(run.end,next.end); run.runOccIdxs.push(next.idx);
+        run.runLastStart=next.start; run.runLastEnd=next.end; lastDay=Math.max(lastDay,nextDay); }
+      else { runs.push(run); run=project(next); lastDay=nextDay; }
+    }
+    runs.push(run);
+    return runs;
   }
   /* /PP-EXT */
 
@@ -12554,14 +12480,25 @@ class Component extends DCLogic {
        `deltaMs` is already snapped to a whole day (or hour, when zoomed in) by `snapDragMs`, so the
        `*this.DAY` multiply the dead field needed is gone with it — multiplying a millisecond delta by a
        day would have flung the bar off the chart. */
-    const dShift = dragging ? (this.dragState.deltaMs||0) : 0;
-    /* PP-EXT (V1.2 round3): draw a ghost across its DRAWN span, not its derived one — see ghostDrawSpan. The
-       data span is untouched; only these two render-locals widen. */
-    const ghost=!!o.ghost; /* PP-EXT (V1.2 round3): hoisted — the chore branch below now defers to it */
-    const draw=this.ghostDrawSpan(o, this.state.dayW, this.ganttViewW());
-    let st=draw.start, en=draw.end;
-    if(dragging){ const m=this.dragState.mode; if(m==='move'){st+=dShift;en+=dShift;} else if(m==='start'){st=Math.min(en-this.DAY,st+dShift);} else if(m==='end'){en=Math.max(st+this.DAY,en+dShift);} }
-    const left=this.xOf(st);
+    const dShift = dragging ? Math.round((this.dragState.deltaMs||0)/this.DAY) : 0;
+    let st=o.start, en=o.end;
+    if(dragging){ const m=this.dragState.mode; if(m==='move'){st=this.addLocalDays(st,dShift);en=this.addLocalDays(en,dShift);} else if(m==='start'){st=Math.min(this.addLocalDays(en,-1),this.addLocalDays(st,dShift));} else if(m==='end'){en=Math.max(this.addLocalDays(st,1),this.addLocalDays(en,dShift));} }
+    /* PP-EXT (Chain 6 block 43): dates, not instants, own horizontal bar geometry. All-day ends
+       are exclusive in storage, hence `-1`; timed ends are inclusive on their calendar day. During
+       a drag, the grabbed missing edge becomes finite in the preview, as it will on commit. */
+    let openStart=t.start==null, openEnd=t.end==null;
+    if(dragging || (this.dragState&&this.dragState.id===t.id&&!this.dragState.recurring)){
+      const m=this.dragState&&this.dragState.mode;
+      if(m==='start'||m==='move') openStart=false;
+      if(m==='end'||m==='move') openEnd=false;
+    }
+    const dayIndex=ms=>this.ganttDayIndex(ms,this._tl.start);
+    const startDay=openStart?null:dayIndex(st);
+    const endDay=openEnd?null:dayIndex(t.allDay?Math.max(st,en-1):en);
+    const vw=this._vwin||{d0:0,d1:this._tl.days};
+    const geom=this.ganttDayBarGeometry(startDay,endDay,this.state.dayW,vw.d0,vw.d1);
+    if(!geom) return null;
+    const left=geom.left;
     const top=this.yOfRow(rowI)+(this.rowH-this.barH)/2;
     const crit=this._showCP && this._cpm.critical[t.id];
     const sel=this.isSel(t.id);
@@ -12597,7 +12534,7 @@ class Component extends DCLogic {
        so that collision is resolved by deletion rather than by retuning either hatch. */
     const key='bk'+t.id+'_'+o.idx;
     const recurring=!!t.recur;
-    const md=(mode)=>e=>this.startBarDrag(e,t,o.idx,mode);
+    const md=(mode)=>e=>this.startBarDrag(e,t,o,mode);
     /* PP-EXT (V1.4): right-click opens the bar's field editor for EVERY bar (it used to jump straight to the
        recurring delete-scope prompt on repeats only — that prompt is still reached via the row menu's Delete,
        which routes recurring deletes through openScope). */
@@ -12636,7 +12573,7 @@ class Component extends DCLogic {
          it was introduced for (removed 2026-08-12) and is kept: the rotation-isolation reason stands on
          its own, and anything added beside a diamond later needs exactly this shape. */
       return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,title:t.name+occLbl},hov,{
-        style:{position:'absolute',left:(left-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
+          style:{position:'absolute',left:(left+this.state.dayW/2-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
           cursor:'grab',zIndex:5}}),
         h('div',{key:'dia',style:{position:'absolute',inset:0,
           background:done?base:'var(--gantt-bg)',border:'2px solid '+base,transform:'rotate(45deg)',borderRadius:'3px',
@@ -12653,41 +12590,30 @@ class Component extends DCLogic {
     /* PP-EXT (C1): draw to effBarEnd (zero/negative span ⇒ one full day) and never below BAR_MIN_PX, so the
        edge grips + move body stop stacking on top of each other on a short bar (the old 8px floor was narrower
        than the two 7px grips). At high zoom the real width dominates, so a true sub-day appointment still reads. */
-    const w=Math.max(this.BAR_MIN_PX,this.xOf(this.effBarEnd(st,en))-left);
+    /* PP-EXT (Chain 6 block 43): exact inclusive whole-day width. A same-day clocked appointment and
+       an all-day task therefore occupy the identical column; time of day belongs to the day timeline. */
+    const w=geom.width;
     /* PP-EXT (owner 2026-08-15): the literal 7 became `BAR_GRIP_PX`, because `pctGrabZone` now has to
        reason about this exact width to keep the %-done band off the grips. Two copies of the number
        would have made the clearance rule silently wrong the first time either moved. */
-    const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),
+    const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),'data-gantt-edge':side==='l'?'start':'end','data-gantt-edge-task':t.id,
       style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:this.BAR_GRIP_PX+'px',cursor:'ew-resize',zIndex:3}});
-    /* PP-EXT (V1.2 round2 — anchored ghosts): a derived span no longer greys out WHOLESALE. The committed
-       edge keeps the task's real colour and a solid border; the bar dissolves toward the derived edge while
-       a dotted outline fades in over the same ramp (see ghostPaint). A double-ghost has no committed edge,
-       so it gets a SYMMETRIC fade — transparent → accent core → transparent — dotted all round. Data stays
-       null either way; dragging an edge writes a real date via the existing bar-drag machinery. */
-    const gp=ghost?this.ghostPaint(o, base):null;
-    const ghostTitle = ghost ? (t.name+' · ghost (no'+(o.ghostStart&&o.ghostEnd?' dates':(o.ghostStart?' start':' due'))+' set) — drag an edge to set a real date') : null;
-    return h('div',Object.assign({key},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5}}),
-      h('div',{onMouseDown:md('move'),onContextMenu:ctx,
+    return h('div',Object.assign({key,'data-gantt-bar-id':t.id,'data-gantt-columns':String(geom.last-geom.first+1),'data-gantt-last-day':String(this.ganttDayAt(this._tl.start,geom.last)),
+      'data-gantt-run-occurrences':(o.runOccIdxs||[o.idx]).join(',')},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5}}),
+      h('div',{'data-gantt-bar-body':'1',onMouseDown:md('move'),onContextMenu:ctx,
         /* PP-EXT (owner 2026-08-13): `optedOutTitle` dropped with the rest of the not-in-today channel;
            `displacedTitle` stays — displacement is an unattributed background rewrite, not a user state
            already reported by a row control. */
-        title:(ghostTitle||(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details'))+displacedTitle,
+        title:(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details')+displacedTitle,
         style:{position:'absolute',inset:0,
-          background: gp?gp.fill:base,
+          background:base,
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
-          /* PP-EXT (V1.2 round2): ONLY the committed edge is bordered here, in the task's own colour — the
-             derived edges are drawn by the masked dotted outline below, so no border runs full-width. */
-          borderLeft: (gp&&gp.anchor==='l')?('1.5px solid '+base):undefined,
-          borderRight: (gp&&gp.anchor==='r')?('1.5px solid '+base):undefined,
           boxSizing:'border-box',
-          boxShadow:sel?'0 0 0 2px var(--bar-ring)':(ghost?'none':'0 1px 2px rgba(0,0,0,0.4)')}},
+          boxShadow:sel?'0 0 0 2px var(--bar-ring)':'0 1px 2px rgba(0,0,0,0.4)'}},
         /* PP-EXT (owner 2026-08-15): green done-fill, base-colour remainder — see `pctFillPaint`. */
-        (function(){ const f=this.pctFillPaint(o,pct,base); if(!f) return null;
+        (function(){ const f=this.pctFillPaint(pct); if(!f) return null;
           return h('div',{key:'pctfill','data-pct-fill':String(pct),
             style:{position:'absolute',top:0,left:0,bottom:0,width:f.width,background:f.background,
-              WebkitMaskImage:f.mask||undefined, maskImage:f.mask||undefined,
-              WebkitMaskSize:f.maskSize||undefined, maskSize:f.maskSize||undefined,
-              WebkitMaskRepeat:'no-repeat', maskRepeat:'no-repeat',
               pointerEvents:'none'}}); }).call(this),
         /* PP-EXT (owner 2026-08-15): "Make % complete overlaid in small text in the bar." The readout was
            in `ganttSideRow`, OUTSIDE the bar to its right, where it competed with the label row and told
@@ -12703,13 +12629,7 @@ class Component extends DCLogic {
             /* On the green done-fill AND on the base colour, so it is given its own contrast rather than
                inheriting either: white text with a dark shadow reads on both without a second token. */
             color:'#fff',textShadow:'0 1px 2px rgba(0,0,0,0.55)',
-            pointerEvents:'none',whiteSpace:'nowrap'}}, pct+'%') : null,
-        /* PP-EXT (V1.2 round2): the dotted ghost outline. One overlay on all four sides (a CSS border can't
-           be dashed for only part of its length), masked by the inverse of the fill ramp so the dots fade in
-           exactly as the colour fades out. Unmasked on a double-ghost — dotted all round at full opacity. */
-        gp?h('div',{style:{position:'absolute',inset:0,borderRadius:'var(--r-1)',boxSizing:'border-box',
-          border:'2px dotted var(--ghost-dots)',pointerEvents:'none',
-          WebkitMaskImage:gp.mask||undefined, maskImage:gp.mask||undefined}}):null),
+            pointerEvents:'none',whiteSpace:'nowrap'}}, pct+'%') : null),
       /* PP-EXT (deps gap 1): the barrier. Full row height so it reads as a WALL the bar is against,
          not as part of the bar; `--danger` because it is a refusal, and transient because it only exists
          while the pointer is pushing into it. */

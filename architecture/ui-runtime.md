@@ -124,7 +124,8 @@ the ambient one is the redundant copy, regardless of how rare the state is.
 visual information to decode intuitively"* has been answered twice since: critical path became a
 default-off toggle, and the whole **in-today** channel was deleted outright (see below). One channel was
 added back on 2026-08-14 for the reason given next. Recorded here because nothing else states them
-together — and the two 45° hatches no longer collide, because there is only one hatch left.
+together. Chain 6 removes the final recurrence hatch: consecutive occurrence days now merge into the
+same plain rounded bar used by an ordinary multi-day task.
 
 **Why one was added on 2026-08-14, against that note.** Dependency scheduling now propagates from a
 task's *effective* end, so a bar can move **on its own** as days pass with its predecessor unfinished (see
@@ -135,19 +136,49 @@ on the one axis (vertical position relative to the bar) the legend had left free
 
 | Channel | Look | Meaning |
 |---|---|---|
-| Shape | Rounded rectangle | Ordinary task; width = start → due |
+| Shape | Rounded rectangle | Ordinary task; whole-day width = inclusive start day → inclusive due day |
 | | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
-| | Wide bar, **−45° accent pinstripe** + repeat label | `ganttRecurStrip` — one strip for a repeat too dense to draw (occurrence spacing < 36px). Now the **only** hatch on the chart |
 | Fill | Red (`--danger`) | On the critical path — **off by default**, see below |
 | | **Green (`--success-strong`) from the left edge to `pct%`** | % done. A 100% bar is green edge to edge; a 0% bar has no green at all |
 | | Accent | The remainder. **Not** priority and **not** tag |
-| Ghosting | Solid fill + border + shadow | Both dates are real |
-| | Colour dissolving to transparent with a **dotted outline** fading in | Half-ghost — one date only. The **solid bordered edge is the real one** |
-| | **Symmetric fade** — transparent → `--ghost-core` at the centre → transparent — dotted all round, no shadow | Double-ghost — neither date set. Neither edge is committed, so neither may look it |
 | Displaced | **Dashed `--warn` rule under the bar's full width** + a `»` glyph at its left | `autoSchedule` moved this bar forward because a predecessor is **overdue and unfinished** — not because the user dragged it. Tooltip names the amount: *"pushed Nd by an overdue predecessor"*. Driven by `_schedDisplaced` |
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
 | | **3px `--danger` rule at the bar's left edge, full ROW height** | Dependency barrier: this drag is pressed against the predecessor's end and will go no further. Exists only while the button is held |
+
+**Gantt geometry is date-only (Chain 6 block 43).** Clock time never shifts a bar inside its day: a
+clocked appointment and an all-day task on the same date occupy the same whole column, and dragging snaps
+to whole days at every zoom. Day indexes, headers, window bounds, previews and committed edits all use
+local civil-date ordinals plus local-calendar `setDate` addition, never elapsed `86400000`-millisecond
+buckets. Thus Vancouver's 23-hour spring-forward and 25-hour fall-back dates each occupy exactly one
+column, and moving a clocked task across either boundary preserves its clock time. Recurrence scope edits
+use the same rule; new subsequent-series shifts store a civil `days` count while old `offset` entries
+remain readable. A start-only task continues to the right and an end-only task continues to
+the left. Those open edges clamp to `ganttVWin` rather than to invented far-away timestamps, so horizontal
+scroll and zoom recompute the fill while `ghostSpan` remains unchanged as a finite scheduling predicate.
+Because `ganttVWin.d1` is exclusive, a start-only bar's editable right-edge origin is `d1 - 1`, the last
+inclusive painted date; this keeps a one-column left edge drag visually and persistently identical.
+A task with neither date draws no Gantt bar.
+
+**The Hour zoom is retired (Chain 6 block 47).** Continuous Ctrl/Cmd-wheel scaling remains, but its
+semantic label has exactly three values — Month, Week, Day — and even the widest Day scale draws only day
+boundaries and date headers. There are no intra-day gridlines or hour ticks; time-of-day belongs to the
+timeline and the Start/End sheet columns.
+
+**Recurring paint is day-run based (Chain 6 block 44).** A pure projection groups occurrences whose
+start dates occupy consecutive local calendar days, then renders each group as an ordinary solid bar
+from the first occurrence start through the last occurrence end. Daily repeats therefore form one
+continuous run; weekday repeats form Monday–Friday runs separated by weekend gaps; weekly repeats remain
+separate. This is independent of zoom and has no hatch or repeat chip. `recurTooDense` and
+`ganttRecurStrip` are deleted rather than retained as a second density rule. The merge is paint-only:
+stored recurrence, overrides, and `ghostSpan` scheduling semantics are unchanged.
+
+The merged bar is also one **interaction unit**. Its projection carries the member occurrence indexes
+and the true first/last occurrence bounds; it never silently borrows only the first occurrence identity.
+Dragging the body previews and commits the same civil-day shift to every member. The left resize grip
+edits only the first occurrence's start boundary, and the right grip edits only the last occurrence's end
+boundary. The recurrence scope dialog therefore says **This run** for a merged bar; **All occurrences**
+retains its series-wide meaning. A run edit is one `commit()` and consequently one undo entry.
 
 **Progress is a Fill value, not a separate channel (2026-08-15).** It used to be its own row — a flat
 `rgba(255,255,255,0.28)` veil over the bar body — and the owner could not read it: *"the contrast is not
@@ -163,14 +194,9 @@ extremes coincide with a bar edge — the highest-contrast line on the chart —
 case. What it costs, stated plainly: a green bar no longer means *finished* unless it is green edge to
 edge.
 
-`pctFillPaint(o, pct, base)` is pure — occurrence + pct + base in, `{width, background, mask, maskSize}`
-or `null` out — so the ghost × pct matrix is provable in the unit layer. **A ghost keeps its gradient
-exactly as it was**: the green receives the same ramp as the base beneath it, expressed as an alpha mask
-so `ghostPaint` remains the single definition of the shape. The mask is authored in *bar* percentages and
-painted on an element only `pct%` of the bar wide, so `maskSize` rescales it by `100/pct` — without that,
-the whole ramp compresses into the filled part and every stop lands on the wrong pixel. The V1.2 round-2
-anchor semantics are untouched: colour still sits at the committed edge and dissolves toward the derived
-one.
+`pctFillPaint(pct)` is pure — percentage in, `{width, background}` or `null` out. Chain 6 block 47
+retired the ghost-specific masks, so the green done portion and accent remainder are both solid regardless
+of which date edges are present.
 
 The in-bar `n%` readout is unchanged (white with a text shadow, its own contrast rather than either
 fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, and `PCT_GRAB_PX` /
@@ -180,9 +206,9 @@ fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, an
 
 Owner, 2026-08-17: *"I wanted it as a column, not as something inside the detail panel."* `colDefs()`
 carries `{k:'exact', w:104, l:'Time needed'}`, visible by default, between `% Done` and `actions`, and
-`name` was trimmed 354 → 250 so the **pixel total stays 730** — block 26's rule is that every visible
-column fits the first-run pane floor of `min(<total>px, 55%)`, and `sheet-default-width.spec.js` asserts it
-at three viewports.
+At introduction, `name` was trimmed 354 → 250 so the **pixel total stayed 730**. Block 45 later divides
+140px of that name width between the returning Start and End columns, preserving the same 730px total.
+Block 46 subsequently replaced the permanent first-run floor with the draggable, last-column clamp below.
 
 The cell shows `isUncompressable(t)` — the *resolved* value — so a never-decided task reads its answer off
 its own clocks and changes when they do. Decided and derived are drawn differently on purpose (solid chip
@@ -200,6 +226,41 @@ Row cells carry **`data-cellk`** — deliberately not `data-colk`, which is the 
 (the reorder hit test walks up to it, the width spec selects it). It exists so a spec can address a cell by
 column instead of doing arithmetic on the row's box; five specs used to click a row's geometric centre and
 so silently depended on which column the current widths put there.
+
+### The `Start` and `End` columns
+
+Chain 6 block 45 reverses V2.3 for these two fields only. `colDefs()` carries ordinary, visible-by-default
+`start` and `end` entries, so the existing column machinery supplies hide, reorder, resize and reset with
+no date-specific preference path. Both cells are 70px and `name` is 110px; the visible-column total
+remains 730px, which is now also the divider's default last-column cap before its 20px gutter.
+
+### Sheet pane divider
+
+Chain 6 block 46 supersedes block 26's permanent all-columns-fit `minWidth`. An untouched sheet opens to
+the pixel edge of its visible columns plus `SHEET_COL_PAD_PX`; the pane carries that value as `maxWidth`,
+so it cannot be dragged into nuisance whitespace. Dragging left deliberately compresses the sheet and
+makes its own horizontal scroller the route to clipped columns. The saved value remains the existing
+per-view percentage in scoped `pp-prefs.viewSplit`; no task or sync schema changes.
+
+`clampSplitPct` compares the pointer with the live `sheetMinWidthPx()` on every move. Because the board
+rectangle is rendered pixels while column widths are local CSS pixels inside the app zoom, it converts
+with `uiScale()` rather than assuming 0.8. Hiding or resizing a column therefore moves the cap immediately;
+reordering leaves it unchanged. The sheet's lower bound is the responsive `SHEET_PANE_MIN_PX` (capped by
+28%), not the visible-column edge: on a wide board or after hiding columns, every position between that
+usable pixel floor and the last-column maximum remains reachable. Selection keeps its separate triage
+floor and 28–78% clamp. The revised
+`sheet-default-width.spec.js` covers Today and Schedule at 1280, 1600, and 1920 pixels, real divider
+compression/persistence, the right-edge clamp, and real column resize/hide/reorder gestures.
+
+Each cell is a compact two-line read: local calendar date, then a clock only when
+`hasStartTime`/`hasEndTime` says that edge carries one. A bare midnight date therefore never invents
+`00:00`, while an explicitly entered midnight remains visible. All-day ends display their inclusive last
+day even though storage keeps the exclusive next-midnight edge. Recurring rows display the current
+occurrence's edges without rewriting the recurrence.
+
+Clicking either cell calls the existing `openDatePick`; editing, natural-language parsing, recurrence
+semantics and `commit()` therefore remain owned by the picker path introduced earlier. `data-date-clock`
+is the browser-test hook for the otherwise visual clock-presence distinction.
 
 ### The `% Done` column
 
@@ -255,23 +316,10 @@ future test authors: `tests/_load.js`'s `make()` passes `showCriticalPath:true`,
 to paint and no longer is — a test that wants CP paint must **opt in explicitly** with
 `c.state.settings.criticalPath = true` rather than weakening the gate.
 
-**The double-ghost is a symmetric gradient (2026-08-13).** It used to be flat grey. Grey said "inert";
-what it needs to say is *"we don't know either end"* — so the fill now enters from transparent at the left
-edge, reaches an accent core across the middle (`GHOST_BOTH_LO` → `GHOST_BOTH_HI`, mirrored about 50% by
-construction: `HI = 100 − LO`), and leaves to transparent at the right. The dotted outline is retained,
-unmasked, all round: it is still what marks the bar as derived rather than committed. This reads *against*
-the half-ghost deliberately — a half-ghost holds colour and a solid 1.5px border at one edge, and **that
-edge is the real date**; a double-ghost has no such edge anywhere, and its symmetry is the tell.
-
-The centre colour is `--ghost-core`, **per theme** (`rgba(91,155,240,0.52)` dark, `rgba(37,99,214,0.50)`
-light), replacing the retired `--ghost-flat`. It is a token and deliberately **not** the task's `base`
-colour: `base` encodes committed state (critical red, done green), and a bar with no dates has no such
-state to report. The per-theme split is not optional — a single rgba tuned against `#1a1a1b` washes out on
-`#fcfcfb`, which is the 2026-08-12 defect this whole area exists to prevent.
-`tests/e2e/ghost-contrast.spec.js` composites each token over `--gantt-bg` and measures the WCAG ratio in
-both themes (measured: core **dark 2.59:1 / light 2.14:1**; dots **dark 7.24:1 / light 3.70:1**; floor
-1.6:1), and rasterises the *live* bar's computed gradient to assert the two edge alphas are equal to each
-other and the centre is not.
+**Ghost paint is retired (Chain 6 block 47).** Start-only and end-only tasks are ordinary solid bars whose
+missing side clamps to the visible row edge; tasks with neither date draw no bar. `ghostSpan` deliberately
+survives as a finite scheduling predicate and is not a rendering contract. The ghost CSS tokens, gradient
+helpers, dotted outlines, and viewport-fraction widening are deleted.
 
 **The in-today channel is deleted from Gantt bars (2026-08-13).** The +45° gold hatch, the whole-bar
 `BAR_OPTED_OUT_OPACITY` mute, and the `☐`/`💤` top-right glyphs are all gone, along with the constant. This

@@ -103,12 +103,11 @@ depth went on 2026-08-12** — sheet and Gantt rows now carry only selection/hov
 critical-path inset and the calendar glow. Inclusion is read from `taskInclControl`'s glyph. See
 `ui-runtime.md` for why (an ambient channel cannot encode a state most rows hold).
 
-A **dateless recurring** task is expanded from a derived anchor rather than dropped. `renderVals` used to
-give one an empty occurrence list; since 2026-08-12 it expands a shadow task built from `recurGhostAnchor`
-(pure: anchor on whichever of start/due exists, else today; every occurrence one day) with each occurrence
-flagged ghost. `t.start`/`t.end` stay null — dragging an edge commits a real date through the normal
-bar-drag path. `ghostDrawSpan` skips its view-fraction floor for any occurrence carrying `occ`, since a
-series tiles and does not need any one member enlarged.
+A **dateless recurring** task is expanded from a derived anchor rather than dropped from scheduling.
+`renderVals` builds a shadow task with `recurGhostAnchor` (pure: anchor on whichever of start/due exists,
+else today; every occurrence one day), while `t.start`/`t.end` stay null. Chain 6 block 47 removes the
+old ghost paint: a task with neither raw edge now keeps an empty Gantt row, while these derived occurrences
+remain available to the scheduling predicates.
 
 **Dependency scheduling** (2026-08-14). `autoSchedule` pushes each task's dates so a finish-to-start edge
 is never violated, and the rule is `Math.max(t.start, floor)` — strictly monotone, so a predecessor moved

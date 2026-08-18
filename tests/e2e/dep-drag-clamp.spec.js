@@ -66,7 +66,12 @@ test.describe('dependency drag clamp', () => {
 
     /* (2) The bar itself actually stopped, rather than being corrected afterwards. */
     const held = await box(page, BAR_B);
-    expect(held.x, 'B stops at A\'s end mid-drag instead of crossing it').toBeGreaterThan(aRight - 3);
+    /* Chain 6 block 43 makes a due day inclusive in paint. A.end is the START of A's final
+       painted day, so B correctly shares that date column while still respecting the exact
+       finish-to-start instant. A spans three painted days in this fixture. */
+    const aEndDayLeft = aRight - a.width / 3;
+    expect(held.x, 'B stops at A.end (the left edge of A\'s inclusive due day) mid-drag')
+      .toBeGreaterThan(aEndDayLeft - 3);
 
     await page.mouse.up();
 

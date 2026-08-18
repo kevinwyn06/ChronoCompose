@@ -1,16 +1,16 @@
-// Gantt ergonomics (workstream C): sub-day zoom clamp, bar-draw width floor, and the
+// Gantt ergonomics: continuous day zoom clamp, bar-draw width floor, and the
 // dependency-driven scheduling invariant (finish-to-start, forward-only) that the docs describe.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { make, DAY } = require('./_load');
 
-// ---- C2: sub-day zoom bounds ----
+// ---- continuous day zoom bounds ----
 test('clampDayW keeps the zoom within [GANTT_DAYW_MIN, GANTT_DAYW_MAX]', () => {
   const c = make();
   assert.strictEqual(c.clampDayW(1), c.GANTT_DAYW_MIN);      // below floor
   assert.strictEqual(c.clampDayW(99999), c.GANTT_DAYW_MAX);  // above cap
   assert.strictEqual(c.clampDayW(300), 300);                 // in range — past the old 120 cap
-  assert.ok(c.GANTT_DAYW_MAX > 120, 'cap raised beyond the old one-day-ish 120 so hours are reachable');
+  assert.ok(c.GANTT_DAYW_MAX > 120, 'wide day columns remain reachable without changing granularity');
 });
 
 // ---- C1: bar-draw width (a zero/negative span must never render as a zero-length point) ----
@@ -20,6 +20,106 @@ test('effBarEnd: a zero/negative span draws one full day; a real span draws itse
   assert.strictEqual(c.effBarEnd(st, st), st + DAY);          // zero span → one day wide
   assert.strictEqual(c.effBarEnd(st, st - 1000), st + DAY);   // inverted → one day wide
   assert.strictEqual(c.effBarEnd(st, st + 3 * DAY), st + 3 * DAY); // real forward span unchanged
+});
+
+// ---- Chain 6 block 43: day-only Gantt geometry ----
+test('ganttDayBarGeometry renders inclusive whole-day spans independent of clock time', () => {
+  const c = make();
+  assert.strictEqual(JSON.stringify(c.ganttDayBarGeometry(4, 4, 42, 0, 20)),
+    JSON.stringify({ left: 168, width: 42, first: 4, last: 4 }));
+  assert.strictEqual(JSON.stringify(c.ganttDayBarGeometry(4, 6, 42, 0, 20)),
+    JSON.stringify({ left: 168, width: 126, first: 4, last: 6 }));
+});
+
+test('ganttDayBarGeometry clamps open edges to each virtual window at every zoom and scroll', () => {
+  const c = make();
+  for (const dayW of [3, 42, 720]) {
+    assert.strictEqual(JSON.stringify(c.ganttDayBarGeometry(5, null, dayW, 0, 12)),
+      JSON.stringify({ left: 5 * dayW, width: 7 * dayW, first: 5, last: 11 }), 'start-only at zoom ' + dayW);
+    assert.strictEqual(JSON.stringify(c.ganttDayBarGeometry(5, null, dayW, 8, 16)),
+      JSON.stringify({ left: 8 * dayW, width: 8 * dayW, first: 8, last: 15 }), 'start-only after scroll at zoom ' + dayW);
+    assert.strictEqual(JSON.stringify(c.ganttDayBarGeometry(null, 11, dayW, 8, 16)),
+      JSON.stringify({ left: 8 * dayW, width: 4 * dayW, first: 8, last: 11 }), 'end-only after scroll at zoom ' + dayW);
+  }
+  assert.strictEqual(c.ganttDayBarGeometry(null, null, 42, 0, 12), null,
+    'fully dateless tasks leave the Gantt row empty');
+  assert.strictEqual(c.ganttDayBarGeometry(20, null, 42, 0, 12), null,
+    'a future start-only task does not paint before its committed edge');
+  assert.strictEqual(c.ganttDayBarGeometry(null, 3, 42, 8, 16), null,
+    'a past end-only task does not paint after its committed edge');
+});
+
+// ---- Chain 6 block 44: recurring occurrences merge by consecutive calendar day ----
+test('mergeConsecutiveOccurrenceDays turns a daily series into one continuous run without mutating input', () => {
+  const c = make();
+  const base = new Date(2026, 7, 17, 9, 0, 0, 0).getTime();
+  const occs = Array.from({ length: 7 }, (_, idx) => ({
+    idx, start: base + idx * DAY, end: base + idx * DAY + 60 * 60 * 1000, occ: true,
+  }));
+  const before = JSON.stringify(occs);
+  const runs = c.mergeConsecutiveOccurrenceDays(occs);
+
+  assert.strictEqual(runs.length, 1);
+  assert.strictEqual(runs[0].idx, 0, 'the run retains the first occurrence identity for compatibility');
+  assert.deepStrictEqual(Array.from(runs[0].runOccIdxs), [0, 1, 2, 3, 4, 5, 6],
+    'the projection carries explicit membership instead of pretending the run is occurrence zero');
+  assert.strictEqual(runs[0].runFirstStart, occs[0].start);
+  assert.strictEqual(runs[0].runFirstEnd, occs[0].end);
+  assert.strictEqual(runs[0].runLastStart, occs[6].start);
+  assert.strictEqual(runs[0].runLastEnd, occs[6].end);
+  assert.strictEqual(runs[0].start, occs[0].start);
+  assert.strictEqual(runs[0].end, occs[6].end);
+  assert.strictEqual(JSON.stringify(occs), before, 'the pure merge leaves its input untouched');
+});
+
+test('mergeConsecutiveOccurrenceDays keeps weekday runs apart across weekend gaps', () => {
+  const c = make();
+  const monday = new Date(2026, 7, 17, 9, 0, 0, 0).getTime();
+  const offsets = [0, 1, 2, 3, 4, 7, 8, 9, 10, 11];
+  const occs = offsets.map((offset, idx) => ({
+    idx, start: monday + offset * DAY, end: monday + offset * DAY + 60 * 60 * 1000, occ: true,
+  }));
+  const runs = c.mergeConsecutiveOccurrenceDays(occs);
+
+  assert.strictEqual(runs.length, 2);
+  assert.strictEqual(JSON.stringify(runs.map(r => [r.start, r.end])), JSON.stringify([
+    [occs[0].start, occs[4].end],
+    [occs[5].start, occs[9].end],
+  ]));
+});
+
+test('mergeConsecutiveOccurrenceDays leaves weekly occurrences as separate blocks', () => {
+  const c = make();
+  const monday = new Date(2026, 7, 17, 9, 0, 0, 0).getTime();
+  const occs = [0, 7, 14].map((offset, idx) => ({
+    idx, start: monday + offset * DAY, end: monday + offset * DAY + 60 * 60 * 1000, occ: true,
+  }));
+  const runs = c.mergeConsecutiveOccurrenceDays(occs);
+
+  assert.strictEqual(runs.length, 3);
+  assert.strictEqual(JSON.stringify(runs.map(r => [r.start, r.end])),
+    JSON.stringify(occs.map(o => [o.start, o.end])));
+});
+
+test('mergeConsecutiveOccurrenceDays treats local dates across a DST boundary as consecutive', () => {
+  const c = make();
+  const beforeFallback = new Date('2026-11-01T09:00:00-07:00').getTime();
+  const afterFallback = new Date('2026-11-02T09:00:00-08:00').getTime();
+  assert.strictEqual(afterFallback-beforeFallback, 25*60*60*1000, 'fixture crosses the fallback hour');
+  const occs = [
+    { idx: 0, start: beforeFallback, end: beforeFallback + 60 * 60 * 1000, occ: true },
+    { idx: 1, start: afterFallback, end: afterFallback + 60 * 60 * 1000, occ: true },
+  ];
+  const runs = c.mergeConsecutiveOccurrenceDays(occs);
+
+  assert.strictEqual(runs.length, 1, 'calendar adjacency does not depend on a fixed 24-hour delta');
+  assert.strictEqual(runs[0].end, occs[1].end);
+});
+
+test('consecutive recurrence rendering replaces the dense hatched-strip helpers', () => {
+  const c = make();
+  assert.strictEqual(typeof c.recurTooDense, 'undefined');
+  assert.strictEqual(typeof c.ganttRecurStrip, 'undefined');
 });
 
 // ---- C4: dependency-driven scheduling (verify the documented behaviour) ----
@@ -75,6 +175,35 @@ function findAll(node, pred, out){
 const styleOf = n => (n.props && n.props.style) || {};
 const px = v => parseFloat(String(v || 0));
 
+test('clocked and all-day tasks on the same date render with identical bar geometry', () => {
+  const c = ganttReady();
+  const localBase = new Date(2026, 6, 1).getTime();
+  c._tl = { start: localBase, days: 60 };
+  c._vwin = { d0: 0, d1: 20 };
+  const clocked = mkTask(c, { id: 'clocked', start: localBase + 14 * 3600000, end: localBase + 15 * 3600000 });
+  const allDay = mkTask(c, { id: 'all-day', start: localBase, end: localBase + DAY, allDay: true });
+  const a = styleOf(c.ganttBlock(clocked, 0, occOf(clocked)));
+  const b = styleOf(c.ganttBlock(allDay, 0, occOf(allDay)));
+  assert.strictEqual(a.left, b.left);
+  assert.strictEqual(a.width, b.width);
+});
+
+test('a start-only rendered bar reclamps when the virtual window scrolls', () => {
+  const c = ganttReady();
+  const localBase = new Date(2026, 6, 1).getTime();
+  c._tl = { start: localBase, days: 60 };
+  const t = mkTask(c, { id: 'open-right', start: localBase + 5 * DAY, end: null });
+  const o = { idx: 0, start: t.start, end: t.start + DAY, ghost: true, ghostStart: false, ghostEnd: true };
+  c._vwin = { d0: 0, d1: 12 };
+  const before = styleOf(c.ganttBlock(t, 0, o));
+  c._vwin = { d0: 8, d1: 16 };
+  const after = styleOf(c.ganttBlock(t, 0, o));
+  assert.strictEqual(before.left, (5 * c.state.dayW) + 'px');
+  assert.strictEqual(before.width, (7 * c.state.dayW) + 'px');
+  assert.strictEqual(after.left, (8 * c.state.dayW) + 'px');
+  assert.strictEqual(after.width, (8 * c.state.dayW) + 'px');
+});
+
 test('a Gantt bar owns its own hover state (the row stripe alone cannot keep hoverId set)', () => {
   const c = ganttReady();
   const t = mkTask(c);
@@ -86,13 +215,10 @@ test('a Gantt bar owns its own hover state (the row stripe alone cannot keep hov
   bar.props.onMouseLeave();
   assert.strictEqual(c.state.hoverId, null, 'leaving the bar clears it');
 
-  // The same defect hit the milestone diamond and the collapsed-recurrence strip.
+  // The same defect hit the milestone diamond.
   const ms = mkTask(c, { id: 'g2', type: 'Milestone' });
   assert.strictEqual(typeof c.ganttBlock(ms, 0, occOf(ms)).props.onMouseEnter, 'function',
     'milestone diamond hovers its row too');
-  const rt = mkTask(c, { id: 'g3', recur: { kind: 'day', n: 1, label: 'Daily' } });
-  const strip = c.ganttRecurStrip(rt, 0, [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }]);
-  assert.strictEqual(typeof strip.props.onMouseEnter, 'function', 'recurrence strip hovers its row too');
 });
 
 // Owner tenet (2026-07-26): "all the clickboxes are all too tiny. Humans do not have machine
@@ -278,8 +404,8 @@ test('no Gantt shape renders its task name as text; the tooltip still carries it
     ['ghost bar', c.ganttBlock(wide, 0,
       { idx: 0, start: wide.start, end: wide.end, ghost: true, ghostStart: true }), 'Quarterly board deck'],
     ['milestone', c.ganttBlock(ms, 0, occOf(ms)), 'Launch'],
-    ['recur strip', c.ganttRecurStrip(rt, 0,
-      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }]), 'Standup'],
+    ['merged recurrence run', c.ganttBlock(rt, 0, c.mergeConsecutiveOccurrenceDays(
+      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }])[0]), 'Standup'],
   ];
 
   for (const [what, node, name] of shapes) {
@@ -291,10 +417,8 @@ test('no Gantt shape renders its task name as text; the tooltip still carries it
       what + ' still names the task in a title tooltip');
   }
 
-  // The recurrence strip keeps its RULE chip: that is per-row, not per-occurrence, so it does not
-  // multiply with density the way the name did.
-  const strip = shapes[4][1];
-  assert.ok(textOf(strip).includes('Daily'), 'the recurrence strip still announces its rule');
+  assert.ok(!textOf(shapes[4][1]).includes('Daily'),
+    'a merged recurrence run is a plain bar with no hatch label');
 
   // The V1.5 hover contract and the drag must survive the removal.
   const dia = shapes[3][1];
@@ -393,6 +517,63 @@ test('a recurring drag previews the edge modes too, without inverting the span',
   c.dragState = { id: 'r1', occIdx: 0, mode: 'end', recurring: true, deltaMs: -30 * DAY };
   assert.ok(w(c.ganttBlock(t, 0, occs[0])) > 0, 'an over-dragged end never renders a negative span');
   c.dragState = null;
+});
+
+test('a merged recurring run previews as one interaction unit', () => {
+  const c = ganttReady();
+  const { t } = recurFixture(c);
+  const occs = [0, 1, 2].map(idx => ({ idx, start: B0 + idx * DAY, end: B0 + (idx + 1) * DAY, occ: true }));
+  const run = c.mergeConsecutiveOccurrenceDays(occs)[0];
+  const rest = styleOf(c.ganttBlock(t, 0, run));
+
+  c.dragState = { id: 'r1', occIdx: 0, runOccIdxs: [0, 1, 2], mode: 'move', recurring: true, deltaMs: 2 * DAY };
+  const moved = styleOf(c.ganttBlock(t, 0, run));
+  assert.strictEqual(px(moved.left) - px(rest.left), 2 * c.state.dayW, 'the whole run moves in preview');
+  assert.strictEqual(px(moved.width), px(rest.width), 'body drag preserves the run width');
+
+  c.dragState.mode = 'start'; c.dragState.deltaMs = -DAY;
+  const left = styleOf(c.ganttBlock(t, 0, run));
+  assert.strictEqual(px(rest.left) - px(left.left), c.state.dayW, 'left grip previews only the run boundary');
+  assert.strictEqual(px(left.width) - px(rest.width), c.state.dayW);
+
+  c.dragState.mode = 'end'; c.dragState.deltaMs = DAY;
+  const right = styleOf(c.ganttBlock(t, 0, run));
+  assert.strictEqual(px(right.left), px(rest.left));
+  assert.strictEqual(px(right.width) - px(rest.width), c.state.dayW, 'right grip previews only the run boundary');
+});
+
+test('This run commits every body member but only the grabbed edge boundary in one undo step', () => {
+  const c = ganttReady();
+  const { t } = recurFixture(c);
+  t.recur.overrides = {};
+  const occs = [0, 1, 2].map(idx => ({ idx, start: B0 + idx * DAY, end: B0 + (idx + 1) * DAY, occ: true }));
+  c._occById = { r1: occs };
+  c.state.tasks = [t];
+  c.saveTasks = () => {};
+  const apply = mode => {
+    t.recur.overrides = {};
+    const before = c.history.length;
+    c.state.scopePrompt = { kind: 'date', taskId: 'r1', occIdx: 0,
+      payload: { mode, deltaMs: mode === 'start' ? -DAY : DAY, runOccIdxs: [0, 1, 2] } };
+    c.applyScope('this');
+    assert.strictEqual(c.history.length, before + 1, mode + ' is one commit and therefore one undo step');
+    return t.recur.overrides;
+  };
+
+  let ov = apply('move');
+  assert.deepStrictEqual(Object.keys(ov), ['0', '1', '2']);
+  occs.forEach(o => {
+    assert.strictEqual(ov[o.idx].start, c.addLocalDays(o.start, 1));
+    assert.strictEqual(ov[o.idx].end, c.addLocalDays(o.end, 1));
+  });
+
+  ov = apply('start');
+  assert.deepStrictEqual(Object.keys(ov), ['0'], 'left resize edits only the first member');
+  assert.strictEqual(ov[0].start, c.addLocalDays(occs[0].start, -1));
+
+  ov = apply('end');
+  assert.deepStrictEqual(Object.keys(ov), ['2'], 'right resize edits only the last member');
+  assert.strictEqual(ov[2].end, c.addLocalDays(occs[2].end, 1));
 });
 
 test('a drag on a DIFFERENT task previews nothing here', () => {

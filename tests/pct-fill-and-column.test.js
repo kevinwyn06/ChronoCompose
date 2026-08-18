@@ -1,79 +1,28 @@
-/* Owner report 2026-08-15: "The contrast is not high enough on the left and right of the percent complete
-   bar, especially for ghost bars which already have a gradient... I think I would prefer to add percent
-   complete back as a column which then updates the gantt bars."
-
-   Two subjects, one report. `pctFillPaint` is the paint half — pure, so the ghost × pct matrix is provable
-   here rather than by eye on a chart. The column half is asserted through the existing column machinery,
-   which is the whole reason the column was added to `colDefs()` rather than special-cased. */
+/* Percent complete stays one solid success fill after Chain 6 retires ghost paint. The column half is
+   asserted through the ordinary column machinery below. */
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { make } = require('./_load');
 
-const solid = { ghost: false };
-const startGhost = { ghost: true, ghostStart: true, ghostEnd: false };  // committed END, dissolves left
-const endGhost   = { ghost: true, ghostStart: false, ghostEnd: true };  // committed START, dissolves right
-const bothGhost  = { ghost: true, ghostStart: true, ghostEnd: true };
-
-test('pctFillPaint: zero is no fill at all, on every shape', () => {
+test('pctFillPaint: zero is no fill at all', () => {
   const c = make();
-  [solid, startGhost, endGhost, bothGhost, null].forEach(o => {
-    assert.equal(c.pctFillPaint(o, 0, '#123456'), null);
-    assert.equal(c.pctFillPaint(o, -20, '#123456'), null, 'a negative pct is not a fill');
-  });
+  assert.equal(c.pctFillPaint(0), null);
+  assert.equal(c.pctFillPaint(-20), null, 'a negative pct is not a fill');
 });
 
 test('pctFillPaint: width is the pct, and the colour is the success token', () => {
   const c = make();
   [0.5, 45, 100].forEach(p => {
-    const f = c.pctFillPaint(solid, p, '#123456');
+    const f = c.pctFillPaint(p);
     assert.equal(f.width, p + '%');
     assert.equal(f.background, 'var(--success-strong)');
   });
-  assert.equal(c.pctFillPaint(solid, 140, '#123456').width, '100%', 'clamped at the bar edge');
+  assert.equal(c.pctFillPaint(140).width, '100%', 'clamped at the bar edge');
 });
 
-test('pctFillPaint: a solid bar carries no mask', () => {
+test('pctFillPaint carries no retired ghost mask fields', () => {
   const c = make();
-  const f = c.pctFillPaint(solid, 45, '#123456');
-  assert.equal(f.mask, null);
-  assert.equal(f.maskSize, null);
-});
-
-/* The point of the whole fix: on a ghost the green must dissolve on the SAME ramp as the base beneath it,
-   so the two halves of the bar stay distinguishable instead of converging into a white wash. The ramp is
-   ghostPaint's, expressed as alpha — these assertions pin the two to the same stop values. */
-test('pctFillPaint: a half-ghost masks on ghostPaint\'s own ramp, in the same direction', () => {
-  const c = make();
-  const hold = c.GHOST_FILL_HOLD, fade = c.GHOST_FILL_FADE;
-
-  const fe = c.pctFillPaint(endGhost, 45, '#123456');
-  assert.equal(fe.mask,
-    'linear-gradient(to right, #000 0%, #000 ' + hold + '%, transparent ' + fade + '%)');
-  assert.ok(c.ghostPaint(endGhost, '#123456').fill.startsWith('linear-gradient(to right,'),
-    'base dissolves to the right, so the green must too');
-
-  const fs = c.pctFillPaint(startGhost, 45, '#123456');
-  assert.equal(fs.mask,
-    'linear-gradient(to left, #000 0%, #000 ' + hold + '%, transparent ' + fade + '%)');
-  assert.ok(c.ghostPaint(startGhost, '#123456').fill.startsWith('linear-gradient(to left,'));
-});
-
-test('pctFillPaint: a double-ghost gets the symmetric core mask', () => {
-  const c = make();
-  const f = c.pctFillPaint(bothGhost, 45, '#123456');
-  assert.equal(f.mask,
-    'linear-gradient(to right, transparent 0%, #000 ' + c.GHOST_BOTH_LO + '%, '
-      + '#000 ' + c.GHOST_BOTH_HI + '%, transparent 100%)');
-});
-
-/* The mask is authored in BAR percentages but painted on an element only pct% of the bar wide. Without the
-   rescale the whole ramp compresses into the filled part and every stop lands on the wrong pixel. */
-test('pctFillPaint: maskSize rescales the ramp back to the full bar', () => {
-  const c = make();
-  assert.equal(c.pctFillPaint(endGhost, 50, '#123456').maskSize, '200% 100%');
-  assert.equal(c.pctFillPaint(endGhost, 100, '#123456').maskSize, '100% 100%',
-    'a full bar needs no rescale');
-  assert.equal(c.pctFillPaint(endGhost, 25, '#123456').maskSize, '400% 100%');
+  assert.deepEqual(c.pctFillPaint(45), {width:'45%', background:'var(--success-strong)'});
 });
 
 test('% Done is an ordinary column: present, placed, hideable, restorable', () => {

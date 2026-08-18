@@ -2,15 +2,15 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { make, DAY } = require('./_load');
 
-test('V1.5 sheet schema drops the fields edited on the Gantt bar', () => {
+test('Block 45 restores Start and End while keeping the other Gantt-only fields out', () => {
   const c = make();
   const keys = c.colDefs().map(col => col.k);
 
-  assert.equal(keys.includes('start'), false, 'Start is edited from the bar');
-  assert.equal(keys.includes('end'), false, 'Due is edited from the bar');
+  assert.equal(keys.includes('start'), true, 'Start is an ordinary sheet column again');
+  assert.equal(keys.includes('end'), true, 'End is an ordinary sheet column again');
   /* Owner 2026-08-15 reversed the % Done half of this rule: "I would prefer to add percent complete back
-     as a column which then updates the gantt bars." Dates stay bar-only — they are a two-ended span and a
-     column would need two cells — but a percentage is one scalar, so it earns a cell. */
+     as a column which then updates the gantt bars." Block 45 later restores Start and End as two ordinary
+     cells; their clocks are deliberately read here rather than from the day-granularity Gantt. */
   assert.ok(keys.includes('pct'), '% Done is a column again (owner 2026-08-15)');
   assert.ok(keys.includes('name'), 'task name remains');
   assert.ok(keys.includes('planned'), 'planned → allotted remains as one composite readout');

@@ -271,10 +271,8 @@ test('dpNudgeMonth: steps months without skipping (31st → shorter month)', () 
 
 // ---------------------------------------------------------------------------
 // V1.3 bar-as-editor — pure drag math
-// snapDragMs: pixels dragged → a snapped time delta (ms). Whole DAYS at day/week
-//   zoom; whole HOURS once zoomed into the hour grid (dayW >= GANTT_HOUR_GRID_DAYW),
-//   so a small drag on a narrow bar still moves it and tracks the cursor. all-day
-//   tasks stay day-snapped at every zoom (they own midnight-based exclusive ends).
+// snapDragMs: pixels dragged → a whole-day delta at every Gantt zoom. Bars encode
+//   dates only; clock time remains available in the day timeline.
 // barDragEdit: a drag gesture → {start,end}, ghost-aware (an UNtouched ghost edge
 //   stays null — only the dragged edge is committed to a real date).
 // ---------------------------------------------------------------------------
@@ -290,20 +288,20 @@ test('snapDragMs: at day zoom, rounds the pixel drag to the nearest whole day', 
   assert.equal(c.snapDragMs(-33, 64, false), -DAY, 'symmetric for leftward drags');
 });
 
-test('snapDragMs: zoomed into the hour grid, snaps to whole hours so small drags register', () => {
+test('snapDragMs: at the widest day zoom still snaps to whole days', () => {
   const c = make();
-  const z = c.GANTT_HOUR_GRID_DAYW; // 240 px/day => 10 px/hr
-  assert.equal(c.snapDragMs(10, z, false), HOUR, 'one hour column of drag = one hour');
-  assert.equal(c.snapDragMs(25, z, false), 3 * HOUR, 'rounds to the nearest hour');
-  assert.equal(c.snapDragMs(4, z, false), 0, 'under half an hour column snaps back to 0');
-  assert.equal(c.snapDragMs(-10, z, false), -HOUR, 'symmetric leftward');
+  const z = c.GANTT_DAYW_MAX;
+  assert.equal(c.snapDragMs(10, z, false), 0, 'sub-day drag cannot move a day-only bar');
+  assert.equal(c.snapDragMs(z/2-1, z, false), 0, 'under half a day snaps back to 0');
+  assert.equal(c.snapDragMs(z/2+1, z, false), DAY, 'over half a day moves one whole day');
+  assert.equal(c.snapDragMs(-(z/2+1), z, false), -DAY, 'symmetric leftward');
 });
 
 test('snapDragMs: an all-day task stays day-snapped even when zoomed in', () => {
   const c = make();
-  const z = c.GANTT_HOUR_GRID_DAYW;
+  const z = c.GANTT_DAYW_MAX;
   assert.equal(c.snapDragMs(10, z, true), 0, 'a sub-day drag does not nudge an all-day task');
-  assert.equal(c.snapDragMs(130, z, true), DAY, 'past half a day column it moves a whole day');
+  assert.equal(c.snapDragMs(z/2+1, z, true), DAY, 'past half a day column it moves a whole day');
 });
 
 test('zoomScrollAnchor: keeps the timeline point under the cursor fixed across a zoom', () => {
@@ -371,6 +369,56 @@ test('barDragEdit: solid bar — body move shifts both edges by the delta', () =
   const r = c.barDragEdit('move', 3 * DAY, s, e, s, e);
   assert.equal(r.start, at(2026, 6, 18, 9, 0));
   assert.equal(r.end, at(2026, 6, 23, 9, 0));
+});
+
+test('barDragEdit: civil-day moves preserve clock time across both Vancouver DST changes', () => {
+  const c = make();
+  const cases = [
+    [at(2026, 2, 7, 9, 15), at(2026, 2, 8, 9, 15), 'spring-forward'],
+    [at(2026, 9, 31, 9, 15), at(2026, 10, 1, 9, 15), 'fall-back'],
+  ];
+  for (const [start, expected, label] of cases) {
+    const end = c.addLocalDays(start, 2);
+    const r = c.barDragEdit('move', DAY, start, end, start, end);
+    assert.equal(r.start, expected, label + ' lands on the next local date at the same clock time');
+    assert.equal(new Date(r.start).getHours(), 9, label + ' does not drift the clock by an hour');
+    assert.equal(new Date(r.start).getMinutes(), 15);
+    assert.equal(r.end, c.addLocalDays(end, 1), label + ' shifts the far edge by its own civil day');
+  }
+});
+
+test('civil Gantt day indexes stay integral across Vancouver spring-forward and fall-back', () => {
+  const c = make();
+  for (const [a, b, label] of [
+    [at(2026, 2, 7), at(2026, 2, 8), 'spring-forward'],
+    [at(2026, 9, 31), at(2026, 10, 1), 'fall-back'],
+  ]) {
+    assert.equal(c.ganttDayIndex(b, a), 1, label + ' adjacent local midnights are one column apart');
+    assert.equal(c.ganttDayAt(a, 1), b, label + ' header day lookup uses local calendar addition');
+  }
+});
+
+test('recurrence drag scopes use civil days and keep clock time through DST', () => {
+  const start = at(2026, 2, 7, 9, 15), end = at(2026, 2, 7, 10, 15);
+  const { c, t } = withTask({ start, end, recur: { kind: 'day', n: 1, label: 'Daily', overrides: {}, shifts: [] } });
+  c._occById = { t1: [{ idx: 0, start, end }] };
+
+  c.state.scopePrompt = { kind: 'date', taskId: 't1', occIdx: 0, payload: { mode: 'move', deltaMs: DAY } };
+  c.applyScope('this');
+  assert.equal(t().recur.overrides[0].start, at(2026, 2, 8, 9, 15), 'this occurrence keeps 09:15');
+  assert.equal(t().recur.overrides[0].end, at(2026, 2, 8, 10, 15), 'each edge keeps its own clock');
+
+  c.state.scopePrompt = { kind: 'date', taskId: 't1', occIdx: 0, payload: { mode: 'move', deltaMs: DAY } };
+  c.applyScope('subsequent');
+  assert.equal(t().recur.shifts[0].from, 0);
+  assert.equal(t().recur.shifts[0].days, 1, 'new subsequent shifts persist civil-day provenance');
+  const expanded = c.expandTask(t(), at(2026, 2, 12));
+  assert.equal(new Date(expanded[0].start).getHours(), 9, 'expanded subsequent occurrence does not drift to 10:15');
+
+  c.state.scopePrompt = { kind: 'date', taskId: 't1', occIdx: 0, payload: { mode: 'move', deltaMs: DAY } };
+  c.applyScope('all');
+  assert.equal(t().start, at(2026, 2, 8, 9, 15), 'whole series base keeps clock time');
+  assert.equal(t().end, at(2026, 2, 8, 10, 15));
 });
 
 test('barDragEdit: deadline ghost (start=null) — dragging the ghost START commits a real start, keeps the real due', () => {
