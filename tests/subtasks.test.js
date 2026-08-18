@@ -138,5 +138,5 @@ test('addSubtask inserts directly after the parent subtree with parentId set', (
   assert.equal(ids[2], 'z', 'new subtask sits between parent and the next root');
   const sub = c.state.tasks[1];
   assert.equal(sub.parentId, 'p');
-  assert.equal(sub.planned, 0, 'unplanned by default (weight 0 until the user budgets it)');
+  assert.equal(sub.planned, null, 'unestimated by default; a deliberate zero remains distinct');
 });

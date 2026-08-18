@@ -36,17 +36,37 @@ carries the meaningful "never decided → derive from the clocks" state — and 
 are derived through the commit diff funnel and queued. Pure merge/diff helpers are tested separately from
 OAuth and network IO.
 
-**Deletions are NOT gated on `gcalTwoWay` (2026-08-13).** Every other outbound op is. `gcalTwoWay`
-defaults to **false**, and `gcalSyncOut` used to return on that flag before computing any op, so deleting
-a linked task queued no remote DELETE *and* — because the tombstone is written inside `gcalEnqueue` —
-recorded nothing locally either. The next silent `gcalImport` then found a live Google event with no
-matching task and no tombstone and re-created it, which is the owner's report that deleted tasks *"came
-back after a few minutes"*. `gcalSyncOut` now always computes the diff and, with two-way off, enqueues
-only the ops `isGcalDeleteOp` accepts (`delete`, `deleteInstance`, `cancelInsert`); `gcalFlushQueue`
-carries the matching rule and drops any non-deletion it finds while two-way is off. The asymmetry is
-deliberate: an **edit** is a continuous opinion about content and pushing it without consent would
-overwrite events ChronoCompose does not own, whereas a **delete** is one settled fact, the confirm dialog
-already promises it, and the alternative is a row that resurrects itself.
+**Calendar is two-way only (2026-08-17).** There is no `gcalTwoWay` setting or mode gate: every local
+task diff reaches `gcalEnqueue`, while `_gcalApplying` still suppresses an import echo. Existing dated
+local-only tasks are **not** swept into Google on upgrade; the `gcalBackfill` button remains the only
+broad backfill action. Newly created dated tasks and edits to linked tasks queue normally.
+
+Two queue guards make the transition safe. New operations carry `GCAL_QUEUE_VERSION = 2` plus a unique
+`queueId`; non-delete operations persisted by the retired opt-in implementation are unversioned and are
+dropped rather than unexpectedly flushed after upgrade. Legacy deletes still drain because their
+tombstones may be actively blocking resurrection. The unique id also prevents completion of an older
+in-flight PATCH from shifting a newer coalesced edit off the queue. A current pending PATCH is passed
+into `mergeCalendarEvents`, which keeps local name, dates, all-day shape, and recurrence authoritative
+until the write drains; `planned`, `goal`, `description`, and blocking retain their existing
+local-authority rules.
+
+Four ordering guards close races around that queue. Calendar restoration after account sign-in is chained
+behind the initial Supabase **task** reconciliation, so an import cannot mint a second local task id while
+the already-linked row is still waiting in the cloud pull. A failed initial pull releases its promise gate
+and schedules a retry after 30 seconds; Calendar remains blocked until one reconciliation succeeds. An
+import snapshots Calendar-owned task fingerprints when its request begins; a local edit made before the
+response merges stays authoritative even if its PATCH has already drained from the queue. Finally, absence
+from the bounded events list is never deletion evidence: every absent linked event is fetched directly by
+id, and only an authoritative 404/410 or cancelled resource permits pruning. The immediate verification
+after a successful PATCH still skips that redundant lookup once, but later polls remain safe when a move
+put the event outside the window. These guards do not reconcile or remove duplicates that already exist.
+
+**Deletion/tombstone handling remains load-bearing (2026-08-13).** The old gated funnel once queued no
+remote DELETE and — because the tombstone is written inside `gcalEnqueue` — recorded nothing locally.
+The next silent import found a live event with no matching task and no tombstone and re-created it, which
+is the owner's report that deleted tasks *"came back after a few minutes"*. A delete still supersedes
+pending writes for its task, records the event tombstone before network I/O, sends DELETE (accepting
+404/410 as already gone), and clears the tombstone only after Google accepts the deletion.
 
 **The app's own calendar is implicit (2026-08-13).** `GCAL_OWN_CAL_NAME` (`'ChronoCompose'`) is a
 **reserved** calendar name: `gcalEnsureCalendar` adopts an existing calendar with that summary

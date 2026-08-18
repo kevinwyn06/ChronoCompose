@@ -51,6 +51,10 @@ for, and its branch order is the design:
 4. otherwise → `DEFAULT_TASK_MINUTES`, now **5** (was 30). Named cost: unestimated work renders as a sliver
    in the timeline, a deliberate nudge to estimate.
 
+Creation sites preserve the same distinction: quick add without a duration, new subtasks, and imported
+all-day events write `null`; a typed zero remains `0`. Ambiguity chooser tuples shape dates only and never
+overwrite the duration parsed from quick-add text.
+
 **`clockSpanMinutes(t, B)` is the appointment-shaped predicate, and new code should use it.**
 `hasStartTime`/`hasEndTime` DERIVE a clock from the timestamp when the explicit flags are null, so "has both
 clocks" is a strictly **wider** set than "is an appointment" — a plain multi-day window at non-midnight
@@ -80,7 +84,9 @@ after a pin was found to shrink the competing count and hand the remaining tasks
 each.
 
 V2.1 makes today's participation explicit: `included===true` is pressed/in today regardless of the
-date window, while false or legacy null is unpressed. The most recently started running timer is the
+date window, while false or null is unpressed. Since 2026-08-17 creation follows datedness: a dateless
+quick task defaults to `true`, while any task carrying a start or end defaults to `null` and waits for
+its occurrence window (or a later explicit press). The most recently started running timer is the
 single stronger active state; it participates even if previously unpressed and packs no earlier than
 the current time. Other-day columns remain date-window-derived. (V2.1 also gave non-Point pressed work with
 zero `planned` a 30-minute reserve paid off the top and never compressed. **That rule is retired as of
@@ -217,6 +223,11 @@ render uses. Resetting an already-auto block writes nothing, so it never leaves 
 The fixed predicate has two load-bearing guards: it applies only on the occurrence's own start day and
 only when `end - start <= DAY`. A multi-day `Mon 09:00` to `Fri 17:00` window therefore stays flexible
 instead of consuming a whole daily pool.
+
+Recurring day-specific reads use `occOnDay(t, B)`, which returns `null` when no occurrence overlaps that
+day. `occForDay` retains its legacy always-an-object contract for guarded render paths. Derived Exact is
+therefore day-aware: an undecided recurring appointment reserves its clock span only on its real
+occurrence day; an explicit `uncompressable` decision still wins on every day.
 
 Bare dates are stored at midnight. `hasStartTime` and `hasEndTime` normally derive clock presence from the
 timestamp; nullable `startClock` / `endClock` flags only disambiguate a deliberately typed `00:00` from an

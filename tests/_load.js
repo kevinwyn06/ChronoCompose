@@ -84,7 +84,7 @@ function activeTask(c, over){
   const B = c.startOfDay(Date.now());
   return c.normalizeTask(Object.assign({
     id:'x'+Math.random().toString(36).slice(2,7), name:'t', type:'Proportional',
-    start:B-DAY, end:B+DAY, priority:4, deps:[], pct:0, planned:120, spent:0,
+    start:B-DAY, end:B+DAY, priority:4, deps:[], pct:0, planned:120, spent:0, included:true,
   }, over||{}));
 }
 

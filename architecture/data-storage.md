@@ -14,7 +14,8 @@ Scheduling-specific fields:
 | `start` / `end` | Epoch milliseconds or `null`; bare dates sit at local midnight. |
 | `planned` | Planned duration in minutes, **nullable since 2026-08-16 and three-valued**: `null` = no time given (renders `—`), `0` = deliberately zero (renders `0:00`), `> 0` = an estimate. Participates in derived shape discrimination; `requestedMinutes` is the only place the three cases are resolved. Mirrored column made nullable by migration `0013`. |
 | `uncompressable` | Tri-state, 2026-08-16. `true` = "Exact": the day reserves this task's figure off the top and never compresses it, and it is a precondition of `isFixedOn`. `false` = "Flexible". `null` = **never decided**, and `isUncompressable(t)` — the only reader — derives the answer from `clockSpanMinutes(t) != null` on every read, so a task that gains clocks later becomes Exact by itself. A stored `true`/`false` is a decision and outranks the derivation. In `SYNC_FIELDS`; **nullable** column added by migration `0013`. |
-| `included` | `true` means pressed into today; `false`/legacy `null` are unpressed. New tasks default pressed. |
+| `included` | `true` means pressed into today; `false`/`null` are unpressed. A dateless task defaults `true`; a task with either date defaults `null`, so hand-created and Calendar-imported future work does not enter today early. |
+| `includedExplicit` | Boolean provenance for `included`, added by migration `0014`. `true` only when the user manually presses work into today; `false` for dateless automatic inclusion, dated bound-derived inclusion, unpresses, defaults, and migrated legacy rows. It lets incoming sync distinguish a current decision from the old unconditional `included:true` default. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
 
@@ -147,7 +148,7 @@ silently asserts against a no-op.
 Current flags, in execution order: `allday-planned-zero`, `schedule-pins-removed`,
 `sections-from-primary-tag`, `retire-off`, `drag-pin-list`, `strip-section-tags` (2026-08-13),
 `implicit-own-calendar-tag` (2026-08-13), `planned-null-unset` (2026-08-16), `uncompressable-rederive`
-(2026-08-16).
+(2026-08-16), `included-dated-default` (2026-08-17).
 
 One further flag, `break-min-default` (2026-08-16), shares the `pp-migrations` ledger but does **not** run
 from `runOnceMigrations`: it lives in `migrateSettings`, whose only call site is `loadSettings`, and it
@@ -160,6 +161,9 @@ the one every reader sees.
 
 - **`planned-null-unset`** rewrites the stored `0` that used to mean "unset" to `null`, so `0` can start
   meaning "deliberately zero". Without it the fix reaches only tasks created after the upgrade.
+- **`allday-planned-zero`** clears legacy imported all-day estimates directly to `null`. Its result is
+  order-independent with `planned-null-unset`: either order ends at unestimated, and neither pass can
+  recreate a deliberate zero. New all-day imports also start at `null`.
 - **`break-min-default`** writes `settings.breakMin = 3` onto any workspace still holding `0`. A default
   change alone reaches nobody who has ever saved settings, which is why this is a migration and not just a
   new value in `DEFAULT_SETTINGS`.
@@ -169,6 +173,16 @@ the one every reader sees.
   The predicate is `clockSpanMinutes` — *not* `hasStartTime && hasEndTime`, which is a wider set and would
   treat plain multi-day windows as reserved-off-the-top while they never qualify as `isFixedOn`. The key is
   deliberately not the earlier `uncompressable-backfill`, which some devices already have marked done.
+
+**`included-dated-default` (2026-08-17)** clears legacy `included:true` from dated rows whose real or
+derived occurrence window does not contain today. The old default and a genuine press stored the same
+bit, so the local one-time migration necessarily clears a small number of real presses too; this
+owner-accepted cost is preferable to every future or imported event entering today permanently.
+Migration `0014` adds mirrored `includedExplicit` provenance: only a manual press writes `true`, while
+defaults, automatic inclusion, unpresses, and migrated rows carry `false`. The incoming correction runs
+only without explicit provenance, so an old-client default is still corrected but a current press survives
+pulls and later remote-winning edits. Apply `0014` before deploying a client with the field in
+`SYNC_FIELDS`; adding it causes the expected one-time full task re-push.
 
 **The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
 

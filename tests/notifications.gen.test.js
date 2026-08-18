@@ -12,7 +12,7 @@ const MIN = 60000, HOUR = 3600000;
 function T(c, over){
   return c.normalizeTask(Object.assign({
     id:'id'+Math.random().toString(36).slice(2,8), name:'t', type:'Proportional',
-    start:Date.now()-DAY, end:Date.now()+DAY, priority:4, deps:[], pct:0, planned:10, spent:0,
+    start:Date.now()-DAY, end:Date.now()+DAY, priority:4, deps:[], pct:0, planned:10, spent:0, included:true,
   }, over||{}));
 }
 function keys(list){ return list.map(s=>s.key); }

@@ -89,17 +89,17 @@ test('and the TOMBSTONE is written, which is what actually stops the resurrectio
   assert.equal(r2.added, 1, 'with no tombstone the event resurrects — this is what the owner saw');
 });
 
-test('with two-way OFF, an EDIT still does NOT push — only deletions escape the gate', () => {
+test('the retired two-way OFF value cannot gate an edit after Calendar becomes two-way only', () => {
   const c = make();
   twoWay(c, false);
   const before = linked(c, { id: 'e1', name: 'old' });
   const after = Object.assign(JSON.parse(JSON.stringify(before)), { name: 'renamed', updatedAt: Date.now() + 1 });
   c.gcalSyncOut([before], [after]);
-  assert.equal(c.loadQueue().length, 0,
-    'an edit is a continuous opinion about content and stays consent-gated; a delete is a single settled fact');
+  assert.equal(c.loadQueue().length, 1, 'old persisted settings are inert; the edit queues');
+  assert.equal(c.loadQueue()[0].op, 'patch');
 });
 
-test('with two-way ON, edits push exactly as before — the gate is unchanged in that direction', () => {
+test('the retired two-way ON value is equally inert and edits still push', () => {
   const c = make();
   twoWay(c, true);
   const before = linked(c, { id: 'e2', name: 'old' });
@@ -119,10 +119,10 @@ test('an UNLINKED task deleted with two-way off queues nothing and tombstones no
   assert.deepEqual(c.loadTombstones(), {}, 'and nothing to tombstone — it never reached Google');
 });
 
-test('isGcalDeleteOp names the escaping set exactly, so the two gates cannot drift apart', () => {
+test('isGcalDeleteOp names the legacy ops that may cross the queue-generation boundary', () => {
   const c = make();
   ['delete', 'deleteInstance', 'cancelInsert'].forEach(op =>
-    assert.equal(c.isGcalDeleteOp({ op }), true, op + ' escapes the two-way gate'));
+    assert.equal(c.isGcalDeleteOp({ op }), true, op + ' remains safe to drain from a legacy queue'));
   ['insert', 'patch', 'patchInstance'].forEach(op =>
     assert.equal(c.isGcalDeleteOp({ op }), false, op + ' does not'));
 });

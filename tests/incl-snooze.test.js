@@ -71,11 +71,12 @@ test('snoozeToday: sets snoozeUntil to start-of-tomorrow, leaves included untouc
   assert.strictEqual(c.state.tasks[0].included, true, 'snooze never touches included');
 });
 
-test('parseSnoozeText: reuses parseDurPhrase for explicit "for Nh/m" phrases', () => {
+test('parseSnoozeText: sub-day explicit and bare durations floor forward to tomorrow', () => {
   const c = make();
   const now = new Date(2026, 6, 21, 10, 0, 0).getTime(); // Tue 2026-07-21 10:00
-  const ms = c.parseSnoozeText('for 3 hours', now);
-  assert.strictEqual(ms, c.startOfDay(now), 'floored to the day-only boundary parseDurPhrase\'s minutes land in');
+  const tomorrow = c.startOfDay(new Date(2026, 6, 22).getTime());
+  assert.strictEqual(c.parseSnoozeText('for 3 hours', now), tomorrow, 'an explicit sub-day duration must not snooze to today');
+  assert.strictEqual(c.parseSnoozeText('30m', now), tomorrow, 'the new bare duration must not snooze to today');
 });
 
 test('parseSnoozeText: falls back to chrono.parse for bare durations and absolute anchors', () => {

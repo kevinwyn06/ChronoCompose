@@ -26,3 +26,10 @@ Known gap: R7 two-day windows (for example `start Mon due Fri`) remain an expect
 current extraction path returns one date per line. Keep regression fixtures in `tests/quickadd.test.js`;
 do not broaden cue matching without adversarial cases for title-word collisions and deadline/start
 inversion.
+
+A single bare number plus duration unit (`30m`, `1.5h`) is a movable budget only when it is the sole
+temporal token. The parser masks that candidate before chrono extraction, then claims it only if no
+date, clock, recurrence, or repeat-until token won; otherwise it restores the candidate as title text.
+Unitless numbers and non-duration units remain ordinary text. The snooze parser accepts the same bare
+form, but any snooze resolving to today is floored forward to tomorrow so a sub-day duration has an
+observable effect.

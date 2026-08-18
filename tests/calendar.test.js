@@ -102,7 +102,7 @@ test('pruneDeletedEvents: removes deleted, keeps manual and unselected-calendar 
   const other = c.normalizeTask({ id:'O', name:'other-cal', calendarId:'cal2', eventId:'e_other' });
   const tasks = [live, dead, manual, other];
   const results = [{ cid:'cal1', items:[ { id:'e_live', start:{dateTime:'2026-07-01T09:00:00Z'} } ] }];
-  const removed = c.pruneDeletedEvents(tasks, results, ['cal1']);
+  const removed = c.pruneDeletedEvents(tasks, results, ['cal1'], new Set(['cal1|e_dead']));
   assert.strictEqual(removed, 1);
   const ids = tasks.map(t=>t.id).sort();
   assert.deepEqual(ids, ['L','M','O'], 'dead removed; manual + other-cal kept');
@@ -177,7 +177,7 @@ test('pruneDeletedEvents: recurring series kept if any instance present, removed
   assert.strictEqual(c.pruneDeletedEvents(tasks, results, ['cal1']), 0, 'kept when an instance present');
   assert.strictEqual(tasks.length, 1);
   results = [{ cid:'cal1', items:[] }];
-  assert.strictEqual(c.pruneDeletedEvents(tasks, results, ['cal1']), 1, 'removed when no instances');
+  assert.strictEqual(c.pruneDeletedEvents(tasks, results, ['cal1'], new Set(['cal1|m1'])), 1, 'removed when direct verification says the series is gone');
   assert.strictEqual(tasks.length, 0);
 });
 
@@ -187,7 +187,7 @@ test('pruneDeletedEvents: cleans dangling deps on survivors', () => {
   const keep = c.normalizeTask({ id:'K', name:'keep', calendarId:'cal1', eventId:'e_live', deps:['D', { id:'other', occ:0 }] });
   const tasks = [dead, keep];
   const results = [{ cid:'cal1', items:[ { id:'e_live', start:{dateTime:'2026-07-01T09:00:00Z'} } ] }];
-  c.pruneDeletedEvents(tasks, results, ['cal1']);
+  c.pruneDeletedEvents(tasks, results, ['cal1'], new Set(['cal1|e_dead']));
   const k = tasks.find(t=>t.id==='K');
   assert.ok(!k.deps.some(d=>c.depId(d)==='D'), 'dep on removed task cleaned');
   assert.ok(k.deps.some(d=>c.depId(d)==='other'), 'unrelated dep kept');

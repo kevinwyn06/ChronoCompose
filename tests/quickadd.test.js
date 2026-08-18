@@ -202,6 +202,42 @@ test('parseDateText: fractional hour duration', () => {
   assert.strictEqual(r.dur, 90);
 });
 
+test('parseDateText: a bare number and unit is a duration only when it is the sole temporal token', () => {
+  const c = make();
+  const durationOnly = c.parseDateText('write report 30m', BASE);
+  assert.strictEqual(durationOnly.dur, 30);
+  assert.strictEqual(durationOnly.start, null);
+  assert.strictEqual(durationOnly.date, null);
+  assert.strictEqual(durationOnly.rest, 'write report');
+  assert.deepStrictEqual(spansOf(c, 'write report 30m').map(x=>[x.kind,x.text]), [['duration','30m']]);
+
+  const clockWins = c.parseDateText('meeting 3pm 30m', BASE);
+  assert.strictEqual(clockWins.dur, null, 'a clock prevents the bare token becoming a duration');
+  assert.strictEqual(clockWins.startClock, true);
+  assert.strictEqual(new Date(clockWins.start).getHours(), 15);
+  assert.strictEqual(clockWins.rest, 'meeting 30m', 'the losing token remains ordinary title text');
+
+  const dateWins = c.parseDateText('meeting tomorrow 30m', BASE);
+  assert.strictEqual(dateWins.dur, null, 'a date prevents the bare token becoming a duration');
+  assert.strictEqual(dateWins.rest, 'meeting 30m');
+
+  const recurrenceWins = c.parseDateText('review 30m every week', BASE);
+  assert.strictEqual(recurrenceWins.dur, null);
+  assert.strictEqual(recurrenceWins.recur.kind, 'week');
+  assert.strictEqual(recurrenceWins.rest, 'review 30m');
+});
+
+test('parseDateText: bare-duration arbitration preserves unitless and title-word collisions', () => {
+  const c = make();
+  for(const text of ['buy 2 apples', 'run 5k', 'route 66', 'vitamin B12']){
+    const r = c.parseDateText(text, BASE);
+    assert.strictEqual(r.dur, null, text);
+    assert.strictEqual(r.date, null, text);
+    assert.strictEqual(r.rest, text, text);
+    assert.deepStrictEqual(spansOf(c, text), [], text);
+  }
+});
+
 test('parseDateText: an ambiguous bare "N to M" is not a time range', () => {
   const c = make(); // "5 to 6 apples" is a count, not 17:00-18:00
   const r = c.parseDateText('buy 5 to 6 apples', BASE);

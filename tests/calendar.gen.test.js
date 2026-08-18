@@ -126,13 +126,13 @@ test('mergeCalendarEvents: timed event -> planned = actual gcal duration in minu
   assert.equal(t.type, 'Proportional'); // no explicit marker -> still Proportional
 });
 
-test('mergeCalendarEvents: all-day event -> planned left blank (0)', () => {
+test('mergeCalendarEvents: all-day event -> planned left unestimated (null)', () => {
   const c = make();
   const tasks = [];
   const ev = { id:'allday2', status:'confirmed', summary:'Holiday',
     start:{ date:'2026-07-04' }, end:{ date:'2026-07-05' }, description:'' };
   c.mergeCalendarEvents(tasks, results('cal1', [ev]), {}, calById('cal1','Work'));
-  assert.equal(tasks[0].planned, 0);
+  assert.equal(tasks[0].planned, null);
 });
 
 test('mergeCalendarEvents: legacy //planned-duration and //goal markers are ignored', () => {
@@ -231,7 +231,7 @@ test('mergeCalendarEvents: recurring re-import stays a single task', () => {
 test('pruneDeletedEvents: removes calendar tasks whose event is gone', () => {
   const c = make();
   const tasks = [ c.normalizeTask({ id:'t1', name:'gone', eventId:'ev1', calendarId:'cal1' }) ];
-  const removed = c.pruneDeletedEvents(tasks, results('cal1', []), ['cal1']);
+  const removed = c.pruneDeletedEvents(tasks, results('cal1', []), ['cal1'], new Set(['cal1|ev1']));
   assert.equal(removed, 1);
   assert.equal(tasks.length, 0);
 });
@@ -264,7 +264,7 @@ test('pruneDeletedEvents: leaves tasks from unselected calendars alone', () => {
 test('pruneDeletedEvents: cancelled instances count as gone', () => {
   const c = make();
   const tasks = [ c.normalizeTask({ id:'t1', name:'cx', eventId:'ev1', calendarId:'cal1' }) ];
-  const removed = c.pruneDeletedEvents(tasks, results('cal1', [timedEvent({ status:'cancelled' })]), ['cal1']);
+  const removed = c.pruneDeletedEvents(tasks, results('cal1', [timedEvent({ status:'cancelled' })]), ['cal1'], new Set(['cal1|ev1']));
   assert.equal(removed, 1);
   assert.equal(tasks.length, 0);
 });
@@ -284,7 +284,7 @@ test('pruneDeletedEvents: cleans dangling deps pointing at removed tasks', () =>
   const gone = c.normalizeTask({ id:'g1', name:'gone', eventId:'ev1', calendarId:'cal1' });
   const keep = c.normalizeTask({ id:'k1', name:'keep', deps:['g1'] });
   const tasks = [gone, keep];
-  const removed = c.pruneDeletedEvents(tasks, results('cal1', []), ['cal1']);
+  const removed = c.pruneDeletedEvents(tasks, results('cal1', []), ['cal1'], new Set(['cal1|ev1']));
   assert.equal(removed, 1);
   assert.deepEqual([...keep.deps], []); // dependency on removed task cleaned
 });

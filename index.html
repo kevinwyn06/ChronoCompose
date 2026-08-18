@@ -395,6 +395,10 @@ class Component extends DCLogic {
     this.GCAL_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one write
     this.GCAL_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped
     this.GCAL_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-event ids kept this long to block re-import
+    /* PP-EXT (owner 2026-08-17): queue generation 2 is the always-two-way contract. Non-delete writes
+       persisted by the old opt-in mode have no generation and must never spring to life after upgrade;
+       legacy deletes remain valid because their tombstones are actively blocking resurrection. */
+    this.GCAL_QUEUE_VERSION = 2;
     /* PP-EXT (owner 2026-08-13): the app's OWN Google calendar. The name is RESERVED — gcalEnsureCalendar
        adopts an existing calendar with exactly this summary rather than making a second one, so it was
        already load-bearing while living as a bare string literal in two places. Named here per the
@@ -415,6 +419,7 @@ class Component extends DCLogic {
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
     this.SYNC_TOMBSTONE_TTL_MS = 30*86400000;  // deleted-row ids kept this long so a pull can't resurrect them
+    this.SYNC_INITIAL_RETRY_MS = 30000;         // failed sign-in task reconciliation retries before Calendar can restore
     /* PP-EXT B3b: gcal events.watch push (gcal-watch/gcal-notify Edge Functions + gcal_pings doorbell). */
     this.GCAL_WATCH_RESYNC_MS = 6*3600000;     // re-assert watch channels at most this often per tab
     this.GCAL_PING_DEBOUNCE_MS = 1200;         // coalesce a burst of pushes (a bulk edit) into one import
@@ -788,7 +793,6 @@ class Component extends DCLogic {
     every real transition between two tasks costs a minute or two, and a plan that denies it runs late from
     the first hand-off. 3 is small enough that the pool barely moves and large enough to be honest. Existing
     workspaces hold the old 0 in their persisted blob, so migrateSettings delivers this to them. */, gcalPollSec:60,
-    gcalTwoWay:false, /* PP-EXT: push local changes to Google (off until the owner signs off, see ROADMAP Phase 2) */
     syncEnabled:false, /* PP-EXT B1: offline-first Supabase sync; off until the owner signs in (B2 flips it on). Funnel + updatedAt stamping are inert while false. */
     autoArchiveDays:0, /* PP-EXT: grace days before a completed task auto-archives off the task page (0 = immediate). See Archive page. */
     multitask:false, /* PP-EXT V2.4: OFF = strict single timer (starting one stops every other). ON restores the legacy concurrent-timer behavior. Switching the ACTIVE task stops only the prior active either way. */
@@ -838,6 +842,7 @@ class Component extends DCLogic {
      settings write. Until then the in-memory value is the correct one, and that is what every reader uses. */
   migrateSettings(s){
     const out=Object.assign({}, s||{});
+    delete out.gcalTwoWay; /* PP-EXT (owner 2026-08-17): Calendar is two-way only; shed the retired persisted toggle. */
     try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
       if(!done['break-min-default']){
         if((+out.breakMin||0)===0) out.breakMin=3;
@@ -881,7 +886,11 @@ class Component extends DCLogic {
       /* PP-EXT: clock flags only disambiguate an explicit 00:00 from a bare midnight date.
          null = derive from the timestamp; true/false = an explicit user time choice. */
       startClock:null, endClock:null,
-      included:true, /* PP-EXT V2.1: pressed = in today. New tasks start pressed; false/null are unpressed legacy/off states. */
+      included:(t && (t.start!=null || t.end!=null)) ? null : true,
+      includedExplicit:false, /* PP-EXT (36 review): provenance for a manual press; automatic/default inclusion is never explicit. Mirrored by migration 0014. */
+      /* PP-EXT (owner 2026-08-17): creation defaults follow intent visible in the dates. A dateless quick
+         chore starts pressed into today; any task with a real date starts undecided and lets its window
+         decide when it arrives. Object.assign below still preserves an explicit true/null decision. */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       blocking:null, /* PP-EXT (10): busy-interval semantics for this task's fixed span. TRI-STATE —
          true = blocking (nothing schedules through it), false = background (a Work-shaped container the
@@ -918,10 +927,11 @@ class Component extends DCLogic {
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
     return n;
   }
-  /* PP-EXT: one-time cleanup — zero out planned time that old imports stamped onto all-day tasks (60m default).
-     New imports already set all-day planned to 0; this only scrubs previously-persisted data, once. Planned
-     stays user-editable afterwards (it is NOT re-zeroed on every load). Returns the number of tasks changed. */
-  migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned){ t.planned=0; n++; } }); return n; }
+  /* PP-EXT: one-time cleanup — clear planned time that old imports stamped onto all-day tasks (60m default).
+     New imports already leave all-day planned null; this only scrubs previously-persisted data, once. Planned
+     stays user-editable afterwards (it is NOT re-cleared on every load). Writing null also makes this cleanup
+     order-independent with `planned-null-unset`; neither migration can recreate a deliberate zero. */
+  migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned!=null){ t.planned=null; n++; } }); return n; }
   /* PP-EXT: one-time cleanup for the pin removal. The parser used to stamp a bare day with a 9am
      placeholder and mark it startClock:false; bare days are now plain midnight, so collapse those
      starts and drop the flag back to null (derive). pinStart/pinEnd no longer exist because every
@@ -985,6 +995,11 @@ class Component extends DCLogic {
          need the sweep. */
       if(!done['uncompressable-rederive']){ const n=this.migrateUncompressable(tasks); done['uncompressable-rederive']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-08-17): the old unconditional included:true default pressed dated work into
+         today before its window. The stored bit cannot distinguish that default from a genuine press;
+         the owner accepted clearing both for dated rows whose window does not contain today. */
+      if(!done['included-dated-default']){ const n=this.migrateIncludedDatedDefault(tasks); done['included-dated-default']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       /* /PP-EXT */
       /* PP-EXT (owner 2026-08-14): "get rid of the calendar tags" — the retroactive half for EVERY
          calendar, not just the reserved one.
@@ -1011,7 +1026,30 @@ class Component extends DCLogic {
      the tasks it converts, unlike `setIncludedOff`: the user turned these off before unpressed could bring
      anything back, so honouring the new rule means letting their triggers run. */
   migrateRetireOff(tasks){
-    let n=0; (tasks||[]).forEach(t=>{ if(t && t.included===false){ t.included=null; n++; } }); return n;
+    let n=0; (tasks||[]).forEach(t=>{ if(t && t.included===false){ t.included=null; t.includedExplicit=false; n++; } }); return n;
+  }
+  /* PP-EXT (owner 2026-08-17 + review): true used to be both a creation default and a real press.
+     `includedExplicit` (migration 0014) now separates current manual presses from legacy/default true.
+     The ruled one-time migration still clears ambiguous legacy local rows, while incoming current-client
+     presses survive every pull. PURE-ish (wall-clock only), mutates, idempotent. */
+  datedWindowIncludesDay(t, B){
+    if(!t || (t.start==null && t.end==null)) return false;
+    let win=null;
+    if(this.isScheduled(t)){
+      if(t.recur){
+        const dayEnd=B+this.DAY;
+        win=this.expandTask(t, dayEnd).find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd))||null;
+      } else win=t;
+    } else win=this.ghostSpan(t, B);
+    return !!(win && win.start!=null && win.end!=null
+      && this.startOfDay(win.start)<=B && B<=this.startOfDay(win.end));
+  }
+  migrateIncludedDatedDefault(tasks){
+    const B=this.startOfToday(); let n=0;
+    (tasks||[]).forEach(t=>{ if(t && t.included===true && t.includedExplicit!==true
+      && (t.start!=null || t.end!=null) && !this.datedWindowIncludesDay(t,B)){
+        t.included=null; t.includedExplicit=false; n++; } });
+    return n;
   }
   /* PP-EXT (owner 2026-08-16): `planned:0` used to be the DEFAULT for a task nobody had estimated — the
      value and "never chosen" were the same thing, so every existing workspace stores 0 for work whose
@@ -1579,7 +1617,7 @@ class Component extends DCLogic {
     window.removeEventListener('blur', this._onBlur); /* PP-EXT V2.9 §1 */
     window.removeEventListener('storage', this._onStorage); /* PP-EXT */
     clearInterval(this._tickRun); clearInterval(this._tickIdle); clearInterval(this._gcalPoll); clearTimeout(this._gcalSoon); clearTimeout(this._gcalFlushT); clearTimeout(this._summaryT); /* PP-EXT */
-    clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); clearTimeout(this._syncKvFlushT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 + B3a */
+    clearTimeout(this._syncFlushT); clearTimeout(this._syncInitT); clearTimeout(this._syncKvFlushT); clearTimeout(this._syncInitialRetryT); this.syncUnsubscribeRealtime(); /* PP-EXT B2 + B3a */
     this.gcalPingUnsubscribe(); /* PP-EXT B3b */
     /* PP-EXT (31): flush what the debounce still holds, then drop the listeners. */
     try{ this.trackFlush(); }catch(e){}
@@ -1783,7 +1821,26 @@ class Component extends DCLogic {
     });
     if(this._selectAfter){ this.openDetail(this._selectAfter); this._selectAfter=null; }
   }
-  rename(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.name=val.trim()||'Untitled'; }); }
+  /* PP-EXT (owner 2026-08-17): title edits use the quick-add parser silently. Parser-owned fields and
+     the cleaned title land in the SAME commit, so one undo restores the complete pre-edit task. */
+  rename(id,val){
+    const raw=val.trim(), parsed=raw?this.parseDateText(raw):null;
+    const shaped=parsed?this.shapeParsedTask(parsed,'anchor'):null;
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      if(!shaped){ t.name='Untitled'; return; }
+      t.name=shaped.name;
+      const hasAnchor=parsed.date!=null || parsed.start!=null || parsed.end!=null || parsed.recur || parsed.mile;
+      if(hasAnchor){ t.start=shaped.start; t.end=shaped.end;
+        t.startClock=shaped.startClock; t.endClock=shaped.endClock; t.recur=shaped.recur; }
+      if(parsed.dur!=null) t.planned=shaped.planned;
+      else if(hasAnchor && t.start!=null){ const span=this.clockSpanMinutes(t,this.startOfDay(t.start));
+        if(span!=null) t.planned=span; }
+      if(shaped.priority!==4 || /\bp[1-4]\b/i.test(raw)) t.priority=shaped.priority;
+      if(shaped.labels.length) t.labels=shaped.labels.slice();
+      if(shaped.type==='Milestone') t.type='Milestone';
+    });
+  }
+  /* /PP-EXT */
   setType(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.type=val; }); }
   /* PP-EXT (owner 2026-08-12): "There is no way to switch something from a milestone to a task and vice
      versa." `setType` has always existed and worked; nothing in the UI called it, and isMilestone's
@@ -2086,8 +2143,6 @@ class Component extends DCLogic {
     const pd = this.pointDayOf(t, B);
     if(pd!=null && pd!==B) return false;
     /* /PP-EXT */
-    const win = this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, this.startOfToday());
-    const inWindow = this.startOfDay(win.start) <= B && B <= this.startOfDay(win.end);
     if(B===this.startOfToday()){
       if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
       if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
@@ -2097,6 +2152,8 @@ class Component extends DCLogic {
       return t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t); /* inherited legacy/unpressed work carries forward */
       /* /PP-EXT */
     }
+    const win = this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, this.startOfToday());
+    const inWindow = this.startOfDay(win.start) <= B && B <= this.startOfDay(win.end);
     /* PP-EXT V2.11: no `included===false` veto on other days — "Off" is retired, so a future day is decided
        by the window alone. Snooze is deliberately still today-only (see the isOptedOut note above). */
     return inWindow;
@@ -2360,7 +2417,7 @@ class Component extends DCLogic {
      (Task 4) calls these instead of the old binary include toggle. Turning on presses and clears snooze;
      snoozing never touches `included` (so an expired snooze always falls back to whatever `included`
      already was). */
-  setIncludedTrue(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.included=true; }); }
+  setIncludedTrue(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; } }); }
   /* ==== PP-EXT V2.11: "Off" is RETIRED (owner rule, 2026-08-04: *Off is a dangerous button*) ====
      `included===false` used to mean "decided against, permanently, until you say otherwise" — a state
      nothing could rescue you from, which is exactly the failure the standing tenet forbids (the
@@ -2374,13 +2431,14 @@ class Component extends DCLogic {
      turning off a carried-over task is a statement about today. */
   setIncludedOff(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
     t.included=null;
+    t.includedExplicit=false;
     /* PP-EXT V5 (block 20): auto-inclusion joins inheritance here. An opening window or an expired
        snooze would re-include the task the instant `included` went null, making the opt-out a no-op —
        so an unpress that would be immediately undone snoozes until tomorrow, exactly as for inherited
        work. Auto-inclusion is only acceptable while saying no is one gesture that actually lands. */
     if(this.isInheritedToday(t) || this.autoIncludedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
     /* /PP-EXT */
-  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.snoozeUntil=null; } }); }
+  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; } }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
      the draft untouched instead of silently clearing a snooze on a typo. */
@@ -2801,6 +2859,17 @@ class Component extends DCLogic {
     const dayEnd=B+this.DAY;
     return occs.find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd)) || this.occOf(t);
   }
+  /* PP-EXT (owner 2026-08-17): honest recurring day-specific occurrence lookup. `occForDay` deliberately
+     keeps its legacy always-an-object contract for guarded render/scheduling callers; consumers that need
+     to know whether B actually owns a recurring occurrence use this accessor. Omitted B and non-recurring
+     tasks preserve the raw/current lookup, including past deadlines that overdue readers still need. */
+  occOnDay(t, B){
+    if(B==null || !t.recur) return this.occForDay(t, B);
+    const occs=(this._occById&&this._occById[t.id])||this.expandTask(t,this._horizon||t.end);
+    const dayEnd=B+this.DAY;
+    return occs.find(o=>(o.end>o.start)?(o.start<dayEnd && o.end>B):(o.start>=B && o.start<dayEnd)) || null;
+  }
+  /* /PP-EXT */
   hasClock(ms){ const d=new Date(ms); return d.getHours()!==0 || d.getMinutes()!==0 || d.getSeconds()!==0; }
   /* Does this edge carry a user-typed time? A null flag derives from the timestamp; an explicit flag
      disambiguates a deliberate 00:00 from a bare date, which also sits at midnight. */
@@ -2818,7 +2887,7 @@ class Component extends DCLogic {
        fixedBlocksToday and into the seam's compressible set — but `notBeforeMsOf` is deliberately NOT
        touched, so it still returns the occurrence start and the packer cannot place it earlier. The
        start holds; only the end floats. */
-    if(!this.isUncompressable(t)) return false;
+    if(!this.isUncompressable(t, B)) return false;
     /* /PP-EXT */
     const oc=this.occForDay(t, B);
     if(oc.start==null || oc.end==null) return false;
@@ -2855,10 +2924,11 @@ class Component extends DCLogic {
      treats it as an appointment — so it would silently reserve against EVERY day. Rather than duplicate
      the threshold we reuse `clockSpanMinutes`, which already asks exactly this question (both clocks +
      fits a day, else null) and is already tested; `isFixedOn` has always applied the same test.
-     PURE with respect to the task, but `clockSpanMinutes` routes a recurring task through `occOf`, which
-     reads the instance occurrence caches — the same (already-tolerated) reach `isFixedOn` makes. */
-  isUncompressable(t){ if(!t) return false;
-    return t.uncompressable!=null ? !!t.uncompressable : (this.clockSpanMinutes(t) != null); }
+     PURE with respect to the task, but `clockSpanMinutes` routes a recurring task through `occOnDay`,
+     which reads the instance occurrence caches; omitted B deliberately preserves the current-occurrence
+     read used by task-level controls. */
+  isUncompressable(t, B){ if(!t) return false;
+    return t.uncompressable!=null ? !!t.uncompressable : (this.clockSpanMinutes(t, B) != null); }
   /* The tick's writer. Writes an EXPLICIT boolean — the point of the control is to record a decision,
      and a decision is what stops the derivation above from overriding it later. Routed through commit()
      like every other task mutation. */
@@ -2868,8 +2938,8 @@ class Component extends DCLogic {
      manual end (midnight clock) means "due that day" → end of that day (the old GAS EOD rule). B = the day being
      scheduled (occurrence-for-B); omitted ⇒ today. */
   dueMsOf(t, B){
-    const oc=this.occForDay(t, B);
-    if(oc.end==null) return (B!=null?B:this.startOfToday())+this.DAY; /* PP-EXT: dateless task — due = end of the day it's scheduled into (today) */
+    const oc=this.occOnDay(t, B);
+    if(!oc || oc.end==null) return (B!=null?B:this.startOfToday())+this.DAY; /* PP-EXT: dateless/non-occurring task — due = end of the day it's scheduled into (today) */
     if(t.allDay) return oc.end;
     return this.hasEndTime(t) ? oc.end : this.startOfDay(oc.end)+this.DAY;
   }
@@ -3019,7 +3089,8 @@ class Component extends DCLogic {
     if(this.isFixedOn(t, B)) return false;                      /* has a clock span → drawn as a block */
     if(this.isPointOn(t, B)) return false;                      /* clocked anchor → drawn as a caret */
     if(this.hasDragPinToday(t, B)) return false;                /* drawn as a pinned block */
-    const oc=this.occForDay(t, B);
+    const oc=this.occOnDay(t, B);
+    if(!oc) return false;
     const inst = oc.end!=null ? oc.end : oc.start;
     if(inst==null) return false;                                /* dateless → not a hover line */
     /* A real clock disqualifies; bare dates sit at midnight and remain agenda chips. */
@@ -3169,7 +3240,7 @@ class Component extends DCLogic {
     this.commit(tasks=>{
       const p=tasks.find(x=>x.id===parentId); if(!p) return;
       tasks.push(this.normalizeTask({id,name:'New subtask',type:'Proportional',parentId,
-        start:p.start,end:p.end,priority:p.priority,deps:[],pct:0,planned:0,predicted:0,
+        start:p.start,end:p.end,priority:p.priority,deps:[],pct:0,planned:null,predicted:0,
         description:'',labels:[],recur:null,completion:null}));
       this.normalizeTreeOrder(tasks); /* lands right after the parent's subtree */
     });
@@ -4363,7 +4434,7 @@ class Component extends DCLogic {
            boolean and stays the pure, day-unaware function its tests exercise directly. A raw null
            would read as "flexible" inside the seam and quietly drop every never-decided appointment
            off the reserve path — the whole defect the derivation exists to prevent. */
-        uncompressable:this.isUncompressable(t)})), avail);
+        uncompressable:this.isUncompressable(t, B)})), avail);
     /* /PP-EXT */
     /* PP-EXT (21): capacity out-param. The indicator MUST read the same two numbers the seam divides, or it
        would drift from the grid the way the retired `scheduledLoadOn` did. `demand` is the RAW ask of the
@@ -4470,8 +4541,8 @@ class Component extends DCLogic {
      through to DEFAULT_TASK_MINUTES like any other unestimated work. */
   clockSpanMinutes(t, B){
     if(!t || !this.hasStartTime(t) || !this.hasEndTime(t)) return null;
-    const oc=this.occForDay(t, B);
-    if(oc.start==null || oc.end==null || oc.end<=oc.start) return null;
+    const oc=this.occOnDay(t, B);
+    if(!oc || oc.start==null || oc.end==null || oc.end<=oc.start) return null;
     if(oc.end-oc.start > this.DAY) return null;
     return Math.round((oc.end-oc.start)/60000);
   }
@@ -4801,6 +4872,12 @@ class Component extends DCLogic {
         const maxStart = t.allDay ? ms-this.DAY : ms;
         if(t.start>maxStart) t.start=maxStart;
       }
+      /* PP-EXT (owner 2026-08-17): a clock edit always makes the booked intra-day span the plan.
+         This deliberately overwrites even a typed estimate; clockSpanMinutes owns both the clock-shape
+         and day-fit rules, and running inside this commit keeps the edit to one undo entry. */
+      const span=t.start==null ? null : this.clockSpanMinutes(t, this.startOfDay(t.start));
+      if(span!=null) t.planned=span;
+      /* /PP-EXT */
     });
   }
 
@@ -5425,12 +5502,28 @@ class Component extends DCLogic {
        from drag-to-nest, `parentId` re-parents the moving roots (their subtrees ride along via
        normalizeTreeOrder); undefined means "keep current parent" (plain reorder). */
     const vis=this._visTasks||this.state.tasks;
-    let anchorId=null; for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
     const reparent = parentId!==undefined; /* PP-EXT */
     /* PP-EXT V2.6b: `sectionId === undefined` means "leave sections alone" (a nested drop, or Group by: None);
        `null` is the real value for No section. Applied inside the SAME commit as the reorder, so one drag is
        one undo step rather than two. */
     const resection = sectionId!==undefined;
+    /* PP-EXT (owner 2026-08-17): the visible list is section-projected, while `state.tasks` deliberately
+       remains one global manual order and may be interleaved across sections. A projected next-row anchor
+       can therefore sit BEFORE the target section's rows in storage; applying it there turns a bottom drop
+       into the section's first row. Resolve an in-band next anchor when one exists, otherwise insert after
+       the target section's last persisted row. Collapsed bands have no visible rows, so the latter is also
+       the only honest translation of their shared gap index. */
+    let anchorId=null, afterId=null;
+    if(resection){
+      const byId={}; this.state.tasks.forEach(t=>byId[t.id]=t);
+      const sectionOf=t=>{ let root=t, seen={};
+        while(root&&root.parentId!=null&&byId[root.parentId]&&!seen[root.id]){ seen[root.id]=1; root=byId[root.parentId]; }
+        return root&&root.sectionId!=null ? root.sectionId : null; };
+      for(let i=to;i<vis.length;i++) if(!ids.includes(vis[i].id) && sectionOf(vis[i])===sectionId){ anchorId=vis[i].id; break; }
+      if(anchorId==null) this.state.tasks.forEach(t=>{ if(!ids.includes(t.id) && sectionOf(t)===sectionId) afterId=t.id; });
+    }else{
+      for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
+    }
     /* PP-EXT V2.9 §6: under Group by: Inclusion the drop writes `included` instead of `sectionId`, inside
        this SAME commit — one drag stays one undo step, matching the V2.6b re-section rule. Turning a row on
        also clears any snooze, so the two paths cannot disagree with setIncludedOn/Off. */
@@ -5446,13 +5539,15 @@ class Component extends DCLogic {
       if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         const on=(inclusion==='included');
         tasks.forEach(t=>{ if(!roots.has(t.id)) return;
-          if(on){ t.included=true; t.snoozeUntil=null; }
+          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; }
           /* PP-EXT V5 (block 20): mirrors setIncludedOff — auto-included work needs the same snooze or
              the drag across the divider would be silently undone by the opening window. */
-          else { t.included=null; if(this.isInheritedToday(t) || this.autoIncludedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; } }); }
+          else { t.included=null; t.includedExplicit=false;
+            if(this.isInheritedToday(t) || this.autoIncludedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; } }); }
           /* /PP-EXT */
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
-      let ti = anchorId==null ? tasks.length : tasks.findIndex(t=>t.id===anchorId);
+      const afterIndex=afterId==null ? -1 : tasks.findIndex(t=>t.id===afterId);
+      let ti = anchorId==null ? (afterIndex<0 ? tasks.length : afterIndex+1) : tasks.findIndex(t=>t.id===anchorId);
       if(ti<0) ti=tasks.length;
       tasks.splice(ti,0,...moving);
       if(reparent) this.normalizeTreeOrder(tasks); /* PP-EXT: re-gather each moved subtree contiguously under its new parent */
@@ -5869,13 +5964,19 @@ class Component extends DCLogic {
     if(!a.mer && b.mer && sh>=12 && (sh*60+sm)>=(eh*60+em)) sh-=12;
     return {sh, sm, eh, em, txt:m[0]};
   }
-  /* PP-EXT: an explicit duration phrase — "for 30m", "for 1.5h", "for 90 minutes" → {min,txt} | null.
+  /* PP-EXT: a duration phrase — "for 30m", "for 1.5h", "for 90 minutes" → {min,txt} | null.
      Must be consumed before the relative-offset pass, which would read "for 1 hour" as a +1h date offset. */
-  parseDurPhrase(s){
-    /* PP-EXT V1.1B: "for 30m", "takes 2h", or a standalone "~45m" duration (R1 movable budget). A bare
-       unprefixed number+unit is NOT accepted (too many false positives — "buy 2 apples", "run 5k"). */
+  parseDurPhrase(s, allowBare){
+    /* PP-EXT V1.1B: "for 30m", "takes 2h", or a standalone "~45m" duration (R1 movable budget).
+       Block 39 permits a bare probe only when allowBare is explicit; its caller owns collision arbitration. */
     let m=s.match(/\b(?:for|takes?)\s+(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i);
     if(!m) m=s.match(/(?:^|\s)~\s*(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i);
+    /* PP-EXT Block 39: callers may probe exactly one bare number+unit. parseDateText still decides
+       whether it is temporal only after every competing temporal pass has had its turn. */
+    if(!m && allowBare){
+      const all=Array.from(s.matchAll(/\b(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/ig));
+      if(all.length===1) m=all[0];
+    }
     if(!m) return null;
     const n=parseFloat(m[1]), unit=m[2].toLowerCase();
     const min=/^h/.test(unit) ? Math.round(n*60) : Math.round(n);
@@ -5887,13 +5988,15 @@ class Component extends DCLogic {
      parser (design doc §2). snoozeUntil is date-only, so both branches floor to startOfDay. */
   parseSnoozeText(text, now){
     now = now!=null ? now : Date.now();
-    const dp=this.parseDurPhrase(text);
-    if(dp) return this.startOfDay(now + dp.min*60000);
+    const floorForward=(ms)=>{ const day=this.startOfDay(ms), today=this.startOfDay(now);
+      return day<=today ? today+this.DAY : day; };
+    const dp=this.parseDurPhrase(text,true);
+    if(dp) return floorForward(now + dp.min*60000);
     const eng = (typeof window!=='undefined' && window.chrono) ? window.chrono : (typeof chrono!=='undefined' ? chrono : null);
     if(!eng) return null;
     const rs = eng.parse(text, new Date(now), {forwardDate:true});
     if(!rs || !rs.length) return null;
-    return this.startOfDay(rs[0].start.date().getTime());
+    return floorForward(rs[0].start.date().getTime());
   }
   /* PP-EXT: remove `frag` from `s` together with any connector word immediately before it ("submit report
      by friday" → "submit report"), so prepositions don't survive into the task title. */
@@ -6015,6 +6118,15 @@ class Component extends DCLogic {
     else if((rm=s.match(/\b(monthly|every\s+months?)\b/))){ result.recur={kind:'month',n:1,label:'Monthly'}; eatAll(/\b(?:monthly|every\s+months?)\b/); }
     else if((rm=s.match(/\b(yearly|annually|every\s+years?)\b/))){ result.recur={kind:'year',n:1,label:'Yearly'}; eatAll(/\b(?:yearly|annually|every\s+years?)\b/); }
 
+    /* PP-EXT Block 39: hide exactly one bare number+unit from chrono while the remaining temporal
+       text is resolved. Otherwise chrono invents a relative start from "30m" before arbitration. */
+    const bareProbe=(!range&&!durPh) ? this.parseDurPhrase(s,true) : null;
+    const bareProbeI=bareProbe ? s.indexOf(bareProbe.txt) : -1;
+    /* "in 2m" belongs to the existing relative-offset/month pass; its cue is another temporal token. */
+    const bareDur=bareProbe && !/\bin\s+$/i.test(s.slice(0,bareProbeI)) ? bareProbe : null;
+    let bareMasked=null;
+    if(bareDur){ const i=s.indexOf(bareDur.txt); if(i>=0){ bareMasked={i,txt:s.slice(i,i+bareDur.txt.length)}; mask(i,i+bareDur.txt.length); } }
+
     /* ---- PP-EXT: date/time extraction via chrono-node (vendored `chrono.min.js`) ----
        The pre-pass above already stripped priority, labels, the clock range and the explicit duration
        phrase, and the recurrence rule — all of which poison chrono ("for 30m" reads as a time,
@@ -6090,6 +6202,14 @@ class Component extends DCLogic {
         const d=this.atMidnight(new Date(now.getFullYear(), now.getMonth(), day));
         if(d.getTime() < this.atMidnight(new Date(now)).getTime()) d.setMonth(d.getMonth()+1);
         date=d; dateSpanText=om[0]; dateSpanIndex=om.index; claimDate(om,'date'); }
+    }
+    /* PP-EXT Block 39: claim the hidden candidate only when it is the sole temporal token. When a
+       date, clock, recurrence, or until clause wins, restore the exact aligned slice as title text. */
+    if(bareMasked){
+      if(!date && !clock && !result.recur && result.until==null){
+        result.dur=bareDur.min;
+        mark('duration',bareMasked.i,bareMasked.i+bareMasked.txt.length);
+      } else s=s.slice(0,bareMasked.i)+bareMasked.txt+s.slice(bareMasked.i+bareMasked.txt.length);
     }
     /* PP-EXT: a clock with no day means today — rolling to tomorrow if that instant already passed.
        The pre-pass strips a clock RANGE before chrono runs, so "call client 2-3pm" reaches here with a
@@ -6172,7 +6292,7 @@ class Component extends DCLogic {
       const dueEnd = result.clock ? anchorDay
         : (()=>{ const e=new Date(anchorDay); e.setHours(23,59,59,999); return e.getTime(); })();
       result.candidates = [
-        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:null, start:anchorDay, end:null, planned:0 } },
+        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:null, start:anchorDay, end:null } },
         { kind:'due',    tuple:{ startClock:null, endClock:!!result.clock, start:null, end:dueEnd } },
         /* slot 3 (block-with-default-duration) intentionally empty in v1 — gated behind §7 */
       ];
@@ -6198,6 +6318,22 @@ class Component extends DCLogic {
       || parsed.candidates.find(c=>c.kind==='anchor') || parsed.candidates[0];
     return pick ? pick.tuple : null;
   }
+  /* PP-EXT (owner 2026-08-17): the ONE pure binding from parser output to task fields. Quick-add and
+     silent title parsing share it so title cleanup, ambiguity, recurrence and clock shape cannot drift. */
+  shapeParsedTask(parsed, choice){
+    const p=parsed||{};
+    const name=String(p.rest||'').replace(/◇/g,'').replace(/\bmilestone\b/ig,'')
+      .replace(/^\s*\*/,'').replace(/\s+/g,' ').trim() || 'New task';
+    const recur=p.recur ? Object.assign({},p.recur,{until:(p.until||null),shifts:[],overrides:{}}) : null;
+    const tup=this.pickCandidate(p,choice);
+    const out={name,type:p.mile?'Milestone':'Proportional',start:p.start,end:p.end,
+      startClock:p.startClock,endClock:p.endClock,planned:p.dur==null?null:p.dur,
+      priority:p.priority||4,labels:(p.labels||[]).slice(),recur};
+    if(tup){ out.start=tup.start; out.end=tup.end; out.startClock=tup.startClock; out.endClock=tup.endClock;
+      if(tup.planned!=null) out.planned=tup.planned; }
+    return out;
+  }
+  /* /PP-EXT */
   /* PP-EXT: short am/pm clock label for the chooser ("9am", "9:30am", "2pm") — reads the anchor day's
      own clock, so it always matches what the user typed. */
   _fmtClockLabel(ms){
@@ -6633,9 +6769,9 @@ class Component extends DCLogic {
 
   /* ---------- date picker (state.datePick) ----------
      PP-EXT: the only way to EDIT a start/end date. Opens from the tasks-table date cells and the detail
-     drawer. Draft lives in state.datePick and is only written through setDate on Done/Enter, so Escape
-     or an outside click cancels cleanly and a fiddled-with time makes ONE undo entry, not one per click.
-     Accepts the same natural-language text as quick-add (parseDateText) alongside the calendar grid. */
+     drawer. Draft lives in state.datePick and is only committed on Done/Enter, so Escape or an outside
+     click cancels cleanly and a fiddled-with time makes ONE undo entry, not one per click. Natural-language
+     drafts retain parseDateText's full range/duration/clock shape; manual calendar/time drafts use setDate. */
   openDatePick(e, id, key){
     e.stopPropagation();
     const r=e.currentTarget.getBoundingClientRect();
@@ -6686,8 +6822,13 @@ class Component extends DCLogic {
   /* Live-parse the NL field; a parse failure just leaves the draft alone (the chip shows nothing). */
   dpText(v){
     const p=v.trim() ? this.parseDateText(v) : null;
-    const patch={text:v};
-    if(p && p.date!=null){ patch.ms=p.date; patch.view=p.date; }
+    const temporal=!!(p && (p.date!=null || p.start!=null || p.end!=null || p.dur!=null));
+    const patch={text:v,parsed:temporal?p:null};
+    if(p && p.date!=null){
+      const dp=this.state.datePick;
+      const edge=dp && dp.key==='end' && p.end!=null ? p.end : (p.start!=null?p.start:p.date);
+      patch.ms=edge; patch.view=edge; patch.dpTimed=!!p.clock;
+    }
     this.dpSet(patch);
   }
   dpNudgeMonth(k){ const dp=this.state.datePick; if(!dp) return;
@@ -6696,18 +6837,18 @@ class Component extends DCLogic {
   dpPickDay(dayMs){ const dp=this.state.datePick; if(!dp) return;
     const cur=new Date(dp.ms), d=new Date(dayMs);
     d.setHours(cur.getHours(), cur.getMinutes(), 0, 0);
-    this.dpSet({ms:d.getTime(), view:d.getTime()});
+    this.dpSet({ms:d.getTime(), view:d.getTime(), parsed:null});
   }
   /* Accepts "17:00", "5pm", "9" — a bare hour keeps the 24h reading. Blank clears the clock;
      junk leaves the draft untouched. */
   dpSetTime(str){ const dp=this.state.datePick; if(!dp) return;
     if(!String(str).trim()){
-      const ms=this.startOfDay(dp.ms); this.dpSet({ms,view:ms,dpTimed:false}); return;
+      const ms=this.startOfDay(dp.ms); this.dpSet({ms,view:ms,dpTimed:false,parsed:null}); return;
     }
     const tok=this.parseClockTok(str); let hh, mm;
     if(tok){ hh=this.clockH(tok,null); mm=tok.m; }
     else { const c=this.parseClock(String(str)); if(!c) return; hh=c.h; mm=c.m; }
-    const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime(),dpTimed:true});
+    const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime(),dpTimed:true,parsed:null});
   }
   /* Monday-first month grid; null cells pad the leading/trailing week. */
   dpGrid(viewMs){
@@ -6721,6 +6862,39 @@ class Component extends DCLogic {
   dpApply(){
     const dp=this.state.datePick; if(!dp) return;
     const t=this.state.tasks.find(x=>x.id===dp.id);
+    /* PP-EXT (owner 2026-08-17): NL drafts retain the complete parser result. A range writes BOTH
+       edges/clock flags; a duration writes planned. One commit keeps the whole parse one undo away. */
+    if(t && dp.parsed){
+      const p=dp.parsed;
+      this.commit(tasks=>{ const task=tasks.find(x=>x.id===dp.id); if(!task) return;
+        const range=p.start!=null && p.end!=null;
+        if(range){
+          task.start=p.start; task.end=p.end;
+          task.startClock=p.startClock; task.endClock=p.endClock;
+        } else if(p.date!=null){
+          let edgeMs=dp.ms;
+          if(task.allDay){ const d=this.atMidnight(new Date(edgeMs));
+            edgeMs=dp.key==='end'?d.getTime()+this.DAY:d.getTime(); }
+          task[dp.key]=edgeMs;
+          const flag=dp.key==='start'?'startClock':'endClock';
+          task[flag]=p.clock?(this.hasClock(edgeMs)?null:true):null;
+          if(!p.clock) task[dp.key]=dp.key==='end'&&task.allDay?edgeMs:this.startOfDay(edgeMs);
+          if(dp.key==='start' && task.end!=null){
+            const minEnd=task.allDay?this.atMidnight(new Date(task.start)).getTime()+this.DAY:task.start;
+            if(task.end<minEnd) task.end=minEnd;
+          }
+          if(dp.key==='end' && task.start!=null){
+            const maxStart=task.allDay?task.end-this.DAY:task.end;
+            if(task.start>maxStart) task.start=maxStart;
+          }
+        }
+        const span=task.start==null?null:this.clockSpanMinutes(task,this.startOfDay(task.start));
+        if(p.dur!=null) task.planned=p.dur; else if(span!=null) task.planned=span;
+      });
+      this.setState({datePick:null});
+      return;
+    }
+    /* /PP-EXT */
     let ms=dp.ms;
     /* Re-encode an all-day value: starts sit at midnight, ends at the exclusive next-day midnight. */
     if(t && t.allDay){ const d=this.atMidnight(new Date(ms));
@@ -6949,20 +7123,10 @@ class Component extends DCLogic {
        the word "milestone") — the old `\bmile\b|\bms\b` alternatives here were the other half of the
        corruption class the Track A comment above `result.mile` describes: they survived the detection
        fix and kept eating "run a mile" / "email ms johnson" down to "run a" / "email johnson". */
-    let name = p.rest.replace(/◇/g,'').replace(/\bmilestone\b/ig,'').replace(/^\s*\*/,'').replace(/\s+/g,' ').trim() || 'New task';
-    const recur = p.recur ? {...p.recur, until:(p.until||null), shifts:[], overrides:{}} : null;
-    /* PP-EXT Track B Group 3: apply the ambiguity chooser's selection over the shaped fields. Null when
-       the parse is unambiguous → keep p's fields (no behaviour change). The 'anchor' tuple is identical
-       to Track A's interim default, so only a 'due' pick actually changes what gets committed. */
-    const tup = this.pickCandidate(p, this.state.quickChoice);
-    const f = { start:p.start, end:p.end, startClock:p.startClock, endClock:p.endClock, planned:p.dur||0 };
-    if(tup){ f.start=tup.start; f.end=tup.end; f.startClock=tup.startClock; f.endClock=tup.endClock; if(tup.planned!=null) f.planned=tup.planned; }
+    const shaped=this.shapeParsedTask(p,this.state.quickChoice);
     this.commit(tasks=>{
       const id='t'+Math.random().toString(36).slice(2,8);
-      const t=this.normalizeTask({id,name,type:p.mile?'Milestone':'Proportional',
-        start:f.start, end:f.end, priority:p.priority||4, deps:[], pct:0,
-        planned:f.planned, predicted:0, description:'', labels:p.labels||[], recur, completion:null,
-        startClock:f.startClock, endClock:f.endClock});
+      const t=this.normalizeTask(Object.assign({id,deps:[],pct:0,predicted:0,description:'',completion:null},shaped));
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
@@ -7069,6 +7233,11 @@ class Component extends DCLogic {
      token; success => reconnect Calendar and resume auto-sync. A 404 (never connected) is a no-op. */
   gcalRestore(){
     if(!this._sb || !this._session) return;
+    /* PP-EXT (owner 2026-08-18): Calendar pull must never race the signed-in workspace's first task
+       reconciliation. Otherwise it can import against the constructor's empty/stale list, mint a second
+       local id for an event that Supabase is about to restore, and leave both rows when the pull lands. */
+    if(this._syncInitialTasksReady!==true){
+      return this.syncEnsureInitialTasks().then(ok=>{ if(ok) return this.gcalRestore(); }); }
     this.gcalEnsureToken()
       .then(()=>{ this.setState(s=>({gcal:Object.assign({},s.gcal,{connected:true,lastError:null,needsReauth:false})}));
         this.gcalListCalendars(); this.gcalSyncSoon();
@@ -7176,7 +7345,7 @@ class Component extends DCLogic {
     return recur;
   }
   /* ==== PP-EXT: two-way sync — outbound writes (ROADMAP Phase 2) ====
-     Local changes push to Google when settings.gcalTwoWay is on. New tasks insert into the dedicated
+     Local changes push to Google. New tasks insert into the dedicated
      "ChronoCompose" calendar; edits PATCH the linked event in its own calendar (including imported ones);
      deletes DELETE the event and leave a tombstone so the next poll can't resurrect the task.
      Everything below the fetch layer is PURE and unit-tested (tests/twoway.test.js). */
@@ -7292,11 +7461,13 @@ class Component extends DCLogic {
      PP-EXT (owner 2026-08-16): `uncompressable` joins the list and needs supabase migration 0013 applied
      FIRST — the 0012 ordering rule. Both this and `planned` going nullable change syncRowFp, so expect
      ONE full re-push of every task row on the next sync, the same one-time cost 0008 and 0012 recorded.
-     That re-push is expected and documented, not a defect. */
+     That re-push is expected and documented, not a defect.
+     PP-EXT (36 review): `includedExplicit` joins with migration 0014 and MUST be added server-side before
+     this client ships. It is provenance, not another inclusion state: only a manual press writes true. */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking','sectionId','uncompressable']; }
+    'snoozeUntil','blocking','sectionId','uncompressable','includedExplicit']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -7349,6 +7520,7 @@ class Component extends DCLogic {
   migrateIncomingRow(t){
     const one=[t];
     this.migrateRetireOff(one);     /* included:false -> null (V2.11 retired the state) */
+    this.migrateIncludedDatedDefault(one); /* unprovenanced legacy true -> dated/window-aware undecided */
     this.migratePins(one);          /* startClock:false placeholder starts -> plain midnight */
     this.migrateDragPinList(one);   /* legacy single-object drag pin -> one-element list */
     return t;
@@ -7503,9 +7675,11 @@ class Component extends DCLogic {
         msg:'Signed in — syncing…', lastError:null, needsReauth:false});
       if(!this.state.settings.syncEnabled) this.saveSettings({syncEnabled:true});
       this.syncSubscribeRealtime();
-      this.syncInitialSync();
+      const initialTasks=this.syncInitialSync();
       this.syncFlushSoon(); this.syncKvFlushSoon(); /* PP-EXT B3a: drain any writes queued while offline */
-      this.gcalRestore(); /* PP-EXT: reconnect Google Calendar from the server-held refresh token, if any */
+      /* PP-EXT (owner 2026-08-18): restore Calendar only after the task pull has reconciled. Calling it
+         in parallel let Calendar import create a new id for an event whose linked task was still in Supabase. */
+      Promise.resolve(initialTasks).then(ok=>{ if(ok) this.gcalRestore(); });
     } else if(event==='SIGNED_OUT'){
       this._session=null; this.syncUnsubscribeRealtime();
       this.saveSync({connected:false, msg:'Signed out.'});
@@ -7802,9 +7976,12 @@ class Component extends DCLogic {
      applyRemoteSnapshot), then push whatever the backend is missing or is stale on (computeSyncOps of
      remote->merged). Restores a fresh device AND backs up a never-synced one, reusing the tested layer. */
   syncInitialSync(){
-    if(!this._sb || !this._session) return;
+    if(!this._sb || !this._session) return Promise.resolve(false);
+    if(this._syncInitialTasksReady===true) return Promise.resolve(true);
+    if(this._syncInitialTasksPromise) return this._syncInitialTasksPromise;
+    this._syncInitialTasksReady=false;
     this.saveSync({pulling:true});
-    this._sb.from('tasks').select('*')
+    const run=this._sb.from('tasks').select('*')
       .then(({data, error})=>{ if(error) throw error;
         const remote=(data||[]).map(r=>this.rowToTask(r));
         /* compute the merge locally (do NOT read this.state.tasks after setState — it's async in React) */
@@ -7816,8 +7993,28 @@ class Component extends DCLogic {
         if(ops.length) this.syncEnqueue(ops);
         this.saveSync({pulling:false, msg:'Synced.', lastError:null});
         this.syncInitialSyncKv();
+        clearTimeout(this._syncInitialRetryT); this._syncInitialRetryT=null;
+        this._syncInitialTasksReady=true;
+        return true;
       })
-      .catch(e=>{ this.saveSync({pulling:false}); this.syncError(e); });
+      .catch(e=>{ this.saveSync({pulling:false}); this.syncError(e);
+        /* PP-EXT (owner 2026-08-18): release a failed task-pull gate so the next Calendar attempt can
+           retry reconciliation. Calendar remains blocked until one attempt returns true. */
+        if(this._syncInitialTasksPromise===run) this._syncInitialTasksPromise=null;
+        this.syncScheduleInitialRetry();
+        return false; });
+    this._syncInitialTasksPromise=run;
+    return run;
+  }
+  syncEnsureInitialTasks(){
+    if(this._syncInitialTasksReady===true) return Promise.resolve(true);
+    return this._syncInitialTasksPromise || this.syncInitialSync();
+  }
+  syncScheduleInitialRetry(){
+    if(!this._sb || !this._session || this._syncInitialTasksReady===true || this._syncInitialRetryT) return;
+    this._syncInitialRetryT=setTimeout(()=>{ this._syncInitialRetryT=null;
+      this.syncEnsureInitialTasks().then(ok=>{ if(ok) this.gcalRestore(); else this.syncScheduleInitialRetry(); });
+    }, this.SYNC_INITIAL_RETRY_MS);
   }
   /* ==== PP-EXT B3a: habits/journal network wiring — reuses the B2 Supabase client + Realtime, mirroring the
      tasks path but over the {id,data} blob tables (kvFp/computeKvOps/kvMergeDecision above). Separate queue
@@ -8059,13 +8256,15 @@ class Component extends DCLogic {
       if(ch) this.saveTombstones(t); return t; }catch(e){ return {}; } }
   saveTombstones(t){ try{ this.lsSet('pp-gcal-tombstones', JSON.stringify(t)); }catch(e){} }
   clearTombstone(eid){ const t=this.loadTombstones(); if(t[eid]!=null){ delete t[eid]; this.saveTombstones(t); } }
-  /* Outbound funnel (called by commit/undo/redo). Inert unless two-way is on; _gcalApplying suppresses
+  /* Outbound funnel (called by commit/undo/redo). Calendar is always two-way; _gcalApplying suppresses
      echoes while an import is being committed. */
-  /* PURE: is this op a DELETION? Deletions escape the gcalTwoWay gate — see gcalSyncOut. */
+  /* PURE: legacy deletion ops remain flushable across the queue-generation boundary. */
   isGcalDeleteOp(op){ return !!op && (op.op==='delete' || op.op==='deleteInstance' || op.op==='cancelInsert'); }
+  isCurrentGcalOp(op){ return !!op && (op.queueVersion===this.GCAL_QUEUE_VERSION || this.isGcalDeleteOp(op)); }
+  gcalQueueOpKey(op){ return op&&op.queueId ? op.queueId : JSON.stringify(op||null); }
   gcalSyncOut(before, after){
     if(!this.state.settings || this._gcalApplying) return;
-    /* PP-EXT (owner 2026-08-13): DELETIONS ARE NOT GATED ON `gcalTwoWay`. Owner report: "I deleted two
+    /* PP-EXT (owner 2026-08-13): deletion and tombstone handling remains load-bearing. Owner report: "I deleted two
        tasks from the ChronoCompose calendar, and they came back after a few minutes."
 
        That was exact, and the mechanism is worth naming because it made a destructive action silently
@@ -8077,22 +8276,19 @@ class Component extends DCLogic {
        later, exactly as reported. Turning two-way sync on would have masked it; the defect is that a
        delete was treated as an ordinary outbound EDIT.
 
-       An edit is genuinely two-way-only — it is a continuous opinion about content, and pushing it
-       without consent would overwrite events ChronoCompose does not own. A delete is not that. The user
-       removed the task, the confirm dialog already promises "This also deletes its linked Google Calendar
-       event", and the alternative is a row that resurrects itself. So: with two-way OFF we compute the
-       full diff and enqueue ONLY the deletions; with it ON, everything, as before.
-       `gcalFlushQueue` carries the matching half of this rule. */
+       Calendar became two-way-only on 2026-08-17, so the old gate is gone. The tombstone still belongs
+       inside `gcalEnqueue`: it is what blocks a pull while the remote DELETE is queued or in flight. */
     let ops;
     try{ ops=this.computeOutboundOps(before, after); }
     catch(e){ this.gcalError(e); return; }
-    if(!this.state.settings.gcalTwoWay) ops=ops.filter(op=>this.isGcalDeleteOp(op));
     if(ops.length) this.gcalEnqueue(ops);
   }
   gcalEnqueue(ops){
     if(!ops || !ops.length) return;
     let q=this.loadQueue(); const ts=this.loadTombstones(); let tsChanged=false;
-    ops.forEach(op=>{
+    ops.forEach(raw=>{
+      const op=Object.assign({}, raw, {queueVersion:this.GCAL_QUEUE_VERSION,
+        queueId:this.GCAL_QUEUE_VERSION+':'+Date.now()+':'+Math.random().toString(36).slice(2)});
       if(op.op==='cancelInsert'){ q=q.filter(x=>!(x.taskId===op.taskId && x.op==='insert')); return; }
       if(op.op==='delete'){
         q=q.filter(x=>x.taskId!==op.taskId); /* the delete supersedes any pending write for the task */
@@ -8113,13 +8309,12 @@ class Component extends DCLogic {
   gcalBackfillable(){ return (this.state.tasks||[]).filter(t=>
     !t.eventId && !t.parentId && !t.archivedAt && !this.isMilestone(t) && this.isScheduled(t)); }
   /* PP-EXT: one-time backfill — enqueue an insert for every never-synced local task so it lands in the
-     dedicated ChronoCompose calendar. Turns two-way on (backfilling implies it) and writes to the real
-     calendar, so it's an explicit button, never automatic. */
+     dedicated ChronoCompose calendar. It writes to the real calendar, so it stays an explicit button,
+     never an upgrade migration or automatic merge side effect. */
   gcalBackfill(){
     if(!this._token){ this.gcalMsg('Sign in with Google first.'); return; }
     const eligible=this.gcalBackfillable();
     if(!eligible.length){ this.gcalMsg('Nothing to backfill — every dated task is already synced.'); return; }
-    if(!this.state.settings.gcalTwoWay) this.saveSettings({gcalTwoWay:true}); /* backfilling implies two-way */
     this.gcalEnqueue(eligible.map(t=>({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)})));
     this.gcalMsg('Backfilling '+eligible.length+' task'+(eligible.length>1?'s':'')+' into the ChronoCompose calendar…');
   }
@@ -8150,25 +8345,21 @@ class Component extends DCLogic {
      local copy reconciles with what Google actually stored. */
   gcalFlushQueue(){
     if(this._gcalFlushing) return;
-    /* PP-EXT (owner 2026-08-13): the flush half of the deletions-are-not-gated rule in gcalSyncOut.
-       Queueing a DELETE while two-way is off would be pointless if the flusher then refused to send it,
-       so the gate here is the token alone; `step()` skips any non-deletion op while two-way is off.
-       Belt and braces on purpose — a stale queue written under a previous two-way ON session must not
-       start pushing edits the moment the user turns two-way back off. */
+    /* PP-EXT (owner 2026-08-17): the token is the only runtime gate. The queue-generation check in
+       `step()` discards non-delete writes persisted by the retired opt-in mode, while legacy deletes
+       still drain so their tombstones cannot strand or resurrect tasks. */
     if(!this._token) return;
     if(!this.loadQueue().length) return;
     this._gcalFlushing=true;
     const base='https://www.googleapis.com/calendar/v3/calendars/';
-    let anyWrite=false;
+    let anyWrite=false; const preserveAfterWrite=new Set();
     const finish=()=>{ this._gcalFlushing=false;
-      if(anyWrite){ this.gcalClearError(); this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); } };
+      if(anyWrite){ this.gcalClearError(); this._lastGcalSync=Date.now();
+        this.gcalImport({silent:true,preserveEventIds:preserveAfterWrite}); } };
     const step=()=>{
       const q=this.loadQueue(); const op=q[0];
       if(!op){ finish(); return; }
-      /* PP-EXT (owner 2026-08-13): with two-way OFF, only deletions leave this queue. Dropped rather than
-         held, because an edit that waits for a two-way switch that may never flip is a write the user has
-         no way to see, cancel, or reason about — and by the time it flushed it would be arbitrarily stale. */
-      if(!this.state.settings.gcalTwoWay && !this.isGcalDeleteOp(op)){ this.shiftQueue(); step(); return; }
+      if(!this.isCurrentGcalOp(op)){ this.shiftQueue(op); step(); return; }
       let p;
       if(op.op==='insert'){
         p=this.gcalEnsureCalendar().then(cid=>
@@ -8182,25 +8373,34 @@ class Component extends DCLogic {
           .catch(e=>{ if(e.status===404||e.status===410) return {}; throw e; })
           .then(()=>{ if(op.op==='delete') this.clearTombstone(op.eventId); });
       } else { p=Promise.resolve(); }
-      p.then(()=>{ anyWrite=true; this.shiftQueue(); step(); })
+      p.then(()=>{ anyWrite=true;
+        /* A PATCH can move its event before `timeMin` or beyond `timeMax`. Its absence from the immediate
+           bounded verification pull is therefore not proof of deletion. */
+        if(op.op==='patch'&&op.calendarId&&op.eventId) preserveAfterWrite.add(op.calendarId+'|'+op.eventId);
+        this.shiftQueue(op); step(); })
        .catch(e=>{
           this.gcalError(e);
           if(e.status===401){ this._gcalFlushing=false; return; }
-          if(e.status===400||e.status===403||e.status===404){ this.shiftQueue(); step(); return; }
+          if(e.status===400||e.status===403||e.status===404){ this.shiftQueue(op); step(); return; }
           const tries=(op.tries||0)+1;
-          if(tries>=this.GCAL_OP_MAX_TRIES){ this.shiftQueue(); step(); }
-          else { const q2=this.loadQueue(); if(q2[0]&&q2[0].taskId===op.taskId&&q2[0].op===op.op) q2[0]=Object.assign({},q2[0],{tries});
+          if(tries>=this.GCAL_OP_MAX_TRIES){ this.shiftQueue(op); step(); }
+          else { const q2=this.loadQueue(); if(q2[0]&&this.gcalQueueOpKey(q2[0])===this.gcalQueueOpKey(op)) q2[0]=Object.assign({},q2[0],{tries});
             this.saveQueue(q2); this._gcalFlushing=false; }
         });
     };
     step();
   }
-  shiftQueue(){ const q=this.loadQueue(); q.shift(); this.saveQueue(q); }
+  shiftQueue(expected){ const q=this.loadQueue();
+    if(!expected || (q[0]&&this.gcalQueueOpKey(q[0])===this.gcalQueueOpKey(expected))) q.shift();
+    this.saveQueue(q); }
   /* ==== /PP-EXT: two-way sync ==== */
   /* PURE: merge fetched calendar events into `tasks` (mutates). results=[{cid,items}], masters={cid|masterId:masterEvent}.
      Recurring instances collapse to ONE task keyed by the master id, carrying a recur rule. Returns {added,updated}. */
-  mergeCalendarEvents(tasks, results, masters, calById, tombstones){ /* PP-EXT: tombstones = locally-deleted event ids awaiting remote DELETE */
+  mergeCalendarEvents(tasks, results, masters, calById, tombstones, pendingOps){ /* PP-EXT: tombstones = locally-deleted event ids awaiting remote DELETE */
     const byEid={}; tasks.forEach(t=>{ if(t.eventId) byEid[t.eventId]=t; });
+    /* A poll can land during the debounce or network flight of a local PATCH. Until that exact current-
+       generation write drains, the local Calendar-owned fields are authoritative. */
+    const pending={}; (pendingOps||[]).forEach(op=>{ if(op&&op.op==='patch'&&op.queueVersion===this.GCAL_QUEUE_VERSION) pending[op.taskId]=1; });
     const handled={}; let added=0, updated=0;
     /* PP-EXT (owner 2026-08-14): import no longer ADDS a calendar tag (calTag is '' for everything), and
        it is also the one place that reliably has the calendar's summary in hand, so it SHEDS the tag a
@@ -8221,9 +8421,10 @@ class Component extends DCLogic {
         let end = en ? (allDay ? this.parseYMD(en) : new Date(en).getTime()) : start;
         if(allDay && end<=start) end = start + this.DAY;
         let t=byEid[eid];
-        if(t){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay;
+        if(t){ const keepLocal=!!pending[t.id];
+          if(!keepLocal){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay; }
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
-          if(recur){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
+          if(recur && !keepLocal){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
           /* PP-EXT (owner 2026-08-14): `tag` is now '' for EVERY calendar, so nothing is ever pushed; the
              guard stays because the expression is what makes that visible at the site. The re-add half of
              the old churn loop is gone, which is what frees `sectionTagStrippable` to disappear.
@@ -8235,9 +8436,9 @@ class Component extends DCLogic {
           t.calendarId=cid; updated++; }
         else if(tombstones && tombstones[eid]){ /* PP-EXT: deleted locally — don't resurrect while the DELETE is in flight */ }
         else { const id='t'+Math.random().toString(36).slice(2,8);
-          /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it blank (0).
+          /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it unestimated (null).
              goal/description come straight from the event; thereafter they persist locally (no round-trip through GCAL). */
-          const evMins = allDay ? 0 : Math.max(0, Math.round((end-start)/60000));
+          const evMins = allDay ? null : Math.max(0, Math.round((end-start)/60000));
           const nt=this.normalizeTask({id,name:src.summary||'(untitled)',type:'Proportional',
             start,end,allDay,priority:4,deps:[],pct:0,planned:evMins,spent:0,goal:'',
             /* PP-EXT (owner 2026-08-14): EVERY calendar's events now arrive UNTAGGED and land in the
@@ -8256,25 +8457,47 @@ class Component extends DCLogic {
   }
   /* PURE: remove calendar-linked tasks whose source event is gone from the selected calendars (mutates). Returns removed count.
      Never touches manual tasks (no eventId) or tasks from unselected calendars. */
-  pruneDeletedEvents(tasks, results, selectedIds){
-    const live={}; selectedIds.forEach(c=>live[c]=new Set());
-    results.forEach(({cid,items})=>{ if(!live[cid]) live[cid]=new Set();
-      items.forEach(ev=>{ if(ev.status==='cancelled') return; live[cid].add(ev.recurringEventId||ev.id); }); });
+  pruneDeletedEvents(tasks, results, selectedIds, verifiedMissing, preserveEventIds){
+    const selected=new Set(selectedIds||[]), missing=verifiedMissing||new Set();
     const removedIds=new Set(); let removed=0;
     for(let i=tasks.length-1;i>=0;i--){ const t=tasks[i];
       if(t.archivedAt) continue; /* PP-EXT: archived tasks are kept for stats even if their event is gone */
-      if(t.eventId && t.calendarId && live[t.calendarId] && !live[t.calendarId].has(t.eventId)){ removedIds.add(t.id); tasks.splice(i,1); removed++; } }
+      const protectedKey=t.calendarId+'|'+t.eventId;
+      if(t.eventId && t.calendarId && selected.has(t.calendarId) && missing.has(protectedKey)
+          && !(preserveEventIds&&preserveEventIds.has(protectedKey))){ removedIds.add(t.id); tasks.splice(i,1); removed++; } }
     if(removed) tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!removedIds.has(this.depId(d))); });
     return removed;
+  }
+  /* A bounded events.list response proves only what is inside its time window. An absent linked event
+     gets an authoritative by-id lookup; only 404/410 or an explicit cancelled resource permits pruning.
+     Transient lookup failures retain the local task and can be retried by the next normal poll. */
+  gcalVerifyMissing(tasks, results, selectedIds, preserveEventIds){
+    const live={}; (selectedIds||[]).forEach(cid=>live[cid]=new Set());
+    (results||[]).forEach(({cid,items})=>{ if(!live[cid]) live[cid]=new Set();
+      (items||[]).forEach(ev=>{ if(ev.status!=='cancelled') live[cid].add(ev.recurringEventId||ev.id); }); });
+    const candidates={}; (tasks||[]).forEach(t=>{ const key=t.calendarId+'|'+t.eventId;
+      if(!t.archivedAt && t.calendarId && t.eventId && live[t.calendarId] && !live[t.calendarId].has(t.eventId)
+          && !(preserveEventIds&&preserveEventIds.has(key))) candidates[key]={cid:t.calendarId,eid:t.eventId}; });
+    const base='https://www.googleapis.com/calendar/v3/calendars/';
+    return Promise.all(Object.keys(candidates).map(key=>{ const x=candidates[key];
+      return this.gcalFetch(base+encodeURIComponent(x.cid)+'/events/'+encodeURIComponent(x.eid))
+        .then(ev=>(ev&&ev.status==='cancelled')?key:null)
+        .catch(e=>(e&&(e.status===404||e.status===410))?key:null); }))
+      .then(keys=>new Set(keys.filter(Boolean)));
   }
   /* opts.silent → background auto-sync: no "Importing…" spinner, and only commits (touches undo history)
      when the calendar data actually changed, so idle polling doesn't churn state. */
   gcalImport(opts){ opts=opts||{};
+    if(this._sb && this._session && this._syncInitialTasksReady!==true){
+      this.syncEnsureInitialTasks().then(ok=>{ if(ok) this.gcalImport(opts); }); return; }
     const g=this.state.gcal; const ids=Object.keys(g.selected||{}).filter(k=>g.selected[k]);
     if(!this._token){ if(!opts.silent) this.gcalMsg('Connect first.'); return; }
     if(!ids.length){ if(!opts.silent) this.gcalMsg('Select at least one calendar.'); return; }
     if(this._gcalSyncing) return; /* don't overlap an in-flight sync */
     this._gcalSyncing=true;
+    /* Snapshot only Calendar-owned fields. If a local edit happens after this pull begins, it remains
+       authoritative even when its PATCH drains before the response reaches mergeCalendarEvents. */
+    const importFp={}; this.state.tasks.forEach(t=>{ if(t.eventId) importFp[t.id]=this.syncFp(t); });
     const timeMin=new Date().toISOString();
     const tmax=new Date(Date.now()+(g.window||30)*this.DAY).toISOString();
     const calById={}; (g.calendars||[]).forEach(c=>calById[c.id]=c);
@@ -8293,7 +8516,21 @@ class Component extends DCLogic {
         .then(list=>{ const masters={}; list.forEach(x=>{ if(x) masters[x.key]=x.ev; }); return {results,masters}; });
     })
     .then(({results,masters})=>{
+      const preserve=new Set(opts.preserveEventIds||[]);
+      const liveIds=ids.filter(id=>gone.indexOf(id)<0);
+      return this.gcalVerifyMissing(this.state.tasks,results,liveIds,preserve)
+        .then(verifiedMissing=>({results,masters,verifiedMissing}));
+    })
+    .then(({results,masters,verifiedMissing})=>{
       const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
+      const pending=this.loadQueue(); /* PP-EXT (owner 2026-08-17): a pull must not beat an in-flight local PATCH. */
+      const preserve=new Set(opts.preserveEventIds||[]);
+      /* PP-EXT (owner 2026-08-18): queue presence alone is insufficient: a PATCH can finish after this
+         request started but before its response is merged. Protect any linked task whose Calendar-owned
+         fingerprint changed during that interval, including a task newly restored by Supabase. */
+      this.state.tasks.forEach(t=>{ if(t.eventId && (importFp[t.id]===undefined || importFp[t.id]!==this.syncFp(t))){
+        pending.push({op:'patch',taskId:t.id,queueVersion:this.GCAL_QUEUE_VERSION});
+        if(t.calendarId) preserve.add(t.calendarId+'|'+t.eventId); } });
       const liveIds=ids.filter(id=>gone.indexOf(id)<0); /* PP-EXT: never prune tasks of a calendar we couldn't reach — that empty result isn't proof the events were deleted */
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
@@ -8301,15 +8538,15 @@ class Component extends DCLogic {
         /* apply on a clone; only commit if it changed anything (avoids undo/render churn on idle polls) */
         const before=JSON.stringify(this.state.tasks);
         const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
-        const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb);
-        const removed=this.pruneDeletedEvents(clone,results,liveIds);
+        const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb,pending);
+        const removed=this.pruneDeletedEvents(clone,results,liveIds,verifiedMissing,preserve);
         if(JSON.stringify(clone)!==before){
           this.commit(tasks=>{ tasks.length=0; clone.forEach(t=>tasks.push(t)); });
           if(r.added||removed) this.gcalMsg('Auto-synced: +'+r.added+' new, −'+removed+' removed.');
         }
       } else {
         let r={added:0,updated:0}, removed=0;
-        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb); removed=this.pruneDeletedEvents(tasks,results,liveIds); });
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb,pending); removed=this.pruneDeletedEvents(tasks,results,liveIds,verifiedMissing,preserve); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
       }
       } finally { this._gcalApplying=false; } /* PP-EXT */
@@ -8358,7 +8595,10 @@ class Component extends DCLogic {
     }catch(_){}
   }
   /* Debounced sync after a settings edit (calendar selection / window change). */
-  gcalSyncSoon(){ if(!this._token) return; clearTimeout(this._gcalSoon);
+  gcalSyncSoon(){ if(!this._token) return;
+    if(this._sb && this._session && this._syncInitialTasksReady!==true){
+      this.syncEnsureInitialTasks().then(ok=>{ if(ok) this.gcalSyncSoon(); }); return; }
+    clearTimeout(this._gcalSoon);
     this._gcalSoon=setTimeout(()=>{ this.gcalWatchSync(); /* PP-EXT B3b: selection may have changed — re-assert channels */
       if(this.loadQueue().length||this._gcalFlushing){ this.gcalFlushQueue(); return; } /* PP-EXT: push first */
       this._lastGcalSync=Date.now(); this.gcalImport({silent:true}); }, 800); }
@@ -8562,15 +8802,11 @@ class Component extends DCLogic {
       h('div',{style:{padding:'2px 0 8px'}}, this.googleSignInBtn()),
       setRow('Import window (days)', inp(g.window||30,v=>{ this.saveGcal({window:Math.max(1,parseInt(v)||30)}); this.gcalSyncSoon(); })),
       setRow('Auto-sync every (sec)', inp(s.gcalPollSec||60,v=>this.saveSettings({gcalPollSec:Math.max(20,parseInt(v)||60)}))),
-      /* PP-EXT: two-way sync toggle (ROADMAP Phase 2) — owner-blessed; enable via this toggle or the Backfill button */
-      setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Two-way sync (beta)',
-          this.infoNote('When on, your changes push to Google: tasks you create or edit here become events in a dedicated "ChronoCompose" calendar; edits to imported tasks update their own calendar; deleting a linked task deletes its event. Title, dates/times, recurrence and description (as plain text) all push out. Writes are debounced and queued (they survive reloads and expired sign-ins). Planned/Spent/pins stay local; import never overwrites your local rich-text description.')),
-        toggle(!!s.gcalTwoWay,()=>this.saveSettings({gcalTwoWay:!s.gcalTwoWay}))),
+      /* PP-EXT (owner 2026-08-17): Calendar is two-way only. There is no mode switch whose copy can
+         promise that a local edit is kept while the next import actually overwrites it. */
       h('div',{style:{fontSize:'11px',color:'var(--text-faint2)',padding:'0 0 6px'}},
-        s.gcalTwoWay
-          ? 'Two-way: imports run in the background AND your local changes (name, times, recurrence, description, deletes) push to Google.'
-          : 'Syncs automatically when connected (on selection/window change and in the background). Import runs one-way; your edits are kept.'),
-      /* PP-EXT: one-time backfill — push never-synced local tasks into the ChronoCompose calendar (also turns two-way on) */
+        'Syncs automatically when connected: imports run in the background and your local changes (name, times, recurrence, description, deletes) push to Google. Writes are debounced and queued across reloads or expired sign-ins. Planned, Spent, pins, goals and rich-text descriptions stay locally authoritative.'),
+      /* PP-EXT: one-time explicit backfill — push never-synced local tasks into the ChronoCompose calendar */
       (()=>{ const n=g.connected?this.gcalBackfillable().length:0;
         return h('div',{style:{display:'flex',alignItems:'center',gap:'8px',padding:'2px 0 6px'}},
           h('button',{className:'pp-tbtn',onClick:()=>this.gcalBackfill(),disabled:!g.connected||!n,

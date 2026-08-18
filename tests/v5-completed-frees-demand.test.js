@@ -40,7 +40,7 @@ function day(tasks) {
   const list = typeof tasks === 'function' ? tasks(today) : (tasks || []);
   c.state.tasks = list.map((t) => c.normalizeTask(Object.assign({
     type: 'Proportional', priority: 4, deps: [], pct: 0, spent: 0,
-    start: today, end: today + 6 * HOUR,
+    start: today, end: today + 6 * HOUR, included: true,
   }, t)));
   return { c, today };
 }

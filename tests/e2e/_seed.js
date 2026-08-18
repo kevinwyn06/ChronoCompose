@@ -106,6 +106,10 @@ async function seed(page, data = {}) {
          that seeds the field explicitly would otherwise be un-seeded on boot. (The older
          `uncompressable-backfill` key no longer exists in the app; only this one is live.) */
       'planned-null-unset': 1, 'uncompressable-rederive': 1,
+      /* Owner session 2026-08-17: fixtures express CURRENT inclusion state explicitly. The real
+         migration cannot distinguish an old default true from a genuine press and would therefore
+         rewrite future-window fixtures (and a press persisted across a seed-once reload). */
+      'included-dated-default': 1,
     }));
   }, [payload, MIDNIGHT_EXPR]);
 }

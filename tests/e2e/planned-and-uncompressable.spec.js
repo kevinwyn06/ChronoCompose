@@ -17,7 +17,7 @@
  * programmatically is the exact failure this repo already paid for once with the %-done caret.
  */
 const { test, expect } = require('@playwright/test');
-const { boot, bootToday, cleanDaySettings, settleTimeline } = require('./_seed');
+const { boot, bootDays, cleanDaySettings, settleTimeline } = require('./_seed');
 
 /* The DETAIL PANEL's Time-needed option. Explicitly not `getByRole('button', {name})` alone: as of
  * 2026-08-17 the sheet has a Time-needed COLUMN whose chip carries the same role and the same label on
@@ -76,8 +76,10 @@ test.describe('the Planned cell tells "unset" from "a deliberate zero"', () => {
 
 test.describe('"Time needed": Exact holds the span, Flexible floats the end', () => {
   /* Fixture arithmetic, by hand from the rules:
-     - The day window is 10:00–13:00 = 180 minutes, no meals, no free-time reserve,
-       `packFromNow:false`, so the wall clock cannot move where blocks land.
+     - The fixture is TOMORROW in the 4-Day view. Today has a second, intentional wall-clock input
+       (`nowTick`) for live planning in addition to `packFromNow`; a future column has neither, so this
+       geometry remains a function of the fixture even when the suite runs after the appointment clock.
+     - The day window is 10:00–13:00 = 180 minutes, no meals, no free-time reserve.
      - `appt` is clocked 10:30 → 12:00 (a 90-minute span) with `planned:null`. With `uncompressable`
        ON it is fixed: `isFixedOn` is true, so the packer draws exactly its 90-minute clock span, and
        `filler` gets the 90 minutes left over.
@@ -94,8 +96,8 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
     settings: Object.assign(cleanDaySettings('13:00'), { dayStart: '10:00' }),
     tasks: [
       { id: 'appt', name: 'Standing meeting', type: 'Proportional', included: true, planned: null,
-        start: '0d+10h30m', end: '0d+12h', startClock: true, endClock: true, uncompressable: true },
-      { id: 'filler', name: 'Deep work', type: 'Proportional', included: true, planned: 600, start: '0d', end: '+1d' },
+        start: '+1d+10h30m', end: '+1d+12h', startClock: true, endClock: true, uncompressable: true },
+      { id: 'filler', name: 'Deep work', type: 'Proportional', included: true, planned: 600, start: '+1d', end: '+2d' },
     ],
   };
 
@@ -107,7 +109,7 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
   }
 
   test('switching Exact → Flexible keeps the start and shortens the block', async ({ page }) => {
-    await bootToday(page, fixture);
+    await bootDays(page, 'day4', fixture);
 
     expect((await stored(page, 'appt')).uncompressable, 'the fixture starts Exact').toBe(true);
     const before = await apptBox(page);
@@ -142,7 +144,7 @@ test.describe('"Time needed": Exact holds the span, Flexible floats the end', ()
        destroys the field. */
     const flexFixture = JSON.parse(JSON.stringify(fixture));
     flexFixture.tasks[0].uncompressable = false;
-    await bootToday(page, flexFixture);
+    await bootDays(page, 'day4', flexFixture);
 
     const before = await apptBox(page);
 

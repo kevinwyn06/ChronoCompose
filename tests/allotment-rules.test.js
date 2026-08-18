@@ -3,7 +3,7 @@
 // (requestedMinutes), and how the day DIVIDES itself between those asks (compressionSeam).
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { make, activeTask, cleanDay, DAY } = require('./_load.js');
+const { make, activeTask, cleanDay, DAY, withNow } = require('./_load.js');
 
 const HOUR = 3600000;
 
@@ -316,6 +316,44 @@ test('uncompressable derives true only for an APPOINTMENT-shaped span, not any t
     'an explicit true on a multi-day span SURVIVES — the day-fit rule governs the DEFAULT only, ' +
     'and a user decision is never overridden by the derivation');
 });
+
+test('recurring appointments derive Exact only on their real occurrence day', () => withNow(() => {
+  const c = make();
+  cleanDay(c, '02:00');
+  const monday = c.startOfToday();
+  const thursday = monday + 3 * DAY;
+  const friday = thursday + DAY;
+  const appointment = c.normalizeTask({
+    id: 'weekly', name: 'Weekly appointment', included: true, planned: null,
+    start: monday - 4 * DAY + 14 * HOUR, end: monday - 4 * DAY + 15 * HOUR,
+    startClock: true, endClock: true,
+    recur: { kind: 'week', n: 1, shifts: [], overrides: {} },
+  });
+  const first = activeTask(c, { id: 'first', included: true, planned: 60 });
+  const second = activeTask(c, { id: 'second', included: true, planned: 60 });
+  c._horizon = monday + 14 * DAY;
+
+  assert.equal(c.occOnDay(appointment, monday), null,
+    'an honest day lookup says there is no Monday occurrence instead of returning Thursday');
+  assert.equal(c.isUncompressable(appointment, monday), false,
+    'a recurring appointment is Flexible on a day when it does not occur');
+  assert.equal(c.isUncompressable(appointment, thursday), true,
+    'the same appointment is still Exact on its real occurrence day');
+  assert.equal(c.isFixedOn(appointment, thursday), true,
+    'and its real occurrence remains a fixed block');
+  assert.equal(c.dueMsOf(appointment, friday), friday + DAY,
+    'a non-occurrence day gets that day\'s neutral deadline, never the prior occurrence\'s past due instant');
+
+  const allotted = c.computeAllotted([appointment, first, second], monday);
+  assert.deepEqual(
+    [allotted.weekly.allotted, allotted.first.allotted, allotted.second.allotted],
+    [5, 58, 57],
+    'the absent appointment competes as a 5-minute flexible default; it does not reserve 60 minutes off the top');
+
+  const stored = Object.assign({}, appointment, { uncompressable: true });
+  assert.equal(c.isUncompressable(stored, monday), true,
+    'a stored Exact decision still outranks day-aware derivation on every day');
+}));
 
 test('isFixedOn is gated by uncompressable — an unticked appointment compresses', () => {
   const c = make();

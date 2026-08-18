@@ -72,6 +72,40 @@ test('setDate: start/end edits are undoable (they route through commit)', () => 
   assert.equal(t().start, before);
 });
 
+test('setDate: a completed intra-day clock span always overwrites planned', () => {
+  const { c, t } = withTask({
+    start: at(2026, 6, 15, 9, 0), end: at(2026, 6, 15, 10, 0), planned: 30,
+  });
+  c.setDate('t1', 'end', at(2026, 6, 15, 11, 0), true);
+  assert.equal(t().planned, 120, 'the booked clock span wins over a deliberately different estimate');
+});
+
+test('setDate: clock-span planning stays in the same undo entry as the date edit', () => {
+  const { c, t } = withTask({
+    start: at(2026, 6, 15, 9, 0), end: at(2026, 6, 15, 10, 0), planned: 30,
+  });
+  const before = { end: t().end, planned: t().planned };
+  c.setDate('t1', 'end', at(2026, 6, 15, 11, 0), true);
+  assert.equal(t().planned, 120, 'the edit changes planned before undo');
+  c.undo();
+  assert.equal(t().end, before.end);
+  assert.equal(t().planned, before.planned);
+});
+
+test('setDate: a task with only one clock leaves planned untouched', () => {
+  const { c, t } = withTask({ end: null, planned: 25 });
+  c.setDate('t1', 'start', at(2026, 6, 15, 9, 30), true);
+  assert.equal(t().planned, 25);
+});
+
+test('setDate: a multi-day clock span leaves planned untouched', () => {
+  const { c, t } = withTask({
+    start: at(2026, 6, 15, 9, 0), end: at(2026, 6, 16, 10, 0), planned: 25,
+  });
+  c.setDate('t1', 'end', at(2026, 6, 16, 11, 0), true);
+  assert.equal(t().planned, 25);
+});
+
 test('setDate: an explicit time sets the clock flag; clearing it returns to derived midnight', () => {
   const c = make();
   const B = c.startOfDay(Date.now());

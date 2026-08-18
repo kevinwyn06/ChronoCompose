@@ -80,7 +80,7 @@ test('pruneDeletedEvents keeps archived tasks even when their event is gone', ()
   const gone = activeTask(c, { id: 'g', eventId: 'evg', calendarId: 'c1', archivedAt: Date.now() });
   const alsoGone = activeTask(c, { id: 'g2', eventId: 'evg2', calendarId: 'c1' });
   const tasks = [gone, alsoGone];
-  const removed = c.pruneDeletedEvents(tasks, [{ cid: 'c1', items: [] }], ['c1']);
+  const removed = c.pruneDeletedEvents(tasks, [{ cid: 'c1', items: [] }], ['c1'], new Set(['c1|evg','c1|evg2']));
   assert.equal(removed, 1, 'only the unarchived task is pruned');
   assert.ok(tasks.find(t => t.id === 'g'), 'archived task survives for stats');
 });

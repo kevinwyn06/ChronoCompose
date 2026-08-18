@@ -76,6 +76,12 @@ same fixed row height; expanded description height is still measured into the Ga
 the same sections and uniform 52px task rows with `spent / allotted`, a progress fill, done, timer, and
 `+15` tracked-time actions.
 
+The projection may group a globally interleaved persisted task array, so a row-drop gap cannot be applied
+by blindly anchoring on the projection's next task. `reorderRows` translates a re-section drop through the
+target band: it anchors before the next row in that band when one exists, otherwise after the band's last
+persisted row. That same fallback makes collapsed populated bands append after their hidden rows; empty
+bands simply receive their first row.
+
 The section-header band is painted from per-theme `--sec-head-bg` / `--sec-head-border` (owner
 2026-08-13b), in **both** panes, opaque in both. It previously painted `--top-bg`, which is four units
 from `--sheet-bg` in the dark theme and *identical* to it in the light theme, so the header was carried

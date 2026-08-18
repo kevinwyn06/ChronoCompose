@@ -39,6 +39,12 @@ async function storedSections(page) {
   });
 }
 
+async function storedOrderInSection(page, sectionId) {
+  return page.evaluate((sid) => JSON.parse(localStorage.getItem('pp-tasks') || '[]')
+    .filter((t) => (t.sectionId === undefined ? null : t.sectionId) === sid)
+    .map((t) => t.id), sectionId);
+}
+
 /**
  * A real drag that releases in the LOWER half of `toId`'s row — the gesture that means "put it below this
  * row". Stepped, so the app promotes the pending drag and re-resolves the drop on every move exactly as it
@@ -60,6 +66,86 @@ async function dragBelowRow(page, fromId, toId, midDrag) {
   if (midDrag) await midDrag();
   await page.mouse.up();
 }
+
+async function dragIntoBand(page, fromId, sectionId) {
+  const a = await rowOf(page, fromId).locator('[data-cellk="name"]').boundingBox();
+  const band = await header(page, sectionId).boundingBox();
+  const x = a.x + a.width / 2;
+  const y = band.y + band.height / 2;
+  await page.mouse.move(x, a.y + a.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(x, y, { steps: 12 });
+  await page.mouse.move(x + 1, y, { steps: 3 });
+  await page.mouse.up();
+}
+
+test('bottom drop stays last when persisted task order is interleaved across sections', async ({ page }) => {
+  await boot(page, {
+    sections: SECTIONS.concat([{ id: 's3', name: 'Later', order: 2 }]),
+    /* Deliberately NOT section-contiguous. The sheet projection groups these as a1, a2 | b1 | c1,
+       but real workspaces retain one global manual order and can therefore store this interleaving. */
+    tasks: [
+      task('b1', 'Beta one', { sectionId: 's2', start: '0d', end: '+1d' }),
+      task('c1', 'Charlie one', { sectionId: 's3', start: '0d', end: '+1d' }),
+      task('a1', 'Alpha one', { sectionId: 's1', start: '0d', end: '+1d' }),
+      task('a2', 'Alpha two', { sectionId: 's1', start: '0d', end: '+1d' }),
+    ],
+  });
+
+  let indicator = null;
+  await dragBelowRow(page, 'b1', 'a2', async () => {
+    indicator = {
+      rule: await page.locator('[data-drop-rule]').boundingBox(),
+      last: await rowOf(page, 'a2').boundingBox(),
+    };
+  });
+
+  expect(Math.abs(indicator.rule.y - (indicator.last.y + indicator.last.height)),
+    'pre-drop paint identifies the bottom gap correctly').toBeLessThan(4);
+  expect(await sheetOrder(page)).toEqual([
+    { kind: 'section', id: 's1' }, { kind: 'row', id: 'a1' }, { kind: 'row', id: 'a2' }, { kind: 'row', id: 'b1' },
+    { kind: 'section', id: 's2' },
+    { kind: 'section', id: 's3' }, { kind: 'row', id: 'c1' },
+  ]);
+  expect(await storedSections(page)).toMatchObject({ a1: 's1', a2: 's1', b1: 's1', c1: 's3' });
+});
+
+test('dropping into a collapsed populated band appends after its hidden rows', async ({ page }) => {
+  await boot(page, {
+    sections: SECTIONS.concat([{ id: 's3', name: 'Later', order: 2 }]),
+    prefs: { collapsedSections: { s1: 1 } },
+    tasks: [
+      task('b1', 'Beta one', { sectionId: 's2', start: '0d', end: '+1d' }),
+      task('c1', 'Charlie one', { sectionId: 's3', start: '0d', end: '+1d' }),
+      task('a1', 'Alpha one', { sectionId: 's1', start: '0d', end: '+1d' }),
+      task('a2', 'Alpha two', { sectionId: 's1', start: '0d', end: '+1d' }),
+    ],
+  });
+
+  await dragIntoBand(page, 'b1', 's1');
+
+  expect(await storedSections(page)).toMatchObject({ a1: 's1', a2: 's1', b1: 's1', c1: 's3' });
+  expect(await storedOrderInSection(page, 's1')).toEqual(['a1', 'a2', 'b1']);
+});
+
+test('dropping into an empty band commits it as that band\'s only row', async ({ page }) => {
+  await boot(page, {
+    sections: SECTIONS.concat([{ id: 's3', name: 'Later', order: 2 }]),
+    tasks: [
+      task('b1', 'Beta one', { sectionId: 's2', start: '0d', end: '+1d' }),
+      task('c1', 'Charlie one', { sectionId: 's3', start: '0d', end: '+1d' }),
+    ],
+  });
+
+  await dragIntoBand(page, 'b1', 's1');
+
+  expect(await storedSections(page)).toMatchObject({ b1: 's1', c1: 's3' });
+  expect(await sheetOrder(page)).toEqual([
+    { kind: 'section', id: 's1' }, { kind: 'row', id: 'b1' },
+    { kind: 'section', id: 's2' },
+    { kind: 'section', id: 's3' }, { kind: 'row', id: 'c1' },
+  ]);
+});
 
 test('a task can be dropped as the BOTTOM-most row of a middle section, and stays there', async ({ page }) => {
   const errors = [];

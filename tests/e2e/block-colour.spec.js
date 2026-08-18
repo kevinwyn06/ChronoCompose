@@ -46,15 +46,25 @@ const SETTINGS = {
   lunchStart: '12:00', lunchEnd: '13:00', dinnerStart: '00:00', dinnerEnd: '00:00',
   minChunk: 30, breakMin: 0,
 };
-const fixture = (theme) => ({
-  theme,
-  settings: SETTINGS,
-  tasks: [
-    task('t-appt', 'Standup', { start: '0d+9h', end: '0d+10h', startClock: true, endClock: true, planned: 60 }),
-    task('t-p1', 'Ship the release', { start: '-1d', end: '+2d', planned: 150, priority: 1 }),
-    task('t-p3', 'Clear the inbox', { start: '-1d', end: '+2d', planned: 90, priority: 3 }),
-  ],
-});
+const fixture = (theme) => {
+  /* Keep the locked block deliberately away from the wall clock. A fixed 09:00 appointment becomes
+     the current block during that hour, when the intentional current-task red paint replaces the
+     normal priority fill and turns this into a test of red-vs-border contrast. Either slot remains
+     inside the configured day, while selecting the far side of noon guarantees it is non-current. */
+  const appointmentHour = new Date().getHours() < 13 ? 17 : 9;
+  return {
+    theme,
+    settings: SETTINGS,
+    tasks: [
+      task('t-appt', 'Standup', {
+        start: `0d+${appointmentHour}h`, end: `0d+${appointmentHour + 1}h`,
+        startClock: true, endClock: true, planned: 60,
+      }),
+      task('t-p1', 'Ship the release', { start: '-1d', end: '+2d', planned: 150, priority: 1 }),
+      task('t-p3', 'Clear the inbox', { start: '-1d', end: '+2d', planned: 90, priority: 3 }),
+    ],
+  };
+};
 
 /* sRGB helpers. Chromium serialises a resolved color-mix() as `color(srgb r g b)` on 0..1 and plain
    colours as `rgb()`/`rgba()` on 0..255 — both appear here, so both must parse or the measurements

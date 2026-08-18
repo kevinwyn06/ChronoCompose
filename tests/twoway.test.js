@@ -214,16 +214,12 @@ test('mergeCalendarEvents does not resurrect tombstoned events', () => {
 // ---------------------------------------------------------------------------
 // Funnel gating
 // ---------------------------------------------------------------------------
-test('commit enqueues outbound ops only when two-way is on and not applying an import', () => {
+test('commit always enqueues outbound ops except while applying an import', () => {
   const c = make();
   const t = linked(c, { id: 'g1', name: 'before' });
   c.state.tasks = [t];
-  c.rename('g1', 'off - no push');
-  assert.equal(c.loadQueue().length, 0, 'two-way off → no writes');
-
-  c.state.settings.gcalTwoWay = true;
-  c.rename('g1', 'on - push');
-  assert.equal(c.loadQueue().length, 1, 'two-way on → rename queues a patch');
+  c.rename('g1', 'local edit');
+  assert.equal(c.loadQueue().length, 1, 'rename queues a patch with no mode switch');
   assert.equal(c.loadQueue()[0].op, 'patch');
 
   c.saveQueue([]);
