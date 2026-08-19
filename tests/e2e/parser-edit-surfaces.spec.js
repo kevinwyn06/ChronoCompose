@@ -15,7 +15,7 @@ const stored = (page) => page.evaluate(() => {
 
 test('detail title and date picker both consume the shared parser shape', async ({ page }) => {
   await boot(page, fixture);
-  await page.locator('[data-task-id="parse-edit"] [data-cellk="name"]').click();
+  await page.locator('[data-task-id="parse-edit"] [data-task-name]').click();
 
   const title = page.locator('.pp-edit[contenteditable="true"]');
   await title.fill('Call mom Friday');

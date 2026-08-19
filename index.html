@@ -1372,17 +1372,13 @@ class Component extends DCLogic {
        with the name; the only numeric readout is planned → allotted, flush right. Actions retain today's
        inclusion, timer, and add-time controls without reintroducing data columns. */
     return [
-      /* PP-EXT (owner 2026-08-17): `name` gives up 104px — exactly the width of the new `Time needed`
-         column below — so the sheet's PIXEL TOTAL is unchanged at 730. Block 26's rule is that every
-         visible column fits inside the first-run pane, whose floor is `min(<column total>px, 55%)`;
-         growing the total pushes `Actions` past the right edge at 1280 wide, which
-         `tests/e2e/sheet-default-width.spec.js` asserts at three viewports precisely so a new column
-         cannot regress it silently. It did catch this one. Block 45 keeps that total until the pane
-         divider changes in block 46; the compact name and date cells ellipsize rather than wrap. */
+      /* PP-EXT (owner 2026-08-18): Task grows to 180px after the 110px post-date-column compromise
+         proved too cramped in use. Column-width changes now move the pane divider by the same pixel
+         delta, so this added room does not consume columns that were already visible. */
       /* PP-EXT (owner 2026-08-17, Chain 6 block 45): Start and End return as ordinary columns. Their
          compact two-line cells carry date plus an explicit clock, and hand off to the existing picker.
-         Keeping the pre-divider pixel total at 730 is deliberate: block 46 owns changing pane geometry. */
-      {k:'check',w:50,lock:true},{k:'name',w:110,l:'Task'},
+         Their compact two-line cells ellipsize rather than wrap. */
+      {k:'check',w:50,lock:true},{k:'name',w:180,l:'Task'},
       {k:'start',w:70,l:'Start'},{k:'end',w:70,l:'End'},
       {k:'planned',w:126,l:'Planned → Allotted'},
       /* PP-EXT (owner 2026-08-15): "I would prefer to add percent complete back as a column which then
@@ -1408,14 +1404,38 @@ class Component extends DCLogic {
   }
   visibleCols(){ return this.orderedCols().filter(c=>!c.hidden); }
   colMin(k){ return k==='check'?44:54; }
-  resetColW(k){ const sel=this.state.selCols; const keys=(sel.includes(k)&&sel.length>1)?sel:[k]; const cw=Object.assign({},this.state.colW); keys.forEach(x=>delete cw[x]); this.setState({colW:cw}); this.savePrefs({colW:cw}); }
-  setColW(patch){ const cw=Object.assign({}, this.state.colW, patch); this.setState({colW:cw}); this.savePrefs({colW:cw}); }
-  resetCols(){ this.setState({colW:{}, colHidden:{}, colOrder:null, selCols:[], colMenu:null}); this.savePrefs({colW:{}, colHidden:{}, colOrder:null}); }
+  /* PP-EXT (owner 2026-08-18): column mutations move the pane divider by their exact total-width delta.
+     The divider therefore remains the sole control for how much sheet content is clipped: widening Task
+     adds room to the left pane instead of consuming the already-visible columns to its right. */
+  colWidthTotal(colW, colHidden){
+    const cw=colW||{}, ch=colHidden||{};
+    return this.colDefs().reduce((n,c)=>n+(ch[c.k]?0:(cw[c.k]!=null?cw[c.k]:c.w)),0);
+  }
+  splitAfterColDelta(pct, deltaPx, boardWidth, scale){
+    if(!deltaPx || !(boardWidth>0)) return pct;
+    const shifted=pct+(deltaPx*((scale>0)?scale:1)/boardWidth*100);
+    return Math.max(this.PANE_MIN_FRAC,Math.min(this.PANE_MAX_FRAC,shifted));
+  }
+  colLayoutState(nextColW, nextHidden, extra){
+    const oldTotal=this.colWidthTotal(this.state.colW,this.state.colHidden);
+    const newTotal=this.colWidthTotal(nextColW,nextHidden);
+    const r=this.boardEl&&this.boardEl.getBoundingClientRect?this.boardEl.getBoundingClientRect():null;
+    const splitPct=this.splitAfterColDelta(this.state.splitPct,newTotal-oldTotal,r&&r.width,this.uiScale());
+    return Object.assign({colW:nextColW,colHidden:nextHidden,splitPct},extra||{});
+  }
+  saveColumnLayout(colW, colHidden, splitPct){
+    const key=this.leftSplitKey();
+    const vs=Object.assign({},this.state.viewSplit,{[key]:splitPct});
+    this.setState({viewSplit:vs}); this.savePrefs({colW,colHidden,viewSplit:vs});
+  }
+  resetColW(k){ const sel=this.state.selCols; const keys=(sel.includes(k)&&sel.length>1)?sel:[k]; const cw=Object.assign({},this.state.colW); keys.forEach(x=>delete cw[x]); const next=this.colLayoutState(cw,this.state.colHidden); this.setState(next); this.saveColumnLayout(cw,this.state.colHidden,next.splitPct); }
+  setColW(patch){ const cw=Object.assign({}, this.state.colW, patch); const next=this.colLayoutState(cw,this.state.colHidden); this.setState(next); this.saveColumnLayout(cw,this.state.colHidden,next.splitPct); }
+  resetCols(){ const next=this.colLayoutState({},{} ,{colOrder:null,selCols:[],colMenu:null}); this.setState(next); this.saveColumnLayout({}, {}, next.splitPct); this.savePrefs({colOrder:null}); }
   setColHidden(keys, hidden){
     const ch=Object.assign({}, this.state.colHidden);
     keys.forEach(k=>{ if(k==='check') return; if(hidden) ch[k]=true; else delete ch[k]; });
-    this.setState({colHidden:ch, colMenu:null, selCols:this.state.selCols.filter(k=>!ch[k])});
-    this.savePrefs({colHidden:ch});
+    const next=this.colLayoutState(this.state.colW,ch,{colMenu:null,selCols:this.state.selCols.filter(k=>!ch[k])});
+    this.setState(next); this.saveColumnLayout(this.state.colW,ch,next.splitPct);
   }
   selectCol(e,k){
     if(k==='check') return;
@@ -5286,7 +5306,7 @@ class Component extends DCLogic {
   /* PP-EXT (Chain 6 block 46): remember which surface owns the gesture. A task sheet clamps at the last
      visible column; the Selection grid retains its independent percentage bounds. */
   startSplit(e){ if(e.button!==0) return; e.preventDefault(); this.splitDrag={key:this.leftSplitKey()}; }
-  startColDrag(e,key,w){ if(e.button!==0) return; e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w}; }
+  startColDrag(e,key,w){ if(e.button!==0) return; e.preventDefault(); e.stopPropagation(); const sel=this.state.selCols; const keys=(sel.includes(key)&&sel.length>1)?sel.slice():[key]; this.colDrag={keys,startX:e.clientX,startW:w,lastW:w}; }
   /* PP-EXT V2.9 §1: called at DRAG BEGIN, not at mousedown — suppressing at mousedown would kill caret
      placement on the very click that also opens an inline editor. Two things happen here, and the second
      is the one that is easy to forget: `user-select:none` stops a selection GROWING but does not remove
@@ -5580,7 +5600,9 @@ class Component extends DCLogic {
     }
     if(this.colDrag){
       const d=this.colDrag; const base=Math.round(d.startW+(e.clientX-d.startX));
-      this.setState(s=>{ const cw=Object.assign({},s.colW); d.keys.forEach(k=>cw[k]=Math.max(this.colMin(k),base)); return {colW:cw}; });
+      const width=Math.max(this.colMin(d.keys[0]),base), delta=(width-d.lastW)*d.keys.filter(k=>!this.state.colHidden[k]).length;
+      d.lastW=width;
+      this.setState(s=>{ const cw=Object.assign({},s.colW); d.keys.forEach(k=>cw[k]=width); const r=this.boardEl&&this.boardEl.getBoundingClientRect(); return {colW:cw,splitPct:this.splitAfterColDelta(s.splitPct,delta,r&&r.width,this.uiScale())}; });
       return;
     }
     if(this.headPending){
@@ -5740,7 +5762,7 @@ class Component extends DCLogic {
       else this.forceUpdate();
       return;
     }
-    if(this.colDrag){ this.savePrefs({colW:this.state.colW}); this.colDrag=null; return; }
+    if(this.colDrag){ this.saveColumnLayout(this.state.colW,this.state.colHidden,this.state.splitPct); this.colDrag=null; return; }
     if(this.headPending){
       const p=this.headPending; this.headPending=null;
       if(this.colReorder){ const r=this.colReorder; this.colReorder=null; if(r.fromK!==r.overK){ const sel=this.state.selCols; const keys=(sel.includes(r.fromK)&&sel.length>1)?sel.slice():[r.fromK]; this.moveColumns(keys, r.overK); } else this.forceUpdate(); return; }
@@ -12212,7 +12234,7 @@ class Component extends DCLogic {
         caret, /* PP-EXT */
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
-        t.name, kidBadge /* PP-EXT */),
+        h('b',{'data-task-name':'1',style:{fontWeight:'inherit'}},t.name), kidBadge /* PP-EXT */),
       h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0,height:'18px',overflow:'hidden'}},
         dueRecurChip,
         inlineTags,

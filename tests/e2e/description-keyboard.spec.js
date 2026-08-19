@@ -4,7 +4,7 @@ const { boot, task } = require('./_seed');
 test.describe('keyboard-first task descriptions', () => {
   test.beforeEach(async ({ page }) => {
     await boot(page, { seedOnce:true, tasks:[task('desc-1', 'Description task', { start:'0d', end:'+1d' })] });
-    await page.locator('[data-task-id="desc-1"] [data-cellk="name"]').click();
+    await page.locator('[data-task-id="desc-1"] [data-task-name]').click();
     await expect(page.getByText('DESCRIPTION', { exact:true })).toBeVisible();
   });
 
@@ -98,7 +98,7 @@ test.describe('keyboard-first task descriptions', () => {
     await page.getByText('DESCRIPTION', { exact:true }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem('pp-tasks'))).toContain('safe');
     await page.reload();
-    await page.locator('[data-task-id="desc-1"] [data-cellk="name"]').click();
+    await page.locator('[data-task-id="desc-1"] [data-task-name]').click();
     const restored = page.locator('.pp-rich[contenteditable][data-tid="desc-1"]').last();
     await expect(restored).toContainText('bold');
     await expect(restored).toContainText('italic');

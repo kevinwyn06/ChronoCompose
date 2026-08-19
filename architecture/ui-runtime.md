@@ -216,9 +216,9 @@ fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, an
 
 Owner, 2026-08-17: *"I wanted it as a column, not as something inside the detail panel."* `colDefs()`
 carries `{k:'exact', w:104, l:'Time needed'}`, visible by default, between `% Done` and `actions`, and
-At introduction, `name` was trimmed 354 → 250 so the **pixel total stayed 730**. Block 45 later divides
-140px of that name width between the returning Start and End columns, preserving the same 730px total.
-Block 46 subsequently replaced the permanent first-run floor with the draggable, last-column clamp below.
+At introduction, `name` was trimmed 354 → 250. Block 45 temporarily divided 140px of that width between
+the returning Start and End columns. Owner testing widened Task from 110px to 180px; the divider-delta coupling below
+now lets column geometry grow without changing which rightmost sheet content was already visible.
 
 The cell shows `isUncompressable(t)` — the *resolved* value — so a never-decided task reads its answer off
 its own clocks and changes when they do. Decided and derived are drawn differently on purpose (solid chip
@@ -241,8 +241,8 @@ so silently depended on which column the current widths put there.
 
 Chain 6 block 45 reverses V2.3 for these two fields only. `colDefs()` carries ordinary, visible-by-default
 `start` and `end` entries, so the existing column machinery supplies hide, reorder, resize and reset with
-no date-specific preference path. Both cells are 70px and `name` is 110px; the visible-column total
-remains 730px, which is now also the divider's default last-column cap before its 20px gutter.
+no date-specific preference path. Both cells are 70px. The Task column now defaults to 180px after owner
+testing found 110px too cramped.
 
 ### Sheet pane divider
 
@@ -261,6 +261,10 @@ usable pixel floor and the last-column maximum remains reachable. Selection keep
 floor and 28–78% clamp. The revised
 `sheet-default-width.spec.js` covers Today and Schedule at 1280, 1600, and 1920 pixels, real divider
 compression/persistence, the right-edge clamp, and real column resize/hide/reorder gestures.
+
+Column resize, hide/show, and reset translate their total local-pixel width delta into the divider's
+rendered percentage. Changing columns therefore moves the divider by exactly the same distance and
+preserves the existing horizontal clipping; only dragging the divider changes how much is clipped.
 
 Each cell is a compact two-line read: local calendar date, then a clock only when
 `hasStartTime`/`hasEndTime` says that edge carries one. A bare midnight date therefore never invents

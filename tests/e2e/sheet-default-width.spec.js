@@ -151,6 +151,7 @@ test('the last-column clamp follows real column resize, hide, and reorder intera
   await boot(page, { prefs: { mainView: 'today' } });
   const pane = page.locator('[data-sheet-pane="1"]');
   const width0 = (await pane.boundingBox()).width;
+  const clip0 = await sheetGeometry(page, 'actions');
 
   /* Resize Task through its real 8px header grip. The pane grows because the last visible edge moved. */
   const grip = page.locator('[data-colk="name"] .pp-rsz');
@@ -162,9 +163,11 @@ test('the last-column clamp follows real column resize, hide, and reorder intera
   await page.mouse.move(gx + 80, gy, { steps: 6 });
   await page.mouse.up();
   const savedNameW = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-prefs')).colW.name);
-  expect(savedNameW).toBeGreaterThan(110);
+  expect(savedNameW).toBeGreaterThan(180);
   const width1 = (await pane.boundingBox()).width;
   expect(width1).toBeGreaterThan(width0 + 40);
+  const clip1 = await sheetGeometry(page, 'actions');
+  expect(clip1.scrollWidth - clip1.clientWidth).toBeCloseTo(clip0.scrollWidth - clip0.clientWidth, 0);
 
   /* Hide Time needed through the header context menu. The cap contracts immediately. */
   await page.locator('[data-colk="exact"]').click({ button: 'right' });
@@ -172,6 +175,8 @@ test('the last-column clamp follows real column resize, hide, and reorder intera
   await expect(page.locator('[data-colk="exact"]')).toHaveCount(0);
   const width2 = (await pane.boundingBox()).width;
   expect(width2).toBeLessThan(width1 - 60);
+  const clip2 = await sheetGeometry(page, 'actions');
+  expect(clip2.scrollWidth - clip2.clientWidth).toBeCloseTo(clip1.scrollWidth - clip1.clientWidth, 0);
 
   /* Reordering changes identity, not total width, so it must neither loosen nor shrink the clamp. */
   const start = page.locator('[data-colk="start"]');

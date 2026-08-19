@@ -56,7 +56,7 @@ async function dragBelowRow(page, fromId, toId, midDrag) {
      chip), so a row's midpoint is whichever column the current widths happen to put there — adding
      one column moved it onto the Planned input and turned this into a false failure. The name cell
      is the row's neutral surface, and where a user actually presses to open or drag a task. */
-  const a = await rowOf(page, fromId).locator('[data-cellk="name"]').boundingBox();
+  const a = await rowOf(page, fromId).locator('[data-task-name]').boundingBox();
   const b = await rowOf(page, toId).boundingBox();
   const targetY = b.y + b.height - 3; /* unambiguously the lower half, and still inside the row */
   await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
@@ -68,7 +68,7 @@ async function dragBelowRow(page, fromId, toId, midDrag) {
 }
 
 async function dragIntoBand(page, fromId, sectionId) {
-  const a = await rowOf(page, fromId).locator('[data-cellk="name"]').boundingBox();
+  const a = await rowOf(page, fromId).locator('[data-task-name]').boundingBox();
   const band = await header(page, sectionId).boundingBox();
   const x = a.x + a.width / 2;
   const y = band.y + band.height / 2;

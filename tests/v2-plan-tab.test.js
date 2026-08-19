@@ -190,6 +190,14 @@ test('the triage default sits inside the splitter clamp the user could drag to',
   assert.ok(d <= c.splitDefault('cal'), 'the sheet now opens to its content edge; its px cap prevents whitespace');
 });
 
+test('column width deltas move the sheet divider by the same rendered distance', () => {
+  const c = make();
+  assert.equal(c.splitAfterColDelta(50, 140, 1400, 1), 60);
+  assert.equal(c.splitAfterColDelta(60, -140, 1400, 1), 50);
+  assert.equal(c.splitAfterColDelta(50, 140, 1120, 0.8), 60,
+    'local column pixels are converted through the measured UI scale');
+});
+
 test('setLeftSurface banks the width it leaves and restores the one it enters', () => {
   const c = make();
   const saved = [];

@@ -55,7 +55,7 @@ async function litRow(page, n) {
      chip), so a row's midpoint is whichever column the current widths happen to put there — adding
      one column moved it onto the Planned input and turned this into a false failure. The name cell
      is the row's neutral surface, and where a user actually presses to open or drag a task. */
-  const box = await rows(page).nth(n).locator('[data-cellk="name"]').boundingBox();
+  const box = await rows(page).nth(n).locator('[data-task-name]').boundingBox();
   if (!box) throw new Error('row ' + n + ' had no box');
   await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
   await expect(detailOpen(page)).toBeVisible();

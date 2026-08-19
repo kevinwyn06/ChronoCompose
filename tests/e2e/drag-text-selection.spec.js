@@ -33,7 +33,7 @@ test.describe('V2.9 §1 — a drag does not drag a highlight along with it', () 
   test('an existing selection is cleared at drag begin and the board stops selecting', async ({ page }) => {
     await boot(page);
     const row = firstRow(page);
-    const box = await row.boundingBox();
+    const box = await row.locator('[data-task-name]').boundingBox();
     const x = box.x + box.width / 2, y = box.y + box.height / 2;
 
     const had = await selectRowText(page);

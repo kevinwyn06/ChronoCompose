@@ -23,7 +23,7 @@ test('Block 46: hiding and resizing columns immediately changes the sheet clamp'
   const hidden = c.sheetMinWidthPx();
   assert.ok(hidden < full);
 
-  c.state.colW = { name: 240 };
+  c.state.colW = { name: c.colDefs().find(x => x.k === 'name').w + 130 };
   assert.equal(c.sheetMinWidthPx(), hidden + 130);
 
   const narrowContentPct = c.sheetMinWidthPx() / 4000 * 100;

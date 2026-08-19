@@ -47,7 +47,7 @@ test.describe('V2.4 — activation is a gesture on the row, not on a click', () 
        ever moved onto the single click (the shape an earlier handoff wrongly claimed shipped), and it
        is the control the gesture assertion above needs before it can mean anything. */
     await boot(page);
-    await rows(page).nth(0).click();
+    await rows(page).nth(0).locator('[data-task-name]').click();
     await expect(page.getByRole('button', { name: 'Previous task' })).toBeVisible();
     expect(await running(page), 'a single click is not an activation').toEqual([]);
   });
