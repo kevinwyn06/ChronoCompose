@@ -82,6 +82,16 @@ target band: it anchors before the next row in that band when one exists, otherw
 persisted row. That same fallback makes collapsed populated bands append after their hidden rows; empty
 bands simply receive their first row.
 
+**Single-row hiding is task state, not a view filter (Block 49).** Right-clicking an ordinary sheet row
+offers `Hide row`, which commits mirrored `rowHidden:true`. The task remains in the persisted array at the
+same position; it is not archived, deleted, excluded, or removed from scheduling/Calendar reconciliation.
+After the normal grouping/sorting/filter projection, consecutive hidden tasks collapse into one 20px
+Excel-like seam with a truthful count and a `Show` action that restores the whole run in one commit.
+The same structural height is reserved in the Gantt, while hidden tasks leave the flattened task/bar list,
+so pane alignment and drag insertion geometry remain shared. Section collapse still owns the entire band;
+ordinary filters may temporarily omit a hidden task just as they omit a visible one, and clearing the
+filter exposes its marker again. Keyboard row navigation skips hidden rows.
+
 The section-header band is painted from per-theme `--sec-head-bg` / `--sec-head-border` (owner
 2026-08-13b), in **both** panes, opaque in both. It previously painted `--top-bg`, which is four units
 from `--sheet-bg` in the dark theme and *identical* to it in the light theme, so the header was carried
@@ -421,6 +431,16 @@ caret** — in the sheet a drag reorders and re-nests, on a card it includes/exc
 cannot mean both. The card's description panel uses `state.cardDescOpen`, never `state.descOpen`,
 because the sheet's panel is measured (`observeDescPanel` → `_descH` → `yOfRow`) to offset the Gantt's
 rows — a card sharing that state would silently shift bars.
+
+Task descriptions are keyboard-first rich text (owner 2026-08-18). All three task surfaces share
+`richEditor`; it renders only the content-editable field, with no formatting toolbar. Native browser
+keyboard shortcuts remain available, while a Space after an exact line-start `-`, `*`, or numeric
+enumerator such as `1.` converts that line to an unordered or ordered list and removes the marker.
+The line-start check spans adjacent inline nodes (native bold/italic/underline split one visual line into
+several nodes) and treats Chromium's Enter blocks plus `<br>` as line boundaries, so a mid-line marker
+cannot autoformat merely because it begins a new text node. Mid-line punctuation and decimals stay literal.
+Storage, blur commits, paste, undo, and sanitization retain
+the existing rich-HTML contract; Journal and Scratch continue to use the separate generic `richField`.
 
 **Inclusion is four states, not five.** V2.11 retired `off` (`included===false`): `setIncludedOff` writes
 `null`, and snoozes until tomorrow **exactly when `isInheritedToday` would otherwise re-include the task

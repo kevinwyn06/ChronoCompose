@@ -509,6 +509,7 @@ class Component extends DCLogic {
     this.ROW_GHOST_DX = 14;
     this.ROW_GHOST_DY = 10;
     this.TAG_SECTION_H = 24;     // PP-EXT V2.3: shared sheet/Gantt height for @tag section rails
+    this.ROW_HIDDEN_H = 20;      // PP-EXT (49): compact shared sheet/Gantt slot for a consecutive hidden-row run
     this.FOCUS_ADD_MINUTES = 15; // PP-EXT V2.3: one-tap manual time increment in Focus rows
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
@@ -839,6 +840,7 @@ class Component extends DCLogic {
       startClock:null, endClock:null,
       included:(t && (t.start!=null || t.end!=null)) ? null : true,
       includedExplicit:false, /* PP-EXT (36 review): provenance for a manual press; automatic/default inclusion is never explicit. Mirrored by migration 0014. */
+      rowHidden:false, /* PP-EXT (49): synced sheet-row visibility; independent of archive, filters, inclusion and scheduling. */
       /* PP-EXT (owner 2026-08-17): creation defaults follow intent visible in the dates. A dateless quick
          chore starts pressed into today; any task with a real date starts undecided and lets its window
          decide when it arrives. Object.assign below still preserves an explicit true/null decision. */
@@ -1876,6 +1878,48 @@ class Component extends DCLogic {
   }
   /* True when a description has real content (ignoring empty tags/whitespace execCommand leaves behind). */
   hasDesc(html){ const s=String(html||'').replace(/<br\s*\/?>/gi,'').replace(/<[^>]*>/g,'').replace(/&nbsp;/gi,' ').trim(); return !!s; }
+  /* PP-EXT owner 2026-08-18: description list autoformat is deliberately narrow. The caller passes only
+     text from the start of the current visual line to the caret, immediately before Space. */
+  descriptionListMarker(line){ line=String(line==null?'':line);
+    if(line==='-' || line==='*') return {command:'insertUnorderedList',markerLength:1};
+    if(/^\d+\.$/.test(line)) return {command:'insertOrderedList',markerLength:line.length};
+    return null; }
+  /* Read the complete visual-line prefix, not merely the caret's text node: native Ctrl+B/I/U splits one
+     line into adjacent inline nodes, and a later mid-line `-` must not masquerade as a line-start marker.
+     Chromium Enter normally creates a DIV/P/LI block; BR is the remaining visual-line boundary. */
+  descriptionLineBeforeCaret(el,caret){
+    const BLOCK=/^(DIV|P|LI|PRE|BLOCKQUOTE|H[1-6])$/;
+    let boundary=caret.startContainer.nodeType===1?caret.startContainer:caret.startContainer.parentNode;
+    while(boundary && boundary!==el && !BLOCK.test(boundary.tagName||'')) boundary=boundary.parentNode;
+    if(!boundary || (boundary!==el && !el.contains(boundary))) return null;
+    const prefix=document.createRange(); prefix.selectNodeContents(boundary);
+    try{ prefix.setEnd(caret.startContainer,caret.startOffset); }catch(_){ return null; }
+    const frag=prefix.cloneContents(); let text='';
+    const read=(node)=>{ Array.prototype.forEach.call(node.childNodes,ch=>{
+      if(ch.nodeType===3){ text+=ch.data; return; }
+      if(ch.nodeType!==1) return;
+      if(ch.tagName==='BR'){ text+='\n'; return; }
+      const nestedBlock=BLOCK.test(ch.tagName||'');
+      if(nestedBlock && text && text.slice(-1)!=='\n') text+='\n';
+      read(ch);
+      if(nestedBlock && text.slice(-1)!=='\n') text+='\n';
+    }); };
+    read(frag);
+    return text.slice(text.lastIndexOf('\n')+1);
+  }
+  descriptionListKeyDown(e){ if(e.key!==' ' || e.ctrlKey || e.metaKey || e.altKey) return false;
+    const el=e.currentTarget, sel=window.getSelection();
+    if(!sel || !sel.rangeCount || !sel.isCollapsed) return false;
+    const caret=sel.getRangeAt(0); if(!el.contains(caret.startContainer)) return false;
+    const node=caret.startContainer; if(node.nodeType!==3) return false;
+    const line=this.descriptionLineBeforeCaret(el,caret), marker=this.descriptionListMarker(line);
+    if(!marker || caret.startOffset<marker.markerLength) return false;
+    e.preventDefault();
+    const remove=document.createRange(); remove.setStart(node,caret.startOffset-marker.markerLength);
+    remove.setEnd(node,caret.startOffset); sel.removeAllRanges(); sel.addRange(remove);
+    try{ document.execCommand('insertText',false,''); }catch(_){ return false; }
+    try{ document.execCommand(marker.command,false,''); }catch(_){}
+    return true; }
   /* PP-EXT: plain-text caret offset within `el`, walking its text nodes (0 if no selection inside el). */
   caretOffset(el){ const sel=window.getSelection(); if(!sel||!sel.rangeCount) return 0;
     const r=sel.getRangeAt(0); if(!el.contains(r.startContainer)) return 0;
@@ -1893,33 +1937,23 @@ class Component extends DCLogic {
       remaining-=len; }
     if(last){ const r=document.createRange(); r.setStart(last,last.textContent.length); r.collapse(true);
       sel.removeAllRanges(); sel.addRange(r); } }
-  richCmd(e,cmd){ e.preventDefault(); const el=this._reEl; const offset=el?this.caretOffset(el):0;
-    try{ document.execCommand('styleWithCSS',false,''); }catch(_){}
-    try{ document.execCommand(cmd,false,''); }catch(_){}
-    if(el){ this.setCaretOffset(el,offset); this.setDesc(el.getAttribute('data-tid'), this.sanitizeHtml(el.innerHTML)); } }
   /* Commit the currently-focused editor's content (used when a panel is collapsed/closed before blur fires). */
   flushDesc(){ const el=this._reEl; if(el && el.isConnected){ const id=el.getAttribute('data-tid');
     if(id){ const html=this.sanitizeHtml(el.innerHTML); const t=this.state.tasks.find(x=>x.id===id); if(t && (t.description||'')!==html) this.setDesc(id, html); } } }
-  /* Reusable WYSIWYG editor: toolbar (B/I/U, bullets, numbers) + a contentEditable surface. Uncontrolled — the
+  /* Reusable keyboard-first WYSIWYG description editor. Native browser shortcuts provide formatting; the
      ref seeds innerHTML once per task so React never reconciles it away mid-edit; content is committed on blur. */
   richEditor(t, opts){ const h=React.createElement; opts=opts||{};
-    const tbBtn=(label,cmd,title)=>h('button',{key:cmd,title:title,type:'button',
-      onMouseDown:e=>this.richCmd(e,cmd),
-      style:{minWidth:'26px',height:'24px',padding:'0 6px',fontSize:'12px',fontWeight:700,cursor:'pointer',
-        background:'var(--input-bg)',color:'var(--text-2)',border:'1px solid var(--divider)',borderRadius:'5px'}},label);
-    const toolbar=h('div',{style:{display:'flex',gap:'5px',marginBottom:'7px',flexWrap:'wrap'}},
-      tbBtn('B','bold','Bold'), tbBtn('I','italic','Italic'), tbBtn('U','underline','Underline'),
-      tbBtn('• List','insertUnorderedList','Bullet list'), tbBtn('1. List','insertOrderedList','Numbered list'));
     const editor=h('div',{key:'re'+t.id, className:'pp-rich', contentEditable:true, suppressContentEditableWarning:true,
       'data-tid':t.id, 'data-ph':'Add a description…',
       ref:el=>{ this._reEl=el; if(el && el._initId!==t.id){ el._initId=t.id; el.innerHTML=this.sanitizeHtml(t.description); } },
       onFocus:e=>{ this._reEl=e.currentTarget; },
       onBlur:e=>this.setDesc(t.id, this.sanitizeHtml(e.currentTarget.innerHTML)),
-      onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onKeyDown:e=>e.stopPropagation(),
+      onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(),
+      onKeyDown:e=>{ this.descriptionListKeyDown(e); e.stopPropagation(); },
       style:Object.assign({outline:'none',fontSize:'13.5px',lineHeight:'1.55',color:'var(--text-2)',
         border:'1px solid var(--divider)',borderRadius:'8px',padding:'10px 12px',minHeight:(opts.minHeight||120)+'px',
         overflow:'auto',background:'var(--input-bg)'},opts.style||{})});
-    return h('div',{style:opts.wrap||null}, toolbar, editor);
+    return h('div',{style:opts.wrap||null}, editor);
   }
   /* Read-only rendered description (sanitized). */
   renderRichHtml(html, style){ const h=React.createElement;
@@ -3066,7 +3100,19 @@ class Component extends DCLogic {
   }
   /* The flattened, render-order task list both panes index by — collapsed sections contribute no rows. */
   flattenSections(sections){
-    return (sections||[]).reduce((out,sec)=>sec.collapsed?out:out.concat(sec.tasks),[]);
+    return (sections||[]).reduce((out,sec)=>sec.collapsed?out:out.concat((sec.tasks||[]).filter(t=>!t.rowHidden)),[]);
+  }
+  /* PP-EXT (49): preserve the projection's exact order while replacing each consecutive hidden run with
+     one structural item. This runs after grouping/sorting/filtering, so those view transforms remain
+     projections only and can never rewrite the persisted task array. */
+  rowProjectionItems(tasks){
+    const out=[];
+    (tasks||[]).forEach(t=>{
+      if(!t.rowHidden){ out.push({kind:'task',task:t}); return; }
+      const last=out[out.length-1];
+      if(last&&last.kind==='hidden') last.tasks.push(t); else out.push({kind:'hidden',tasks:[t]});
+    });
+    return out;
   }
   buildKids(tasks){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
@@ -4630,6 +4676,14 @@ class Component extends DCLogic {
   navDetail(dir){ const ts=this.state.tasks; const i=ts.findIndex(t=>t.id===this.state.detailId); const ni=Math.max(0,Math.min(ts.length-1,i+dir)); this.setState({detailId:ts[ni].id, selectedIds:[ts[ni].id]}); }
   closeMenu(){ this.setState({menu:null}); }
 
+  /* PP-EXT (49): hiding is an ordinary mirrored task mutation. It neither removes nor reorders a task,
+     and therefore does not participate in archive, Calendar deletion, inclusion, or scheduling. */
+  setRowsHidden(ids, hidden){
+    const set=new Set(ids||[]);
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(set.has(t.id)) t.rowHidden=!!hidden; }); });
+    this.setState({selectedIds:[],menu:null,detailId:null});
+  }
+
   setPriorityMulti(ids,p){ this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.priority=p; }); }); this.closeMenu(); }
   completeMulti(ids){ ids=this.expandSubtrees(ids); /* PP-EXT: completing a parent completes its subtree */
     const allDone=this.state.tasks.filter(t=>ids.includes(t.id)).every(t=>t.pct>=100);
@@ -5288,7 +5342,7 @@ class Component extends DCLogic {
      not always the visible right pane (Schedule/Month/Week render instead). Deriving both panes from one
      pure function means the drop geometry cannot drift from the painted geometry. */
   sectionGeometry(sections){
-    const yTop=[]; const secLayout=[]; let acc=0, ti=0;
+    const yTop=[]; const secLayout=[]; const hiddenRuns=[]; let acc=0, ti=0;
     (sections||[]).forEach(sec=>{
       /* `flat` (Group by: None) emits no band and consumes no TAG_SECTION_H, exactly as the sheet skips
          its header row — the two panes stay aligned because they read the same projection. */
@@ -5297,11 +5351,16 @@ class Component extends DCLogic {
       /* Collapsed sections contribute their header band and NOTHING else — the same rows the sheet skips
          and flattenSections drops, so `acc` (and every bar's Y) stays in step with _visTasks. */
       const firstIndex=ti;
-      if(!sec.collapsed) sec.tasks.forEach(t=>{ yTop[ti++]=acc; acc+=this.rowH+this.descExtra(t); });
+      if(!sec.collapsed) this.rowProjectionItems(sec.tasks).forEach(item=>{
+        if(item.kind==='hidden'){
+          hiddenRuns.push({sectionId:sec.id,top:acc,height:this.ROW_HIDDEN_H,ids:item.tasks.map(t=>t.id)});
+          acc+=this.ROW_HIDDEN_H;
+        } else { const t=item.task; yTop[ti++]=acc; acc+=this.rowH+this.descExtra(t); }
+      });
       if(!sec.flat) secLayout.push({id:sec.id, name:sec.name, top:bandTop, headerBottom:bandTop+this.TAG_SECTION_H,
         bottom:acc, firstIndex, endIndex:ti, collapsed:!!sec.collapsed});
     });
-    return {yTop, secLayout, bodyH:acc};
+    return {yTop, secLayout, hiddenRuns, bodyH:acc};
   }
   /* PP-EXT V2.6b: drag a section HEADER to reorder it. ▲▼ still work and stay the keyboard/precision path;
      dragging is the one people reach for first. `No section` is not draggable — it is a fallback bucket that
@@ -7396,11 +7455,13 @@ class Component extends DCLogic {
      ONE full re-push of every task row on the next sync, the same one-time cost 0008 and 0012 recorded.
      That re-push is expected and documented, not a defect.
      PP-EXT (36 review): `includedExplicit` joins with migration 0014 and MUST be added server-side before
-     this client ships. It is provenance, not another inclusion state: only a manual press writes true. */
+     this client ships. It is provenance, not another inclusion state: only a manual press writes true.
+     PP-EXT (49): `rowHidden` likewise requires migration 0015 before this client ships. Its fingerprint
+     addition causes the same expected one-time full row re-push; it is visibility only, never scheduling. */
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking','sectionId','uncompressable','includedExplicit']; }
+    'snoozeUntil','blocking','sectionId','uncompressable','includedExplicit','rowHidden']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -11710,7 +11771,10 @@ class Component extends DCLogic {
       /* A collapsed section keeps its header (both panes still reserve TAG_SECTION_H) and hides only its
          task rows — matching flattenSections, so rowIndex stays in step with _visTasks and _yTop. */
       if(sec.collapsed) return;
-      sec.tasks.forEach(t=>rows.push(this.sheetRow(t,rowIndex++,cols,totalW,byId)));
+      this.rowProjectionItems(sec.tasks).forEach(item=>{
+        if(item.kind==='hidden') rows.push(this.hiddenRowMarker(item.tasks,totalW));
+        else rows.push(this.sheetRow(item.task,rowIndex++,cols,totalW,byId));
+      });
     });
 
     /* PP-EXT: replaces the removed always-on quick-add bar — a subtle full-width footer row that opens the
@@ -11732,6 +11796,21 @@ class Component extends DCLogic {
     return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}}, inner);
+  }
+  /* PP-EXT (49): Excel-like collapsed-row seam. The count describes this exact consecutive run and the
+     one action restores every member, so no task inside a compacted run can become unreachable. */
+  hiddenRowMarker(tasks,totalW){
+    const h=React.createElement, ids=(tasks||[]).map(t=>t.id), n=ids.length;
+    return h('div',{key:'hidden-'+ids.join('-'),'data-hidden-row-marker':'1','data-hidden-count':String(n),
+      style:{display:'flex',alignItems:'center',height:this.ROW_HIDDEN_H+'px',minWidth:totalW+'px',padding:'0 9px',
+        color:'var(--text-mut2)',background:'var(--sheet-bg)',borderTop:'1px solid var(--divider)',
+        borderBottom:'1px solid var(--divider)',fontSize:'10px'}},
+      h('span',{style:{width:'18px',color:'var(--text-faint)',fontWeight:700}},'⋯'),
+      h('span',{style:{fontVariantNumeric:'tabular-nums'}},n+' hidden row'+(n===1?'':'s')),
+      h('span',{style:{flex:1,borderTop:'1px dashed var(--divider)',margin:'0 9px'}}),
+      h('button',{type:'button',onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.setRowsHidden(ids,false);},
+        style:{height:'18px',padding:'0 8px',border:'1px solid var(--divider)',borderRadius:'var(--r-1)',
+          background:'var(--btn-bg)',color:'var(--btn-text)',fontSize:'10px',cursor:'pointer'}},'Show'));
   }
   /* PP-EXT V2.6: one section header row. Controls (rename · reorder · delete) are hover-gated but are
      CHILDREN of the header, per the hit-target tenet — a handle that appears on hover must live inside the
@@ -12386,6 +12465,10 @@ class Component extends DCLogic {
              hairline is gone with the sheet's rule. Height/top are untouched, so row alignment is unchanged. */
           background:'var(--sec-head-bg)',borderTop:si?'1px solid var(--sec-head-border)':'none',
           borderBottom:'1px solid var(--sec-head-border)'}})),
+      ...g.hiddenRuns.map((run,i)=>h('div',{key:'ghidden-'+i,'data-gantt-hidden-marker':'1','aria-hidden':'true',
+        style:{position:'absolute',left:0,right:0,top:run.top+'px',height:run.height+'px',zIndex:1,
+          background:'color-mix(in srgb,var(--sheet-bg) 82%,transparent)',borderTop:'1px solid var(--divider)',
+          borderBottom:'1px solid var(--divider)',pointerEvents:'none'}})),
       // row hover stripes
       ...tasks.map((t,i)=>{ const crit=this._showCP&&this._cpm.critical[t.id]; const sel=this.isSel(t.id); const hov=this.state.hoverId===t.id;
         return h('div',{key:'r'+t.id,'data-gantt-task-id':t.id,onMouseEnter:()=>this.setState({hoverId:t.id}),onMouseLeave:()=>this.setState({hoverId:null}),
@@ -12897,6 +12980,8 @@ class Component extends DCLogic {
         this.allMilestones(ids)?'Convert to task':'Convert to milestone'],()=>this.toggleMilestoneMulti(ids)),
       row([ic('⧉'),'Duplicate'],()=>this.duplicateMulti(ids)),
       !multi?row([ic('↳'),'Add subtask',kbd('Tab')],()=>{this.addSubtask(ids[0]); this.closeMenu();}):null, /* PP-EXT: subtasks */
+      divider,
+      row([ic('↕'),h('span',{'data-hide-row-action':'1'},multi?'Hide rows':'Hide row')],()=>this.setRowsHidden(ids,true)), /* PP-EXT (49): synced, reversible sheet visibility */
       divider,
       /* PP-EXT: archive keeps the task (hidden, stats intact, gcal untouched); delete is permanent + deletes the event */
       tasks.every(t=>t.archivedAt)

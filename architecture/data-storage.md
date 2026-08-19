@@ -16,6 +16,7 @@ Scheduling-specific fields:
 | `uncompressable` | Tri-state, 2026-08-16. `true` = "Exact": the day reserves this task's figure off the top and never compresses it, and it is a precondition of `isFixedOn`. `false` = "Flexible". `null` = **never decided**, and `isUncompressable(t)` — the only reader — derives the answer from `clockSpanMinutes(t) != null` on every read, so a task that gains clocks later becomes Exact by itself. A stored `true`/`false` is a decision and outranks the derivation. In `SYNC_FIELDS`; **nullable** column added by migration `0013`. |
 | `included` | `true` means pressed into today; `false`/`null` are unpressed. A dateless task defaults `true`; a task with either date defaults `null`, so hand-created and Calendar-imported future work does not enter today early. |
 | `includedExplicit` | Boolean provenance for `included`, added by migration `0014`. `true` only when the user manually presses work into today; `false` for dateless automatic inclusion, dated bound-derived inclusion, unpresses, defaults, and migrated legacy rows. It lets incoming sync distinguish a current decision from the old unconditional `included:true` default. |
+| `rowHidden` | Boolean sheet-row visibility, added by migration `0015`. `true` replaces the ordinary row with a reversible compact marker; it does not archive/delete the task or change scheduling, inclusion, Calendar identity, or persisted order. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
 
@@ -183,6 +184,13 @@ defaults, automatic inclusion, unpresses, and migrated rows carry `false`. The i
 only without explicit provenance, so an old-client default is still corrected but a current press survives
 pulls and later remote-winning edits. Apply `0014` before deploying a client with the field in
 `SYNC_FIELDS`; adding it causes the expected one-time full task re-push.
+
+**Synced row hiding (migration 0015, 2026-08-18).** `rowHidden` is an explicit non-null boolean on
+`public.tasks` and in `SYNC_FIELDS`. Apply `0015_row_hidden.sql` before deploying the client field; an
+older schema rejects every task write that names a missing column. As with 0014, the fingerprint change
+causes one expected full task re-push on first upgraded sync. Existing and old-client rows default false.
+Old-client writes omit the column, so PostgREST preserves a current client's hidden state.
+Migration `0015` is **APPLIED** and catalog verified: `rowHidden | NO | boolean | false`.
 
 **The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
 

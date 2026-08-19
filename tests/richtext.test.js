@@ -38,3 +38,15 @@ test('hasDesc: true only for real content, ignoring empty tags/whitespace', () =
   assert.strictEqual(c.hasDesc('<ul><li>step</li></ul>'), true);
   assert.strictEqual(c.hasDesc('plain text'), true);
 });
+
+test('descriptionListMarker: recognizes only complete line-start list markers', () => {
+  const c = make();
+  assert.equal(JSON.stringify(c.descriptionListMarker('-')), JSON.stringify({ command:'insertUnorderedList', markerLength:1 }));
+  assert.equal(JSON.stringify(c.descriptionListMarker('*')), JSON.stringify({ command:'insertUnorderedList', markerLength:1 }));
+  assert.equal(JSON.stringify(c.descriptionListMarker('1.')), JSON.stringify({ command:'insertOrderedList', markerLength:2 }));
+  assert.equal(JSON.stringify(c.descriptionListMarker('27.')), JSON.stringify({ command:'insertOrderedList', markerLength:3 }));
+
+  for (const ordinary of ['hello-', 'a *', 'x -', '3.14', '1.2.', 'word', '', '  -', '- item']) {
+    assert.strictEqual(c.descriptionListMarker(ordinary), null, ordinary+' must stay ordinary text');
+  }
+});
