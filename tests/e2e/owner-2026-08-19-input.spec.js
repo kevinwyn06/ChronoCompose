@@ -112,3 +112,21 @@ test('blur still commits to the draft without closing, so Tab still works', asyn
   // the card is still open — this is the only way to set a time and then adjust the date
   await expect(page.getByText('START', { exact: true })).toBeVisible();
 });
+
+/* Owner, 2026-08-19: "I'll think 'okay this task is 10pm, I want it to be 9pm instead' and type 9 only
+   for it to end up as 9am." The whole round trip, through a real picker. */
+test('a task at 10pm, typing 9, becomes 9pm', async ({ page }) => {
+  await boot(page, { seedOnce: true, tasks: [
+    // '0d+22h' is the seed's day-offset-plus-clock form: today at 22:00.
+    task('a', 'Write', { start: '0d+22h', end: '+1d', startClock: true, endClock: true }),
+  ] });
+
+  const cell = page.locator('[data-task-id="a"] [data-cellk="start"]');
+  await cell.click();
+  await expect(page.getByText('START', { exact: true })).toBeVisible();
+
+  await timeBox(page).fill('9');
+  await page.keyboard.press('Enter');
+
+  await expect(cell).toContainText('9:00 PM');
+});

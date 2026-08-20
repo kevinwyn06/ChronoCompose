@@ -6183,7 +6183,10 @@ class Component extends DCLogic {
   /* PP-EXT: parse ONE clock token ("5", "17:00", "4pm", "4:30 p.m.") → {h,m,mer} | null.
      mer is 'am'|'pm'|null; null means no meridiem was written, so it may inherit one from a range partner. */
   parseClockTok(tok){
-    const m=/^\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*$/i.exec(tok||'');
+    /* PP-EXT (owner 2026-08-19): the `m` is optional, so the one-letter forms `9a` / `9p` parse as an
+       EXPLICIT meridiem instead of falling through as unparseable. Without this the owner's listed
+       form `9p` returned null and set no time at all. */
+    const m=/^\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m?\.?|p\.?m?\.?)?\s*$/i.exec(tok||'');
     if(!m) return null;
     const h=parseInt(m[1]), mm=m[2]?parseInt(m[2]):0;
     if(h>23 || mm>59) return null;
@@ -6191,6 +6194,44 @@ class Component extends DCLogic {
   }
   /* Resolve a token to a 24h hour, applying its own meridiem or an inherited one. */
   clockH(tok, inherit){ const M=tok.mer||inherit; let h=tok.h; if(M){ h=h%12; if(M==='pm') h+=12; } return h; }
+  /* PP-EXT (owner 2026-08-19): resolve a bare typed hour to a 24h hour. Owner decision: keep the
+     meridiem already in the field. PURE — four plain values in, a number out.
+       tok         parseClockTok output
+       currentMs   what the field currently holds, or null when empty
+       dayWindow   {start,end} 'HH:MM' — the day bounds
+       otherEdgeMs the task's other clock, or null
+     Rung 2 is load-bearing: clockH computes h%12 before adding 12 for pm, so 17 with an inherited
+     `am` would come back as 5am. An hour above 12 has no meridiem to inherit. */
+  resolveBareHour(tok, currentMs, dayWindow, otherEdgeMs){
+    if(!tok) return null;
+    if(tok.mer) return this.clockH(tok, null);           /* 1. explicit wins */
+    if(tok.h>12) return tok.h;                           /* 2. no meridiem to inherit */
+    if(currentMs!=null){                                 /* 3. inherit the field's own */
+      const cur=new Date(currentMs).getHours();
+      return this.clockH(tok, cur>=12 ? 'pm' : 'am');
+    }
+    const am=this.clockH(tok,'am'), pm=this.clockH(tok,'pm');
+    const lo=this.timeParts(dayWindow.start), hi=this.timeParts(dayWindow.end);
+    const inWin=hh=>hh*60>=lo && hh*60<=hi;
+    const amOk=inWin(am), pmOk=inWin(pm);
+    if(amOk!==pmOk) return amOk?am:pm;                   /* 4. only one reading is in the day */
+    if(otherEdgeMs!=null){                               /* 5. tie -> nearer the other edge */
+      const oh=new Date(otherEdgeMs).getHours();
+      return Math.abs(am-oh)<=Math.abs(pm-oh) ? am : pm;
+    }
+    return am;
+  }
+  /* PP-EXT (owner 2026-08-19): the OTHER clock of the task the picker is editing, or null. Feeds
+     resolveBareHour's tie-break: editing the end of a task that starts at 8pm, a bare "9" means 9pm. */
+  _dpOtherEdge(key){
+    const dp=this.state.datePick; if(!dp) return null;
+    const t=(this.state.tasks||[]).find(x=>x.id===dp.id); if(!t) return null;
+    const has=key==='start' ? this.hasStartTime(t) : this.hasEndTime(t);
+    if(!has) return null;
+    const v=key==='start' ? t.start : t.end;
+    return v!=null ? v : null;
+  }
+  /* /PP-EXT */
   CLOCK_TOK_RE(){ return '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?'; }
   /* PP-EXT: a clock RANGE — "from 17:00 to 18:00", "5-6pm", "9am to 10:30am". Returns
      {sh,sm,eh,em,txt} | null. Without this the old parser matched only the first clock and threw the
@@ -7094,7 +7135,12 @@ class Component extends DCLogic {
       const ms=this.startOfDay(dp.ms); this.dpSet({ms,view:ms,dpTimed:false,parsed:null}); return;
     }
     const tok=this.parseClockTok(str); let hh, mm;
-    if(tok){ hh=this.clockH(tok,null); mm=tok.m; }
+    /* PP-EXT (owner 2026-08-19): a bare hour keeps the meridiem already in the field — "10pm" + "9"
+       is 9pm, not 9am. `dpTimed===false` means the field is showing no clock, so there is nothing to
+       inherit and resolveBareHour falls through to the day-window rungs. */
+    if(tok){ const other=dp.key==='start' ? this._dpOtherEdge('end') : this._dpOtherEdge('start');
+      hh=this.resolveBareHour(tok, dp.dpTimed===false?null:dp.ms,
+        {start:this.state.settings.dayStart, end:this.state.settings.dayEnd}, other); mm=tok.m; }
     else { const c=this.parseClock(String(str)); if(!c) return; hh=c.h; mm=c.m; }
     const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime(),dpTimed:true,parsed:null});
   }
