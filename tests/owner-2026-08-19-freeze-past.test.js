@@ -85,3 +85,70 @@ test('freeze the past: history blocks — pure, and `now` is an argument', () =>
   const b = c.completedHistoryBlocks(B, [m], B + 15 * H);
   assert.deepEqual(a, b, 'same inputs, same output');
 });
+
+// buildDayTimeline's output key is `chunks` (each carries `id`, `start`, `end`, `type`), and it exposes
+// no `free` array — the plan's snippets said `blocks`/`free`. The free intervals are read back from
+// `dayIntervals` with the same busy set the packer uses, which is exactly the pool-agreement invariant.
+const packedOf = (tl, id) => (tl.chunks || []).filter(b => b.id === id && b.type === 'scheduled');
+
+test('freeze the past: a completed meeting still blocks the hours it consumed', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const m = appt(c, B, 'mtg', 13, 14, { pct: 100, completion: B + 14 * H });
+  const work = flex(c, B, 'work', 600);
+  c.state.tasks = [m, work];
+  c.state.nowTick = B + 15 * H;
+
+  const tl = c.buildDayTimeline(B, [m, work]);
+  const overlapsMeeting = packedOf(tl, 'work').some(bl =>
+    bl.start < B + 14 * H && bl.end > B + 13 * H);
+  assert.equal(overlapsMeeting, false, 'nothing may be packed into a completed meeting\'s hours');
+});
+
+test('freeze the past: the floor is the latest completion, not the wall clock', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const done = flex(c, B, 'a', 60, { pct: 100, completion: B + 14 * H + 10 * M,
+    pin: [{ day: B, start: B + 13 * H + 30 * M, dur: 60 }] });
+  const work = flex(c, B, 'b', 120);
+  c.state.tasks = [done, work];
+  c.state.nowTick = B + 14 * H + 10 * M;
+
+  const tl = c.buildDayTimeline(B, [done, work]);
+  const b = packedOf(tl, 'b')[0];
+  assert.ok(b, 'b must be packed somewhere');
+  assert.ok(b.start >= B + 14 * H + 10 * M, 'b starts at the completion instant, pulled up by 20 minutes');
+});
+
+test('freeze the past: past days are untouched', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now()) - DAY;
+  const m = appt(c, B, 'mtg', 13, 14, { pct: 100, completion: B + 14 * H });
+  c.state.tasks = [m];
+
+  const cap = {};
+  c.computeAllotted([m], B, { capacity: cap });
+  assert.equal(cap.pool, 0, 'a past day already gets no flexible pool; history changes nothing there');
+});
+
+test('freeze the past: the pool agreement invariant holds with history present', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const m = appt(c, B, 'mtg', 13, 14, { pct: 100, completion: B + 14 * H });
+  const work = flex(c, B, 'work', 600);
+  c.state.tasks = [m, work];
+  c.state.nowTick = B + 15 * H;
+
+  const cap = {};
+  c.computeAllotted([m, work], B, { capacity: cap });
+
+  const hist = c.completedHistoryBlocks(B, [m, work], c.state.nowTick).map(b => Object.assign({}, b, { taskId: null }));
+  const busy = c.fixedBlocksToday(B, [m, work]).concat(hist);
+  const di = c.dayIntervals(B, c.packStart(B), busy, c.keepClearToday(B, [m, work]));
+  const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
+  assert.equal(cap.pool, Math.round(freeMin), 'allotment and packing must divide the same minutes');
+});

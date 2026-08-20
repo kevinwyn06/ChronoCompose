@@ -2743,8 +2743,17 @@ class Component extends DCLogic {
   }
   /* PP-EXT: the "from now" toggle starts the plan (and pool) at the current time — but ONLY for today's column.
      Future-day timelines always plan the whole day (B ≠ today ⇒ null). B omitted ⇒ today. */
+  /* PP-EXT (owner 2026-08-19): the floor is the LATER of "now" and the last completion today. Owner's
+     case: a task ticked at 14:10 frees its tail from 14:10, so the packer may start there — but nothing
+     may ever be placed before a moment the day has already spent. On a day with no completions this is
+     byte-identical to the pre-2026-08-19 behaviour. */
   packStart(B){ const today=this.startOfToday();
-    return (this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null; }
+    const from=(this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null;
+    if(B!=null && B!==today) return from;
+    const hist=this.completedHistoryBlocks(B==null?today:B, this.state.tasks, this.state.nowTick||Date.now());
+    if(!hist.length) return from;
+    const last=hist.reduce((a,b)=>Math.max(a,b.end), 0);
+    return from==null ? last : Math.max(from, last); }
 
   /* PP-EXT: derived scheduling shapes. A clocked start plus a real, <=1-day end is a fixed appointment;
      a clocked start with no end and no planned duration is a keep-clear Point; an end with an untimed start
@@ -2958,6 +2967,12 @@ class Component extends DCLogic {
      `now` is an argument (never Date.now()) so every rung is unit-testable without clock games.
      PURE: tasks + B + now in, blocks out. */
   completedHistoryBlocks(B, tasks, now){
+    /* PP-EXT: re-entrancy guard. The floor (packStart) and the pool (computeAllotted) both consult this
+       helper, and its own single re-pack calls buildDayTimeline — which consults both. Returning [] while
+       a computation is already in flight is not a shortcut, it is the required semantics: that inner pack
+       asks "where would these tasks have sat had nothing been completed", and a day with nothing
+       completed has no history blocks and no history floor. */
+    if(this._histBusy) return [];
     const src=tasks||this.state.tasks;
     const done=src.filter(t=>this.doneOn(t, B) && !this.isMilestone(t));
     if(!done.length) return [];
@@ -2977,7 +2992,9 @@ class Component extends DCLogic {
        differs per drag, and here it does not. */
     if(needPack.length){
       const revived=src.map(t=>this.doneOn(t, B) ? Object.assign({}, t, {pct:0, completion:null}) : t);
-      const packed=this.buildDayTimeline(B, revived);
+      this._histBusy=true;
+      let packed=null;
+      try{ packed=this.buildDayTimeline(B, revived); } finally { this._histBusy=false; }
       /* the packer's output key is `chunks` (each carries `id`), not `blocks` */
       ((packed&&packed.chunks)||[]).forEach(bl=>{
         if(startOf[bl.id]==null && needPack.some(t=>t.id===bl.id)) startOf[bl.id]=bl.start; });
@@ -4369,7 +4386,15 @@ class Component extends DCLogic {
        and a task worked on prior days no longer has its lifetime spent wrongly subtracted from today's pool. */
     /* PP-EXT: fixed appointments occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline renders as fixed blocks. */
-    const fixed=this.fixedBlocksToday(B, tasks);
+    /* PP-EXT (owner 2026-08-19): history blocks join the busy set as blocking intervals. They must be
+       APPENDED to fixedBlocksToday's output rather than emitted from inside it, because a history block
+       is not a task's allotment — the completed task claims nothing from the pool, it merely stops the
+       pool from including hours that are gone. `taskId:null` keeps it out of the allotment stamping
+       loop below for free. */
+    const hist=this.completedHistoryBlocks(B, tasks, this.state.nowTick||Date.now())
+      .map(b=>Object.assign({}, b, {taskId:null}));
+    const fixed=this.fixedBlocksToday(B, tasks).concat(hist);
+    /* /PP-EXT */
     /* PP-EXT (04): a PARTIAL drag-pin fixes only some of the task's minutes. Those minutes stay part of
        the task's allotment (map[id].allotted is the day TOTAL) but are recorded in `pinnedMin` so the
        packer only packs the remainder — the task is NOT stamped `fixed`, so it keeps competing in the
