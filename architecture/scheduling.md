@@ -1,7 +1,9 @@
 # Scheduling
 
 `computeAllotted` calculates planned minutes over active working intervals. `dayIntervals` subtracts
-fixed blocks, meals, breaks, and point keep-clear boundaries. `buildDayTimeline` packs the daily timeline
+fixed blocks, the free-time reserve, breaks, completed-history blocks, and point keep-clear boundaries.
+(It no longer subtracts meals: since 2026-08-19 Lunch and Dinner are ordinary tasks, so they arrive
+through `fixedBlocksToday` like any other appointment — see “Routines” below.) `buildDayTimeline` packs the daily timeline
 and supplies its day-specific allotment map during synchronous rendering.
 
 S1 keeps both future learning hooks behind pure seams. `compressionSeam(features, availableMinutes)` is the
@@ -218,6 +220,7 @@ render uses. Resetting an already-auto block writes nothing, so it never leaves 
 | Point (keep-clear) | Start has a time, `end` is `null`, and `planned` is 0 | Reserves no duration; its clock divides packing intervals. |
 | Deadline (due-by) | `end` is set and start is untimed | Packs flexibly, with every minute before `dueMsOf`. |
 | Flex | No edge supplies a scheduling clock | Packs freely inside its active date window. |
+| History (frozen past) | The task is complete on day B and its position that day is derivable | Spans `[where it sat, its completion instant]`, emitted as **blocking** busy with `taskId:null`. It is not an allotment — the completed task claims nothing from the pool, it only stops the pool from counting hours the day has already spent. |
 
 The fixed predicate has two load-bearing guards: it applies only on the occurrence's own start day and
 only when `end - start <= DAY`. A multi-day `Mon 09:00` to `Fri 17:00` window therefore stays flexible
@@ -241,8 +244,9 @@ rendering, so allotment and packing cannot disagree. Unscheduled leftovers carry
 
 **Blocking vs background busy intervals** (owner decision 2026-08-06, block 10). Every busy interval
 `dayIntervals` builds now carries `blocking:boolean`. It is a property of the INTERVAL, not only of a
-task: Lunch, Dinner and the Free-time reserve carry no task at all and are **blocking** by the stated
-default `BLOCKING_DEFAULT` (true); a fixed appointment inherits `isBlockingTask(t)` from the task's
+task: the Free-time reserve and a completed-history block carry no task at all and are **blocking** by
+the stated default `BLOCKING_DEFAULT` (true) — as Lunch and Dinner did until they became tasks on
+2026-08-19; a fixed appointment inherits `isBlockingTask(t)` from the task's
 tri-state `blocking` field (`null` = inherit); and a **drag pin is background**, because two hand-placed
 blocks may overlap each other and that permission predates this flag. The field is set on first Google
 Calendar import from the event's `transparency` (`transparent` ⇒ background) via `blockingFromEvent`,
@@ -259,6 +263,103 @@ and the render merge step preserves a split whose shared boundary is a Point.
 Recurrence uses `expandTask` and `rruleToRecur`. Recurring occurrences are derived; changes must preserve
 series semantics and recurrence limit/backoff protections.
 
+## Overlapping fixed blocks are charged once (owner report, 2026-08-19)
+
+The owner: *“the computation of time that is free does not account for the fact that if there is overlap
+between two fixed tasks there is double or multicounted time.”*
+
+Diagnosis first (`tests/owner-2026-08-19-overlap-accounting.test.js`). `dayIntervals` was never at fault:
+its sweep does `cur = Math.max(cur, b.end)`, so it unions overlapping busy correctly. The defect was the
+allotment **stamping**, which gave each fixed block its whole drawn span. Two appointments overlapping by
+30 minutes claimed 120 minutes against a day that had only lost 90, so the identity came to 1470 against a
+1440-minute day.
+
+The fix reuses `netBusyClaim`, which already solved exactly this for drag pins (04b): it attributes every
+busy minute to exactly one interval, earliest start first. Fixed blocks now go through the same call, so
+an overlap is charged to whichever appointment was there first and never twice. Two other candidates were
+measured and **ruled out**: `brkFams` (the gap is 30 minutes at `breakMin` 0 and at 3 alike) and `minChunk`
+(under saturated demand the packer fills the pool exactly, on the overlap fixture and on a deliberately
+fragmented day, at the default and at 1). The owner’s “time that is not filled” symptom did **not**
+reproduce and still wants its own repro from real data.
+
+## Freezing the elapsed past (owner report, 2026-08-19)
+
+The owner: *“Suppose I finished a task early. Great, the schedule should move. But it should not reschedule
+as if that task never existed.”* Decision: freeze the elapsed span, free the remainder **from the
+completion moment** — a task packed 13:30–14:30 and ticked at 14:10 keeps 13:30–14:10 and returns the last
+20 minutes.
+
+`completedHistoryBlocks(B, tasks, now)` is the whole mechanism, and it is pure: `now` is an argument, never
+`Date.now()`. It finds each completed task’s position from three sources, cheapest first — an appointment’s
+occurrence, then a drag pin, both of which carry the start as DATA — and only what is left enters a
+**single** re-pack of day B with the completed tasks restored to the competing set. One pass, not one per
+task; that is why B1 needed no narrowed fallback, and `tests/owner-2026-08-19-freeze-past.test.js` COUNTS
+the packs rather than trusting the claim. A completed task with no derivable start yields no block: it
+occupied no hours, so there are none to freeze.
+
+The helper carries a **re-entrancy guard**. `packStart` and `computeAllotted` both consult it, and its own
+re-pack calls `buildDayTimeline`, which consults both. Returning `[]` while a computation is already in
+flight is not a shortcut but the required semantics: that inner pack asks “where would these have sat had
+nothing been completed”, and such a day has no history blocks and no history floor.
+
+**The history floor.** `packStart` returns the LATER of “now” and the last completion today. Nothing may be
+placed before a moment the day has already spent. On a day with no completions this is byte-identical to
+the pre-2026-08-19 behaviour.
+
+**A break after each completion** (owner: *“remember to add a break after the task is marked done”*).
+`historyBusyToday` is the single point of use shared by `computeAllotted` and `_buildDayTimelineInner`; it
+extends each history block’s end by `settings.breakMin`. The break is added there and **not** inside
+`completedHistoryBlocks`, because that helper answers “what hours did this consume” and a break is not
+consumed hours. Because the pool and the packer read the same call, the pool-agreement invariant holds with
+no second break mechanism.
+
+## Day bounds are dragged, not typed (owner decision, 2026-08-19)
+
+*“Instead of having the day start and day end be a setting, have them the dragable objects in the timeline
+views”*, and *“Global setting, dragged”* — the handles edit `settings.dayStart` / `dayEnd` for every day,
+not a per-day override. The Settings row is retired; `DEFAULT_SETTINGS` still carries the values, they
+simply have one editor instead of two.
+
+`setDayBounds` clamps `dayEnd > dayStart` so an inverted drag is never stored, and writes both bounds in
+ONE record so a single Ctrl+Z restores both. The handles live in the hour GUTTER, never over the block
+area: a full-width strip at the column’s bottom edge sat on top of any block dragged there and swallowed
+its clicks (`tests/e2e/timeline-drag.spec.js` caught exactly that on the unpin target). Block gestures are
+used constantly and must win the pointer; the gutter is dead space that never holds a block.
+
+## Start moves end; end sets duration (owner decision, 2026-08-19)
+
+*“If both start and end time exist, changing one should change the other by preserving the duration.”* A
+start-clock edit now slides the end by the same delta; an end edit still rewrites `planned` from the new
+span. The gate is `clockSpanMinutes(t) != null`, **not** `hasStartTime && hasEndTime` — the latter is a
+strictly wider set and admits a multi-day window at non-midnight timestamps, whose end must not be dragged.
+
+This NARROWS but does not repeal the 2026-08-17 rule that a clock edit makes the booked span the plan: the
+span is still the plan on every path; a start edit simply no longer changes the span.
+
+## Routines replace the hardcoded meals (owner decision, 2026-08-19)
+
+Lunch and Dinner were two `addBusy` calls with no task behind them, so they could not be renamed, moved for
+one day, completed, or given a duration. They are now ordinary tasks in a `Routines` section, alongside
+Breakfast and two Points, Wake up and Shut down.
+
+New workspaces seed all five. An existing workspace’s migration carries **only Lunch and Dinner**, at
+whatever clocks its settings held. That asymmetry is deliberate: the four settings encoded exactly two
+blocks of reserved time, and seeding Breakfast as well would silently reserve 30 minutes a day the
+workspace never had. The regression that matters asserts `dayIntervals` output is minute-identical before
+and after the migration.
+
+The structural `meal` chunk kind survives, now meaning the one busy interval left with no task behind it:
+the free-time reserve.
+
+## Indefinite snooze (owner decision, 2026-08-19)
+
+*“Snooze today and take out of today are practically the exact same thing and is therefore useless.”*
+`snoozeIndef` is a DATELESS snooze: `snoozeUntil` answers “not until when”, this answers “not until
+something happens”. `snoozeWakeReason(t, B, now)` gives the owner’s four wake rungs — an explicit include,
+a real start arriving, a due date passing, or the last blocking predecessor completing — and asks “is it
+woken”, never “was it woken TODAY”, so a wake missed while the app was closed still fires. A woken task
+reads as `new` (today brought it back), not as inherited work.
+
 Current invariants:
 
 - Archived and unpressed tasks do not allot or render as active work today; user pressing is never gated
@@ -269,5 +370,10 @@ Current invariants:
 - "Is this appointment-shaped?" is `clockSpanMinutes(t, B) != null`, never `hasStartTime && hasEndTime`.
 - Fixed tasks pass both the same-day and at-most-one-day guards.
 - Ghost draw width may depend on zoom; scheduling span must not.
+- Overlapping fixed blocks are attributed once, via `netBusyClaim`: the fixed set plus the pool never
+  exceeds the window.
+- Nothing is ever packed before the history floor — the later of “now” and the last completion today.
+- The pool and the packer read the SAME busy set: `fixedBlocksToday(B, tasks)` plus `historyBusyToday(B, tasks)`.
+- `completedHistoryBlocks` re-packs at most ONCE per call, whatever the number of completed tasks.
 - Manual movement/resize remains undoable through `commit()`.
 - Keep helpers pure and test them through `tests/_load.js` where possible.

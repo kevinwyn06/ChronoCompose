@@ -16,6 +16,7 @@ Scheduling-specific fields:
 | `uncompressable` | Tri-state, 2026-08-16. `true` = "Exact": the day reserves this task's figure off the top and never compresses it, and it is a precondition of `isFixedOn`. `false` = "Flexible". `null` = **never decided**, and `isUncompressable(t)` — the only reader — derives the answer from `clockSpanMinutes(t) != null` on every read, so a task that gains clocks later becomes Exact by itself. A stored `true`/`false` is a decision and outranks the derivation. In `SYNC_FIELDS`; **nullable** column added by migration `0013`. |
 | `included` | `true` means pressed into today; `false`/`null` are unpressed. A dateless task defaults `true`; a task with either date defaults `null`, so hand-created and Calendar-imported future work does not enter today early. |
 | `includedExplicit` | Boolean provenance for `included`, added by migration `0014`. `true` only when the user manually presses work into today; `false` for dateless automatic inclusion, dated bound-derived inclusion, unpresses, defaults, and migrated legacy rows. It lets incoming sync distinguish a current decision from the old unconditional `included:true` default. |
+| `snoozeIndef` | Boolean DATELESS snooze, added by migration `0016` (owner, 2026-08-19). `snoozeUntil` answers “not until when”; this answers “not until something happens”, and the two are independent — an expired `snoozeUntil` still falls back to `included`, and this one does not expire at all. `snoozeWakeReason(t, B, now)` is the only thing that ends it: an explicit include, a real start arriving, a due date passing, or the last blocking predecessor completing. It asks “is it woken”, never “was it woken TODAY”, so a wake missed while the app was closed still fires. `NOT NULL DEFAULT false` — unlike `uncompressable` there is no “never decided” state to preserve. In `SYNC_FIELDS`. |
 | `rowHidden` | Boolean sheet-row visibility, added by migration `0015`. `true` replaces the ordinary row with a reversible compact marker; it does not archive/delete the task or change scheduling, inclusion, Calendar identity, or persisted order. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
@@ -29,8 +30,13 @@ The app is local/offline first. `wsKey(base)` returns a bare key for the anonymo
 `base::<uid>` for an authenticated workspace. Scoped access uses `lsGet`, `lsSet`, and `lsRemove`.
 
 Scoped keys: `pp-tasks`, `pp-sections`, `pp-settings`, `pp-prefs`, `pp-gcal`, `pp-run`, `pp-pomo`,
-`pp-notify`, `pp-migrations`, `pp-habits`, `pp-journal`, `pp-scratch`, `pp-journal-prompts`, sync
-queues, and tombstones.
+`pp-notify`, `pp-migrations`, `pp-mig-routines`, `pp-habits`, `pp-journal`, `pp-scratch`,
+`pp-journal-prompts`, sync queues, and tombstones.
+
+**Four settings were deleted on 2026-08-19**: `lunchStart`, `lunchEnd`, `dinnerStart`, `dinnerEnd`.
+Meals are tasks now (see `architecture/scheduling.md`, “Routines replace the hardcoded meals”). Unknown
+keys are inert, so a persisted `pp-settings` blob that still carries the four is harmless — nothing
+reads them, and `migrateRoutines` is what converts their VALUES before they stop mattering.
 
 `pp-scratch` (V3.1) is the **running scratchpad**: one record `{html, updatedAt}` holding a single
 continuous rich-text document per workspace — not per day and not per task. It reuses `richField`, so
@@ -158,6 +164,21 @@ constructor is still building `this.state` at that point. The flag is recorded i
 happens once; the value persists on the user's next settings write, and until then the in-memory value is
 the one every reader sees.
 
+**`pp-mig-routines` (2026-08-19) is a key of its own, not a flag in the `pp-migrations` ledger.** It runs
+from `initRoutines`, called in `componentDidMount` — NOT from `runOnceMigrations`, which runs inside the
+constructor before `state` exists and therefore cannot use `commit()`. Creating tasks needs both.
+
+It branches on whether the workspace is new: no persisted `pp-tasks` means a fresh workspace and
+`seedRoutines()` creates all five routines; anything else is an existing workspace and `migrateRoutines()`
+carries **only Lunch and Dinner**, at whatever clocks the four deleted settings held. The narrowing is
+deliberate and is covered by a test: seeding Breakfast into an existing workspace would silently reserve 30
+minutes a day it never had, and the acceptance criterion for that migration is that `dayIntervals` output
+is minute-identical across it.
+
+The flag is what makes a deleted routine stay deleted — without it, a user who removes Lunch would find it
+back on the next load. E2E fixtures stamp `pp-mig-routines` in `tests/e2e/_seed.js` for the same reason the
+other flags are stamped there: a fixture must contain exactly the tasks it seeded.
+
 **The three 2026-08-16 additions ship the allotment fix to existing workspaces.**
 
 - **`planned-null-unset`** rewrites the stored `0` that used to mean "unset" to `null`, so `0` can start
@@ -191,6 +212,24 @@ older schema rejects every task write that names a missing column. As with 0014,
 causes one expected full task re-push on first upgraded sync. Existing and old-client rows default false.
 Old-client writes omit the column, so PostgREST preserves a current client's hidden state.
 Migration `0015` is **APPLIED** and catalog verified: `rowHidden | NO | boolean | false`.
+
+**Indefinite snooze (migration 0016, 2026-08-19).** `snoozeIndef` is an explicit non-null boolean on
+`public.tasks` and in `SYNC_FIELDS`. Apply `0016_snooze_indef.sql` before deploying the client field;
+an older schema rejects every task write that names a missing column. As with 0014 and 0015, adding it
+to `SYNC_FIELDS` changes the fingerprint and causes one expected full task re-push on first upgraded
+sync. Existing and old-client rows default false, and old-client writes omit the column so PostgREST
+preserves a current client's value.
+
+Migration `0016` is written but **NOT YET APPLIED**. Applying it needs a linked Supabase project
+(`config.toml` is deliberately not committed, and the DB password and `service_role` key are secrets),
+so it is an owner-terminal step. Verify with the usual catalog query and expect
+`snoozeIndef | NO | boolean | false`:
+
+```sql
+select column_name, is_nullable, data_type, column_default
+  from information_schema.columns
+ where table_name='tasks' and column_name='snoozeIndef';
+```
 
 **The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
 
