@@ -76,3 +76,29 @@ test('overlap accounting: the day identity holds when two fixed blocks overlap',
   assert.equal(allottedToFixed + cap.pool, 1440,
     `fixed claimed ${allottedToFixed} min against a ${cap.pool} min pool; the day is 1440`);
 });
+
+test('overlap accounting: non-overlapping fixed blocks are unchanged', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const tasks = [appt(c, B, 'a', 10, 11), appt(c, B, 'b', 14, 15)];
+  c.state.tasks = tasks;
+
+  const map = c.computeAllotted(tasks, B);
+  assert.equal(map.a.allotted, 60, 'a disjoint appointment still claims its whole span');
+  assert.equal(map.b.allotted, 60);
+});
+
+test('overlap accounting: three overlapping blocks are each charged once', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  // 10:00-11:00, 10:30-11:30, 11:00-12:00  ->  union 10:00-12:00 = 120 minutes
+  const tasks = [appt(c, B, 'a', 10, 11), appt(c, B, 'b', 10.5, 11.5), appt(c, B, 'x', 11, 12)];
+  c.state.tasks = tasks;
+
+  const map = c.computeAllotted(tasks, B);
+  const total = map.a.allotted + map.b.allotted + map.x.allotted;
+  assert.equal(total, 120, 'the union is 120 minutes; the sum of spans would be 180');
+  assert.equal(map.a.allotted, 60, 'earliest start is charged first, in full');
+});

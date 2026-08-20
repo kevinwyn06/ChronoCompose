@@ -4326,10 +4326,19 @@ class Component extends DCLogic {
        around blocking busy — so the fixed minutes ACCUMULATE. Assigning per block (the pre-11 shape,
        correct while a whole pin was always a single record) would have let the last piece overwrite
        the earlier ones and shrink the task's day to its final fragment. */
+    /* PP-EXT (owner 2026-08-19): a fixed block's allotment is the free time it actually CONSUMED, not
+       its drawn span. Two appointments overlapping by 30 minutes cost the day 90 minutes, not 120, and
+       stamping each one's whole span claimed time the day never had — `Σ allotted + pool` exceeded the
+       window. This is the same distinction (04b) already drew for drag pins between a pin's drawn span
+       and `netBusyClaim`; the only reason fixed blocks were exempt is that nothing had overlapped them
+       yet. Attribution order is netBusyClaim's own: earliest start first, so the overlap is charged to
+       whichever appointment was there first, and never twice. */
+    const fixedClaim=this.netBusyClaim(fixed, b=>!b.partial, B, B+this.DAY).byTask;
     fixed.forEach(b=>{ if(b.partial){ partialPin[b.taskId]=true; return; }
-      const mins=Math.round((b.end-b.start)/60000);
-      const tot=((map[b.taskId]&&map[b.taskId].allotted)||0)+mins;
+      if(map[b.taskId]) return;                 /* accumulated already — byTask is a per-task total */
+      const tot=Math.round(fixedClaim[b.taskId]||0);
       map[b.taskId]={allotted:tot, computed:tot, active:true, fixed:true}; });
+    /* /PP-EXT */
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
     /* PP-EXT V5 (34): a COMPLETED task stops consuming the day's pool. Owner ruling 2026-08-11, and it is
