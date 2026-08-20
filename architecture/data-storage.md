@@ -214,16 +214,15 @@ Old-client writes omit the column, so PostgREST preserves a current client's hid
 Migration `0015` is **APPLIED** and catalog verified: `rowHidden | NO | boolean | false`.
 
 **Indefinite snooze (migration 0016, 2026-08-19).** `snoozeIndef` is an explicit non-null boolean on
-`public.tasks` and in `SYNC_FIELDS`. Apply `0016_snooze_indef.sql` before deploying the client field;
+`public.tasks` and in `SYNC_FIELDS`. `0016_snooze_indef.sql` had to be applied before the client field;
 an older schema rejects every task write that names a missing column. As with 0014 and 0015, adding it
 to `SYNC_FIELDS` changes the fingerprint and causes one expected full task re-push on first upgraded
 sync. Existing and old-client rows default false, and old-client writes omit the column so PostgREST
 preserves a current client's value.
 
-Migration `0016` is written but **NOT YET APPLIED**. Applying it needs a linked Supabase project
-(`config.toml` is deliberately not committed, and the DB password and `service_role` key are secrets),
-so it is an owner-terminal step. Verify with the usual catalog query and expect
-`snoozeIndef | NO | boolean | false`:
+Migration `0016` is **APPLIED** (2026-08-20, run in the Supabase SQL editor because `config.toml` is
+deliberately not committed) and catalog verified: `snoozeIndef | NO | boolean | false`. Re-verify with
+the usual catalog query:
 
 ```sql
 select column_name, is_nullable, data_type, column_default
