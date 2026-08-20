@@ -185,3 +185,104 @@ test('freeze the past: break — breakMin 0 changes nothing', () => {
   const tl = c.buildDayTimeline(B, [done, next]);
   assert.equal(packedOf(tl, 'b')[0].start, B + 14 * H);
 });
+
+// This is the claim the whole no-fallback decision rests on: the pre-completion pack is ONE pass per
+// render, not one per completed task. Owner declined a narrowed B1 on the strength of it, so it is
+// pinned here rather than left to inspection.
+test('freeze the past: the re-pack runs once regardless of how many tasks completed', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const tasks = [];
+  for (let i = 0; i < 5; i++) {
+    tasks.push(flex(c, B, 't' + i, 30, { pct: 100, completion: B + (10 + i) * H }));
+  }
+  c.state.tasks = tasks;
+
+  let packs = 0;
+  const real = c.buildDayTimeline.bind(c);
+  c.buildDayTimeline = (...a) => { packs++; return real(...a); };
+
+  c.completedHistoryBlocks(B, tasks, B + 16 * H);
+  assert.equal(packs, 1, `packed ${packs} times for 5 completed tasks; the design requires exactly 1`);
+});
+
+test('freeze the past: adversarial — completion at exactly the packed start', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const t = flex(c, B, 'a', 60, { pct: 100, completion: B + 13 * H,
+    pin: [{ day: B, start: B + 13 * H, dur: 60 }] });
+
+  const hist = c.completedHistoryBlocks(B, [t], B + 14 * H);
+  assert.deepEqual([...hist], [], 'a zero-length span is not a busy interval');
+});
+
+test('freeze the past: adversarial — an overrun freezes past the plan', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const t = flex(c, B, 'a', 60, { pct: 100, completion: B + 15 * H,
+    pin: [{ day: B, start: B + 13 * H, dur: 60 }] });   // planned to 14:00, actually done 15:00
+
+  const hist = c.completedHistoryBlocks(B, [t], B + 16 * H);
+  assert.equal(hist[0].end, B + 15 * H, 'the hours really spent, not the hours planned');
+});
+
+test('freeze the past: adversarial — one completed occurrence of a series', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const t = appt(c, B, 'standup', 9, 9.25, {
+    recur: { freq: 'DAILY', interval: 1, overrides: { 0: { pct: 100, completion: B + 9.25 * H } } },
+  });
+
+  const today = c.completedHistoryBlocks(B, [t], B + 12 * H);
+  assert.equal(today.length, 1, 'today\'s occurrence froze');
+  const tomorrow = c.completedHistoryBlocks(B + DAY, [t], B + DAY + 12 * H);
+  assert.deepEqual([...tomorrow], [], 'tomorrow\'s occurrence is not complete and must not freeze');
+});
+
+test('freeze the past: adversarial — two tasks completed at the same instant', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const at14 = B + 14 * H;
+  const a = flex(c, B, 'a', 60, { pct: 100, completion: at14, pin: [{ day: B, start: B + 13 * H, dur: 60 }] });
+  const b = flex(c, B, 'b', 60, { pct: 100, completion: at14, pin: [{ day: B, start: B + 13.5 * H, dur: 30 }] });
+
+  const hist = c.completedHistoryBlocks(B, [a, b], B + 15 * H);
+  assert.equal(hist.length, 2);
+  // 13:00-14:00 and 13:30-14:00 overlap; the union is 60 minutes, not 90.
+  const claimed = c.netBusyClaim(hist, () => true, B, B + DAY).total;
+  assert.equal(claimed, 60, 'shared minutes are attributed once');
+});
+
+test('freeze the past: adversarial — a completed task that also carries a pin uses the pin', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const t = flex(c, B, 'a', 60, { pct: 100, completion: B + 20 * H,
+    pin: [{ day: B, start: B + 19 * H, dur: 60 }] });
+
+  const hist = c.completedHistoryBlocks(B, [t], B + 21 * H);
+  assert.equal(hist[0].start, B + 19 * H, 'the pin is data; it never enters the re-pack');
+});
+
+test('freeze the past: adversarial — a completion inside another task\'s fixed span', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  const mtg = appt(c, B, 'mtg', 13, 15);                                  // not complete
+  const t = flex(c, B, 'a', 60, { pct: 100, completion: B + 14 * H,
+    pin: [{ day: B, start: B + 13.5 * H, dur: 60 }] });
+  c.state.tasks = [mtg, t];
+  c.state.nowTick = B + 16 * H;
+
+  const cap = {};
+  c.computeAllotted([mtg, t], B, { capacity: cap });
+  const busy = c.fixedBlocksToday(B, [mtg, t]).concat(c.historyBusyToday(B, [mtg, t]));
+  const di = c.dayIntervals(B, c.packStart(B), busy, c.keepClearToday(B, [mtg, t]));
+  const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
+  assert.equal(cap.pool, Math.round(freeMin), 'overlapping history and fixed must not double-count');
+});
