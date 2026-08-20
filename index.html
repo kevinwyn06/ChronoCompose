@@ -1561,6 +1561,14 @@ class Component extends DCLogic {
     this._onKey = (e)=>this.onKey(e);
     this._onMove = (e)=>this.onMouseMove(e);
     this._onUp = (e)=>this.onMouseUp(e);
+    /* PP-EXT (owner 2026-08-19): the value Escape restores. Captured at the document level rather than
+       through a shared field onFocus, because there is no shared onFocus — fields are built by several
+       different helpers. ONE record, not one per field: only one element can hold focus at a time, and
+       focusout clears it so a stale draft can never be restored into the wrong element. */
+    this._onFocusIn=(e)=>{ const t=e.target;
+      if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA')) this._fieldDraft={el:t, value:t.value}; else this._fieldDraft=null; };
+    this._onFocusOut=(e)=>{ if(this._fieldDraft && this._fieldDraft.el===e.target) this._fieldDraft=null; };
+    try{ document.addEventListener('focusin', this._onFocusIn); document.addEventListener('focusout', this._onFocusOut); }catch(e){}
     window.addEventListener('keydown', this._onKey);
     window.addEventListener('mousemove', this._onMove);
     window.addEventListener('mouseup', this._onUp);
@@ -1606,6 +1614,7 @@ class Component extends DCLogic {
     requestAnimationFrame(()=>this.forceUpdate());
   }
   componentWillUnmount(){
+    try{ document.removeEventListener('focusin', this._onFocusIn); document.removeEventListener('focusout', this._onFocusOut); }catch(e){} /* PP-EXT (owner 2026-08-19) */
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
@@ -1725,6 +1734,24 @@ class Component extends DCLogic {
          that follows is a no-op: nothing is committed, so there is nothing to undo. */
       /* PP-EXT (V4.2): an edge-drag is the same kind of in-flight gesture and cancels the same way —
          nothing is written until the release, so dropping the record IS the cancel. */
+      /* PP-EXT (owner 2026-08-19): rung 0 — a focused FIELD. Owner: "esc should be able to get the user
+         out of fields like the planned duration."
+         Position is not a convenience exception: the ladder is ordered most-transient-first, and a field
+         the user is mid-keystroke in is strictly more transient than a drag — the drag rungs cannot even
+         fire while a field holds focus.
+         REVERT, then blur. A bare blur would COMMIT (every onBlur here writes through commit()), making
+         Escape a save — the opposite of what every other rung means. Restoring the focus-time value first
+         means the blur handler writes back an unchanged value and no undo entry is created.
+         Fields that belong to an overlay are EXCLUDED: datePick and pctPop own their own Escape, and
+         rung 0 must never steal an overlay close from them. */
+      if(this.isEditingTarget(e) && this._fieldDraft && this._fieldDraft.el===e.target
+         && !this.state.datePick && !this.state.pctPop && !this.state.inclPick && !this.state.scopePrompt){
+        e.preventDefault();
+        e.target.value=this._fieldDraft.value;
+        this._fieldDraft=null;
+        e.target.blur();
+        return;
+      }
       if(this._edgeDrag){ this._edgeDrag=null; this.forceUpdate(); return; }
       if(this._blockDrag){ this._blockDrag=null; this.forceUpdate(); return; }
       if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
@@ -13506,7 +13533,10 @@ class Component extends DCLogic {
           return h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
             h('span',{style:{fontSize:'13px',color:statusColor}}, statusTxt),
             h('div',{style:{display:'flex',flexDirection:'column'}}, ...this.inclActionRows(t))); })();
-    const durInput=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
+    /* PP-EXT (owner 2026-08-19): a stable e2e hook, same idiom as `data-tl-block` / `data-task-name`.
+       The sheet's duration boxes are otherwise addressable only as "the nth input.pp-num", which also
+       matches the sheet ROW's Planned box behind the overlay. */
+    const durInput=(key)=>h('input',{className:'pp-num',type:'text','data-field':key,key:key+t[key],defaultValue:this.fmtDur(t[key]),
       style:{textAlign:'left',width:'90px',border:'1px solid var(--divider)'},
       /* PP-EXT (owner 2026-08-16): this helper is shared by `planned` and `predicted`; only `planned` is
          nullable, so branch on the key rather than making every duration field blank-means-null. */
