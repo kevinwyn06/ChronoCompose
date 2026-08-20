@@ -3008,6 +3008,18 @@ class Component extends DCLogic {
     });
     return out.sort((x,y)=>x.start-y.start);
   }
+  /* PP-EXT (owner 2026-08-19): history AS BUSY — the single point of use shared by computeAllotted
+     (which derives the pool from it) and _buildDayTimelineInner (which packs into what is left), so the
+     two cannot disagree. `taskId:null` keeps these out of the allotment stamping loop: a completed task
+     claims nothing from the pool, it merely stops the pool from including hours that are gone.
+     The break is added HERE and not inside completedHistoryBlocks, because that helper answers "what
+     hours did this consume" and a break is not consumed hours. Owner: "remember to add a break after
+     the task is marked done." It rides on the existing busy mechanism — no second break reserve. */
+  historyBusyToday(B, tasks){
+    const brkMs=Math.max(0, this.state.settings.breakMin||0)*60000;
+    return this.completedHistoryBlocks(B, tasks, this.state.nowTick||Date.now())
+      .map(b=>Object.assign({}, b, {taskId:null, end:b.end+brkMs}));
+  }
   /* PP-EXT (owner 2026-08-19): the completion INSTANT relevant to day B. `isCompletedOn` answers the
      yes/no; this answers "at what moment", and for a recurring series that moment lives on the
      occurrence override, not the task. */
@@ -4391,9 +4403,7 @@ class Component extends DCLogic {
        is not a task's allotment — the completed task claims nothing from the pool, it merely stops the
        pool from including hours that are gone. `taskId:null` keeps it out of the allotment stamping
        loop below for free. */
-    const hist=this.completedHistoryBlocks(B, tasks, this.state.nowTick||Date.now())
-      .map(b=>Object.assign({}, b, {taskId:null}));
-    const fixed=this.fixedBlocksToday(B, tasks).concat(hist);
+    const fixed=this.fixedBlocksToday(B, tasks).concat(this.historyBusyToday(B, tasks));
     /* /PP-EXT */
     /* PP-EXT (04): a PARTIAL drag-pin fixes only some of the task's minutes. Those minutes stay part of
        the task's allotment (map[id].allotted is the day TOTAL) but are recorded in `pinnedMin` so the
@@ -9318,7 +9328,10 @@ class Component extends DCLogic {
     const today=this.startOfToday();
     /* PP-EXT: fixed appointments are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
-    const fixedBlocks=this.fixedBlocksToday(B, TL);
+    /* PP-EXT (owner 2026-08-19): the packer carves out the SAME history busy the pool was derived from.
+       Without this the break after a completed task shrinks the pool but not the free intervals, and the
+       pool-agreement invariant breaks. */
+    const fixedBlocks=this.fixedBlocksToday(B, TL).concat(this.historyBusyToday(B, TL));
     const kc=this.keepClearToday(B, TL); /* PP-EXT: Point dividers */
     const di=this.dayIntervals(B, this.packStart(B), fixedBlocks, kc);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;

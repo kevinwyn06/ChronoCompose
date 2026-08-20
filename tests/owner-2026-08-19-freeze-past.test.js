@@ -146,9 +146,42 @@ test('freeze the past: the pool agreement invariant holds with history present',
   const cap = {};
   c.computeAllotted([m, work], B, { capacity: cap });
 
-  const hist = c.completedHistoryBlocks(B, [m, work], c.state.nowTick).map(b => Object.assign({}, b, { taskId: null }));
-  const busy = c.fixedBlocksToday(B, [m, work]).concat(hist);
+  // read the busy set through the same single point of use the pool and the packer share, so the
+  // invariant is checked against what ships rather than against a re-implementation of it here
+  const busy = c.fixedBlocksToday(B, [m, work]).concat(c.historyBusyToday(B, [m, work]));
   const di = c.dayIntervals(B, c.packStart(B), busy, c.keepClearToday(B, [m, work]));
   const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
   assert.equal(cap.pool, Math.round(freeMin), 'allotment and packing must divide the same minutes');
+});
+
+// Owner, verbatim: "remember to add a break after the task is marked done."
+test('freeze the past: break — a completed task is followed by breakMin', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  c.state.settings.breakMin = 3;
+  const B = c.startOfDay(Date.now());
+  const done = flex(c, B, 'a', 60, { pct: 100, completion: B + 14 * H,
+    pin: [{ day: B, start: B + 13 * H, dur: 60 }] });
+  const next = flex(c, B, 'b', 120);
+  c.state.tasks = [done, next];
+  c.state.nowTick = B + 14 * H;
+
+  const tl = c.buildDayTimeline(B, [done, next]);
+  const b = packedOf(tl, 'b')[0];
+  assert.ok(b, 'b must be packed somewhere');
+  assert.ok(b.start >= B + 14 * H + 3 * M, `b started at ${new Date(b.start)}, expected >= 14:03`);
+});
+
+test('freeze the past: break — breakMin 0 changes nothing', () => {
+  const c = make();
+  cleanDay(c, '24:00');                     // cleanDay sets breakMin:0
+  const B = c.startOfDay(Date.now());
+  const done = flex(c, B, 'a', 60, { pct: 100, completion: B + 14 * H,
+    pin: [{ day: B, start: B + 13 * H, dur: 60 }] });
+  const next = flex(c, B, 'b', 120);
+  c.state.tasks = [done, next];
+  c.state.nowTick = B + 14 * H;
+
+  const tl = c.buildDayTimeline(B, [done, next]);
+  assert.equal(packedOf(tl, 'b')[0].start, B + 14 * H);
 });
