@@ -64,3 +64,51 @@ test('a second Escape still closes the sheet — the field rung takes exactly on
   await page.keyboard.press('Escape');           // the ladder continues as before
   await expect(page.getByText('DESCRIPTION', { exact: true })).toHaveCount(0);
 });
+
+/* Owner, 2026-08-19: "enter doesn't have, one needs to press enter then done."
+   The TIME box's blur only updated the picker's DRAFT; `dpApply` — on the Done button — is what wrote
+   the task. Enter now does both, so setting a time costs one key rather than a key and a click. */
+
+const clockedFixture = () => ({
+  seedOnce: true,
+  tasks: [task('a', 'Write', { start: '0d', end: '+1d', startClock: true, endClock: true })],
+});
+
+const timeBox = (page) => page.locator('.pp-num[placeholder="—"]');
+
+test('Enter in the TIME field applies and closes the picker', async ({ page }) => {
+  await boot(page, clockedFixture());
+
+  await page.locator('[data-task-id="a"] [data-cellk="start"]').click();
+  await expect(page.getByText('START', { exact: true })).toBeVisible();
+
+  await timeBox(page).fill('15:00');
+  await page.keyboard.press('Enter');
+
+  await expect(timeBox(page)).toHaveCount(0);                    // the card closed
+  await expect(page.locator('[data-task-id="a"] [data-cellk="start"]')).toContainText('3:00');
+});
+
+test('Enter in the TIME field is ONE undo entry', async ({ page }) => {
+  await boot(page, clockedFixture());
+  const cell = page.locator('[data-task-id="a"] [data-cellk="start"]');
+
+  await cell.click();
+  await timeBox(page).fill('15:00');
+  await page.keyboard.press('Enter');
+  await expect(cell).toContainText('3:00');
+
+  await page.keyboard.press('Control+z');                        // a single press must undo the whole edit
+  await expect(cell).not.toContainText('3:00');
+});
+
+test('blur still commits to the draft without closing, so Tab still works', async ({ page }) => {
+  await boot(page, clockedFixture());
+
+  await page.locator('[data-task-id="a"] [data-cellk="start"]').click();
+  await timeBox(page).fill('15:00');
+  await page.keyboard.press('Tab');
+
+  // the card is still open — this is the only way to set a time and then adjust the date
+  await expect(page.getByText('START', { exact: true })).toBeVisible();
+});

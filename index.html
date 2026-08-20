@@ -7206,7 +7206,15 @@ class Component extends DCLogic {
         defaultValue:timed?(p2(draft.getHours())+':'+p2(draft.getMinutes())):'',
         placeholder:'—',
         onBlur:e=>this.dpSetTime(e.target.value),
-        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } },
+        /* PP-EXT (owner 2026-08-19): "enter doesn't have, one needs to press enter then done". Blur alone
+           only updated the DRAFT — dpApply is what writes the task, and it lived on the Done button.
+           Enter now does both, in that order, inside dpApply's single commit() so the edit stays one
+           undo entry. onBlur keeps calling dpSetTime alone, so Tab still commits and moves on without
+           closing — which is the only way to set a time and then adjust the date.
+           GENERAL RULE this establishes: any single-value editor with a confirming button must also
+           confirm on Enter and cancel on Escape. */
+        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.dpSetTime(e.target.value); this.dpApply(); }
+                       else if(e.key==='Escape'){ e.preventDefault(); this.closeDatePick(); } },
         style:{width:'70px',textAlign:'left',border:'1px solid var(--field-border)'}}));
     const btn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
       style:{color:danger?'var(--danger-strong)':undefined}},label);
