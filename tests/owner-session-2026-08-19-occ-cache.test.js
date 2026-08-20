@@ -44,11 +44,23 @@ test('a recurring Exact task re-plans from its NEW end clock, not the cached occ
     'the booked span is 09:00–11:30; the stale cache used to write back the old 60');
 });
 
-test('a recurring Exact task re-plans from its NEW start clock', () => {
+// REVISED 2026-08-19 (owner, same session as A4): "Start moves end; end sets duration." A start-clock
+// edit now SLIDES the end and preserves the span, so 09:00–10:00 moved to 07:00 is 07:00–08:00 and the
+// plan stays 60 — it is no longer 07:00–10:00/180.
+//
+// Note what this costs the fixture: under the new rule the correct answer (60) coincides with the stale
+// cached answer (60), so this case can no longer demonstrate the occurrence-cache staleness it was
+// written for. That property is still proven by its two siblings above and below, both of which edit the
+// END and are unaffected by the new rule. What this test now pins is the new rule itself, on a recurring
+// Exact task — the shape most likely to regress it.
+test('a recurring Exact task slides its end when the start clock moves', () => {
   const c = make(); const day = c.startOfToday();
   rendered(c, appt(c, { recur: { kind: 'day', n: 1 } }));
   c.setDate('a', 'start', day + 7 * HOUR, true);
-  assert.equal(c.state.tasks[0].planned, 180, '07:00–10:00 is 180 minutes');
+  const t = c.state.tasks[0];
+  assert.equal(t.start, day + 7 * HOUR);
+  assert.equal(t.end, day + 8 * HOUR, 'the end slid by the same delta');
+  assert.equal(t.planned, 60, 'the span is unchanged, so the plan is unchanged');
 });
 
 test('a weekly recurring Exact task re-plans even when the edit lands off the old rule', () => {

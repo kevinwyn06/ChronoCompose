@@ -5022,6 +5022,9 @@ class Component extends DCLogic {
      undefined when the existing derive-or-explicit flag should stay unchanged. */
   setDate(id,key,ms,timed){
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      /* PP-EXT (owner 2026-08-19): read BEFORE the assignment — both the previous start and whether the
+         task was an intra-day appointment have to be judged on its pre-edit shape. */
+      const prevStart=t.start, wasAppt=this.clockSpanMinutes(t)!=null;
       t[key]=ms;
       if(timed!==undefined){
         const flag=key==='start'?'startClock':'endClock';
@@ -5029,6 +5032,20 @@ class Component extends DCLogic {
         if(!timed) t[key]=this.startOfDay(ms);
         ms=t[key];
       }
+      /* PP-EXT (owner 2026-08-19): "If both start and end time exist, changing one should change the
+         other by preserving the duration." Owner decision: START moves end; END sets duration.
+         The gate is clockSpanMinutes, NOT hasStartTime && hasEndTime — the latter is a strictly wider
+         set (architecture/scheduling.md) and admits a multi-day window at non-midnight timestamps,
+         whose end must not be dragged. Running BEFORE the clamps below means a preserved span can never
+         invert, so the clamps have nothing left to correct.
+         This NARROWS but does not repeal the 2026-08-17 rule that a clock edit makes the booked span the
+         plan: the span is still the plan on every path — a start edit simply no longer changes the span.
+         The anchorSpanMinutes line at the end of this method therefore yields the unchanged duration for
+         free, and `planned` is never written twice. */
+      if(key==='start' && prevStart!=null && t.end!=null && wasAppt){
+        t.end += (ms - prevStart);
+      }
+      /* /PP-EXT */
       /* An all-day end is the EXCLUSIVE next-day midnight, so the carried edge has to be re-encoded in
          those terms too — copying the raw instant across would leave end==start, which renders (end-1)
          as the day BEFORE the start and reads as an inverted window. */
@@ -7166,6 +7183,10 @@ class Component extends DCLogic {
           task.start=p.start; task.end=p.end;
           task.startClock=p.startClock; task.endClock=p.endClock;
         } else if(p.date!=null){
+          /* PP-EXT (owner 2026-08-19): same rule as setDate — START moves end, END sets duration. The
+             ordering trap: clockSpanMinutes must be judged on the task's PRE-edit shape, so both reads
+             happen before the assignment below. */
+          const prevStart=task.start, wasAppt=this.clockSpanMinutes(task)!=null;
           let edgeMs=dp.ms;
           if(task.allDay){ const d=this.atMidnight(new Date(edgeMs));
             edgeMs=dp.key==='end'?d.getTime()+this.DAY:d.getTime(); }
@@ -7173,6 +7194,9 @@ class Component extends DCLogic {
           const flag=dp.key==='start'?'startClock':'endClock';
           task[flag]=p.clock?(this.hasClock(edgeMs)?null:true):null;
           if(!p.clock) task[dp.key]=dp.key==='end'&&task.allDay?edgeMs:this.startOfDay(edgeMs);
+          if(dp.key==='start' && prevStart!=null && task.end!=null && wasAppt){
+            task.end += (task.start - prevStart);   /* PP-EXT (owner 2026-08-19): the span is preserved */
+          }
           if(dp.key==='start' && task.end!=null){
             const minEnd=task.allDay?this.atMidnight(new Date(task.start)).getTime()+this.DAY:task.start;
             if(task.end<minEnd) task.end=minEnd;
