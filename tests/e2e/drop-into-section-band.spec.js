@@ -256,11 +256,14 @@ test('the two themes tune the drop-band tokens separately', async ({ page }) => 
    bit" — the working case is not a narrow zone on the left of the section, it is any drag whose
    horizontal delta from the grab point is not more than 14px to the RIGHT.
 
-   NO FIX IS ATTEMPTED HERE. Per the plan, D2's remedy is a behaviour change to a gesture the owner
-   uses constantly (either widening the section gate to accept a nest-intent drop when the resolved
-   target is a section band, or making nest intent depend on the drop target's kind rather than on
-   horizontal offset alone), and it is chosen with the owner, not from a hypothesis. The second sweep
-   therefore FAILS by design: it asserts the behaviour the owner asked for, which does not exist yet.
+   FIXED (owner decision, 2026-08-19): *"Make nest intent depend on the drop target's kind. There's no
+   valid intent behind 'nesting under this section'."*
+
+   `steps` is now forced to 0 when the drop lands in a different band than the drag started in, so a
+   cross-section drop is unambiguously a section drop and horizontal drift cannot re-interpret it.
+   Nesting is untouched WITHIN a band — rearranging a row among siblings it already lives with — which
+   the last test in this file pins so the fix cannot quietly kill the nest gesture instead of scoping it.
+   Both sweeps below now pass at every offset.
    ============================================================================================ */
 
 const dropRow = (page, id) => page.locator(`[data-task-id="${id}"]:not([data-card-id])`);
@@ -329,7 +332,6 @@ test('section drop: which horizontal offsets file, and which nest', async ({ pag
    sweep keeps printing its evidence, the shared suite stays green, and the day someone fixes the gate
    this reports an unexpected PASS instead of quietly continuing to agree with itself. */
 test('section drop: the same sweep aimed at a ROW inside the section', async ({ page }) => {
-  test.fail();   /* scoped to THIS test — at file scope it marks every test in the file */
   const outcomes = [];
 
   for (const frac of [0.1, 0.3, 0.5, 0.7, 0.9]) {
@@ -365,4 +367,32 @@ test('section drop: the same sweep aimed at a ROW inside the section', async ({ 
 
   expect(outcomes.every((o) => o.sectionId === 's1' && o.parentId == null),
     `sweep: ${JSON.stringify(outcomes)}`).toBe(true);
+});
+
+/* The other half of the D2 fix: scoping nest intent must not ABOLISH it. Within one section — where
+   nesting is the whole point, rearranging a row among the siblings it already lives with — a rightward
+   drag past ROW_NEST_DEADZONE must still nest. If this ever goes red, the fix stopped being a scope and
+   became a removal. */
+test('section drop: nesting still works WITHIN a section', async ({ page }) => {
+  await boot(page, {
+    sections: SECTIONS,
+    tasks: [
+      task('r1', 'Read the spec', { sectionId: 's1', start: '0d', end: '+2d' }),
+      task('r2', 'Draft notes', { sectionId: 's1', start: '0d', end: '+1d' }),
+      /* Same section as its target, so this is a rearrange and not a section drop. */
+      task('r3', 'Summarise', { sectionId: 's1', start: '0d', end: '+1d' }),
+    ],
+  });
+
+  const a = await dropRow(page, 'r3').locator('[data-task-name]').boundingBox();
+  const target = await dropRow(page, 'r1').boundingBox();
+
+  await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+  await page.mouse.down();
+  /* Well past the 14px deadzone to the right: an unambiguous nest intent. */
+  await page.mouse.move(a.x + a.width / 2 + 120, target.y + target.height - 3, { steps: 12 });
+  await page.mouse.up();
+
+  const stored = await storedOf(page, 'r3');
+  expect(stored.parentId, 'a same-section rightward drag still nests').toBe('r1');
 });

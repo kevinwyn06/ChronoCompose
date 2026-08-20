@@ -5980,7 +5980,26 @@ class Component extends DCLogic {
       const oi=res.index;
       /* PP-EXT: drag-to-nest — horizontal offset past the deadzone picks a nesting level (right nests, left outdents) */
       const dx=e.clientX-rd.startX;
-      const steps=(Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
+      /* PP-EXT (owner 2026-08-19, D2): nest intent depends on the DROP TARGET'S KIND, not on horizontal
+         offset alone. A drop that lands in a different band than the drag started in is a SECTION drop —
+         "file this into that section" — and there is no valid second meaning for it to carry. Owner:
+         *"There's no valid intent behind 'nesting under this section'."*
+         Before this, `steps` was read from `dx` on every drop, so drifting more than ROW_NEST_DEADZONE
+         (14px) to the right while crossing into a section gave the row a parent, which closed the
+         section gate below (`drop.parentId==null && ...`) and left the row in its ORIGINAL section. The
+         owner reported that as "dragging into section only works when I drag to the left little bit":
+         leftward travel makes `steps` negative, which only outdents an already-root row and so kept
+         parentId null by luck rather than by intent.
+         Nesting is untouched WITHIN a band, which is where it means something — rearranging a row
+         among the siblings it already lives with. Moving a row into another section and then nesting it
+         there is two gestures now, deliberately: each one says one thing.
+         `projectRowDrop` is unchanged and stays pure — this is about which intent we hand it. */
+      const bandNow=(this.state.groupBy==='inclusion')
+        ? (res.sectionId===this.INCL_BAND_IN() ? 'included' : 'excluded')
+        : (res.sectionId===undefined ? undefined : res.sectionId);
+      const bandWas=(this.state.groupBy==='inclusion') ? rd.origInclusion : rd.origSectionId;
+      const crossBand = res.sectionPos!=null && bandNow!==undefined && bandNow!==bandWas;
+      const steps=(!crossBand && Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
       const vis=this._visTasks||this.state.tasks;
       const drop=this.projectRowDrop(vis, this._depth||{}, this._byId||{}, oi, rd.moveSet, steps);
       /* PP-EXT V2.6b: a vertical row drag also RE-SECTIONS the row. Only when it lands as a root — a nested

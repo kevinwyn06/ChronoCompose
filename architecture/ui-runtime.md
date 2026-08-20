@@ -599,6 +599,30 @@ chosen”*. The third option gives “not now” an open-ended form; it does not
 has no day to print, so the popover names the EVENTS that end it instead of formatting a date that does not
 exist.
 
+### Nest intent depends on the drop target's kind (owner, 2026-08-19)
+
+A row drag carries two possible meanings on one gesture: *file this into that section* and *nest this under
+that row*. They used to be told apart by horizontal offset alone — `dx = e.clientX - rd.startX`, the
+distance from the GRAB POINT, past `ROW_NEST_DEADZONE` (14px).
+
+That made the section drop unreliable in a way that looked arbitrary. Drift more than 14px right while
+crossing into a section and `steps` went positive, `projectRowDrop` gave the row a parent, and the section
+gate (`drop.parentId==null && res.sectionPos!=null`) closed — so `sectionId` was never written and the row
+silently stayed where it was. Leftward travel produced NEGATIVE steps, which only outdent an already-root
+row, so parentId stayed null by luck. Hence the owner's report: *"dragging into section only works when I
+drag to the left little bit of the section, not for the whole section row."*
+
+The rule now: **a drop that lands in a different band than the drag started in is a section drop, and
+carries no nest intent.** `steps` is forced to 0 for it. Owner: *"There's no valid intent behind 'nesting
+under this section'."* Nesting is untouched WITHIN a band, which is where it means something — rearranging
+a row among the siblings it already lives with. Moving a row into another section and then nesting it there
+is two gestures, deliberately: each says one thing.
+
+`projectRowDrop` is unchanged and remains pure and unit-tested (`tests/dragnest.test.js`); the fix is about
+which intent the call site hands it. `tests/e2e/drop-into-section-band.spec.js` sweeps five offsets over
+both a section header and a row inside the band, and pins same-section nesting separately so the scope
+cannot quietly become a removal.
+
 ### Keyboard navigation of the selection
 
 `↑`/`↓` move the selection one **visible** row (`_visTasks`, not `state.tasks` — arrows must reach the row
