@@ -214,3 +214,155 @@ test('the two themes tune the drop-band tokens separately', async ({ page }) => 
   expect(light.bg, '--drop-band-bg must be tuned per theme').not.toBe(dark.bg);
   expect(light.halo, '--drop-band-halo must be tuned per theme').not.toBe(dark.halo);
 });
+
+/* ============================================================================================
+   D2 DIAGNOSIS (owner, 2026-08-19)
+   "Dragging into section only works when I drag to the left little bit of the section, not for
+   the whole section row."
+
+   Hypothesis going in: section filing requires `drop.parentId == null` (index.html:5989), and nest
+   intent is decided purely by HORIZONTAL OFFSET — ROW_NEST_DEADZONE 14px, then ROW_NEST_STEP 24px per
+   level (index.html:504-505). A drag that drifts right past 14px becomes a NEST and stops being a
+   section drop.
+
+   The sweep below records, at five horizontal offsets across the band, whether the row was FILED into
+   the section or NESTED under the row above. `page.mouse` only: per AGENTS.md a dispatched MouseEvent
+   skips hit-testing and pointer capture, and this test is precisely about a drag threshold.
+
+   FINDING (measured 2026-08-19, both sweeps below).
+
+   The target decides everything, and the hypothesis was only half right.
+
+   Over a section HEADER, every offset FILES — dx from -33px to +492px, all `parentId: null`,
+   all `sectionId: 's1'`. There is no preceding row to nest under, so `projectRowDrop` returns a null
+   parentId whatever `steps` says and the gate at index.html:5989 stays open.
+
+   Over a ROW INSIDE THE BAND, the cutoff is sharp:
+
+       dx  -33px  ->  FILED   (sectionId s1, parentId null)
+       dx  +98px  ->  NESTED  (sectionId UNCHANGED at s2, parentId 'r2')
+       dx +229px  ->  NESTED
+       dx +360px  ->  NESTED
+       dx +492px  ->  NESTED
+
+   RESPONSIBLE GATE: `index.html:5983` computes nest intent from `dx = e.clientX - rd.startX` — the
+   horizontal distance from the GRAB POINT, not from any absolute position. Past ROW_NEST_DEADZONE
+   (14px) rightward, `steps` goes positive, `projectRowDrop` gives the row a parent, and the section
+   gate at `index.html:5989` (`drop.parentId==null && res.sectionPos!=null`) closes — so `sectionId`
+   is never written and the row silently stays in its old section.
+
+   Leftward travel produces NEGATIVE steps, which only outdent an already-root row: parentId stays
+   null and the drop files. That is precisely the owner's "only works when I drag to the left little
+   bit" — the working case is not a narrow zone on the left of the section, it is any drag whose
+   horizontal delta from the grab point is not more than 14px to the RIGHT.
+
+   NO FIX IS ATTEMPTED HERE. Per the plan, D2's remedy is a behaviour change to a gesture the owner
+   uses constantly (either widening the section gate to accept a nest-intent drop when the resolved
+   target is a section band, or making nest intent depend on the drop target's kind rather than on
+   horizontal offset alone), and it is chosen with the owner, not from a hypothesis. The second sweep
+   therefore FAILS by design: it asserts the behaviour the owner asked for, which does not exist yet.
+   ============================================================================================ */
+
+const dropRow = (page, id) => page.locator(`[data-task-id="${id}"]:not([data-card-id])`);
+const sectionHeader = (page, id) => page.locator(`[data-section-id="${id}"]`);
+
+/** What actually PERSISTED — a paint that never committed would otherwise read as a pass. */
+async function storedOf(page, id) {
+  return page.evaluate((tid) => {
+    const t = JSON.parse(localStorage.getItem('pp-tasks') || '[]').find((x) => x.id === tid);
+    return t ? { sectionId: t.sectionId === undefined ? null : t.sectionId,
+                 parentId: t.parentId === undefined ? null : t.parentId } : null;
+  }, id);
+}
+
+test('section drop: which horizontal offsets file, and which nest', async ({ page }) => {
+  const outcomes = [];
+
+  for (const frac of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    await boot(page, {
+      sections: SECTIONS,
+      tasks: [
+        task('r1', 'Read the spec', { sectionId: 's1', start: '0d', end: '+2d' }),
+        task('r2', 'Draft notes', { sectionId: 's1', start: '0d', end: '+1d' }),
+        /* `loose` starts in Admin, so a successful drop is a real change of section. */
+        task('loose', 'Unfiled row', { sectionId: 's2', start: '0d', end: '+1d' }),
+      ],
+    });
+
+    const a = await dropRow(page, 'loose').locator('[data-task-name]').boundingBox();
+    const band = await sectionHeader(page, 's1').boundingBox();
+
+    /* Grab at the row's name cell, then release at `frac` across the SECTION band. The horizontal
+       distance travelled is what the nest gate reads — it is measured from the grab point, not from
+       any absolute position on screen. */
+    await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(band.x + band.width * frac, band.y + band.height / 2, { steps: 12 });
+    await page.mouse.up();
+
+    const stored = await storedOf(page, 'loose');
+    outcomes.push({
+      frac,
+      dx: Math.round(band.x + band.width * frac - (a.x + a.width / 2)),
+      sectionId: stored.sectionId,
+      parentId: stored.parentId,
+      outcome: stored.parentId != null ? 'NESTED' : (stored.sectionId === 's1' ? 'FILED' : 'neither'),
+    });
+  }
+
+  console.log('D2 section-drop sweep:\n' + JSON.stringify(outcomes, null, 2));
+
+  /* Every offset across the band must file into the section; none may nest. */
+  expect(outcomes.every((o) => o.sectionId === 's1' && o.parentId == null),
+    `sweep: ${JSON.stringify(outcomes)}`).toBe(true);
+});
+
+/* The header sweep above files at EVERY offset, which refutes the going-in hypothesis for that target:
+   over a section HEADER there is no preceding row to nest under, so `projectRowDrop` returns
+   parentId null whatever `steps` says, and the section gate at index.html:5989 stays open.
+
+   The owner drags onto the section BAND, though — the rows, not just the header strip. That is where a
+   preceding row exists and nesting becomes possible. This second sweep is the same gesture aimed at the
+   last ROW of the section, which is the case the report is actually about. */
+/* `test.fail()`, not a skip and not a softened assertion: the assertion below states the behaviour the
+   owner asked for, and it is EXPECTED to fail until D2 is fixed. Playwright runs it either way, so the
+   sweep keeps printing its evidence, the shared suite stays green, and the day someone fixes the gate
+   this reports an unexpected PASS instead of quietly continuing to agree with itself. */
+test('section drop: the same sweep aimed at a ROW inside the section', async ({ page }) => {
+  test.fail();   /* scoped to THIS test — at file scope it marks every test in the file */
+  const outcomes = [];
+
+  for (const frac of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    await boot(page, {
+      sections: SECTIONS,
+      tasks: [
+        task('r1', 'Read the spec', { sectionId: 's1', start: '0d', end: '+2d' }),
+        task('r2', 'Draft notes', { sectionId: 's1', start: '0d', end: '+1d' }),
+        task('loose', 'Unfiled row', { sectionId: 's2', start: '0d', end: '+1d' }),
+      ],
+    });
+
+    const a = await dropRow(page, 'loose').locator('[data-task-name]').boundingBox();
+    const target = await dropRow(page, 'r2').boundingBox();
+
+    await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+    await page.mouse.down();
+    /* Release in the LOWER half of r2 — "put it below this row", inside section s1's band. */
+    await page.mouse.move(target.x + target.width * frac, target.y + target.height - 3, { steps: 12 });
+    await page.mouse.up();
+
+    const stored = await storedOf(page, 'loose');
+    outcomes.push({
+      frac,
+      dx: Math.round(target.x + target.width * frac - (a.x + a.width / 2)),
+      sectionId: stored.sectionId,
+      parentId: stored.parentId,
+      outcome: stored.parentId != null ? 'NESTED' : (stored.sectionId === 's1' ? 'FILED' : 'neither'),
+    });
+  }
+
+  console.log('D2 in-band sweep:\n' + JSON.stringify(outcomes, null, 2));
+
+  expect(outcomes.every((o) => o.sectionId === 's1' && o.parentId == null),
+    `sweep: ${JSON.stringify(outcomes)}`).toBe(true);
+});
