@@ -175,16 +175,17 @@ test('blocking round-trips through the JSON backup', () => {
 // =======================================================================
 // busy-interval annotation — the shape block 11 reads
 // =======================================================================
-test('dayIntervals: lunch, dinner and the free-time reserve are BLOCKING', () => {
+// 2026-08-19: the lunch/dinner half of this test is retired with the hardcoded meals — they are tasks
+// now, and a task's blocking flag is its own (covered by the fixedBlocksToday test below). The free-time
+// reserve is the ONE busy interval dayIntervals still synthesises without a task behind it, which is
+// exactly why its default has to be stated here.
+test('dayIntervals: the free-time reserve is BLOCKING', () => {
   const c = make();
   cleanDay(c, '23:59');
-  Object.assign(c.state.settings, { lunchStart:'12:30', lunchEnd:'13:00',
-    dinnerStart:'18:00', dinnerEnd:'18:30', freeTime:60 });
+  Object.assign(c.state.settings, { freeTime:60 });
   const B = c.startOfToday();
   const di = c.dayIntervals(B, null, [], []);
   const byNote = {}; di.busy.forEach(b => { byNote[b.note] = b; });
-  assert.equal(byNote['Lunch'].blocking, true);
-  assert.equal(byNote['Dinner'].blocking, true);
   assert.equal(byNote['Free time'].blocking, true, 'the reserve carries no task, so the default is stated here');
 });
 

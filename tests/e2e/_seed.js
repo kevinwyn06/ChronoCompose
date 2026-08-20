@@ -102,6 +102,11 @@ async function seed(page, data = {}) {
        over every surface under test on the first tick of a new calendar day. Re-stamped on every load,
        including a seed-once reload, because the day it must suppress is the day being loaded. */
     localStorage.setItem('pp-notify', JSON.stringify({ fired: {}, summaryDay: midnight }));
+    /* 2026-08-19: the routines seed/migration lives in its own key (it runs from componentDidMount, not
+       from runOnceMigrations, because it needs `state` and commit()). Marked done for the same reason
+       as everything below: a fixture must contain exactly the tasks it seeded. The spec that is ABOUT
+       routines clears this key itself. */
+    localStorage.setItem('pp-mig-routines', '1');
     /* Mark every one-time migration done so a fixture is never silently rewritten on boot. */
     localStorage.setItem('pp-migrations', JSON.stringify({
       'allday-planned-zero': 1, 'pin-collapse': 1, 'sections-from-primary-tag': 1,
@@ -200,6 +205,23 @@ async function bootSurface(page, where, data) {
  * `packFromNow:false` so the wall clock cannot move where blocks land.
  * @param {string} endHHMM window end, e.g. '10:00'
  */
+/**
+ * A meal as a TASK. From 2026-08-19 Lunch and Dinner are ordinary tasks in the Routines section, not two
+ * clock pairs in `settings` — so a fixture that needs a real lunch window seeds one of these instead of
+ * setting `lunchStart`/`lunchEnd`. An `uncompressable` clocked appointment is blocking busy through
+ * `fixedBlocksToday`, which is exactly what the settings-derived block used to be.
+ * @param {string} id
+ * @param {string} name
+ * @param {string} startOff `0d+12h30m` — the seed's day-offset-plus-clock form
+ * @param {string} endOff
+ */
+function mealTask(id, name, startOff, endOff) {
+  return task(id, name, {
+    start: startOff, end: endOff, startClock: true, endClock: true,
+    uncompressable: true, planned: null, priority: 4,
+  });
+}
+
 function cleanDaySettings(endHHMM) {
   return {
     allotMode: 'today', packFromNow: false, freeTime: 0,
@@ -421,7 +443,7 @@ async function switchLeftSurface(page, key) {
 }
 
 module.exports = {
-  seed, boot, bootPlan, bootToday, bootDays, bootSurface, dragBetween, task, defaultTasks, DAY,
+  seed, boot, bootPlan, bootToday, bootDays, bootSurface, dragBetween, task, mealTask, defaultTasks, DAY,
   cleanDaySettings, timelineBlocks, settleTimeline, BLOCK_SEL, dayColumns, blocksInColumn,
   parseDur, allottedByTask, drawnMinutes, switchView, switchLeftSurface,
 };

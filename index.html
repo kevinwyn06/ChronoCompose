@@ -759,7 +759,8 @@ class Component extends DCLogic {
      promise a pool of hours that had already gone; planning from now is the honest default. The ⏱/☀
      toggle (renderPackToggle) still flips it and still persists, so "full day" is one click away. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:true, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:3/* PP-EXT (owner 2026-08-16): 0 → 3. Back-to-back packing was never realistic —
+    /* PP-EXT (owner 2026-08-19): lunchStart/lunchEnd/dinnerStart/dinnerEnd retired — meals are tasks. */
+    minChunk:30, breakMin:3/* PP-EXT (owner 2026-08-16): 0 → 3. Back-to-back packing was never realistic —
     every real transition between two tasks costs a minute or two, and a plan that denies it runs late from
     the first hand-off. 3 is small enough that the pool barely moves and large enough to be honest. Existing
     workspaces hold the old 0 in their persisted blob, so migrateSettings delivers this to them. */, gcalPollSec:60,
@@ -1588,6 +1589,7 @@ class Component extends DCLogic {
     /* PP-EXT (31): usage tracker. Session header first, then a flush on every way a tab can go away —
        visibilitychange covers a backgrounded/closed tab, pagehide covers navigation and BFCache. Without
        both, a session that ends by closing the window loses whatever the debounce still held. */
+    this.initRoutines(); /* PP-EXT (owner 2026-08-19): seed the routines for a new workspace, migrate an existing one */
     this.trackSessionStart();
     this._onTrackHide=()=>{ try{ if(document.visibilityState==='hidden') this.trackFlush(true); }catch(e){ this.trackFlush(true); } };
     this._onTrackBye=()=>this.trackFlush(true); /* PP-EXT (33): teardown — the Supabase POST goes keepalive */
@@ -2781,8 +2783,10 @@ class Component extends DCLogic {
        this default stated here. extraBusy keeps whatever fixedBlocksToday stamped on it. Annotation only:
        no consumer in this block branches on it (block 11 does). */
     const addBusy=(a,b,note,taskId,blocking)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId,blocking:(blocking==null?this.BLOCKING_DEFAULT:!!blocking)}); }; /* PP-EXT: taskId marks pinned-task blocks */
-    addBusy(B+this.timeParts(s.lunchStart)*60000, B+this.timeParts(s.lunchEnd)*60000, 'Lunch', undefined, true);
-    addBusy(B+this.timeParts(s.dinnerStart)*60000, B+this.timeParts(s.dinnerEnd)*60000, 'Dinner', undefined, true);
+    /* PP-EXT (owner 2026-08-19): the two hardcoded meal blocks are GONE. Lunch and Dinner are ordinary
+       tasks now (see seedRoutines/migrateRoutines), so they arrive through fixedBlocksToday like every
+       other appointment — which is what finally lets them be renamed, moved for one day, completed or
+       given a real duration. */
     const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time', undefined, true);
     (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId, b.blocking)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
@@ -3650,6 +3654,66 @@ class Component extends DCLogic {
     list.push(this.normalizeSection({name:name||'New section', order:max+1})); return list; }
   addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.saveSections(list);
     return list[list.length-1]; }
+  /* PP-EXT (owner 2026-08-19): the five routines, as ORDINARY tasks. Owner: "Instead of having lunch and
+     dinner be hardcoded options, have breakfast lunch dinner wakeup shutdown routines be default tasks
+     included for new users in an appropriately named section."
+     Wake up and Shut down are Points (clocked start, no end, zero planned) — per architecture/scheduling.md
+     a Point reserves no duration but its clock divides packing intervals, which is exactly what a
+     day-ritual marker should do. They do NOT duplicate the day bounds: the bounds define the window,
+     these mark the ritual inside it.
+     Every one of them is `blocking` by default (BLOCKING_DEFAULT), matching what the hardcoded meals did,
+     so an unmodified workspace's packing outcome is unchanged. */
+  ROUTINE_DEFAULTS(){ return [
+    {name:'Wake up',   start:'07:00', end:null,    point:true},
+    {name:'Breakfast', start:'07:30', end:'08:00'},
+    {name:'Lunch',     start:'12:30', end:'13:00'},
+    {name:'Dinner',    start:'17:30', end:'18:00'},
+    {name:'Shut down', start:'23:00', end:null,    point:true},
+  ]; }
+  /* `only` restricts which routines are created (the migration path uses it — see migrateRoutines).
+     `overrides` carries a workspace's existing clocks so a user who moved lunch keeps it. */
+  seedRoutines(overrides, only){
+    const B=this.startOfToday();
+    const secList=this.addSectionTo(this.state.sections, 'Routines');
+    const sec=secList[secList.length-1];
+    const at=hhmm=>B+this.timeParts(hhmm)*60000;
+    const rows=this.ROUTINE_DEFAULTS().filter(r=>!only || only.indexOf(r.name)>=0).map(r=>{
+      const o=(overrides||{})[r.name]||{};
+      const s=at(o.start||r.start), e=(o.end||r.end)?at(o.end||r.end):null;
+      return this.normalizeTask({id:'t'+Math.random().toString(36).slice(2,8), name:r.name, type:'Proportional', sectionId:sec.id,
+        included:true, start:s, end:e, startClock:true, endClock:e!=null?true:null,
+        uncompressable:e!=null?true:null, planned:r.point?0:null,
+        recur:{kind:'day', n:1}, priority:4, deps:[], pct:0, spent:0}); });
+    this.saveSections(secList);
+    this.commit(tasks=>{ rows.forEach(t=>tasks.push(t)); });
+    return sec;
+  }
+  /* Runs ONCE per workspace — the flag is what stops a user who deletes Lunch getting it back on the
+     next load. Precedent: the `break-min-default` local migration at index.html:813.
+
+     ONLY Lunch and Dinner are migrated, deliberately. The four settings encoded exactly two blocks of
+     reserved time, and those two are what an existing day already contains; seeding Breakfast as well
+     would silently reserve 30 minutes a day that the workspace never had, which is precisely the
+     regression this task's `dayIntervals` criterion forbids. New workspaces get all five (seedRoutines
+     with no `only`); an existing user adds the rest if they want them. */
+  migrateRoutines(){
+    if(this.lsGet('pp-mig-routines')) return;
+    const s=this.state.settings;
+    this.seedRoutines({
+      Lunch:  {start:s.lunchStart  || '12:30', end:s.lunchEnd  || '13:00'},
+      Dinner: {start:s.dinnerStart || '17:30', end:s.dinnerEnd || '18:00'},
+    }, ['Lunch','Dinner']);
+    this.lsSet('pp-mig-routines', '1');
+  }
+  /* Startup entry point, called from componentDidMount — NOT from runOnceMigrations, which runs inside the
+     constructor before `state` exists and cannot use commit(). A workspace with no persisted tasks is new
+     and gets all five routines; anything else is an existing workspace and gets the narrowed migration. */
+  initRoutines(){
+    if(this.lsGet('pp-mig-routines')) return;
+    if(!this.lsGet('pp-tasks')){ this.seedRoutines(); this.lsSet('pp-mig-routines', '1'); return; }
+    this.migrateRoutines();
+  }
+  /* /PP-EXT */
   renameSection(id, name){ const list=(this.state.sections||[]).map(s=>s.id===id?Object.assign({},s,{name:name||s.name}):s);
     this.saveSections(list); }
   /* Pure: move a section to a new index, renumbering `order` densely so ties can't accumulate. */
@@ -9072,8 +9136,8 @@ class Component extends DCLogic {
          now ("have them the dragable objects in the timeline views"). DEFAULT_SETTINGS still carries the
          values; they simply have one editor instead of two. */
       setRow('Free time / day (min)', inp(s.freeTime,v=>this.saveSettings({freeTime:Math.max(0,parseInt(v)||0)}))),
-      setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
-      setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
+      /* PP-EXT (owner 2026-08-19): the Lunch and Dinner rows are retired — they are tasks in the
+         Routines section now, edited like any other task rather than as two clock pairs here. */
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
       /* PP-EXT: break between tasks — reserves this many minutes of gap after each packed task */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Break between tasks (min)',

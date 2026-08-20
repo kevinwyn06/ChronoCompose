@@ -61,14 +61,20 @@ test('V2.1: latest running task is stronger pressed and pulled to now', () => {
 // 1. Meals appear as 'meal' chunks; scheduled chunks stay in-window and never overlap a meal.
 // V5 (F4): clock pinned at 12:00 — `packFromNow` now defaults true, so the DEFAULT 07:00–23:00 window
 // is empty when the suite runs after 23:00. This test is about meals, not about the run hour.
+// 2026-08-19: meals are TASKS now, so they are seeded here and arrive as `fixed` chunks rather than as
+// settings-derived `meal` chunks. The property under test is the same one: nothing packs over a meal.
 test('packer: meals present as meal chunks; scheduled within window & clear of meals', () => withNow(() => {
   const c = make();
   c.state.nowTick = Date.now();
-  c.state.settings.freeTime = 0; // keep default 07:00-23:00 window + default lunch/dinner
+  c.state.settings.freeTime = 0; // keep the default 07:00-23:00 window
+  const B = c.startOfToday();
+  const meal = (id, name, sh, eh) => c.normalizeTask({ id, name, type:'Proportional', included:true,
+    start:B + sh*3600000, end:B + eh*3600000, startClock:true, endClock:true, uncompressable:true,
+    priority:4, deps:[], pct:0, planned:null, spent:0 });
   const t = activeTask(c, { predictManual: true, predicted: 120, planned: 120 });
-  const { chunks, dayStart, dayEnd } = pack(c, [t]);
+  const { chunks, dayStart, dayEnd } = pack(c, [t, meal('lunch','Lunch',12.5,13), meal('dinner','Dinner',17.5,18)]);
 
-  const meals = chunks.filter(x => x.type === 'meal');
+  const meals = chunks.filter(x => x.type === 'fixed' && (x.id === 'lunch' || x.id === 'dinner'));
   const mealTitles = meals.map(x => x.title);
   assert.ok(mealTitles.includes('Lunch'), 'Lunch meal chunk present');
   assert.ok(mealTitles.includes('Dinner'), 'Dinner meal chunk present');

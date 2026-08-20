@@ -28,7 +28,7 @@
 const { test, expect } = require('@playwright/test');
 const {
   bootPlan, bootDays, task, timelineBlocks, settleTimeline, dayColumns,
-  allottedByTask, drawnMinutes, switchView, switchLeftSurface, DAY,
+  allottedByTask, drawnMinutes, switchView, switchLeftSurface, DAY, mealTask,
 } = require('./_seed');
 
 /* ── The day ────────────────────────────────────────────────────────────────────────────────────
@@ -39,8 +39,7 @@ function daySettings() {
   return {
     allotMode: 'today', packFromNow: false, freeTime: 0,
     dayStart: '08:00', dayEnd: '18:00',
-    lunchStart: '12:00', lunchEnd: '13:00',
-    dinnerStart: '00:00', dinnerEnd: '00:00',
+    /* 2026-08-19: lunch is a TASK now (see the backlog below), not a settings clock pair. */
     minChunk: 30, breakMin: 0, multitask: false,
   };
 }
@@ -71,6 +70,8 @@ function backlog() {
     task('t-move-a', 'Pack the kitchen', { start: '0d', end: '+6d', planned: 60, priority: 3, parentId: 't-move' }),
     task('t-move-b', 'Book a van', { start: '0d', end: '+6d', planned: 30, priority: 3, parentId: 't-move' }),
     task('t-someday', 'Learn Portuguese', { start: '+1d', end: '+30d', planned: 60, priority: 4, included: false }),
+    /* 2026-08-19: the 12:00-13:00 lunch this day was always built around, now as the task it became. */
+    mealTask('t-lunch', 'Lunch', '0d+12h', '0d+13h'),
   ];
 }
 
@@ -83,7 +84,8 @@ const sum = (m) => Object.values(m).reduce((a, b) => a + b, 0);
    and the 12:00–13:00 lunch. Neither is packed, so neither can move when the flexible work does. */
 const CAL = [
   { pick: (b) => b.taskId === 't-standup', minutes: 30 },
-  { pick: (b) => b.kind === 'meal', minutes: 60 },
+  /* 2026-08-19: lunch is a task, drawn as a `fixed` block, so the calibrator names it directly. */
+  { pick: (b) => b.taskId === 't-lunch', minutes: 60 },
 ];
 
 /**
@@ -204,7 +206,8 @@ test.describe('A day in the life', () => {
     const blocks = await timelineBlocks(page);
     expect(blocks.some((b) => b.kind === 'fixed' && b.taskId === 't-standup'),
       'the appointment is drawn locked').toBe(true);
-    expect(blocks.some((b) => b.kind === 'meal'), 'lunch is on the day').toBe(true);
+    /* 2026-08-19: lunch is a task, so it is drawn as a `fixed` block like any other appointment. */
+    expect(blocks.some((b) => b.kind === 'fixed' && b.taskId === 't-lunch'), 'lunch is on the day').toBe(true);
     expect(blocks.some((b) => b.taskId === 't-move-a'),
       'a subtask is drawn under its parent\'s family time').toBe(true);
     expect(morning.charged['t-move-a'], 'and it is charged its share of the family').toBeGreaterThan(0);
@@ -212,7 +215,7 @@ test.describe('A day in the life', () => {
     /* Something runs into lunch: the meal splits somebody's work into two chunks that sit either
        side of it. This is the "a task overruns into lunch" step, and it is asserted through the
        shape of the day rather than through a widget. */
-    const meal = blocks.find((b) => b.kind === 'meal');
+    const meal = blocks.find((b) => b.taskId === 't-lunch');   /* 2026-08-19: lunch is a task */
     const splitTask = [...new Set(blocks.filter((b) => b.taskId).map((b) => b.taskId))]
       .find((id) => {
         const mine = blocks.filter((b) => b.taskId === id);
