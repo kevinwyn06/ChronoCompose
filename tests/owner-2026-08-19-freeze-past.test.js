@@ -286,3 +286,58 @@ test('freeze the past: adversarial — a completion inside another task\'s fixed
   const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
   assert.equal(cap.pool, Math.round(freeMin), 'overlapping history and fixed must not double-count');
 });
+
+test('day bounds: the clamp keeps dayEnd after dayStart', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  c.setDayBounds('09:00', '08:00');
+  assert.ok(c.timeParts(c.state.settings.dayEnd) > c.timeParts(c.state.settings.dayStart),
+    'an inverted drag is clamped, never stored');
+});
+
+test('day bounds: dayIntervals follows the new window', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  const B = c.startOfDay(Date.now());
+  c.setDayBounds('09:00', '17:00');
+  const di = c.dayIntervals(B, null, [], []);
+  const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
+  assert.equal(freeMin, 480, 'an 09:00-17:00 window is 480 minutes');
+});
+
+// The day bounds are settings, and no setting has ever been part of the task undo history. Owner chose a
+// bounds-only undo record over moving all of `settings` into that history — so the two stacks interleave,
+// and Ctrl+Z must undo the most recent action rather than always preferring one stack.
+test('day bounds: one undo restores both bounds', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  c.setDayBounds('09:00', '17:00');
+  c.undo();
+  assert.equal(c.state.settings.dayStart, '00:00');
+  assert.equal(c.state.settings.dayEnd, '24:00', 'both bounds came back from one record');
+  c.redo();
+  assert.equal(c.state.settings.dayStart, '09:00', 'and redo puts them back');
+  assert.equal(c.state.settings.dayEnd, '17:00');
+});
+
+test('day bounds: a later task edit is undone before the earlier bounds drag', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  c.state.tasks = [flex(c, c.startOfDay(Date.now()), 'a', 60)];
+  c.setDayBounds('09:00', '17:00');
+  c.commit(tasks => { tasks[0].name = 'renamed'; });
+
+  c.undo();
+  assert.equal(c.state.tasks[0].name, 'a', 'the most recent action is the task edit');
+  assert.equal(c.state.settings.dayStart, '09:00', 'the bounds drag is still standing');
+
+  c.undo();
+  assert.equal(c.state.settings.dayStart, '00:00', 'the second undo reaches the bounds drag');
+});
+
+test('day bounds: a drag that changes nothing writes no undo record', () => {
+  const c = make();
+  cleanDay(c, '24:00');
+  c.setDayBounds('00:00', '24:00');
+  assert.equal(c._undoKind.length, 0, 'a stray press on the handle must not consume a Ctrl+Z');
+});

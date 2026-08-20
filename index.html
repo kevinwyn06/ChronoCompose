@@ -671,6 +671,11 @@ class Component extends DCLogic {
     this.PROJECT = 'Life Planner';
     this.history = [];
     this.future = [];
+    /* PP-EXT (owner 2026-08-19): the day-bound drag is the first UNDOABLE setting. Rather than move all
+       of `settings` into the task history (which every other setting has never been part of), the drag
+       gets its own record. `_undoKind` interleaves the two stacks so Ctrl+Z always undoes the most recent
+       action rather than preferring one stack over the other. */
+    this._boundsUndo = []; this._boundsRedo = []; this._undoKind = []; this._redoKind = [];
     const pf = this.loadPrefs();
     this.ROWH = {compact:30, default:40, comfy:52};
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
@@ -1629,7 +1634,15 @@ class Component extends DCLogic {
   }
 
   /* ---------- history ---------- */
-  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[]; } /* PP-EXT: named cap */
+  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[];
+    /* PP-EXT (owner 2026-08-19): record the ORDER as well as the entry — see _undoKind above. A fresh
+       action invalidates both redo stacks, exactly as `this.future=[]` already did for tasks. */
+    this._pushKind('tasks'); } /* PP-EXT: named cap */
+  /* PP-EXT (owner 2026-08-19): kind bookkeeping for the interleaved undo stacks. */
+  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[];
+    /* keep the order log in step with the capped stacks: drop the oldest entry of whichever kind fell off */
+    while(this._undoKind.filter(k=>k==='tasks').length>this.history.length){ const i=this._undoKind.indexOf('tasks'); this._undoKind.splice(i,1); }
+    while(this._undoKind.filter(k=>k==='bounds').length>this._boundsUndo.length){ const i=this._undoKind.indexOf('bounds'); this._undoKind.splice(i,1); } }
   commit(fn){
     this.snapshot();
     const prev = this.state.tasks; /* PP-EXT: pre-change reference for the outbound gcal diff */
@@ -1644,7 +1657,16 @@ class Component extends DCLogic {
     this.trackCommit(prev, tasks); /* PP-EXT (31): third funnel — usage analytics, ids + counts, LOCAL ONLY (never SYNC_FIELDS) */
   }
   undo(){
+    /* PP-EXT (owner 2026-08-19): a day-bound drag is undone ahead of the task history when it IS the most
+       recent action. Bounds live outside `state.tasks`, so they are restored (and re-persisted) directly. */
+    if(this._undoKind.length && this._undoKind[this._undoKind.length-1]==='bounds'){
+      this._undoKind.pop(); const prev=this._boundsUndo.pop();
+      this._boundsRedo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+      this._redoKind.push('bounds');
+      this.saveSettings({dayStart:prev.dayStart, dayEnd:prev.dayEnd}); return; }
     if(!this.history.length) return;
+    if(this._undoKind.length) this._undoKind.pop();
+    this._redoKind.push('tasks');
     this.future.push(JSON.stringify(this.state.tasks)); if(this.future.length>this.HISTORY_MAX) this.future.shift(); /* PP-EXT: cap both stacks — undo/redo cycling grew `future` unbounded */
     const cur=this.state.tasks; /* PP-EXT */
     const prev = JSON.parse(this.history.pop());
@@ -1654,7 +1676,14 @@ class Component extends DCLogic {
     this.syncOut(cur, prev); /* PP-EXT B1: undo propagates to the backend too (server touch_updated_at freshens the clock) */
   }
   redo(){
+    if(this._redoKind.length && this._redoKind[this._redoKind.length-1]==='bounds'){
+      this._redoKind.pop(); const nx=this._boundsRedo.pop();
+      this._boundsUndo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+      this._undoKind.push('bounds');
+      this.saveSettings({dayStart:nx.dayStart, dayEnd:nx.dayEnd}); return; }
     if(!this.future.length) return;
+    if(this._redoKind.length) this._redoKind.pop();
+    this._undoKind.push('tasks');
     this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); /* PP-EXT: cap both stacks */
     const cur=this.state.tasks; /* PP-EXT */
     const nx = JSON.parse(this.future.pop());
@@ -5727,6 +5756,19 @@ class Component extends DCLogic {
     if(this._edgeDrag){
       const ed=this._edgeDrag; const dyRaw=e.clientY-ed.startClientY;
       if(!ed.moved && Math.abs(dyRaw)<4) return; ed.moved=true; /* same 4px raw promotion threshold as every other gesture */
+      /* PP-EXT (owner 2026-08-19): the day-bound branch. Same unit rule as every other drag — raw viewport
+         px through uiPt into local px, then divided by px-per-minute. Alt drags free; otherwise 5-minute
+         snap. Clamped here so the PREVIEW never shows a value setDayBounds would refuse to store. */
+      if(ed.kind==='daybound'){
+        const p=ed.px||this.TL_PXPM;
+        const dMin=this.uiPt(0, dyRaw).y/p;
+        let v=ed.base+dMin;
+        if(!e.altKey) v=Math.round(v/5)*5;
+        v=Math.round(v);
+        const other=this.timeParts(ed.which==='start'?this.state.settings.dayEnd:this.state.settings.dayStart);
+        ed.val = ed.which==='start' ? Math.max(0, Math.min(v, other-1)) : Math.min(24*60, Math.max(v, other+1));
+        this.forceUpdate(); return;
+      }
       const px=ed.px||this.TL_PXPM;
       const dyPx=this.uiPt(0, dyRaw).y;
       /* PP-EXT (V4.3): Alt is read LIVE off the move event, not latched at pointer-down, so the user can
@@ -5890,6 +5932,15 @@ class Component extends DCLogic {
        every future re-compression). One `commit()` ⇒ one undo entry. */
     if(this._edgeDrag){
       const ed=this._edgeDrag; this._edgeDrag=null;
+      /* PP-EXT (owner 2026-08-19): one setDayBounds call ⇒ one undo record covering BOTH bounds. A press
+         that never crossed the threshold writes nothing, exactly as the block edge drag below. */
+      if(ed.kind==='daybound'){
+        if(ed.moved){ const fmt=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+          const st=ed.which==='start'?fmt(ed.val):this.state.settings.dayStart;
+          const en=ed.which==='end'?fmt(ed.val):this.state.settings.dayEnd;
+          this.setDayBounds(st, en); }
+        this.forceUpdate(); return;
+      }
       /* PP-EXT (V4.3): a release ON the priority snap means "make this auto again" — the override is
          cleared rather than rewritten, so the block regains its auto formatting (no ↺; the hatch this
          once mentioned was deleted in V5 block 25 — auto is now the plain, unmarked default) and the
@@ -8912,7 +8963,9 @@ class Component extends DCLogic {
     const paneScheduling=tab!=='scheduling'?null:h(React.Fragment,{},
       /* PP-EXT: day-schedule settings (feed the drawer timeline + allotted-time pool) */
       secTitle('Day schedule'),
-      setRow('Day window (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dayStart,v=>this.saveSettings({dayStart:v}),{width:'56px'}), inp(s.dayEnd,v=>this.saveSettings({dayEnd:v}),{width:'56px'}))),
+      /* PP-EXT (owner 2026-08-19): the Day window row is retired — the bounds are dragged on the timeline
+         now ("have them the dragable objects in the timeline views"). DEFAULT_SETTINGS still carries the
+         values; they simply have one editor instead of two. */
       setRow('Free time / day (min)', inp(s.freeTime,v=>this.saveSettings({freeTime:Math.max(0,parseInt(v)||0)}))),
       setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
       setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
@@ -9095,6 +9148,23 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT: right drawer — ported single-day auto-scheduling timeline (old doGet) ==== */
   timeParts(str){ const m=String(str||'0:0').split(':'); return (parseInt(m[0])||0)*60+(parseInt(m[1])||0); }
+  /* PP-EXT (owner 2026-08-19): "Instead of having the day start and day end be a setting, have them the
+     dragable objects in the timeline views." The handles are a direct-manipulation editor for the GLOBAL
+     setting (owner decision) — not a per-day override. Both bounds are written in ONE record so a single
+     Ctrl+Z restores both, and the packing follows from them on the next render.
+     `commit()` is deliberately NOT used: it snapshots `state.tasks` only, and these are settings. */
+  setDayBounds(startHHMM, endHHMM){
+    const a=this.timeParts(startHHMM), b=this.timeParts(endHHMM);
+    const lo=Math.max(0, Math.min(a, 24*60-1)), hi=Math.max(lo+1, Math.min(b, 24*60));
+    const fmt=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+    const next={dayStart:fmt(lo), dayEnd:fmt(hi)};
+    if(next.dayStart===this.state.settings.dayStart && next.dayEnd===this.state.settings.dayEnd) return; /* a drag that changed nothing writes nothing */
+    this._boundsUndo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+    if(this._boundsUndo.length>this.HISTORY_MAX) this._boundsUndo.shift();
+    this._pushKind('bounds');
+    this.saveSettings(next);
+  }
+  /* /PP-EXT */
   /* PP-EXT: the drawer is gone — Today is a main view now. Keep the methods (placeholders stay) returning null. */
   renderDrawerToggle(){ return null; }
   renderDrawer(){ return null; }
@@ -10065,11 +10135,36 @@ class Component extends DCLogic {
         style:{fontSize:'10px',fontWeight:600,color:'var(--tl-hover-chip-fg)',background:'var(--tl-hover-chip-bg)', /* PP-EXT (22) */
           border:'1px solid var(--tl-hover-chip-border)',borderRadius:'10px',padding:'1px 7px',whiteSpace:'nowrap',
           overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}}, '🕓 '+thv.title))) : null;
+    /* PP-EXT (owner 2026-08-19): day-bound handles. Same gesture vocabulary as the block edge drag — it
+       reuses the `_edgeDrag` record, so the 4px promotion threshold, the uiPt px→minute rule and the
+       existing Escape rung (which nulls `_edgeDrag` without caring what kind it is) all apply unchanged.
+       Alt drags free; otherwise the bound snaps to 5 minutes. The strips sit inside the clipped body, so
+       they are drawn at the very top and bottom edges rather than straddling them. */
+    /* PP-EXT (owner 2026-08-19): the strips live in the HOUR GUTTER (x < gut), never over the block area.
+       A full-width strip at the column's bottom edge sat on top of any block dragged there and swallowed
+       its clicks — tests/e2e/timeline-drag.spec.js caught exactly that on the unpin target. Block
+       gestures are used constantly and must win the pointer; the gutter is dead space that never holds a
+       block, so the handle is always grabbable without ever competing. Only the labelled column (the
+       Today drawer) draws them: these edit a GLOBAL setting, so one editor is enough, and the multi-day
+       grids share a single gutter that belongs to no column. */
+    const dbDrag = (ed && ed.kind==='daybound' && ed.day===B) ? ed : null;
+    const boundHandle=(which)=>h('div',{key:'db'+which, className:'pp-daybound', title:which==='start'?'Drag to set the day start':'Drag to set the day end',
+      onMouseDown:e=>{ e.preventDefault(); e.stopPropagation();
+        const cur=this.timeParts(which==='start'?this.state.settings.dayStart:this.state.settings.dayEnd);
+        this._edgeDrag={kind:'daybound', which, day:B, px, base:cur, val:cur, startClientY:e.clientY, moved:false};
+        this.forceUpdate(); },
+      style:{position:'absolute', left:0, width:gut+'px', height:'7px', cursor:'ns-resize', zIndex:6,
+        [which==='start'?'top':'bottom']:'0', background:'var(--tl-point)', opacity:0.75, borderRadius:'2px'}});
+    const dbPreview = (dbDrag && dbDrag.moved) ? h('div',{key:'dbp',
+      style:{position:'absolute', left:gut+'px', right:0, top:(((dbDrag.val*60000+B)-dStart)/60000*px)+'px',
+        height:'2px', background:'var(--accent)', zIndex:7, pointerEvents:'none'}},
+      h('span',{style:{position:'absolute',right:'4px',top:'-14px',fontSize:'10px',fontWeight:700,color:'var(--accent)'}},
+        String(Math.floor(dbDrag.val/60)).padStart(2,'0')+':'+String(Math.round(dbDrag.val%60)).padStart(2,'0'))) : null;
     const unsched=data.chunks.filter(c=>!c.start);
     return h('div',{style:{position:'relative'}},
       /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
          scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
-      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, ...points, hoverEl, nowLine), /* PP-EXT (Group 2): + carets + top-hover */
+      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, ...points, hoverEl, nowLine, showLabels?boundHandle('start'):null, showLabels?boundHandle('end'):null, dbPreview), /* PP-EXT (Group 2): + carets + top-hover; (owner 2026-08-19): + day-bound handles */
       unsched.length? h('div',{style:{margin:'8px 4px 4px',padding:'8px',background:'var(--tl-unsched-box-bg)',border:'1px solid var(--tl-unsched-box-border)',borderRadius:'8px'}}, /* PP-EXT (22) */
         h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'var(--warn)',marginBottom:'5px'}},'⚠ Unscheduled'),
         ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
