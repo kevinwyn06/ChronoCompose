@@ -863,6 +863,10 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-17): creation defaults follow intent visible in the dates. A dateless quick
          chore starts pressed into today; any task with a real date starts undecided and lets its window
          decide when it arrives. Object.assign below still preserves an explicit true/null decision. */
+      /* PP-EXT (owner 2026-08-19): a DATELESS snooze. snoozeUntil answers "not until when"; this answers
+         "not until something happens". The two are independent: an expired snoozeUntil still falls back
+         to `included`, and this one does not expire at all. */
+      snoozeIndef:false,
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       blocking:null, /* PP-EXT (10): busy-interval semantics for this task's fixed span. TRI-STATE —
          true = blocking (nothing schedules through it), false = background (a Work-shaped container the
@@ -2110,6 +2114,9 @@ class Component extends DCLogic {
   isOptedOut(t){
     if(this.isActiveTask(t)) return false;
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
+    /* PP-EXT (owner 2026-08-19): an indefinite snooze opts out with NO date comparison — until one of
+       the four wake triggers fires, at which point it stops opting out and the task returns as `new`. */
+    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
     /* PP-EXT V2.11: the `included===false` ("off") branch is gone — see setIncludedOff. Unpressed work is
        still opted out of today; it simply is no longer barred from ever coming back on its own. */
     /* PP-EXT V5 (F19/F20, block 20): auto-included work is not opted out. Without this clause the band
@@ -2245,6 +2252,8 @@ class Component extends DCLogic {
   inclState(t){
     if(this.isActiveTask(t)) return 'active';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
+    /* PP-EXT (owner 2026-08-19): a dateless snooze reads as snoozed until one of its wake triggers fires. */
+    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return 'snoozed';
     /* PP-EXT V5 (block 20): auto-included work reads as pressed, so `inclusionRow` files it under
        Included and `isUndecided` stops calling it undecided. One predicate, one answer. */
     return (t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t)) ? 'pressed' : 'unpressed';
@@ -2273,9 +2282,26 @@ class Component extends DCLogic {
      the second half of the owner's `New` definition: work today brought back, whether the calendar or an
      expiring snooze did the bringing. */
   snoozeEndedToday(t){
+    /* PP-EXT (owner 2026-08-19): an indefinite snooze that has WOKEN also counts as "today brought it
+       back", which is what makes originOf file it as `new` rather than as inherited work. */
+    if(t && t.snoozeIndef && this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
     if(!t || t.snoozeUntil==null) return false;
     return this.startOfDay(t.snoozeUntil)===this.startOfToday();
   }
+  /* PP-EXT (owner 2026-08-19): why an indefinite snooze is over, or null. Owner's wake set. `now` is an
+     argument, and the question is "is it woken" rather than "was it woken TODAY" — the same reasoning
+     that shaped snoozeEndedToday, so a wake missed while the app was closed still fires. PURE. */
+  snoozeWakeReason(t, B, now){
+    if(!t || !t.snoozeIndef) return null;
+    const oc=this.occOnDay(t, B) || this.occOf(t);
+    if(oc && oc.start!=null && this.startOfDay(oc.start)<=B && this.hasStartTime(t)) return 'start';
+    if(t.end!=null && this.dueMsOf(t, B)<now) return 'due';
+    const deps=(t.deps||[]);
+    if(deps.length){ const byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x);
+      if(deps.every(d=>{ const p=byId[this.depId(d)]; return !p || p.pct>=100; })) return 'deps'; }
+    return null;
+  }
+  /* /PP-EXT */
   /* PURE-ish: WHY a task is on today's list — the three columns of the Selection view.
      `extra` is a FALLBACK BUCKET, not a category (the same role `No section` plays, and for the same
      reason): making the third column exhaustive means nothing can fall out of the view.
@@ -2518,7 +2544,10 @@ class Component extends DCLogic {
        work. Auto-inclusion is only acceptable while saying no is one gesture that actually lands. */
     if(this.isInheritedToday(t) || this.autoIncludedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
     /* /PP-EXT */
-  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; } }); }
+  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19): an explicit include is the first wake trigger */ } }); }
+  /* PP-EXT (owner 2026-08-19): "not now", open-ended. Distinct from snoozeToday (which expires at
+     midnight) and from setIncludedOff (which unpresses — "not chosen" rather than "not yet"). */
+  snoozeIndefinitely(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeIndef=true; }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
      the draft untouched instead of silently clearing a snooze on a typo. */
@@ -5825,7 +5854,7 @@ class Component extends DCLogic {
       if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         const on=(inclusion==='included');
         tasks.forEach(t=>{ if(!roots.has(t.id)) return;
-          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; }
+          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19) */ }
           /* PP-EXT V5 (block 20): mirrors setIncludedOff — auto-included work needs the same snooze or
              the drag across the divider would be silently undone by the opening window. */
           else { t.included=null; t.includedExplicit=false;
@@ -7392,8 +7421,12 @@ class Component extends DCLogic {
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
       onMouseLeave:e=>e.currentTarget.style.background='transparent'}, label);
     if(st==='snoozed') return [
+      /* PP-EXT (owner 2026-08-19): an indefinite snooze has no date to print — it ends on an EVENT, so
+         the label names the events rather than a day that does not exist. */
       h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},
-        'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
+        (t.snoozeIndef && t.snoozeUntil==null)
+          ? 'Snoozed — until it starts, falls due, or its last dependency is done'
+          : 'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
       btn('Turn on', ()=>this.setIncludedOn(t.id)) ];
     if(st==='unpressed') return [ btn('Press into today', ()=>this.setIncludedTrue(t.id)) ];
     /* pressed or active */
@@ -7401,7 +7434,12 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-04): this popover is STRICTLY inclusion/exclusion. Time tracking does not
          belong here — activation is double-click on the row (rowDblClick). A "Make active now" entry lived
          here briefly in V2.4 and was removed on that rule. */
-      btn('Snooze today', ()=>this.snoozeToday(t.id)),
+      /* PP-EXT (owner 2026-08-19): three DISTINCT actions. The owner: "Snooze today and take out of
+         today are practically the exact same thing and is therefore useless." They are no longer the
+         same: "Not today" expires at midnight, "Snooze indefinitely" ends on an event, and "Take out
+         of today" unpresses — not-yet versus not-yet-open-ended versus not-chosen. */
+      btn('Not today', ()=>this.snoozeToday(t.id)),
+      btn('Snooze indefinitely', ()=>this.snoozeIndefinitely(t.id)),
       h('div',{key:'su',style:{padding:'4px 10px'}},
         h('input',{className:'pp-num',type:'text',placeholder:'Snooze until… (e.g. "3 days")',
           style:{width:'100%',border:'1px solid var(--divider)'},
@@ -7889,7 +7927,7 @@ class Component extends DCLogic {
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking','sectionId','uncompressable','includedExplicit','rowHidden']; }
+    'snoozeUntil','snoozeIndef','blocking','sectionId','uncompressable','includedExplicit','rowHidden']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not

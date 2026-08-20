@@ -42,7 +42,11 @@ test.describe('inclusion popover', () => {
     await expect(menuItem(page, 'Take out of today')).toHaveCount(0);
     await glyph(page, 'inc-1').click();
 
-    await expect(menuItem(page, 'Snooze today')).toBeVisible();
+    /* Owner (2026-08-19): "Snooze today and take out of today are practically the exact same thing and
+       is therefore useless." Three distinct actions now — "Snooze today" was renamed "Not today" and an
+       open-ended snooze sits between it and the unpress. */
+    await expect(menuItem(page, 'Not today')).toBeVisible();
+    await expect(menuItem(page, 'Snooze indefinitely')).toBeVisible();
     await expect(menuItem(page, 'Take out of today')).toBeVisible();
     /* Owner rule (2026-08-04): this popover is STRICTLY inclusion. "Make active now" lived here in
        V2.4 and was deliberately removed — activation is double-click. Pinned so it cannot creep back. */
@@ -113,11 +117,11 @@ test.describe('inclusion popover', () => {
     await expect(cardIn(page, '[data-selcell$="-included"]', 'Popover task')).toHaveCount(1);
   });
 
-  test('"Snooze today" excludes the task for today', async ({ page }) => {
+  test('"Not today" excludes the task for today', async ({ page }) => {
     await bootPlan(page, 'select', { tasks: pressed });
 
     await glyph(page, 'inc-1').click();
-    await menuItem(page, 'Snooze today').click();
+    await menuItem(page, 'Not today').click();
 
     await expect(cardIn(page, '[data-selcell$="-excluded"]', 'Popover task')).toHaveCount(1);
     /* A snoozed task reports a DIFFERENT state than an unpressed one, and its menu says so —
@@ -126,5 +130,19 @@ test.describe('inclusion popover', () => {
     await glyph(page, 'inc-1').click();
     await expect(menuItem(page, 'Turn on')).toBeVisible();
     await expect(menuItem(page, 'Press into today')).toHaveCount(0);
+  });
+
+  test('"Snooze indefinitely" excludes the task and names its wake triggers', async ({ page }) => {
+    await bootPlan(page, 'select', { tasks: pressed });
+
+    await glyph(page, 'inc-1').click();
+    await menuItem(page, 'Snooze indefinitely').click();
+
+    await expect(cardIn(page, '[data-selcell$="-excluded"]', 'Popover task')).toHaveCount(1);
+
+    /* A dateless snooze has no day to print, so the popover names the EVENTS that end it instead. */
+    await glyph(page, 'inc-1').click();
+    await expect(page.getByText('until it starts, falls due', { exact: false })).toBeVisible();
+    await expect(menuItem(page, 'Turn on')).toBeVisible();
   });
 });
