@@ -37,9 +37,9 @@ const THEMES = ['light', 'dark'];
 function fullWeek() {
   return {
     settings: {
-      allotMode: 'today', packFromNow: false, freeTime: 0,
+      /* 2026-08-19: meals are tasks; the free-time reserve is the remaining structural clock window. */
+      allotMode: 'today', packFromNow: false, freeTime: 60,
       dayStart: '08:00', dayEnd: '19:00',
-      lunchStart: '12:00', lunchEnd: '13:00', dinnerStart: '00:00', dinnerEnd: '00:00',
       minChunk: 30, breakMin: 0,
     },
     tasks: [

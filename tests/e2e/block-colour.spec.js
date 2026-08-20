@@ -45,9 +45,12 @@ const shot = (name) => path.join(SHOTS, `${name}.png`);
 /* Two flexible tasks on DIFFERENT priorities (so "one hue for everything" is detectable), one
  * clock-fixed appointment (the locked case), and the lunch window (the structural case). */
 const SETTINGS = {
-  allotMode: 'today', packFromNow: false, freeTime: 0,
+  /* 2026-08-19: meals are tasks, so the STRUCTURAL clock window this spec measures is now the
+     free-time reserve — index.html:9656 gives the `meal` kind to any busy block with no task behind
+     it, and the reserve is the last one left. The case under test is unchanged: a window is drawn as
+     structure and takes no task hue. */
+  allotMode: 'today', packFromNow: false, freeTime: 60,
   dayStart: '08:00', dayEnd: '19:00',
-  lunchStart: '12:00', lunchEnd: '13:00', dinnerStart: '00:00', dinnerEnd: '00:00',
   minChunk: 30, breakMin: 0,
 };
 const fixture = (theme) => {

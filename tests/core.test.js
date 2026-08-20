@@ -483,18 +483,27 @@ test('togglePredictManual / setPredict', () => {
 
 // V5 (F4): clock pinned at 12:00 — with `packFromNow` defaulting true the default 07:00–23:00 window
 // has no room left when the suite runs after 23:00. Both meals still lie ahead of the pinned now.
+//
+// 2026-08-19: meals are TASKS now (the routines), not two settings-derived `meal` chunks, so they are
+// seeded here and arrive as `fixed` chunks. The property under test is unchanged and is the one that
+// mattered all along: scheduled chunks stay inside the window and never overlap a blocking meal.
 test('buildDayTimeline: meals present, chunks in-window & non-overlapping', () => withNow(() => {
   const c = make();
   c.state.nowTick = Date.now();
-  c.state.settings.freeTime = 0; // no evening reserve, so meals are the only busy blocks
+  c.state.settings.freeTime = 0; // no evening reserve, so the meals are the only busy blocks
+  const B = c.startOfToday();
+  const meal = (id, name, sh, eh) => c.normalizeTask({ id, name, type:'Proportional', included:true,
+    start:B + sh*3600000, end:B + eh*3600000, startClock:true, endClock:true, uncompressable:true,
+    priority:4, deps:[], pct:0, planned:null, spent:0 });
+  const lunch = meal('lunch', 'Lunch', 12.5, 13), dinner = meal('dinner', 'Dinner', 17.5, 18);
   const p1 = activeTask(c, { type:'Proportional', planned:120, name:'A' });
   const p2 = activeTask(c, { type:'Proportional', planned:120, name:'B' });
-  c.state.tasks = [p1, p2];
+  c.state.tasks = [p1, p2, lunch, dinner];
   c._allot = c.computeAllotted(c.state.tasks);
   const d = c.buildDayTimeline();
   assert.ok(d.dayStart < d.dayEnd);
-  const meals = d.chunks.filter(x=>x.type==='meal').map(x=>x.title).sort();
-  assert.deepEqual(meals, ['Dinner','Lunch']);
+  const mealsFull = d.chunks.filter(x=>x.type==='fixed' && (x.id==='lunch' || x.id==='dinner'));
+  assert.deepEqual(mealsFull.map(x=>x.title).sort(), ['Dinner','Lunch']);
   const sched = d.chunks.filter(x=>x.start && x.type==='scheduled');
   assert.ok(sched.length > 0, 'some scheduled chunks');
   sched.forEach(x=>{
@@ -502,7 +511,6 @@ test('buildDayTimeline: meals present, chunks in-window & non-overlapping', () =
     assert.ok(x.start < x.end, 'positive duration');
   });
   // no scheduled chunk overlaps a meal
-  const mealsFull = d.chunks.filter(x=>x.type==='meal');
   sched.forEach(x=> mealsFull.forEach(mm=>{
     assert.ok(x.end <= mm.start || x.start >= mm.end, 'no overlap with meal');
   }));

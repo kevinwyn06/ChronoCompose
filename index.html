@@ -671,6 +671,11 @@ class Component extends DCLogic {
     this.PROJECT = 'Life Planner';
     this.history = [];
     this.future = [];
+    /* PP-EXT (owner 2026-08-19): the day-bound drag is the first UNDOABLE setting. Rather than move all
+       of `settings` into the task history (which every other setting has never been part of), the drag
+       gets its own record. `_undoKind` interleaves the two stacks so Ctrl+Z always undoes the most recent
+       action rather than preferring one stack over the other. */
+    this._boundsUndo = []; this._boundsRedo = []; this._undoKind = []; this._redoKind = [];
     const pf = this.loadPrefs();
     this.ROWH = {compact:30, default:40, comfy:52};
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
@@ -754,7 +759,8 @@ class Component extends DCLogic {
      promise a pool of hours that had already gone; planning from now is the honest default. The ⏱/☀
      toggle (renderPackToggle) still flips it and still persists, so "full day" is one click away. */
   DEFAULT_SETTINGS(){ return { freeTime:120, allotMode:'today', packFromNow:true, dayStart:'07:00', dayEnd:'23:00',
-    lunchStart:'12:30', lunchEnd:'13:00', dinnerStart:'17:30', dinnerEnd:'18:00', minChunk:30, breakMin:3/* PP-EXT (owner 2026-08-16): 0 → 3. Back-to-back packing was never realistic —
+    /* PP-EXT (owner 2026-08-19): lunchStart/lunchEnd/dinnerStart/dinnerEnd retired — meals are tasks. */
+    minChunk:30, breakMin:3/* PP-EXT (owner 2026-08-16): 0 → 3. Back-to-back packing was never realistic —
     every real transition between two tasks costs a minute or two, and a plan that denies it runs late from
     the first hand-off. 3 is small enough that the pool barely moves and large enough to be honest. Existing
     workspaces hold the old 0 in their persisted blob, so migrateSettings delivers this to them. */, gcalPollSec:60,
@@ -857,6 +863,10 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-17): creation defaults follow intent visible in the dates. A dateless quick
          chore starts pressed into today; any task with a real date starts undecided and lets its window
          decide when it arrives. Object.assign below still preserves an explicit true/null decision. */
+      /* PP-EXT (owner 2026-08-19): a DATELESS snooze. snoozeUntil answers "not until when"; this answers
+         "not until something happens". The two are independent: an expired snoozeUntil still falls back
+         to `included`, and this one does not expire at all. */
+      snoozeIndef:false,
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
       blocking:null, /* PP-EXT (10): busy-interval semantics for this task's fixed span. TRI-STATE —
          true = blocking (nothing schedules through it), false = background (a Work-shaped container the
@@ -1556,6 +1566,14 @@ class Component extends DCLogic {
     this._onKey = (e)=>this.onKey(e);
     this._onMove = (e)=>this.onMouseMove(e);
     this._onUp = (e)=>this.onMouseUp(e);
+    /* PP-EXT (owner 2026-08-19): the value Escape restores. Captured at the document level rather than
+       through a shared field onFocus, because there is no shared onFocus — fields are built by several
+       different helpers. ONE record, not one per field: only one element can hold focus at a time, and
+       focusout clears it so a stale draft can never be restored into the wrong element. */
+    this._onFocusIn=(e)=>{ const t=e.target;
+      if(t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA')) this._fieldDraft={el:t, value:t.value}; else this._fieldDraft=null; };
+    this._onFocusOut=(e)=>{ if(this._fieldDraft && this._fieldDraft.el===e.target) this._fieldDraft=null; };
+    try{ document.addEventListener('focusin', this._onFocusIn); document.addEventListener('focusout', this._onFocusOut); }catch(e){}
     window.addEventListener('keydown', this._onKey);
     window.addEventListener('mousemove', this._onMove);
     window.addEventListener('mouseup', this._onUp);
@@ -1575,6 +1593,7 @@ class Component extends DCLogic {
     /* PP-EXT (31): usage tracker. Session header first, then a flush on every way a tab can go away —
        visibilitychange covers a backgrounded/closed tab, pagehide covers navigation and BFCache. Without
        both, a session that ends by closing the window loses whatever the debounce still held. */
+    this.initRoutines(); /* PP-EXT (owner 2026-08-19): seed the routines for a new workspace, migrate an existing one */
     this.trackSessionStart();
     this._onTrackHide=()=>{ try{ if(document.visibilityState==='hidden') this.trackFlush(true); }catch(e){ this.trackFlush(true); } };
     this._onTrackBye=()=>this.trackFlush(true); /* PP-EXT (33): teardown — the Supabase POST goes keepalive */
@@ -1601,6 +1620,7 @@ class Component extends DCLogic {
     requestAnimationFrame(()=>this.forceUpdate());
   }
   componentWillUnmount(){
+    try{ document.removeEventListener('focusin', this._onFocusIn); document.removeEventListener('focusout', this._onFocusOut); }catch(e){} /* PP-EXT (owner 2026-08-19) */
     window.removeEventListener('keydown', this._onKey);
     window.removeEventListener('mousemove', this._onMove);
     window.removeEventListener('mouseup', this._onUp);
@@ -1629,7 +1649,15 @@ class Component extends DCLogic {
   }
 
   /* ---------- history ---------- */
-  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[]; } /* PP-EXT: named cap */
+  snapshot(){ this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); this.future=[];
+    /* PP-EXT (owner 2026-08-19): record the ORDER as well as the entry — see _undoKind above. A fresh
+       action invalidates both redo stacks, exactly as `this.future=[]` already did for tasks. */
+    this._pushKind('tasks'); } /* PP-EXT: named cap */
+  /* PP-EXT (owner 2026-08-19): kind bookkeeping for the interleaved undo stacks. */
+  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[];
+    /* keep the order log in step with the capped stacks: drop the oldest entry of whichever kind fell off */
+    while(this._undoKind.filter(k=>k==='tasks').length>this.history.length){ const i=this._undoKind.indexOf('tasks'); this._undoKind.splice(i,1); }
+    while(this._undoKind.filter(k=>k==='bounds').length>this._boundsUndo.length){ const i=this._undoKind.indexOf('bounds'); this._undoKind.splice(i,1); } }
   commit(fn){
     this.snapshot();
     const prev = this.state.tasks; /* PP-EXT: pre-change reference for the outbound gcal diff */
@@ -1644,7 +1672,16 @@ class Component extends DCLogic {
     this.trackCommit(prev, tasks); /* PP-EXT (31): third funnel — usage analytics, ids + counts, LOCAL ONLY (never SYNC_FIELDS) */
   }
   undo(){
+    /* PP-EXT (owner 2026-08-19): a day-bound drag is undone ahead of the task history when it IS the most
+       recent action. Bounds live outside `state.tasks`, so they are restored (and re-persisted) directly. */
+    if(this._undoKind.length && this._undoKind[this._undoKind.length-1]==='bounds'){
+      this._undoKind.pop(); const prev=this._boundsUndo.pop();
+      this._boundsRedo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+      this._redoKind.push('bounds');
+      this.saveSettings({dayStart:prev.dayStart, dayEnd:prev.dayEnd}); return; }
     if(!this.history.length) return;
+    if(this._undoKind.length) this._undoKind.pop();
+    this._redoKind.push('tasks');
     this.future.push(JSON.stringify(this.state.tasks)); if(this.future.length>this.HISTORY_MAX) this.future.shift(); /* PP-EXT: cap both stacks — undo/redo cycling grew `future` unbounded */
     const cur=this.state.tasks; /* PP-EXT */
     const prev = JSON.parse(this.history.pop());
@@ -1654,7 +1691,14 @@ class Component extends DCLogic {
     this.syncOut(cur, prev); /* PP-EXT B1: undo propagates to the backend too (server touch_updated_at freshens the clock) */
   }
   redo(){
+    if(this._redoKind.length && this._redoKind[this._redoKind.length-1]==='bounds'){
+      this._redoKind.pop(); const nx=this._boundsRedo.pop();
+      this._boundsUndo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+      this._undoKind.push('bounds');
+      this.saveSettings({dayStart:nx.dayStart, dayEnd:nx.dayEnd}); return; }
     if(!this.future.length) return;
+    if(this._redoKind.length) this._redoKind.pop();
+    this._undoKind.push('tasks');
     this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); /* PP-EXT: cap both stacks */
     const cur=this.state.tasks; /* PP-EXT */
     const nx = JSON.parse(this.future.pop());
@@ -1696,6 +1740,24 @@ class Component extends DCLogic {
          that follows is a no-op: nothing is committed, so there is nothing to undo. */
       /* PP-EXT (V4.2): an edge-drag is the same kind of in-flight gesture and cancels the same way —
          nothing is written until the release, so dropping the record IS the cancel. */
+      /* PP-EXT (owner 2026-08-19): rung 0 — a focused FIELD. Owner: "esc should be able to get the user
+         out of fields like the planned duration."
+         Position is not a convenience exception: the ladder is ordered most-transient-first, and a field
+         the user is mid-keystroke in is strictly more transient than a drag — the drag rungs cannot even
+         fire while a field holds focus.
+         REVERT, then blur. A bare blur would COMMIT (every onBlur here writes through commit()), making
+         Escape a save — the opposite of what every other rung means. Restoring the focus-time value first
+         means the blur handler writes back an unchanged value and no undo entry is created.
+         Fields that belong to an overlay are EXCLUDED: datePick and pctPop own their own Escape, and
+         rung 0 must never steal an overlay close from them. */
+      if(this.isEditingTarget(e) && this._fieldDraft && this._fieldDraft.el===e.target
+         && !this.state.datePick && !this.state.pctPop && !this.state.inclPick && !this.state.scopePrompt){
+        e.preventDefault();
+        e.target.value=this._fieldDraft.value;
+        this._fieldDraft=null;
+        e.target.blur();
+        return;
+      }
       if(this._edgeDrag){ this._edgeDrag=null; this.forceUpdate(); return; }
       if(this._blockDrag){ this._blockDrag=null; this.forceUpdate(); return; }
       if(this.state.datePick) this.closeDatePick(); /* PP-EXT: topmost overlay closes first */
@@ -2052,6 +2114,9 @@ class Component extends DCLogic {
   isOptedOut(t){
     if(this.isActiveTask(t)) return false;
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
+    /* PP-EXT (owner 2026-08-19): an indefinite snooze opts out with NO date comparison — until one of
+       the four wake triggers fires, at which point it stops opting out and the task returns as `new`. */
+    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
     /* PP-EXT V2.11: the `included===false` ("off") branch is gone — see setIncludedOff. Unpressed work is
        still opted out of today; it simply is no longer barred from ever coming back on its own. */
     /* PP-EXT V5 (F19/F20, block 20): auto-included work is not opted out. Without this clause the band
@@ -2187,6 +2252,8 @@ class Component extends DCLogic {
   inclState(t){
     if(this.isActiveTask(t)) return 'active';
     if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
+    /* PP-EXT (owner 2026-08-19): a dateless snooze reads as snoozed until one of its wake triggers fires. */
+    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return 'snoozed';
     /* PP-EXT V5 (block 20): auto-included work reads as pressed, so `inclusionRow` files it under
        Included and `isUndecided` stops calling it undecided. One predicate, one answer. */
     return (t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t)) ? 'pressed' : 'unpressed';
@@ -2215,9 +2282,26 @@ class Component extends DCLogic {
      the second half of the owner's `New` definition: work today brought back, whether the calendar or an
      expiring snooze did the bringing. */
   snoozeEndedToday(t){
+    /* PP-EXT (owner 2026-08-19): an indefinite snooze that has WOKEN also counts as "today brought it
+       back", which is what makes originOf file it as `new` rather than as inherited work. */
+    if(t && t.snoozeIndef && this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
     if(!t || t.snoozeUntil==null) return false;
     return this.startOfDay(t.snoozeUntil)===this.startOfToday();
   }
+  /* PP-EXT (owner 2026-08-19): why an indefinite snooze is over, or null. Owner's wake set. `now` is an
+     argument, and the question is "is it woken" rather than "was it woken TODAY" — the same reasoning
+     that shaped snoozeEndedToday, so a wake missed while the app was closed still fires. PURE. */
+  snoozeWakeReason(t, B, now){
+    if(!t || !t.snoozeIndef) return null;
+    const oc=this.occOnDay(t, B) || this.occOf(t);
+    if(oc && oc.start!=null && this.startOfDay(oc.start)<=B && this.hasStartTime(t)) return 'start';
+    if(t.end!=null && this.dueMsOf(t, B)<now) return 'due';
+    const deps=(t.deps||[]);
+    if(deps.length){ const byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x);
+      if(deps.every(d=>{ const p=byId[this.depId(d)]; return !p || p.pct>=100; })) return 'deps'; }
+    return null;
+  }
+  /* /PP-EXT */
   /* PURE-ish: WHY a task is on today's list — the three columns of the Selection view.
      `extra` is a FALLBACK BUCKET, not a category (the same role `No section` plays, and for the same
      reason): making the third column exhaustive means nothing can fall out of the view.
@@ -2460,7 +2544,10 @@ class Component extends DCLogic {
        work. Auto-inclusion is only acceptable while saying no is one gesture that actually lands. */
     if(this.isInheritedToday(t) || this.autoIncludedToday(t)) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
     /* /PP-EXT */
-  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; } }); }
+  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19): an explicit include is the first wake trigger */ } }); }
+  /* PP-EXT (owner 2026-08-19): "not now", open-ended. Distinct from snoozeToday (which expires at
+     midnight) and from setIncludedOff (which unpresses — "not chosen" rather than "not yet"). */
+  snoozeIndefinitely(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeIndef=true; }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.snoozeUntil=this.startOfToday()+this.DAY; }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
      the draft untouched instead of silently clearing a snooze on a typo. */
@@ -2725,8 +2812,10 @@ class Component extends DCLogic {
        this default stated here. extraBusy keeps whatever fixedBlocksToday stamped on it. Annotation only:
        no consumer in this block branches on it (block 11 does). */
     const addBusy=(a,b,note,taskId,blocking)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId,blocking:(blocking==null?this.BLOCKING_DEFAULT:!!blocking)}); }; /* PP-EXT: taskId marks pinned-task blocks */
-    addBusy(B+this.timeParts(s.lunchStart)*60000, B+this.timeParts(s.lunchEnd)*60000, 'Lunch', undefined, true);
-    addBusy(B+this.timeParts(s.dinnerStart)*60000, B+this.timeParts(s.dinnerEnd)*60000, 'Dinner', undefined, true);
+    /* PP-EXT (owner 2026-08-19): the two hardcoded meal blocks are GONE. Lunch and Dinner are ordinary
+       tasks now (see seedRoutines/migrateRoutines), so they arrive through fixedBlocksToday like every
+       other appointment — which is what finally lets them be renamed, moved for one day, completed or
+       given a real duration. */
     const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time', undefined, true);
     (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId, b.blocking)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
@@ -2743,8 +2832,17 @@ class Component extends DCLogic {
   }
   /* PP-EXT: the "from now" toggle starts the plan (and pool) at the current time — but ONLY for today's column.
      Future-day timelines always plan the whole day (B ≠ today ⇒ null). B omitted ⇒ today. */
+  /* PP-EXT (owner 2026-08-19): the floor is the LATER of "now" and the last completion today. Owner's
+     case: a task ticked at 14:10 frees its tail from 14:10, so the packer may start there — but nothing
+     may ever be placed before a moment the day has already spent. On a day with no completions this is
+     byte-identical to the pre-2026-08-19 behaviour. */
   packStart(B){ const today=this.startOfToday();
-    return (this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null; }
+    const from=(this.state.settings.packFromNow && (B==null || B===today)) ? (this.state.nowTick||Date.now()) : null;
+    if(B!=null && B!==today) return from;
+    const hist=this.completedHistoryBlocks(B==null?today:B, this.state.tasks, this.state.nowTick||Date.now());
+    if(!hist.length) return from;
+    const last=hist.reduce((a,b)=>Math.max(a,b.end), 0);
+    return from==null ? last : Math.max(from, last); }
 
   /* PP-EXT: derived scheduling shapes. A clocked start plus a real, <=1-day end is a fixed appointment;
      a clocked start with no end and no planned duration is a keep-clear Point; an end with an untimed start
@@ -2949,6 +3047,79 @@ class Component extends DCLogic {
     });
     return out;
   }
+  /* PP-EXT (owner 2026-08-19): the hours a day ACTUALLY consumed on work that is now finished.
+     Owner: "it should not reschedule as if that task never existed."
+     A completed task leaves `acts` in computeAllotted, so its span used to return to the pool and the
+     packer refilled hours that had already elapsed. Each block here spans [where the task sat on day B,
+     its completion instant] and is emitted as BLOCKING busy, so it is carved out of dayIntervals exactly
+     as an appointment is and the pool-agreement invariant holds unchanged.
+     `now` is an argument (never Date.now()) so every rung is unit-testable without clock games.
+     PURE: tasks + B + now in, blocks out. */
+  completedHistoryBlocks(B, tasks, now){
+    /* PP-EXT: re-entrancy guard. The floor (packStart) and the pool (computeAllotted) both consult this
+       helper, and its own single re-pack calls buildDayTimeline — which consults both. Returning [] while
+       a computation is already in flight is not a shortcut, it is the required semantics: that inner pack
+       asks "where would these tasks have sat had nothing been completed", and a day with nothing
+       completed has no history blocks and no history floor. */
+    if(this._histBusy) return [];
+    const src=tasks||this.state.tasks;
+    const done=src.filter(t=>this.doneOn(t, B) && !this.isMilestone(t));
+    if(!done.length) return [];
+    /* Where each one sat. Three sources, cheapest first — an appointment and a pin already carry their
+       start as DATA, so they never enter the re-pack. */
+    const startOf={}; const needPack=[];
+    done.forEach(t=>{
+      if(this.isFixedOn(t, B)){ const oc=this.occForDay(t, B);
+        if(oc && oc.start!=null) startOf[t.id]=Math.max(oc.start, B); return; }
+      const pins=this.dragBlocksOn(t, B);
+      if(pins.length){ startOf[t.id]=Math.min.apply(null, pins.map(p=>p.start)); return; }
+      needPack.push(t);
+    });
+    /* ONE pass, not one per task. The completed set is fixed for a render, so a single pack of day B
+       with every completed task restored to the competing set yields all of their starts together.
+       This is why B1 needs no narrowing: autoStartFor pays per drag only because its excluded set
+       differs per drag, and here it does not. */
+    if(needPack.length){
+      const revived=src.map(t=>this.doneOn(t, B) ? Object.assign({}, t, {pct:0, completion:null}) : t);
+      this._histBusy=true;
+      let packed=null;
+      try{ packed=this.buildDayTimeline(B, revived); } finally { this._histBusy=false; }
+      /* the packer's output key is `chunks` (each carries `id`), not `blocks` */
+      ((packed&&packed.chunks)||[]).forEach(bl=>{
+        if(startOf[bl.id]==null && needPack.some(t=>t.id===bl.id)) startOf[bl.id]=bl.start; });
+    }
+    const out=[];
+    done.forEach(t=>{
+      const s=startOf[t.id]; if(s==null) return;   /* never placed ⇒ occupied no hours ⇒ nothing to freeze */
+      const cm=this.completionOn(t, B); if(cm==null) return;
+      const a=Math.max(s, B), b=Math.min(cm, B+this.DAY);
+      if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id, blocking:true, history:true});
+    });
+    return out.sort((x,y)=>x.start-y.start);
+  }
+  /* PP-EXT (owner 2026-08-19): history AS BUSY — the single point of use shared by computeAllotted
+     (which derives the pool from it) and _buildDayTimelineInner (which packs into what is left), so the
+     two cannot disagree. `taskId:null` keeps these out of the allotment stamping loop: a completed task
+     claims nothing from the pool, it merely stops the pool from including hours that are gone.
+     The break is added HERE and not inside completedHistoryBlocks, because that helper answers "what
+     hours did this consume" and a break is not consumed hours. Owner: "remember to add a break after
+     the task is marked done." It rides on the existing busy mechanism — no second break reserve. */
+  historyBusyToday(B, tasks){
+    const brkMs=Math.max(0, this.state.settings.breakMin||0)*60000;
+    return this.completedHistoryBlocks(B, tasks, this.state.nowTick||Date.now())
+      .map(b=>Object.assign({}, b, {taskId:null, end:b.end+brkMs}));
+  }
+  /* PP-EXT (owner 2026-08-19): the completion INSTANT relevant to day B. `isCompletedOn` answers the
+     yes/no; this answers "at what moment", and for a recurring series that moment lives on the
+     occurrence override, not the task. */
+  completionOn(t, B){
+    if(!t) return null;
+    if(t.recur){ const ov=(t.recur.overrides)||{};
+      const hit=Object.keys(ov).find(oi=>ov[oi] && ov[oi].completion && this.startOfDay(ov[oi].completion)===B);
+      return hit ? ov[hit].completion : null; }
+    return (t.completion!=null && this.startOfDay(t.completion)===B) ? t.completion : null;
+  }
+  /* /PP-EXT */
   /* PP-EXT (04b): how much FREE time each busy interval actually consumed, when intervals may overlap.
      Dropping a drag-pin across an appointment is permitted (owner, 2026-08-04), but the pin then costs
      the day less free time than its own span — the shared minutes were never free. Attributing every
@@ -3512,6 +3683,66 @@ class Component extends DCLogic {
     list.push(this.normalizeSection({name:name||'New section', order:max+1})); return list; }
   addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.saveSections(list);
     return list[list.length-1]; }
+  /* PP-EXT (owner 2026-08-19): the five routines, as ORDINARY tasks. Owner: "Instead of having lunch and
+     dinner be hardcoded options, have breakfast lunch dinner wakeup shutdown routines be default tasks
+     included for new users in an appropriately named section."
+     Wake up and Shut down are Points (clocked start, no end, zero planned) — per architecture/scheduling.md
+     a Point reserves no duration but its clock divides packing intervals, which is exactly what a
+     day-ritual marker should do. They do NOT duplicate the day bounds: the bounds define the window,
+     these mark the ritual inside it.
+     Every one of them is `blocking` by default (BLOCKING_DEFAULT), matching what the hardcoded meals did,
+     so an unmodified workspace's packing outcome is unchanged. */
+  ROUTINE_DEFAULTS(){ return [
+    {name:'Wake up',   start:'07:00', end:null,    point:true},
+    {name:'Breakfast', start:'07:30', end:'08:00'},
+    {name:'Lunch',     start:'12:30', end:'13:00'},
+    {name:'Dinner',    start:'17:30', end:'18:00'},
+    {name:'Shut down', start:'23:00', end:null,    point:true},
+  ]; }
+  /* `only` restricts which routines are created (the migration path uses it — see migrateRoutines).
+     `overrides` carries a workspace's existing clocks so a user who moved lunch keeps it. */
+  seedRoutines(overrides, only){
+    const B=this.startOfToday();
+    const secList=this.addSectionTo(this.state.sections, 'Routines');
+    const sec=secList[secList.length-1];
+    const at=hhmm=>B+this.timeParts(hhmm)*60000;
+    const rows=this.ROUTINE_DEFAULTS().filter(r=>!only || only.indexOf(r.name)>=0).map(r=>{
+      const o=(overrides||{})[r.name]||{};
+      const s=at(o.start||r.start), e=(o.end||r.end)?at(o.end||r.end):null;
+      return this.normalizeTask({id:'t'+Math.random().toString(36).slice(2,8), name:r.name, type:'Proportional', sectionId:sec.id,
+        included:true, start:s, end:e, startClock:true, endClock:e!=null?true:null,
+        uncompressable:e!=null?true:null, planned:r.point?0:null,
+        recur:{kind:'day', n:1}, priority:4, deps:[], pct:0, spent:0}); });
+    this.saveSections(secList);
+    this.commit(tasks=>{ rows.forEach(t=>tasks.push(t)); });
+    return sec;
+  }
+  /* Runs ONCE per workspace — the flag is what stops a user who deletes Lunch getting it back on the
+     next load. Precedent: the `break-min-default` local migration at index.html:813.
+
+     ONLY Lunch and Dinner are migrated, deliberately. The four settings encoded exactly two blocks of
+     reserved time, and those two are what an existing day already contains; seeding Breakfast as well
+     would silently reserve 30 minutes a day that the workspace never had, which is precisely the
+     regression this task's `dayIntervals` criterion forbids. New workspaces get all five (seedRoutines
+     with no `only`); an existing user adds the rest if they want them. */
+  migrateRoutines(){
+    if(this.lsGet('pp-mig-routines')) return;
+    const s=this.state.settings;
+    this.seedRoutines({
+      Lunch:  {start:s.lunchStart  || '12:30', end:s.lunchEnd  || '13:00'},
+      Dinner: {start:s.dinnerStart || '17:30', end:s.dinnerEnd || '18:00'},
+    }, ['Lunch','Dinner']);
+    this.lsSet('pp-mig-routines', '1');
+  }
+  /* Startup entry point, called from componentDidMount — NOT from runOnceMigrations, which runs inside the
+     constructor before `state` exists and cannot use commit(). A workspace with no persisted tasks is new
+     and gets all five routines; anything else is an existing workspace and gets the narrowed migration. */
+  initRoutines(){
+    if(this.lsGet('pp-mig-routines')) return;
+    if(!this.lsGet('pp-tasks')){ this.seedRoutines(); this.lsSet('pp-mig-routines', '1'); return; }
+    this.migrateRoutines();
+  }
+  /* /PP-EXT */
   renameSection(id, name){ const list=(this.state.sections||[]).map(s=>s.id===id?Object.assign({},s,{name:name||s.name}):s);
     this.saveSections(list); }
   /* Pure: move a section to a new index, renumbering `order` densely so ties can't accumulate. */
@@ -4316,7 +4547,13 @@ class Component extends DCLogic {
        and a task worked on prior days no longer has its lifetime spent wrongly subtracted from today's pool. */
     /* PP-EXT: fixed appointments occupy their clock span — they leave the flexible pool entirely and
        their span is busy time, so the pool shrinks by exactly what the timeline renders as fixed blocks. */
-    const fixed=this.fixedBlocksToday(B, tasks);
+    /* PP-EXT (owner 2026-08-19): history blocks join the busy set as blocking intervals. They must be
+       APPENDED to fixedBlocksToday's output rather than emitted from inside it, because a history block
+       is not a task's allotment — the completed task claims nothing from the pool, it merely stops the
+       pool from including hours that are gone. `taskId:null` keeps it out of the allotment stamping
+       loop below for free. */
+    const fixed=this.fixedBlocksToday(B, tasks).concat(this.historyBusyToday(B, tasks));
+    /* /PP-EXT */
     /* PP-EXT (04): a PARTIAL drag-pin fixes only some of the task's minutes. Those minutes stay part of
        the task's allotment (map[id].allotted is the day TOTAL) but are recorded in `pinnedMin` so the
        packer only packs the remainder — the task is NOT stamped `fixed`, so it keeps competing in the
@@ -4326,10 +4563,19 @@ class Component extends DCLogic {
        around blocking busy — so the fixed minutes ACCUMULATE. Assigning per block (the pre-11 shape,
        correct while a whole pin was always a single record) would have let the last piece overwrite
        the earlier ones and shrink the task's day to its final fragment. */
+    /* PP-EXT (owner 2026-08-19): a fixed block's allotment is the free time it actually CONSUMED, not
+       its drawn span. Two appointments overlapping by 30 minutes cost the day 90 minutes, not 120, and
+       stamping each one's whole span claimed time the day never had — `Σ allotted + pool` exceeded the
+       window. This is the same distinction (04b) already drew for drag pins between a pin's drawn span
+       and `netBusyClaim`; the only reason fixed blocks were exempt is that nothing had overlapped them
+       yet. Attribution order is netBusyClaim's own: earliest start first, so the overlap is charged to
+       whichever appointment was there first, and never twice. */
+    const fixedClaim=this.netBusyClaim(fixed, b=>!b.partial, B, B+this.DAY).byTask;
     fixed.forEach(b=>{ if(b.partial){ partialPin[b.taskId]=true; return; }
-      const mins=Math.round((b.end-b.start)/60000);
-      const tot=((map[b.taskId]&&map[b.taskId].allotted)||0)+mins;
+      if(map[b.taskId]) return;                 /* accumulated already — byTask is a per-task total */
+      const tot=Math.round(fixedClaim[b.taskId]||0);
       map[b.taskId]={allotted:tot, computed:tot, active:true, fixed:true}; });
+    /* /PP-EXT */
     /* PP-EXT: subtasks never compete in the pool — they receive a share of their parent's allotted below */
     const kb=this.buildKids(tasks);
     /* PP-EXT V5 (34): a COMPLETED task stops consuming the day's pool. Owner ruling 2026-08-11, and it is
@@ -4869,6 +5115,9 @@ class Component extends DCLogic {
      undefined when the existing derive-or-explicit flag should stay unchanged. */
   setDate(id,key,ms,timed){
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      /* PP-EXT (owner 2026-08-19): read BEFORE the assignment — both the previous start and whether the
+         task was an intra-day appointment have to be judged on its pre-edit shape. */
+      const prevStart=t.start, wasAppt=this.clockSpanMinutes(t)!=null;
       t[key]=ms;
       if(timed!==undefined){
         const flag=key==='start'?'startClock':'endClock';
@@ -4876,6 +5125,20 @@ class Component extends DCLogic {
         if(!timed) t[key]=this.startOfDay(ms);
         ms=t[key];
       }
+      /* PP-EXT (owner 2026-08-19): "If both start and end time exist, changing one should change the
+         other by preserving the duration." Owner decision: START moves end; END sets duration.
+         The gate is clockSpanMinutes, NOT hasStartTime && hasEndTime — the latter is a strictly wider
+         set (architecture/scheduling.md) and admits a multi-day window at non-midnight timestamps,
+         whose end must not be dragged. Running BEFORE the clamps below means a preserved span can never
+         invert, so the clamps have nothing left to correct.
+         This NARROWS but does not repeal the 2026-08-17 rule that a clock edit makes the booked span the
+         plan: the span is still the plan on every path — a start edit simply no longer changes the span.
+         The anchorSpanMinutes line at the end of this method therefore yields the unchanged duration for
+         free, and `planned` is never written twice. */
+      if(key==='start' && prevStart!=null && t.end!=null && wasAppt){
+        t.end += (ms - prevStart);
+      }
+      /* /PP-EXT */
       /* An all-day end is the EXCLUSIVE next-day midnight, so the carried edge has to be re-encoded in
          those terms too — copying the raw instant across would leave end==start, which renders (end-1)
          as the day BEFORE the start and reads as an inverted window. */
@@ -5591,7 +5854,7 @@ class Component extends DCLogic {
       if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         const on=(inclusion==='included');
         tasks.forEach(t=>{ if(!roots.has(t.id)) return;
-          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; }
+          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19) */ }
           /* PP-EXT V5 (block 20): mirrors setIncludedOff — auto-included work needs the same snooze or
              the drag across the divider would be silently undone by the opening window. */
           else { t.included=null; t.includedExplicit=false;
@@ -5630,6 +5893,19 @@ class Component extends DCLogic {
     if(this._edgeDrag){
       const ed=this._edgeDrag; const dyRaw=e.clientY-ed.startClientY;
       if(!ed.moved && Math.abs(dyRaw)<4) return; ed.moved=true; /* same 4px raw promotion threshold as every other gesture */
+      /* PP-EXT (owner 2026-08-19): the day-bound branch. Same unit rule as every other drag — raw viewport
+         px through uiPt into local px, then divided by px-per-minute. Alt drags free; otherwise 5-minute
+         snap. Clamped here so the PREVIEW never shows a value setDayBounds would refuse to store. */
+      if(ed.kind==='daybound'){
+        const p=ed.px||this.TL_PXPM;
+        const dMin=this.uiPt(0, dyRaw).y/p;
+        let v=ed.base+dMin;
+        if(!e.altKey) v=Math.round(v/5)*5;
+        v=Math.round(v);
+        const other=this.timeParts(ed.which==='start'?this.state.settings.dayEnd:this.state.settings.dayStart);
+        ed.val = ed.which==='start' ? Math.max(0, Math.min(v, other-1)) : Math.min(24*60, Math.max(v, other+1));
+        this.forceUpdate(); return;
+      }
       const px=ed.px||this.TL_PXPM;
       const dyPx=this.uiPt(0, dyRaw).y;
       /* PP-EXT (V4.3): Alt is read LIVE off the move event, not latched at pointer-down, so the user can
@@ -5704,7 +5980,26 @@ class Component extends DCLogic {
       const oi=res.index;
       /* PP-EXT: drag-to-nest — horizontal offset past the deadzone picks a nesting level (right nests, left outdents) */
       const dx=e.clientX-rd.startX;
-      const steps=(Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
+      /* PP-EXT (owner 2026-08-19, D2): nest intent depends on the DROP TARGET'S KIND, not on horizontal
+         offset alone. A drop that lands in a different band than the drag started in is a SECTION drop —
+         "file this into that section" — and there is no valid second meaning for it to carry. Owner:
+         *"There's no valid intent behind 'nesting under this section'."*
+         Before this, `steps` was read from `dx` on every drop, so drifting more than ROW_NEST_DEADZONE
+         (14px) to the right while crossing into a section gave the row a parent, which closed the
+         section gate below (`drop.parentId==null && ...`) and left the row in its ORIGINAL section. The
+         owner reported that as "dragging into section only works when I drag to the left little bit":
+         leftward travel makes `steps` negative, which only outdents an already-root row and so kept
+         parentId null by luck rather than by intent.
+         Nesting is untouched WITHIN a band, which is where it means something — rearranging a row
+         among the siblings it already lives with. Moving a row into another section and then nesting it
+         there is two gestures now, deliberately: each one says one thing.
+         `projectRowDrop` is unchanged and stays pure — this is about which intent we hand it. */
+      const bandNow=(this.state.groupBy==='inclusion')
+        ? (res.sectionId===this.INCL_BAND_IN() ? 'included' : 'excluded')
+        : (res.sectionId===undefined ? undefined : res.sectionId);
+      const bandWas=(this.state.groupBy==='inclusion') ? rd.origInclusion : rd.origSectionId;
+      const crossBand = res.sectionPos!=null && bandNow!==undefined && bandNow!==bandWas;
+      const steps=(!crossBand && Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
       const vis=this._visTasks||this.state.tasks;
       const drop=this.projectRowDrop(vis, this._depth||{}, this._byId||{}, oi, rd.moveSet, steps);
       /* PP-EXT V2.6b: a vertical row drag also RE-SECTIONS the row. Only when it lands as a root — a nested
@@ -5793,6 +6088,15 @@ class Component extends DCLogic {
        every future re-compression). One `commit()` ⇒ one undo entry. */
     if(this._edgeDrag){
       const ed=this._edgeDrag; this._edgeDrag=null;
+      /* PP-EXT (owner 2026-08-19): one setDayBounds call ⇒ one undo record covering BOTH bounds. A press
+         that never crossed the threshold writes nothing, exactly as the block edge drag below. */
+      if(ed.kind==='daybound'){
+        if(ed.moved){ const fmt=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+          const st=ed.which==='start'?fmt(ed.val):this.state.settings.dayStart;
+          const en=ed.which==='end'?fmt(ed.val):this.state.settings.dayEnd;
+          this.setDayBounds(st, en); }
+        this.forceUpdate(); return;
+      }
       /* PP-EXT (V4.3): a release ON the priority snap means "make this auto again" — the override is
          cleared rather than rewritten, so the block regains its auto formatting (no ↺; the hatch this
          once mentioned was deleted in V5 block 25 — auto is now the plain, unmarked default) and the
@@ -6008,7 +6312,10 @@ class Component extends DCLogic {
   /* PP-EXT: parse ONE clock token ("5", "17:00", "4pm", "4:30 p.m.") → {h,m,mer} | null.
      mer is 'am'|'pm'|null; null means no meridiem was written, so it may inherit one from a range partner. */
   parseClockTok(tok){
-    const m=/^\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*$/i.exec(tok||'');
+    /* PP-EXT (owner 2026-08-19): the `m` is optional, so the one-letter forms `9a` / `9p` parse as an
+       EXPLICIT meridiem instead of falling through as unparseable. Without this the owner's listed
+       form `9p` returned null and set no time at all. */
+    const m=/^\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m?\.?|p\.?m?\.?)?\s*$/i.exec(tok||'');
     if(!m) return null;
     const h=parseInt(m[1]), mm=m[2]?parseInt(m[2]):0;
     if(h>23 || mm>59) return null;
@@ -6016,6 +6323,44 @@ class Component extends DCLogic {
   }
   /* Resolve a token to a 24h hour, applying its own meridiem or an inherited one. */
   clockH(tok, inherit){ const M=tok.mer||inherit; let h=tok.h; if(M){ h=h%12; if(M==='pm') h+=12; } return h; }
+  /* PP-EXT (owner 2026-08-19): resolve a bare typed hour to a 24h hour. Owner decision: keep the
+     meridiem already in the field. PURE — four plain values in, a number out.
+       tok         parseClockTok output
+       currentMs   what the field currently holds, or null when empty
+       dayWindow   {start,end} 'HH:MM' — the day bounds
+       otherEdgeMs the task's other clock, or null
+     Rung 2 is load-bearing: clockH computes h%12 before adding 12 for pm, so 17 with an inherited
+     `am` would come back as 5am. An hour above 12 has no meridiem to inherit. */
+  resolveBareHour(tok, currentMs, dayWindow, otherEdgeMs){
+    if(!tok) return null;
+    if(tok.mer) return this.clockH(tok, null);           /* 1. explicit wins */
+    if(tok.h>12) return tok.h;                           /* 2. no meridiem to inherit */
+    if(currentMs!=null){                                 /* 3. inherit the field's own */
+      const cur=new Date(currentMs).getHours();
+      return this.clockH(tok, cur>=12 ? 'pm' : 'am');
+    }
+    const am=this.clockH(tok,'am'), pm=this.clockH(tok,'pm');
+    const lo=this.timeParts(dayWindow.start), hi=this.timeParts(dayWindow.end);
+    const inWin=hh=>hh*60>=lo && hh*60<=hi;
+    const amOk=inWin(am), pmOk=inWin(pm);
+    if(amOk!==pmOk) return amOk?am:pm;                   /* 4. only one reading is in the day */
+    if(otherEdgeMs!=null){                               /* 5. tie -> nearer the other edge */
+      const oh=new Date(otherEdgeMs).getHours();
+      return Math.abs(am-oh)<=Math.abs(pm-oh) ? am : pm;
+    }
+    return am;
+  }
+  /* PP-EXT (owner 2026-08-19): the OTHER clock of the task the picker is editing, or null. Feeds
+     resolveBareHour's tie-break: editing the end of a task that starts at 8pm, a bare "9" means 9pm. */
+  _dpOtherEdge(key){
+    const dp=this.state.datePick; if(!dp) return null;
+    const t=(this.state.tasks||[]).find(x=>x.id===dp.id); if(!t) return null;
+    const has=key==='start' ? this.hasStartTime(t) : this.hasEndTime(t);
+    if(!has) return null;
+    const v=key==='start' ? t.start : t.end;
+    return v!=null ? v : null;
+  }
+  /* /PP-EXT */
   CLOCK_TOK_RE(){ return '\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)?'; }
   /* PP-EXT: a clock RANGE — "from 17:00 to 18:00", "5-6pm", "9am to 10:30am". Returns
      {sh,sm,eh,em,txt} | null. Without this the old parser matched only the first clock and threw the
@@ -6604,6 +6949,9 @@ class Component extends DCLogic {
        drawer/Unscheduled entirely. The map is keyed by id and every consumer looks up by id, so a
        superset is safe; what is displayed is still decided by the projection. */
     this._allot = this.computeAllotted(this.state.tasks); /* PP-EXT: allotted/remaining map — live (spent/settings), reads memoized _occById */
+    /* PP-EXT (owner 2026-08-19): built once per render, like _occById and _allot above it. The completed
+       set cannot change mid-render, so every reader shares one pass. */
+    this._hist = this.completedHistoryBlocks(this.startOfToday(), this.state.tasks, this.state.nowTick||Date.now());
     /* PP-EXT: month-view — hovering a day glows all its tasks in the sheet + gantt (Phase 6) */
     this._glowIds = this.state.hoverDay!=null ? new Set(this.tasksOnDay(this.state.hoverDay, tasks)) : null;
     return {
@@ -6916,7 +7264,12 @@ class Component extends DCLogic {
       const ms=this.startOfDay(dp.ms); this.dpSet({ms,view:ms,dpTimed:false,parsed:null}); return;
     }
     const tok=this.parseClockTok(str); let hh, mm;
-    if(tok){ hh=this.clockH(tok,null); mm=tok.m; }
+    /* PP-EXT (owner 2026-08-19): a bare hour keeps the meridiem already in the field — "10pm" + "9"
+       is 9pm, not 9am. `dpTimed===false` means the field is showing no clock, so there is nothing to
+       inherit and resolveBareHour falls through to the day-window rungs. */
+    if(tok){ const other=dp.key==='start' ? this._dpOtherEdge('end') : this._dpOtherEdge('start');
+      hh=this.resolveBareHour(tok, dp.dpTimed===false?null:dp.ms,
+        {start:this.state.settings.dayStart, end:this.state.settings.dayEnd}, other); mm=tok.m; }
     else { const c=this.parseClock(String(str)); if(!c) return; hh=c.h; mm=c.m; }
     const d=new Date(dp.ms); d.setHours(hh, mm, 0, 0); this.dpSet({ms:d.getTime(),dpTimed:true,parsed:null});
   }
@@ -6942,6 +7295,10 @@ class Component extends DCLogic {
           task.start=p.start; task.end=p.end;
           task.startClock=p.startClock; task.endClock=p.endClock;
         } else if(p.date!=null){
+          /* PP-EXT (owner 2026-08-19): same rule as setDate — START moves end, END sets duration. The
+             ordering trap: clockSpanMinutes must be judged on the task's PRE-edit shape, so both reads
+             happen before the assignment below. */
+          const prevStart=task.start, wasAppt=this.clockSpanMinutes(task)!=null;
           let edgeMs=dp.ms;
           if(task.allDay){ const d=this.atMidnight(new Date(edgeMs));
             edgeMs=dp.key==='end'?d.getTime()+this.DAY:d.getTime(); }
@@ -6949,6 +7306,9 @@ class Component extends DCLogic {
           const flag=dp.key==='start'?'startClock':'endClock';
           task[flag]=p.clock?(this.hasClock(edgeMs)?null:true):null;
           if(!p.clock) task[dp.key]=dp.key==='end'&&task.allDay?edgeMs:this.startOfDay(edgeMs);
+          if(dp.key==='start' && prevStart!=null && task.end!=null && wasAppt){
+            task.end += (task.start - prevStart);   /* PP-EXT (owner 2026-08-19): the span is preserved */
+          }
           if(dp.key==='start' && task.end!=null){
             const minEnd=task.allDay?this.atMidnight(new Date(task.start)).getTime()+this.DAY:task.start;
             if(task.end<minEnd) task.end=minEnd;
@@ -7028,7 +7388,15 @@ class Component extends DCLogic {
         defaultValue:timed?(p2(draft.getHours())+':'+p2(draft.getMinutes())):'',
         placeholder:'—',
         onBlur:e=>this.dpSetTime(e.target.value),
-        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } },
+        /* PP-EXT (owner 2026-08-19): "enter doesn't have, one needs to press enter then done". Blur alone
+           only updated the DRAFT — dpApply is what writes the task, and it lived on the Done button.
+           Enter now does both, in that order, inside dpApply's single commit() so the edit stays one
+           undo entry. onBlur keeps calling dpSetTime alone, so Tab still commits and moves on without
+           closing — which is the only way to set a time and then adjust the date.
+           GENERAL RULE this establishes: any single-value editor with a confirming button must also
+           confirm on Enter and cancel on Escape. */
+        onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.dpSetTime(e.target.value); this.dpApply(); }
+                       else if(e.key==='Escape'){ e.preventDefault(); this.closeDatePick(); } },
         style:{width:'70px',textAlign:'left',border:'1px solid var(--field-border)'}}));
     const btn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
       style:{color:danger?'var(--danger-strong)':undefined}},label);
@@ -7072,8 +7440,12 @@ class Component extends DCLogic {
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
       onMouseLeave:e=>e.currentTarget.style.background='transparent'}, label);
     if(st==='snoozed') return [
+      /* PP-EXT (owner 2026-08-19): an indefinite snooze has no date to print — it ends on an EVENT, so
+         the label names the events rather than a day that does not exist. */
       h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},
-        'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
+        (t.snoozeIndef && t.snoozeUntil==null)
+          ? 'Snoozed — until it starts, falls due, or its last dependency is done'
+          : 'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
       btn('Turn on', ()=>this.setIncludedOn(t.id)) ];
     if(st==='unpressed') return [ btn('Press into today', ()=>this.setIncludedTrue(t.id)) ];
     /* pressed or active */
@@ -7081,7 +7453,12 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-04): this popover is STRICTLY inclusion/exclusion. Time tracking does not
          belong here — activation is double-click on the row (rowDblClick). A "Make active now" entry lived
          here briefly in V2.4 and was removed on that rule. */
-      btn('Snooze today', ()=>this.snoozeToday(t.id)),
+      /* PP-EXT (owner 2026-08-19): three DISTINCT actions. The owner: "Snooze today and take out of
+         today are practically the exact same thing and is therefore useless." They are no longer the
+         same: "Not today" expires at midnight, "Snooze indefinitely" ends on an event, and "Take out
+         of today" unpresses — not-yet versus not-yet-open-ended versus not-chosen. */
+      btn('Not today', ()=>this.snoozeToday(t.id)),
+      btn('Snooze indefinitely', ()=>this.snoozeIndefinitely(t.id)),
       h('div',{key:'su',style:{padding:'4px 10px'}},
         h('input',{className:'pp-num',type:'text',placeholder:'Snooze until… (e.g. "3 days")',
           style:{width:'100%',border:'1px solid var(--divider)'},
@@ -7569,7 +7946,7 @@ class Component extends DCLogic {
   SYNC_FIELDS(){ return ['id','name','start','end','priority','deps','pct','planned','predicted',
     'predictManual','spent','spentByDay','completion','recur','labels','description','goal','wbs',
     'type','allDay','calendarId','eventId','startClock','endClock','included','archivedAt','parentId','pin',
-    'snoozeUntil','blocking','sectionId','uncompressable','includedExplicit','rowHidden']; }
+    'snoozeUntil','snoozeIndef','blocking','sectionId','uncompressable','includedExplicit','rowHidden']; }
   syncRowOf(t){ const r={}; this.SYNC_FIELDS().forEach(k=>{ r[k]=(t[k]===undefined?null:t[k]); });
     r.updatedAt = t.updatedAt || null; return r; }
   /* fingerprint for change detection: the mirrored row minus the clock (updatedAt moving alone is not
@@ -8812,10 +9189,12 @@ class Component extends DCLogic {
     const paneScheduling=tab!=='scheduling'?null:h(React.Fragment,{},
       /* PP-EXT: day-schedule settings (feed the drawer timeline + allotted-time pool) */
       secTitle('Day schedule'),
-      setRow('Day window (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dayStart,v=>this.saveSettings({dayStart:v}),{width:'56px'}), inp(s.dayEnd,v=>this.saveSettings({dayEnd:v}),{width:'56px'}))),
+      /* PP-EXT (owner 2026-08-19): the Day window row is retired — the bounds are dragged on the timeline
+         now ("have them the dragable objects in the timeline views"). DEFAULT_SETTINGS still carries the
+         values; they simply have one editor instead of two. */
       setRow('Free time / day (min)', inp(s.freeTime,v=>this.saveSettings({freeTime:Math.max(0,parseInt(v)||0)}))),
-      setRow('Lunch (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.lunchStart,v=>this.saveSettings({lunchStart:v}),{width:'56px'}), inp(s.lunchEnd,v=>this.saveSettings({lunchEnd:v}),{width:'56px'}))),
-      setRow('Dinner (start–end)', h('div',{style:{display:'flex',gap:'5px'}}, inp(s.dinnerStart,v=>this.saveSettings({dinnerStart:v}),{width:'56px'}), inp(s.dinnerEnd,v=>this.saveSettings({dinnerEnd:v}),{width:'56px'}))),
+      /* PP-EXT (owner 2026-08-19): the Lunch and Dinner rows are retired — they are tasks in the
+         Routines section now, edited like any other task rather than as two clock pairs here. */
       setRow('Min chunk (min)', inp(s.minChunk,v=>this.saveSettings({minChunk:Math.max(1,parseInt(v)||30)}))),
       /* PP-EXT: break between tasks — reserves this many minutes of gap after each packed task */
       setRow(h('span',{style:{display:'flex',alignItems:'center'}},'Break between tasks (min)',
@@ -8995,6 +9374,23 @@ class Component extends DCLogic {
 
   /* ==== PP-EXT: right drawer — ported single-day auto-scheduling timeline (old doGet) ==== */
   timeParts(str){ const m=String(str||'0:0').split(':'); return (parseInt(m[0])||0)*60+(parseInt(m[1])||0); }
+  /* PP-EXT (owner 2026-08-19): "Instead of having the day start and day end be a setting, have them the
+     dragable objects in the timeline views." The handles are a direct-manipulation editor for the GLOBAL
+     setting (owner decision) — not a per-day override. Both bounds are written in ONE record so a single
+     Ctrl+Z restores both, and the packing follows from them on the next render.
+     `commit()` is deliberately NOT used: it snapshots `state.tasks` only, and these are settings. */
+  setDayBounds(startHHMM, endHHMM){
+    const a=this.timeParts(startHHMM), b=this.timeParts(endHHMM);
+    const lo=Math.max(0, Math.min(a, 24*60-1)), hi=Math.max(lo+1, Math.min(b, 24*60));
+    const fmt=m=>String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');
+    const next={dayStart:fmt(lo), dayEnd:fmt(hi)};
+    if(next.dayStart===this.state.settings.dayStart && next.dayEnd===this.state.settings.dayEnd) return; /* a drag that changed nothing writes nothing */
+    this._boundsUndo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
+    if(this._boundsUndo.length>this.HISTORY_MAX) this._boundsUndo.shift();
+    this._pushKind('bounds');
+    this.saveSettings(next);
+  }
+  /* /PP-EXT */
   /* PP-EXT: the drawer is gone — Today is a main view now. Keep the methods (placeholders stay) returning null. */
   renderDrawerToggle(){ return null; }
   renderDrawer(){ return null; }
@@ -9207,24 +9603,32 @@ class Component extends DCLogic {
   orderingSeam(features){
     return (features||[]).slice().sort((a,b)=>(Number(!!b.active)-Number(!!a.active))||(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
   }
-  buildDayTimeline(B){
+  /* PP-EXT (owner 2026-08-19): `tasks` is now an explicit parameter (defaulting to state) so callers
+     that must be PURE — completedHistoryBlocks' single re-pack — can pack a hypothetical task list
+     without mutating state. Every pre-existing caller passes nothing and is unaffected. */
+  buildDayTimeline(B, tasks){
     const s=this.state.settings;
+    const TL=tasks||this.state.tasks;
     const today=this.startOfToday();
     if(B==null) B=today;
     /* PP-EXT: multi-day timelines — allotOf / famAllot read this._allot, so swap in day B's allotment map for
        the duration of this build (render is synchronous, so no other code sees the swap), then restore. Today
        reuses the cached map from renderVals; other days compute a fresh (spent = 0) map. */
     const savedAllot=this._allot;
-    this._allot = (B===today && savedAllot) ? savedAllot : this.computeAllotted(this.state.tasks, B);
-    try{ return this._buildDayTimelineInner(B, s); }
+    this._allot = (B===today && savedAllot && !tasks) ? savedAllot : this.computeAllotted(TL, B);
+    try{ return this._buildDayTimelineInner(B, s, TL); }
     finally{ this._allot=savedAllot; }
   }
-  _buildDayTimelineInner(B, s){
+  _buildDayTimelineInner(B, s, TL){
+    TL=TL||this.state.tasks;
     const today=this.startOfToday();
     /* PP-EXT: fixed appointments are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
-    const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
-    const kc=this.keepClearToday(B, this.state.tasks); /* PP-EXT: Point dividers */
+    /* PP-EXT (owner 2026-08-19): the packer carves out the SAME history busy the pool was derived from.
+       Without this the break after a completed task shrinks the pool but not the free intervals, and the
+       pool-agreement invariant breaks. */
+    const fixedBlocks=this.fixedBlocksToday(B, TL).concat(this.historyBusyToday(B, TL));
+    const kc=this.keepClearToday(B, TL); /* PP-EXT: Point dividers */
     const di=this.dayIntervals(B, this.packStart(B), fixedBlocks, kc);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;
     let free=di.free.slice();
@@ -9234,8 +9638,8 @@ class Component extends DCLogic {
        deadline; a clocked start supplies the clock-of-day not-before boundary. */
     /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
-    const kb=this.buildKids(this.state.tasks);
-    const flex=this.orderingSeam(this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
+    const kb=this.buildKids(TL);
+    const flex=this.orderingSeam(TL.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
         && !this.hasFullDragPinToday(t, B) /* PP-EXT: WHOLE-pinned tasks are placed as fixed blocks, not packed (04: a partly-pinned task still packs its remainder) */
         && !(t.parentId!=null && kb.byId[t.parentId])
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.flexAllot(t.id)>0))
@@ -9309,7 +9713,7 @@ class Component extends DCLogic {
       :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd,
-      points:this.pointsToday(B, this.state.tasks), topHover:this.topHoverToday(B, this.state.tasks)}; /* PP-EXT (Group 2): render-only shapes */
+      points:this.pointsToday(B, TL), topHover:this.topHoverToday(B, TL)}; /* PP-EXT (Group 2): render-only shapes */
   }
   /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start and clamp so the whole block stays
      inside today's window. Two-stage snap: if either edge (start or end) lands within PIN_MAGNET minutes of a
@@ -9957,11 +10361,36 @@ class Component extends DCLogic {
         style:{fontSize:'10px',fontWeight:600,color:'var(--tl-hover-chip-fg)',background:'var(--tl-hover-chip-bg)', /* PP-EXT (22) */
           border:'1px solid var(--tl-hover-chip-border)',borderRadius:'10px',padding:'1px 7px',whiteSpace:'nowrap',
           overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}}, '🕓 '+thv.title))) : null;
+    /* PP-EXT (owner 2026-08-19): day-bound handles. Same gesture vocabulary as the block edge drag — it
+       reuses the `_edgeDrag` record, so the 4px promotion threshold, the uiPt px→minute rule and the
+       existing Escape rung (which nulls `_edgeDrag` without caring what kind it is) all apply unchanged.
+       Alt drags free; otherwise the bound snaps to 5 minutes. The strips sit inside the clipped body, so
+       they are drawn at the very top and bottom edges rather than straddling them. */
+    /* PP-EXT (owner 2026-08-19): the strips live in the HOUR GUTTER (x < gut), never over the block area.
+       A full-width strip at the column's bottom edge sat on top of any block dragged there and swallowed
+       its clicks — tests/e2e/timeline-drag.spec.js caught exactly that on the unpin target. Block
+       gestures are used constantly and must win the pointer; the gutter is dead space that never holds a
+       block, so the handle is always grabbable without ever competing. Only the labelled column (the
+       Today drawer) draws them: these edit a GLOBAL setting, so one editor is enough, and the multi-day
+       grids share a single gutter that belongs to no column. */
+    const dbDrag = (ed && ed.kind==='daybound' && ed.day===B) ? ed : null;
+    const boundHandle=(which)=>h('div',{key:'db'+which, className:'pp-daybound', title:which==='start'?'Drag to set the day start':'Drag to set the day end',
+      onMouseDown:e=>{ e.preventDefault(); e.stopPropagation();
+        const cur=this.timeParts(which==='start'?this.state.settings.dayStart:this.state.settings.dayEnd);
+        this._edgeDrag={kind:'daybound', which, day:B, px, base:cur, val:cur, startClientY:e.clientY, moved:false};
+        this.forceUpdate(); },
+      style:{position:'absolute', left:0, width:gut+'px', height:'7px', cursor:'ns-resize', zIndex:6,
+        [which==='start'?'top':'bottom']:'0', background:'var(--tl-point)', opacity:0.75, borderRadius:'2px'}});
+    const dbPreview = (dbDrag && dbDrag.moved) ? h('div',{key:'dbp',
+      style:{position:'absolute', left:gut+'px', right:0, top:(((dbDrag.val*60000+B)-dStart)/60000*px)+'px',
+        height:'2px', background:'var(--accent)', zIndex:7, pointerEvents:'none'}},
+      h('span',{style:{position:'absolute',right:'4px',top:'-14px',fontSize:'10px',fontWeight:700,color:'var(--accent)'}},
+        String(Math.floor(dbDrag.val/60)).padStart(2,'0')+':'+String(Math.round(dbDrag.val%60)).padStart(2,'0'))) : null;
     const unsched=data.chunks.filter(c=>!c.start);
     return h('div',{style:{position:'relative'}},
       /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
          scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
-      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, ...points, hoverEl, nowLine), /* PP-EXT (Group 2): + carets + top-hover */
+      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, ...blocks, ...points, hoverEl, nowLine, showLabels?boundHandle('start'):null, showLabels?boundHandle('end'):null, dbPreview), /* PP-EXT (Group 2): + carets + top-hover; (owner 2026-08-19): + day-bound handles */
       unsched.length? h('div',{style:{margin:'8px 4px 4px',padding:'8px',background:'var(--tl-unsched-box-bg)',border:'1px solid var(--tl-unsched-box-border)',borderRadius:'8px'}}, /* PP-EXT (22) */
         h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'var(--warn)',marginBottom:'5px'}},'⚠ Unscheduled'),
         ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
@@ -13303,7 +13732,10 @@ class Component extends DCLogic {
           return h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
             h('span',{style:{fontSize:'13px',color:statusColor}}, statusTxt),
             h('div',{style:{display:'flex',flexDirection:'column'}}, ...this.inclActionRows(t))); })();
-    const durInput=(key)=>h('input',{className:'pp-num',type:'text',key:key+t[key],defaultValue:this.fmtDur(t[key]),
+    /* PP-EXT (owner 2026-08-19): a stable e2e hook, same idiom as `data-tl-block` / `data-task-name`.
+       The sheet's duration boxes are otherwise addressable only as "the nth input.pp-num", which also
+       matches the sheet ROW's Planned box behind the overlay. */
+    const durInput=(key)=>h('input',{className:'pp-num',type:'text','data-field':key,key:key+t[key],defaultValue:this.fmtDur(t[key]),
       style:{textAlign:'left',width:'90px',border:'1px solid var(--divider)'},
       /* PP-EXT (owner 2026-08-16): this helper is shared by `planned` and `predicted`; only `planned` is
          nullable, so branch on the key rather than making every duration field blank-means-null. */

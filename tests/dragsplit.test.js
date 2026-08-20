@@ -15,10 +15,18 @@ const { make, activeTask, cleanDay, DAY, withNow } = require('./_load.js');
 const H = 3600000, M = 60000;
 
 /* A day 00:00–20:00 with a 12:30–13:00 lunch and nothing else. Lunch is BLOCKING (block 10), so it is
-   the obstacle every split test below is written around. */
+   the obstacle every split test below is written around.
+
+   2026-08-19: lunch is a TASK now, not two settings keys — the hardcoded `addBusy` pair was retired when
+   the routines landed. Nothing about these tests changes: an `uncompressable` clocked appointment is
+   blocking busy through fixedBlocksToday exactly as the settings-derived block was, which is the whole
+   point of the migration. The helper returns it so each fixture can put it in `state.tasks`. */
 function lunchDay(c){
   cleanDay(c, '20:00');
-  Object.assign(c.state.settings, { lunchStart:'12:30', lunchEnd:'13:00' });
+  const B = c.startOfToday();
+  return c.normalizeTask({ id:'lunch', name:'Lunch', type:'Proportional', included:true,
+    start:B + 12.5*H, end:B + 13*H, startClock:true, endClock:true, uncompressable:true,
+    priority:4, deps:[], pct:0, planned:null, spent:0 });
 }
 const spanMins = recs => Array.from(recs).reduce((a,p)=>a+p.dur, 0);
 /* The component runs in a VM sandbox, so the arrays it returns carry the SANDBOX's Array prototype and
@@ -86,13 +94,13 @@ test('splitDropPieces: minutes that cannot fit return null, so the caller keeps 
 // =======================================================================
 test('dropWallsOn: meals and blocking appointments are walls; background, pins and self are not', () => {
   withNow(() => {
-    const c = make(); lunchDay(c);
+    const c = make(); const lunch = lunchDay(c);
     const B = c.startOfToday();
     const appt = activeTask(c, { id:'ap', start:B+9*H, end:B+10*H, startClock:true, endClock:true, planned:60 });
     const work = activeTask(c, { id:'wk', start:B+14*H, end:B+18*H, startClock:true, endClock:true, planned:240, blocking:false });
     const other = activeTask(c, { id:'ot', start:B-DAY, end:B+DAY, planned:60, pin:[{day:B, start:B+16*H, dur:60, partial:true}] });
     const me = activeTask(c, { id:'me', start:B-DAY, end:B+DAY, planned:60, pin:[{day:B, start:B+11*H, dur:60, partial:true}] });
-    c.state.tasks = [appt, work, other, me];
+    c.state.tasks = [appt, work, other, me, lunch];
     const w = c.dropWallsOn(B, 'me');
     const notes = Array.from(w.walls, b=>b.note).sort();
     assert.deepEqual(notes, ['Lunch', appt.name].sort(), 'only blocking busy blocks a drop');
@@ -108,10 +116,10 @@ test('dropWallsOn: meals and blocking appointments are walls; background, pins a
 // pinBlockAt — the drop
 // =======================================================================
 function dropFixture(){
-  const c = make(); lunchDay(c);
+  const c = make(); const lunch = lunchDay(c);
   const B = c.startOfToday();
   const t = activeTask(c, { id:'d1', start:B-DAY, end:B+DAY, planned:600 });
-  c.state.tasks = [t];
+  c.state.tasks = [t, lunch];
   return {c, B};
 }
 
@@ -124,7 +132,8 @@ test('a drop across lunch writes one pin record per piece, and lunch survives be
     assert.deepEqual(plain(pins, B), [[12*H, 30], [13*H, 60]]);
     assert.ok(Array.from(pins).every(p=>p.partial), 'both pieces inherit the drag chunk\'s partial-ness');
     const blocks = c.fixedBlocksToday(B, c.state.tasks);
-    assert.equal(blocks.length, 2, 'fixedBlocksToday already emits one busy block per record');
+    // two pin pieces + the Lunch appointment itself (a task since 2026-08-19, not a settings block)
+    assert.equal(blocks.length, 3, 'fixedBlocksToday already emits one busy block per record');
     const di = c.dayIntervals(B, null, blocks, []);
     assert.ok(Array.from(di.busy).some(b=>b.note==='Lunch' && b.start===B+12.5*H && b.end===B+13*H),
       'lunch is intact between the two pieces, not overwritten by the drop');
@@ -144,11 +153,11 @@ test('Alt (opts.free) keeps the drop contiguous, overlap and all — the V4.3 mo
 
 test('a drop inside a BACKGROUND appointment stays one block — the Work container is not a wall', () => {
   withNow(() => {
-    const c = make(); lunchDay(c);
+    const c = make(); const lunch = lunchDay(c);
     const B = c.startOfToday();
     const work = activeTask(c, { id:'wk', start:B+8*H, end:B+11*H, startClock:true, endClock:true, planned:180, blocking:false });
     const t = activeTask(c, { id:'d1', start:B-DAY, end:B+DAY, planned:600 });
-    c.state.tasks = [work, t];
+    c.state.tasks = [work, t, lunch];
     c.pinBlockAt('d1', B+9*H, 60, [], B, {partial:true, origStart:B});
     const pins = c.pinsOf(c.state.tasks.find(x=>x.id==='d1'));
     assert.deepEqual(plain(pins, B), [[9*H, 60]],

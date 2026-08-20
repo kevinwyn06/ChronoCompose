@@ -39,9 +39,12 @@ function everyKindOfDay(theme) {
   return {
     theme,
     settings: {
-      allotMode: 'today', packFromNow: false, freeTime: 0,
+      /* 2026-08-19: the hardcoded lunch window is gone (meals are tasks). The `meal` family is not —
+         index.html:9656 gives that kind to any busy block with no task behind it, which is now exactly
+         the free-time reserve. A 60-minute reserve is what keeps this fixture drawing all three
+         families, which is the whole point of it. */
+      allotMode: 'today', packFromNow: false, freeTime: 60,
       dayStart: '08:00', dayEnd: '19:00',
-      lunchStart: '12:00', lunchEnd: '13:00', dinnerStart: '00:00', dinnerEnd: '00:00',
       minChunk: 30, breakMin: 0,
     },
     tasks: [

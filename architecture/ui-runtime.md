@@ -506,11 +506,25 @@ in the 10px gap below the bar, is not findable — a passing gesture test is not
 
 `onKey`'s Escape branch is a ladder, and exactly one rung fires per press — most transient first:
 
+0. **a focused field** — revert to its focus-time value, then blur (owner, 2026-08-19)
 1. **an in-flight drag** — `_edgeDrag`, then `_blockDrag`
 2. **the topmost overlay** — `datePick` › `pctPop` › `inclPick` › `barMenu` › `quickOpen` › `scopePrompt` ›
    `settingsOpen` › `colMenu` › `selCols` › `menu`
 3. **the open detail sheet** — `detailId`
 4. **the row selection** — `clearSelection()`, which empties `selectedIds`, `selCols` *and* `selCursor`
+
+**Rung 0 is not a convenience exception to the ordering** (owner: *“esc should be able to get the user out
+of fields like the planned duration”*). A field the user is mid-keystroke in is strictly more transient than
+a drag — the drag rungs cannot even fire while a field holds focus, so nothing below it is reachable anyway.
+
+It REVERTS, then blurs, and the order matters: every `onBlur` in the sheet writes through `commit()`, so a
+bare blur would SAVE and make Escape the one key in the ladder that commits. Restoring the focus-time value
+first means the blur handler writes back an unchanged value and no undo entry is created. The draft is
+captured by a document-level `focusin` rather than a shared field `onFocus`, because there is no shared
+`onFocus` — fields are built by several different helpers; one record suffices because only one element can
+hold focus, and `focusout` clears it so a stale draft can never be restored into the wrong element. Fields
+belonging to an overlay are excluded: `datePick` and `pctPop` own their own Escape and rung 0 must never
+steal an overlay close from them.
 
 Rung 4 is last on purpose: it can never steal from a drag cancel or an overlay close. It is also the only
 rung guarded by `isEditingTarget`, so Escape inside an inline title editor, a description, or the quick-add
@@ -523,6 +537,91 @@ stayed lit. One gesture, one press. When the two have genuinely drifted apart (a
 the Gantt while a different range is selected) they are separate contexts and the ladder still charges
 separately. The sheet's own ✕ (`Close (Esc)`) closes without clearing, which is how a lit row with no sheet
 is reached.
+
+### Enter confirms a single-value editor (owner, 2026-08-19)
+
+The owner: *“enter doesn’t have, one needs to press enter then done”*. The date picker’s TIME box blurred on
+Enter, and blur only updated the picker’s DRAFT — `dpApply`, on the Done button, is what wrote the task. So
+setting a time cost a key and then a click.
+
+Enter now calls `dpSetTime` and then `dpApply`, in that order, inside `dpApply`’s single `commit()`, so the
+whole edit stays one undo entry. `onBlur` still calls `dpSetTime` alone, so Tab commits and moves on
+*without* closing — which is the only way to set a time and then adjust the date.
+
+**The general rule this establishes:** any single-value editor with a confirming button must also confirm on
+Enter and cancel on Escape. A new editor that offers a Done button and no Enter is a defect, not a gap.
+
+### Bare typed hours inherit the field’s meridiem (owner, 2026-08-19)
+
+The owner: *“I’ll think ‘okay this task is 10pm, I want it to be 9pm instead’ and type 9 only for it to end
+up as 9am.”* Decision: keep the current field’s meridiem.
+
+`resolveBareHour(tok, currentMs, dayWindow, otherEdgeMs)` is pure and rung-ordered: an explicit meridiem
+always wins; an hour **above 12** passes through untouched (load-bearing — `clockH` does `h % 12` before
+adding 12, so `17` with an inherited `am` would come back as 5am); otherwise the field’s own meridiem is
+inherited; an empty field prefers whichever reading falls inside `[dayStart, dayEnd]`; a tie breaks toward
+the task’s other clock; and with nothing to go on, am.
+
+`parseClockTok` now also accepts the one-letter forms `9a` / `9p`. Without that the owner’s own listed form
+`9p` did not parse at all and set no time.
+
+### Day-bound handles
+
+The timeline’s hour gutter carries two 7px grab strips, top and bottom, that drag `settings.dayStart` /
+`dayEnd`. They reuse the `_edgeDrag` record, so the 4px promotion threshold, the `uiPt` px→minute rule and
+the existing Escape rung (which nulls `_edgeDrag` without caring what KIND it is) all apply unchanged. Alt
+drags free; otherwise the bound snaps to 5 minutes. A press that never crosses the threshold, or a drag that
+lands back on the same value, writes nothing — a stray press must not consume a Ctrl+Z.
+
+They sit in the GUTTER, never over the block area, and only on the labelled column. A full-width strip at
+the column’s bottom edge covered any block dragged there and swallowed its clicks. Block gestures are used
+constantly and must win the pointer.
+
+**Undo for the day bounds is its own record.** No setting has ever been part of the task history —
+`snapshot()` serialises `state.tasks` and nothing else — and the owner chose a bounds-only record over
+moving all of `settings` into that history. `_undoKind` interleaves the two stacks so Ctrl+Z always undoes
+the most recent ACTION rather than preferring one stack, which is what keeps “bounds drag, then three task
+edits, then four undos” behaving the way a user expects.
+
+### The inclusion popover offers three distinct actions (owner, 2026-08-19)
+
+The owner: *“Snooze today and take out of today are practically the exact same thing and is therefore
+useless.”* They no longer are:
+
+| Action | Mutator | Meaning | Ends when |
+|---|---|---|---|
+| **Not today** | `snoozeToday` | not yet | midnight |
+| **Snooze indefinitely** | `snoozeIndefinitely` | not yet, open-ended | one of the four wake triggers |
+| **Take out of today** | `setIncludedOff` | not chosen | the task’s own triggers press it back |
+
+This keeps the existing division of labour intact — *snooze means “not today”, unpressed means “not
+chosen”*. The third option gives “not now” an open-ended form; it does not blur the line. A dateless snooze
+has no day to print, so the popover names the EVENTS that end it instead of formatting a date that does not
+exist.
+
+### Nest intent depends on the drop target's kind (owner, 2026-08-19)
+
+A row drag carries two possible meanings on one gesture: *file this into that section* and *nest this under
+that row*. They used to be told apart by horizontal offset alone — `dx = e.clientX - rd.startX`, the
+distance from the GRAB POINT, past `ROW_NEST_DEADZONE` (14px).
+
+That made the section drop unreliable in a way that looked arbitrary. Drift more than 14px right while
+crossing into a section and `steps` went positive, `projectRowDrop` gave the row a parent, and the section
+gate (`drop.parentId==null && res.sectionPos!=null`) closed — so `sectionId` was never written and the row
+silently stayed where it was. Leftward travel produced NEGATIVE steps, which only outdent an already-root
+row, so parentId stayed null by luck. Hence the owner's report: *"dragging into section only works when I
+drag to the left little bit of the section, not for the whole section row."*
+
+The rule now: **a drop that lands in a different band than the drag started in is a section drop, and
+carries no nest intent.** `steps` is forced to 0 for it. Owner: *"There's no valid intent behind 'nesting
+under this section'."* Nesting is untouched WITHIN a band, which is where it means something — rearranging
+a row among the siblings it already lives with. Moving a row into another section and then nesting it there
+is two gestures, deliberately: each says one thing.
+
+`projectRowDrop` is unchanged and remains pure and unit-tested (`tests/dragnest.test.js`); the fix is about
+which intent the call site hands it. `tests/e2e/drop-into-section-band.spec.js` sweeps five offsets over
+both a section header and a row inside the band, and pins same-section nesting separately so the scope
+cannot quietly become a removal.
 
 ### Keyboard navigation of the selection
 

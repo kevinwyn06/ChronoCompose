@@ -243,3 +243,67 @@ test('an included row draws no pressed inset or tint; the ACTIVE ring survives',
   assert.strictEqual([].concat(btn.children).join(''), '■',
     'the pause/play indicator does the work, which is the point');
 });
+
+// Owner, 2026-08-19: "I need an indefinite snooze... Snooze today and take out of today are practically
+// the exact same thing and is therefore useless." Wake set decided by the owner: explicit unsnooze,
+// a real start arriving, a due date passing, or the last blocking predecessor completing.
+
+test('indefinite snooze: opts out of today with no date comparison', () => {
+  const c = make();
+  const t = activeTask(c, { snoozeIndef: true });
+  c.state.tasks = [t];
+  assert.equal(c.isOptedOut(t), true);
+  // isOptedOut takes only the task: a dateless snooze has no date to compare, which is the point.
+  // Nothing about "which day it is" can expire it, so asking again gives the same answer.
+  assert.equal(c.isOptedOut(t), true);
+});
+
+test('indefinite snooze: an explicit include clears it', () => {
+  const c = make();
+  c.state.tasks = [activeTask(c, { id: 'a', snoozeIndef: true })];
+  c.setIncludedOn('a');
+  assert.equal(c.state.tasks[0].snoozeIndef, false);
+});
+
+test('indefinite snooze: a start landing today wakes it', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { snoozeIndef: true, start: B + 9 * 3600000, startClock: true });
+  c.state.tasks = [t];
+  assert.equal(c.snoozeWakeReason(t, B, B + 10 * 3600000), 'start');
+});
+
+test('indefinite snooze: a passed due date wakes it', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { snoozeIndef: true, start: null, end: B - DAY });
+  c.state.tasks = [t];
+  assert.equal(c.snoozeWakeReason(t, B, B + 10 * 3600000), 'due');
+});
+
+test('indefinite snooze: the last predecessor completing wakes it', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const pred = activeTask(c, { id: 'p', pct: 100, completion: B - 3600000 });
+  const t = activeTask(c, { id: 'a', snoozeIndef: true, deps: ['p'] });
+  c.state.tasks = [pred, t];
+  assert.equal(c.snoozeWakeReason(t, B, B + 10 * 3600000), 'deps');
+});
+
+test('indefinite snooze: a wake missed while the app was closed still fires', () => {
+  const c = make();
+  const B = c.startOfToday();
+  // due date passed three days ago; the app was never opened in between
+  const t = activeTask(c, { snoozeIndef: true, start: null, end: B - 3 * DAY });
+  c.state.tasks = [t];
+  assert.equal(c.snoozeWakeReason(t, B, B + 10 * 3600000), 'due',
+    'the question is "is it woken", never "was it woken today"');
+});
+
+test('indefinite snooze: a woken task reads as new, not inherited', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { snoozeIndef: true, start: B + 9 * 3600000, startClock: true });
+  c.state.tasks = [t];
+  assert.equal(c.originOf(t), 'new');
+});

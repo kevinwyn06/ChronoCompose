@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const { bootToday, cleanDaySettings, timelineBlocks, settleTimeline, task } = require('./_seed');
+const { bootToday, cleanDaySettings, timelineBlocks, settleTimeline, task, mealTask } = require('./_seed');
 
 /* Block 11 — a dropped block SPLITS around BLOCKING busy; Alt keeps it contiguous.
    (`blockPointerDown` → `onMouseMove` (latches `bd.free` from `e.altKey`) → `onMouseUp` →
@@ -31,12 +31,12 @@ const { bootToday, cleanDaySettings, timelineBlocks, settleTimeline, task } = re
    `Deep work` first into the 120-minute pre-lunch gap — one contiguous 90-minute block at 10:30.
    Asserted as a precondition in every test, never assumed. */
 const lunchFixture = () => ({
-  settings: Object.assign(cleanDaySettings('15:00'), {
-    dayStart: '10:30', lunchStart: '12:30', lunchEnd: '13:00',
-  }),
+  // 2026-08-19: Lunch is a TASK now, not two settings keys. Same 12:30-13:00 blocking window.
+  settings: Object.assign(cleanDaySettings('15:00'), { dayStart: '10:30' }),
   tasks: [
     task('deep', 'Deep work', { start: '0d', end: '+2d', planned: 90, priority: 1 }),
     task('fill', 'Errands', { start: '0d', end: '+2d', planned: 150, priority: 2 }),
+    mealTask('lunch', 'Lunch', '0d+12h30m', '0d+13h'),
   ],
 });
 
@@ -87,8 +87,10 @@ test.describe('Today timeline: a dropped block splits around blocking busy', () 
     const [deep] = of(before, 'Deep work');
     expect(of(before, 'Deep work'), 'fixture: the task is drawn as ONE contiguous block').toHaveLength(1);
     const lunch = before.find((b) => b.title === 'Lunch');
-    expect(lunch, 'fixture: Lunch is drawn as a meal block').toBeTruthy();
-    expect(lunch.kind).toBe('meal');
+    expect(lunch, 'fixture: Lunch is drawn as a blocking appointment').toBeTruthy();
+    // 2026-08-19: Lunch is a task, so it draws as 'fixed' — the settings-derived 'meal' kind is retired.
+    // What matters to this spec is unchanged: it is blocking busy the drop has to split around.
+    expect(lunch.kind).toBe('fixed');
     expect(deep.y + deep.h, 'fixture: the block starts ABOVE Lunch and does not reach it')
       .toBeLessThanOrEqual(lunch.y + 1);
 
