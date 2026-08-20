@@ -654,6 +654,19 @@ class Component extends DCLogic {
        whether a task counts toward today. `type` is retained only as the internal
        'Milestone' marker (see isMilestone; set by addMilestoneAt / quick-add) — 'Exact'/'Excluded' modes are gone. */
     this.PCOL = {1:'#d1453b',2:'#eb8909',3:'#246fe0',4:'var(--pri-default)'};
+    /* PP-EXT (owner 2026-08-19): timeline block hue is the TASK'S SECTION, not its priority. Assigned by
+       section ORDER off this palette rather than stored on the section, which keeps the colour a pure
+       projection of data the app already syncs — no `color` field, no migration 0014, and no way for two
+       devices to disagree about a colour. The cost, stated plainly: reordering sections re-colours them.
+       Eight hues, each distinguishable from its neighbours in both themes; the list wraps. */
+    this.SECCOL = ['#3b82f6','#16a34a','#d946ef','#f59e0b','#0ea5e9','#ef4444','#8b5cf6','#14b8a6'];
+    /* The No-section bucket gets a RESERVED hue rather than the neutral `--pri-default`. Neutral was the
+       first instinct and it is wrong for one reason the e2e layer caught immediately: a workspace with no
+       sections yet — every new workspace — would paint its whole timeline flat grey, which reads as broken
+       rather than as "unfiled", and breaks the standing "a block's fill must not be flattened to grey"
+       legibility invariant. Deliberately outside the SECCOL families (no blue/green/magenta/amber/cyan/
+       red/violet/teal) so "unfiled" can never be mistaken for a section. */
+    this.SECCOL_NONE = '#9a7b4f';
     this.PNAME = {1:'P1',2:'P2',3:'P3',4:'P4'};
     this.PROJECT = 'Life Planner';
     this.history = [];
@@ -3059,13 +3072,38 @@ class Component extends DCLogic {
     return (sections||this.state.sections||[]).slice()
       .sort((a,b)=>((+a.order||0)-(+b.order||0))||String(a.id).localeCompare(String(b.id)));
   }
+  /* PP-EXT (owner 2026-08-19): "which section is this task in?" — ONE definition, because the timeline's
+     colour and the sheet's grouping must never disagree about where a task lives. A subtask has no section
+     of its own; it inherits the ROOT ancestor's, which is the rule `tasksBySection` has always filed by.
+     `seen` guards a corrupt parent cycle. PURE. */
+  rootSectionId(t, byId, defById){
+    let root=t, seen={};
+    while(root&&root.parentId!=null&&byId[root.parentId]&&!seen[root.id]){ seen[root.id]=1; root=byId[root.parentId]; }
+    const sid=root&&root.sectionId;
+    if(sid==null) return null;
+    return (!defById || defById[sid]) ? sid : null;
+  }
+  /* The section's hue, by its position in `sectionsInOrder`. A task with no section — and a dangling id
+     left by a deleted section — is NEUTRAL rather than borrowing whichever section happens to be first. */
+  sectionHue(sectionId){
+    if(sectionId==null) return this.SECCOL_NONE;
+    const defs=this.sectionsInOrder();
+    const i=defs.findIndex(s=>s.id===sectionId);
+    return i<0 ? this.SECCOL_NONE : this.SECCOL[i % this.SECCOL.length];
+  }
+  /* The hue for a TASK: its root section's. */
+  taskHue(t){
+    if(!t) return this.SECCOL_NONE;
+    const byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x);
+    const defById={}; this.sectionsInOrder().forEach(s=>defById[s.id]=s);
+    return this.sectionHue(this.rootSectionId(t, byId, defById));
+  }
+  /* /PP-EXT */
   tasksBySection(tasks, sections){
     const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
     const defs=this.sectionsInOrder(sections);
     const defById={}; defs.forEach(s=>defById[s.id]=s);
-    const sectionOf=t=>{ let root=t, seen={};
-      while(root&&root.parentId!=null&&byId[root.parentId]&&!seen[root.id]){ seen[root.id]=1; root=byId[root.parentId]; }
-      const sid=root&&root.sectionId; return (sid!=null && defById[sid]) ? sid : null; };
+    const sectionOf=t=>this.rootSectionId(t, byId, defById);
     const out=[], byKey=new Map();
     /* Seed in declared order so empty sections still render (a container you made is a container you keep). */
     defs.forEach(s=>{ const sec={id:s.id,name:s.name,tasks:[]}; byKey.set(s.id,sec); out.push(sec); });
@@ -4485,6 +4523,27 @@ class Component extends DCLogic {
     if(oc.end-oc.start > this.DAY) return null;
     return Math.round((oc.end-oc.start)/60000);
   }
+  /* PP-EXT (owner report 2026-08-19: "I changed the start and end times of an exact task. The planned
+     time did not update accordingly.") The SAME question as `clockSpanMinutes`, asked at MUTATION time.
+     It exists because `clockSpanMinutes` routes through `occOnDay`/`currentOcc`, and for a RECURRING task
+     those read the `_occById` memo — which is built by RENDER and therefore still describes the pre-edit
+     dates while a `commit()` body is running. `setDate`/`dpApply` asked it mid-commit and wrote the OLD
+     occurrence's span back as `planned`, or nothing at all when the edited day owned no cached
+     occurrence. Non-recurring tasks never showed it: `occOf` reads `t.start`/`t.end` off the draft.
+
+     The memo is deliberately NOT invalidated here. Its contents depend on `_horizon`, which only a render
+     computes, so a mid-commit rebuild would answer from a different window than the one that was drawn —
+     a second bug wearing the first one's clothes.
+
+     Reading the ANCHOR is not an approximation. The date picker edits the WHOLE SERIES (its own header
+     says so), every derived occurrence is a shift of the anchor, and the day-fit and ordering guards are
+     the same two `clockSpanMinutes` applies. PURE. */
+  anchorSpanMinutes(t){
+    if(!t || !this.hasStartTime(t) || !this.hasEndTime(t)) return null;
+    if(t.start==null || t.end==null || t.end<=t.start) return null;
+    if(t.end-t.start > this.DAY) return null;
+    return Math.round((t.end-t.start)/60000);
+  }
   /* /PP-EXT */
   /* PP-EXT (21): the capacity readout — "how much have I said yes to, against how much time exists".
      PURE-ish (reads state.tasks by default, no caching, no side effects).
@@ -4831,7 +4890,7 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-17): a clock edit always makes the booked intra-day span the plan.
          This deliberately overwrites even a typed estimate; clockSpanMinutes owns both the clock-shape
          and day-fit rules, and running inside this commit keeps the edit to one undo entry. */
-      const span=t.start==null ? null : this.clockSpanMinutes(t, this.startOfDay(t.start));
+      const span=this.anchorSpanMinutes(t);
       if(span!=null) t.planned=span;
       /* /PP-EXT */
     });
@@ -6899,7 +6958,7 @@ class Component extends DCLogic {
             if(task.start>maxStart) task.start=maxStart;
           }
         }
-        const span=task.start==null?null:this.clockSpanMinutes(task,this.startOfDay(task.start));
+        const span=this.anchorSpanMinutes(task);
         if(p.dur!=null) task.planned=p.dur; else if(span!=null) task.planned=span;
       });
       this.setState({datePick:null});
@@ -7420,6 +7479,33 @@ class Component extends DCLogic {
      out but import never overwrites the local rich-text copy). */
   recurRuleKey(r){ return r?JSON.stringify({k:r.kind,n:r.n||1,d:r.days||null,day:r.day!=null?r.day:null,u:r.until!=null?r.until:null}):null; }
   syncFp(t){ return JSON.stringify({n:t.name,s:t.start,e:t.end,a:!!t.allDay,r:this.recurRuleKey(t.recur),d:this.descToText(t.description)}); }
+  /* PP-EXT (owner report 2026-08-19: "Changing the start and end times also did not update my gcal task as
+     intended."): the ONE place that decides whose copy of a linked task wins a pull. Three guards, and the
+     third is why this is a method rather than three lines inside `gcalImport`:
+       1. the op is still in the QUEUE — a pull must not beat an in-flight local PATCH (2026-08-17);
+       2. the task's Calendar-owned FINGERPRINT changed since the request began — a PATCH can drain after
+          the request started but before its response is merged (2026-08-18);
+       3. the task was WRITTEN BY THE FLUSH THAT TRIGGERED THIS PULL (2026-08-19).
+     Guard 3 closes a window the first two cannot see. `gcalFlushQueue.finish()` fires a verification
+     import right after a write, and by then the op has already been shifted off the queue (1 misses) while
+     `importFp` is captured from the post-edit state, so nothing looks changed (2 misses). If Google answers
+     that pull with a not-yet-updated copy of the event — most likely for a recurring series, which must
+     re-expand its instances — `mergeCalendarEvents` writes the OLD times back over the edit that was just
+     successfully pushed. `preserveEventIds` never helped here: it stops a MOVED event being read as
+     deleted, not stale content being read as truth.
+     PURE with respect to Google; reads `state.tasks`. */
+  gcalPendingFor(importFp, justWrittenTaskIds){
+    const out=(this.loadQueue()||[]).slice(); /* a COPY: this list is a decision, never an edit to the queue */
+    const fresh=new Set(justWrittenTaskIds||[]);
+    const fp=importFp||{};
+    (this.state.tasks||[]).forEach(t=>{
+      if(!t.eventId) return;
+      if(fresh.has(t.id) || fp[t.id]===undefined || fp[t.id]!==this.syncFp(t)){
+        out.push({op:'patch', taskId:t.id, queueVersion:this.GCAL_QUEUE_VERSION});
+      }
+    });
+    return out;
+  }
   /* Google instance id suffix = the ORIGINAL (rule-generated) start, UTC basic format (date-only if all-day). */
   instStamp(ms, allDay){ const d=new Date(ms), p=n=>String(n).padStart(2,'0');
     if(allDay) return ''+d.getFullYear()+p(d.getMonth()+1)+p(d.getDate());
@@ -8368,10 +8454,12 @@ class Component extends DCLogic {
     if(!this.loadQueue().length) return;
     this._gcalFlushing=true;
     const base='https://www.googleapis.com/calendar/v3/calendars/';
-    let anyWrite=false; const preserveAfterWrite=new Set();
+    let anyWrite=false; const preserveAfterWrite=new Set(); const writtenTaskIds=new Set();
     const finish=()=>{ this._gcalFlushing=false;
       if(anyWrite){ this.gcalClearError(); this._lastGcalSync=Date.now();
-        this.gcalImport({silent:true,preserveEventIds:preserveAfterWrite}); } };
+        /* PP-EXT (owner report 2026-08-19): the verification pull must be told which tasks this flush just
+           wrote, or a not-yet-updated read of one of them reverts the write. See `gcalPendingFor`. */
+        this.gcalImport({silent:true,preserveEventIds:preserveAfterWrite,justWrittenTaskIds:writtenTaskIds}); } };
     const step=()=>{
       const q=this.loadQueue(); const op=q[0];
       if(!op){ finish(); return; }
@@ -8393,6 +8481,7 @@ class Component extends DCLogic {
         /* A PATCH can move its event before `timeMin` or beyond `timeMax`. Its absence from the immediate
            bounded verification pull is therefore not proof of deletion. */
         if(op.op==='patch'&&op.calendarId&&op.eventId) preserveAfterWrite.add(op.calendarId+'|'+op.eventId);
+        if(op.taskId!=null && op.op!=='delete' && op.op!=='deleteInstance') writtenTaskIds.add(op.taskId);
         this.shiftQueue(op); step(); })
        .catch(e=>{
           this.gcalError(e);
@@ -8539,14 +8628,11 @@ class Component extends DCLogic {
     })
     .then(({results,masters,verifiedMissing})=>{
       const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
-      const pending=this.loadQueue(); /* PP-EXT (owner 2026-08-17): a pull must not beat an in-flight local PATCH. */
+      /* PP-EXT: all three "whose copy wins" guards live in gcalPendingFor — see it for why. */
+      const pending=this.gcalPendingFor(importFp, opts.justWrittenTaskIds);
       const preserve=new Set(opts.preserveEventIds||[]);
-      /* PP-EXT (owner 2026-08-18): queue presence alone is insufficient: a PATCH can finish after this
-         request started but before its response is merged. Protect any linked task whose Calendar-owned
-         fingerprint changed during that interval, including a task newly restored by Supabase. */
-      this.state.tasks.forEach(t=>{ if(t.eventId && (importFp[t.id]===undefined || importFp[t.id]!==this.syncFp(t))){
-        pending.push({op:'patch',taskId:t.id,queueVersion:this.GCAL_QUEUE_VERSION});
-        if(t.calendarId) preserve.add(t.calendarId+'|'+t.eventId); } });
+      const protectedIds={}; pending.forEach(op=>{ if(op&&op.taskId!=null) protectedIds[op.taskId]=1; });
+      this.state.tasks.forEach(t=>{ if(t.eventId && t.calendarId && protectedIds[t.id]) preserve.add(t.calendarId+'|'+t.eventId); });
       const liveIds=ids.filter(id=>gone.indexOf(id)<0); /* PP-EXT: never prune tasks of a calendar we couldn't reach — that empty result isn't proof the events were deleted */
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
@@ -9572,7 +9658,11 @@ class Component extends DCLogic {
      @returns {{bg:string,fg:string,window:boolean,col:string|null}} */
   tlSurface(c, task){
     if(c && c.type==='meal') return {bg:'var(--tl-win-bg)', fg:'var(--tl-win-fg)', window:true, col:null};
-    const col=(task && this.PCOL[task.priority]) || 'var(--pri-default)';
+    /* PP-EXT (owner 2026-08-19): "Assign different colors to different sections for the timeline blocks"
+       + "Get rid of the priority coloring". Scope is the TIMELINE ONLY — `PCOL` still drives the sheet,
+       the month calendar, the dashboards, and above all the priority picker and the P1–P4 filter chips,
+       where the colour is the control's meaning rather than a decoration. */
+    const col=(task && this.taskHue(task)) || 'var(--pri-default)';
     return {bg:'linear-gradient(45deg,color-mix(in srgb,'+col+' var(--tl-fill-a),var(--tl-fill-base)),'
               +'color-mix(in srgb,'+col+' var(--tl-fill-b),var(--tl-fill-base)))',
             fg:'var(--tl-blk-fg)', window:false, col:col};

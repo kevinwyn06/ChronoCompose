@@ -594,7 +594,25 @@ V5 block 25a **deleted** the diagonal hatch that used to mark auto-scheduled blo
 information — the same measurement that retired `ambientRowBackground` in V2.9.
 
 **Block colour has exactly one source** (V5 block 25c, `tlSurface()` — `TL_TYP()`'s four per-kind
-families are retired). A task block is filled with the task's own `PCOL[priority]`, the identical map the
+families are retired). **What that source encodes changed on 2026-08-19**: a task block is filled with its
+**section's** hue, not its priority. Owner: *"Assign different colors to different sections for the timeline
+blocks"* / *"Get rid of the priority coloring."* The scope is the **timeline only** — the sheet, the month
+calendar, the dashboards and the priority picker / P1–P4 filter chips all still read `PCOL`, because on a
+picker the colour *is* the control's meaning rather than decoration.
+
+`SECCOL` is eight hues assigned by **position in `sectionsInOrder`**, wrapping past eight. It is deliberately
+a palette-by-order and **not** a `color` field on the section: the hue stays a pure projection of data the
+app already syncs, so there is no new column, no migration, and no way for two devices to disagree about a
+colour. The cost, stated plainly: reordering sections re-colours them. A task with no section — and one
+whose `sectionId` points at a deleted section — is neutral (`var(--pri-default)`) rather than borrowing
+whichever section happens to sit first.
+
+`rootSectionId(t, byId, defById)` is now the single answer to "which section is this task in?", shared by
+`tasksBySection` and the timeline's `taskHue`, so the colour and the grouping cannot disagree about where a
+task lives. A subtask has no section of its own; it inherits its root ancestor's, which is the rule the
+sheet has always filed by.
+
+Historically the block was filled with the task's own `PCOL[priority]`, the identical map the
 month calendar's chips, the sheet and the Gantt read, mixed into the near-neutral per-theme
 `--tl-fill-base`; the theme contributes tone only, which is why a block's hue is the same in both themes.
 There is deliberately no timeline-only palette, and `tests/e2e/block-colour.spec.js` proves the timeline

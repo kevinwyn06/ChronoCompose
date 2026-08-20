@@ -50,7 +50,7 @@ into `mergeCalendarEvents`, which keeps local name, dates, all-day shape, and re
 until the write drains; `planned`, `goal`, `description`, and blocking retain their existing
 local-authority rules.
 
-Four ordering guards close races around that queue. Calendar restoration after account sign-in is chained
+Five ordering guards close races around that queue. Calendar restoration after account sign-in is chained
 behind the initial Supabase **task** reconciliation, so an import cannot mint a second local task id while
 the already-linked row is still waiting in the cloud pull. A failed initial pull releases its promise gate
 and schedules a retry after 30 seconds; Calendar remains blocked until one reconciliation succeeds. An
@@ -59,7 +59,24 @@ response merges stays authoritative even if its PATCH has already drained from t
 from the bounded events list is never deletion evidence: every absent linked event is fetched directly by
 id, and only an authoritative 404/410 or cancelled resource permits pruning. The immediate verification
 after a successful PATCH still skips that redundant lookup once, but later polls remain safe when a move
-put the event outside the window. These guards do not reconcile or remove duplicates that already exist.
+put the event outside the window.
+
+The fifth guard (owner report 2026-08-19, *"changing the start and end times also did not update my gcal
+task as intended"*) covers the verification pull itself, and it exists because the two guards above cannot
+see it. `gcalFlushQueue.finish()` fires that pull the moment a write drains, so the op is already off the
+queue, and the fingerprint snapshot was taken from the post-edit state, so nothing reads as changed. If
+Google answers with a not-yet-updated copy — most likely for a recurring series, which has to re-expand its
+instances after a master PATCH — `mergeCalendarEvents` writes the OLD times back over the edit that was
+just successfully pushed. The flush therefore passes `justWrittenTaskIds` into the pull it triggers, and
+those tasks stay locally authoritative for it. `preserveEventIds` never covered this: it stops a MOVED
+event being read as deleted, not stale content being read as truth.
+
+**All three "whose copy wins a pull" decisions now live in `gcalPendingFor(importFp, justWrittenTaskIds)`**
+— queue presence, fingerprint drift, and just-written — so the question has one answer rather than three
+call sites. It returns a COPY of the queue: the list is a decision, never an edit to the queue itself.
+Protection is per task, so an ordinary inbound change to any other event in the same pull still lands.
+
+These guards do not reconcile or remove duplicates that already exist.
 
 **Deletion/tombstone handling remains load-bearing (2026-08-13).** The old gated funnel once queued no
 remote DELETE and — because the tombstone is written inside `gcalEnqueue` — recorded nothing locally.

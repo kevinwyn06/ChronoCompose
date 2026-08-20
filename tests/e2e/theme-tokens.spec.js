@@ -45,10 +45,11 @@ function everyKindOfDay(theme) {
       minChunk: 30, breakMin: 0,
     },
     tasks: [
-      /* V5 block 25c: `priority` is now what colours a block, so the appointment carries one too.
-         Without it the fixed family draws in `--pri-default` slate — correctly, since that is also
-         what the month calendar gives an unprioritised task — and the "not flattened to grey"
-         assertion below would have nothing chromatic to measure. */
+      /* 2026-08-19: a block is coloured by its SECTION, not its priority (the priorities below are now
+         inert here and kept only so this fixture keeps exercising the month calendar's own colouring).
+         These tasks are deliberately left UNFILED, which is what makes them measure `SECCOL_NONE` — the
+         reserved No-section hue. That is the case the "not flattened to grey" assertion below exists to
+         protect: a workspace with no sections yet must not paint its whole timeline slate. */
       task('t-appt', 'Standup', { start: '0d+9h', end: '0d+10h', startClock: true, endClock: true, planned: 60, priority: 2 }),
       task('t-flex', 'Write the quarterly report', { start: '-2d', end: '+3d', planned: 180, priority: 1 }),
       task('t-flex2', 'Clear the inbox', { start: '-2d', end: '+3d', planned: 90, priority: 3 }),
@@ -138,12 +139,12 @@ test.describe('theme tokens: the Today timeline follows the theme', () => {
     expect(kinds.sort(), 'the fixture drew an auto-scheduled block, a clock-fixed one and a meal')
       .toEqual(['auto', 'fixed', 'meal']);
 
-    /* V5 block 25c re-homed what "hue" means here. It used to be per-KIND: auto warm, meal purple,
-       fixed green. It is now per-TASK — a block is filled with the task's own `PCOL[priority]`, the
-       same map the month calendar uses — and a `meal` is not a task at all but a `dayIntervals` clock
-       window, which by design takes NO hue and is measured on its own terms below. So the loop runs
-       over the TASK kinds, and the block's fixture gives its two flexible tasks priorities 1 and 3
-       precisely so the "not flattened to grey" assertion still has real chroma to check. */
+    /* V5 block 25c re-homed what "hue" means here (from per-KIND — auto warm, meal purple, fixed green —
+       to per-TASK), and 2026-08-19 re-homed it again: the task's SECTION supplies the hue, not
+       `PCOL[priority]`. A `meal` is still not a task at all but a `dayIntervals` clock window, which by
+       design takes NO hue and is measured on its own terms below, so the loop runs over the TASK kinds.
+       The chroma the "not flattened to grey" assertion checks now comes from `SECCOL_NONE`, since this
+       fixture files nothing — see the fixture note above. */
     const taskKinds = kinds.filter((k) => k !== 'meal');
     expect(taskKinds.sort(), 'the fixture drew a task block of each placement kind').toEqual(['auto', 'fixed']);
 

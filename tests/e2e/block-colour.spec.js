@@ -16,12 +16,16 @@
  *         change that made everything 3px fails), on the CONTRAST of the border against the block's
  *         own fill in BOTH themes (so a border that exists but cannot be seen fails), and separately
  *         in each theme (so a mark that only works on dark fails).
- *   25c — a task block's hue comes from the SAME source as the calendar's: `PCOL[priority]`. Asserted
- *         by measuring the same task in two different views — its timeline block and its month-view
- *         chip — and requiring the hues to agree. A second timeline palette, however tasteful, moves
- *         one and not the other and dies here. Two different priorities are also required to come
- *         back as two visibly different hues, which is what a flatten-everything-to-one-colour change
- *         would break.
+ *   25c — SUPERSEDED 2026-08-19 by an explicit owner decision: *"Assign different colors to different
+ *         sections for the timeline blocks"* / *"Get rid of the priority coloring."* This block used to
+ *         assert that the timeline and the month calendar shared ONE source, `PCOL[priority]`, precisely
+ *         so that a timeline-only palette could not appear. A timeline-only palette is now the
+ *         requirement, so that guard is retired ON PURPOSE rather than quietly weakened — and it is
+ *         replaced, not deleted, by the two properties that now carry the meaning:
+ *           · same section, different priority  -> ONE hue (priority no longer speaks here)
+ *           · different section                 -> visibly different hues
+ *         The month calendar is asserted to still read `PCOL`, so "get rid of priority colouring" cannot
+ *         silently spread past the timeline it was scoped to.
  *         The `dayIntervals` clock windows (Lunch/Dinner/Free time) are NOT tasks and take no hue at
  *         all: they are asserted to be structurally different from task blocks, not merely a
  *         different shade of one.
@@ -60,8 +64,16 @@ const fixture = (theme) => {
         start: `0d+${appointmentHour}h`, end: `0d+${appointmentHour + 1}h`,
         startClock: true, endClock: true, planned: 60,
       }),
-      task('t-p1', 'Ship the release', { start: '-1d', end: '+2d', planned: 150, priority: 1 }),
-      task('t-p3', 'Clear the inbox', { start: '-1d', end: '+2d', planned: 90, priority: 3 }),
+      task('t-p1', 'Ship the release', { start: '-1d', end: '+2d', planned: 150, priority: 1, sectionId: 'sec-work' }),
+      task('t-p3', 'Clear the inbox', { start: '-1d', end: '+2d', planned: 90, priority: 3, sectionId: 'sec-admin' }),
+      /* Same SECTION as t-p1 but a different priority: the pair that proves priority no longer speaks
+         on the timeline. Without it, "coloured by section" and "coloured by priority" are
+         indistinguishable in this fixture, because section and priority would move together. */
+      task('t-p4', 'Water the plants', { start: '-1d', end: '+2d', planned: 60, priority: 4, sectionId: 'sec-work' }),
+    ],
+    sections: [
+      { id: 'sec-work', name: 'Work', order: 0 },
+      { id: 'sec-admin', name: 'Admin', order: 1 },
     ],
   };
 };
@@ -198,37 +210,42 @@ test.describe('block colour: a locked block is marked', () => {
   }
 });
 
-test.describe('block colour: one source, shared with the calendar', () => {
-  test('a task\'s block hue is the hue the calendar gives the same task', async ({ page }) => {
+test.describe('block colour: the timeline reads sections, the calendar still reads priority', () => {
+  test('a block hue is its SECTION, and priority no longer speaks on the timeline', async ({ page }) => {
     await bootToday(page, fixture('dark'));
     await settleTimeline(page);
     const blocks = await blockColours(page);
 
     const byTask = {};
     blocks.forEach((b) => { if (b.taskId && byTask[b.taskId] == null) byTask[b.taskId] = b; });
-    const p1 = byTask['t-p1'], p3 = byTask['t-p3'];
-    expect(p1 && p3, 'both flexible tasks drew a block').toBeTruthy();
+    const work1 = byTask['t-p1'], admin = byTask['t-p3'], work4 = byTask['t-p4'];
+    expect(work1 && admin && work4, 'all three flexible tasks drew a block').toBeTruthy();
 
-    /* Two different priorities must LOOK different. This is what a "tone everything the same" change
-       breaks, and it would otherwise sail through every per-block assertion in this file. */
-    expect(drift(p1.fillHue, p3.fillHue), 'two priorities are two visibly different hues')
+    /* Two SECTIONS must look different. This is what a "tone everything the same" change breaks, and it
+       would otherwise sail through every per-block assertion in this file. */
+    expect(drift(work1.fillHue, admin.fillHue), 'two sections are two visibly different hues')
       .toBeGreaterThan(40);
-    [p1, p3].forEach((b) => {
+    [work1, admin, work4].forEach((b) => {
       expect(b.fillSat, `${b.title}: the fill is a colour, not a grey`).toBeGreaterThan(0.15);
     });
 
-    /* The cross-surface check. Same page, same tasks, two independent renderers: if the timeline ever
-       grows a palette of its own, these two stop agreeing. */
+    /* P1 and P4 in the SAME section: one hue. This is the half that fails if priority creeps back in. */
+    expect(drift(work1.fillHue, work4.fillHue),
+      `same section, priorities 1 and 4: ${work1.fillHue.toFixed(1)} vs ${work4.fillHue.toFixed(1)} - priority must not tint a block`)
+      .toBeLessThan(12);
+
+    /* The scope check. The owner scoped "get rid of the priority coloring" to the TIMELINE; the month
+       calendar still reads PCOL. So the calendar is required to still separate two priorities that the
+       timeline now paints identically. */
     await switchView(page, 'Month');
     await page.waitForTimeout(150);
-    for (const [b, name] of [[p1, 'Ship the release'], [p3, 'Clear the inbox']]) {
-      const chip = await monthChipHue(page, name);
-      expect(chip.found, `${name}: found on the month calendar`).toBe(true);
-      expect(chip.sat, `${name}: the calendar's own colour for it is chromatic`).toBeGreaterThan(0.15);
-      expect(drift(b.fillHue, chip.hue),
-        `${name}: timeline hue ${b.fillHue.toFixed(1)}° vs calendar hue ${chip.hue.toFixed(1)}° — one colour source`)
-        .toBeLessThan(12);
-    }
+    const chip1 = await monthChipHue(page, 'Ship the release');
+    const chip4 = await monthChipHue(page, 'Water the plants');
+    expect(chip1.found && chip4.found, 'both found on the month calendar').toBe(true);
+    expect(chip1.sat, 'the calendar keeps a chromatic colour of its own').toBeGreaterThan(0.15);
+    expect(drift(chip1.hue, chip4.hue),
+      'the month calendar still separates P1 from P4 - PCOL survives everywhere except the timeline')
+      .toBeGreaterThan(40);
   });
 
   for (const theme of ['light', 'dark']) {

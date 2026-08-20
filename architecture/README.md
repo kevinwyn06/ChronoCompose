@@ -26,6 +26,13 @@ Two shape rules added 2026-08-16, both easy to get wrong from the outside (detai
   a clock from the timestamp, so "has both clocks" is a strictly wider set than "is an appointment" and
   matches plain multi-day windows. Using the two `has*Time` helpers directly for this question has already
   produced three separate defects.
+- **Inside a `commit()` body, never ask an occurrence question through `_occById`.** That memo is built by
+  RENDER, so while a mutator runs it still describes the dates as they were drawn. `clockSpanMinutes` routes
+  through it (via `occOnDay`/`currentOcc`) and answered `setDate`/`dpApply` from pre-edit data for every
+  RECURRING task — the 2026-08-19 "planned time did not update" report. Mutators use `anchorSpanMinutes(t)`,
+  which reads the draft task. Do not "fix" this by clearing the memo mid-commit: its contents depend on
+  `_horizon`, which only a render computes, so a mid-commit rebuild answers from a different window than the
+  one on screen.
 
 **Tooling:** call-site audits on `index.html` must use ripgrep (`rg -n` / the Grep tool). Bash `grep`
 silently truncates the file, printing `Binary file index.html matches` and stopping without an error — a
