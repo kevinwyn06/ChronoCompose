@@ -2949,6 +2949,59 @@ class Component extends DCLogic {
     });
     return out;
   }
+  /* PP-EXT (owner 2026-08-19): the hours a day ACTUALLY consumed on work that is now finished.
+     Owner: "it should not reschedule as if that task never existed."
+     A completed task leaves `acts` in computeAllotted, so its span used to return to the pool and the
+     packer refilled hours that had already elapsed. Each block here spans [where the task sat on day B,
+     its completion instant] and is emitted as BLOCKING busy, so it is carved out of dayIntervals exactly
+     as an appointment is and the pool-agreement invariant holds unchanged.
+     `now` is an argument (never Date.now()) so every rung is unit-testable without clock games.
+     PURE: tasks + B + now in, blocks out. */
+  completedHistoryBlocks(B, tasks, now){
+    const src=tasks||this.state.tasks;
+    const done=src.filter(t=>this.doneOn(t, B) && !this.isMilestone(t));
+    if(!done.length) return [];
+    /* Where each one sat. Three sources, cheapest first — an appointment and a pin already carry their
+       start as DATA, so they never enter the re-pack. */
+    const startOf={}; const needPack=[];
+    done.forEach(t=>{
+      if(this.isFixedOn(t, B)){ const oc=this.occForDay(t, B);
+        if(oc && oc.start!=null) startOf[t.id]=Math.max(oc.start, B); return; }
+      const pins=this.dragBlocksOn(t, B);
+      if(pins.length){ startOf[t.id]=Math.min.apply(null, pins.map(p=>p.start)); return; }
+      needPack.push(t);
+    });
+    /* ONE pass, not one per task. The completed set is fixed for a render, so a single pack of day B
+       with every completed task restored to the competing set yields all of their starts together.
+       This is why B1 needs no narrowing: autoStartFor pays per drag only because its excluded set
+       differs per drag, and here it does not. */
+    if(needPack.length){
+      const revived=src.map(t=>this.doneOn(t, B) ? Object.assign({}, t, {pct:0, completion:null}) : t);
+      const packed=this.buildDayTimeline(B, revived);
+      /* the packer's output key is `chunks` (each carries `id`), not `blocks` */
+      ((packed&&packed.chunks)||[]).forEach(bl=>{
+        if(startOf[bl.id]==null && needPack.some(t=>t.id===bl.id)) startOf[bl.id]=bl.start; });
+    }
+    const out=[];
+    done.forEach(t=>{
+      const s=startOf[t.id]; if(s==null) return;   /* never placed ⇒ occupied no hours ⇒ nothing to freeze */
+      const cm=this.completionOn(t, B); if(cm==null) return;
+      const a=Math.max(s, B), b=Math.min(cm, B+this.DAY);
+      if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id, blocking:true, history:true});
+    });
+    return out.sort((x,y)=>x.start-y.start);
+  }
+  /* PP-EXT (owner 2026-08-19): the completion INSTANT relevant to day B. `isCompletedOn` answers the
+     yes/no; this answers "at what moment", and for a recurring series that moment lives on the
+     occurrence override, not the task. */
+  completionOn(t, B){
+    if(!t) return null;
+    if(t.recur){ const ov=(t.recur.overrides)||{};
+      const hit=Object.keys(ov).find(oi=>ov[oi] && ov[oi].completion && this.startOfDay(ov[oi].completion)===B);
+      return hit ? ov[hit].completion : null; }
+    return (t.completion!=null && this.startOfDay(t.completion)===B) ? t.completion : null;
+  }
+  /* /PP-EXT */
   /* PP-EXT (04b): how much FREE time each busy interval actually consumed, when intervals may overlap.
      Dropping a drag-pin across an appointment is permitted (owner, 2026-08-04), but the pin then costs
      the day less free time than its own span — the shared minutes were never free. Attributing every
@@ -6613,6 +6666,9 @@ class Component extends DCLogic {
        drawer/Unscheduled entirely. The map is keyed by id and every consumer looks up by id, so a
        superset is safe; what is displayed is still decided by the projection. */
     this._allot = this.computeAllotted(this.state.tasks); /* PP-EXT: allotted/remaining map — live (spent/settings), reads memoized _occById */
+    /* PP-EXT (owner 2026-08-19): built once per render, like _occById and _allot above it. The completed
+       set cannot change mid-render, so every reader shares one pass. */
+    this._hist = this.completedHistoryBlocks(this.startOfToday(), this.state.tasks, this.state.nowTick||Date.now());
     /* PP-EXT: month-view — hovering a day glows all its tasks in the sheet + gantt (Phase 6) */
     this._glowIds = this.state.hoverDay!=null ? new Set(this.tasksOnDay(this.state.hoverDay, tasks)) : null;
     return {
@@ -9216,24 +9272,29 @@ class Component extends DCLogic {
   orderingSeam(features){
     return (features||[]).slice().sort((a,b)=>(Number(!!b.active)-Number(!!a.active))||(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
   }
-  buildDayTimeline(B){
+  /* PP-EXT (owner 2026-08-19): `tasks` is now an explicit parameter (defaulting to state) so callers
+     that must be PURE — completedHistoryBlocks' single re-pack — can pack a hypothetical task list
+     without mutating state. Every pre-existing caller passes nothing and is unaffected. */
+  buildDayTimeline(B, tasks){
     const s=this.state.settings;
+    const TL=tasks||this.state.tasks;
     const today=this.startOfToday();
     if(B==null) B=today;
     /* PP-EXT: multi-day timelines — allotOf / famAllot read this._allot, so swap in day B's allotment map for
        the duration of this build (render is synchronous, so no other code sees the swap), then restore. Today
        reuses the cached map from renderVals; other days compute a fresh (spent = 0) map. */
     const savedAllot=this._allot;
-    this._allot = (B===today && savedAllot) ? savedAllot : this.computeAllotted(this.state.tasks, B);
-    try{ return this._buildDayTimelineInner(B, s); }
+    this._allot = (B===today && savedAllot && !tasks) ? savedAllot : this.computeAllotted(TL, B);
+    try{ return this._buildDayTimelineInner(B, s, TL); }
     finally{ this._allot=savedAllot; }
   }
-  _buildDayTimelineInner(B, s){
+  _buildDayTimelineInner(B, s, TL){
+    TL=TL||this.state.tasks;
     const today=this.startOfToday();
     /* PP-EXT: fixed appointments are busy time via fixedBlocksToday (the same source
        computeAllotted subtracts from the pool), rendered as 'fixed' blocks below, never packed. */
-    const fixedBlocks=this.fixedBlocksToday(B, this.state.tasks);
-    const kc=this.keepClearToday(B, this.state.tasks); /* PP-EXT: Point dividers */
+    const fixedBlocks=this.fixedBlocksToday(B, TL);
+    const kc=this.keepClearToday(B, TL); /* PP-EXT: Point dividers */
     const di=this.dayIntervals(B, this.packStart(B), fixedBlocks, kc);
     const winStart=di.winStart, winEnd=di.winEnd, busy=di.busy;
     let free=di.free.slice();
@@ -9243,8 +9304,8 @@ class Component extends DCLogic {
        deadline; a clocked start supplies the clock-of-day not-before boundary. */
     /* PP-EXT: subtasks — children never pack independently; a parent packs its FAMILY total (own remainder
        + descendants' shares) and its chunks are subdivided into child sub-blocks below. */
-    const kb=this.buildKids(this.state.tasks);
-    const flex=this.orderingSeam(this.state.tasks.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
+    const kb=this.buildKids(TL);
+    const flex=this.orderingSeam(TL.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
         && !this.hasFullDragPinToday(t, B) /* PP-EXT: WHOLE-pinned tasks are placed as fixed blocks, not packed (04: a partly-pinned task still packs its remainder) */
         && !(t.parentId!=null && kb.byId[t.parentId])
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.flexAllot(t.id)>0))
@@ -9318,7 +9379,7 @@ class Component extends DCLogic {
       :{title:b.note,start:b.start,end:b.end,type:'meal'}));
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd,
-      points:this.pointsToday(B, this.state.tasks), topHover:this.topHoverToday(B, this.state.tasks)}; /* PP-EXT (Group 2): render-only shapes */
+      points:this.pointsToday(B, TL), topHover:this.topHoverToday(B, TL)}; /* PP-EXT (Group 2): render-only shapes */
   }
   /* PP-EXT: drag-pin drop math (Phase 5) — snap a proposed block start and clamp so the whole block stays
      inside today's window. Two-stage snap: if either edge (start or end) lands within PIN_MAGNET minutes of a
