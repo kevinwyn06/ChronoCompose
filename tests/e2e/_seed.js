@@ -70,6 +70,18 @@ async function seed(page, data = {}) {
           + (m[2] ? parseInt(m[2], 10) : 0) * 3600000
           + (m[3] ? parseInt(m[3], 10) : 0) * 60000;
       }
+      /* PP-EXT (owner 2026-08-20): `onListSince` takes the SAME relative syntax but resolves to a `ymd`
+         day KEY rather than epoch ms, because that is the shape the field stores (it is compared for
+         identity, never arithmetic — see architecture/data-storage.md). Resolved here so a fixture can
+         say "on the list since two days ago" without hard-coding a date that goes stale. */
+      if (typeof o.onListSince === 'string') {
+        const m = OFF.exec(o.onListSince);
+        if (m) {
+          const dt = new Date(midnight + parseInt(m[1], 10) * DAYMS);
+          const p2 = n => String(n).padStart(2, '0');
+          o.onListSince = dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate());
+        }
+      }
       /* Recurrence bounds are dates too. Keep them relative for the same reason as task edges: a
          finite recurring-run gesture fixture must not become wholly past as the wall clock advances. */
       if (o.recur && typeof o.recur.until === 'string') {
@@ -266,8 +278,11 @@ async function timelineBlocks(page) {
     const cs = getComputedStyle(el);
     return {
       tip: el.getAttribute('title') || '',
-      /* ⧉ is 04b's regroup control and ↺ is V4.3's Reset, which render inside the block like ✕ and ▶ do. */
-      title: (el.textContent || '').replace(/[📍📌✕▶■⧉↺]/g, '').trim(),
+      /* ⧉ is 04b's regroup control, ↺ is V4.3's Reset and 💤 is Task 19's per-day snooze — all render
+         INSIDE the block like ✕ and ▶ do, so all of them have to come out of the title. 💤 is
+         hover-gated, which means it appears mid-drag (the pointer is on the block) and a spec that did
+         not strip it would silently stop finding the block it was dragging. */
+      title: (el.textContent || '').replace(/[📍📌✕▶■⧉↺💤]/g, '').trim(),
       x: r.x, y: r.y, w: r.width, h: r.height,
       /* Block 12: the overlap layout's own answer for this block — the fraction of the block band its
          LEFT edge was stepped in by. Reading it alongside the box is what lets an overlap failure say

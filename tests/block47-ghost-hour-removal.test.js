@@ -61,7 +61,12 @@ test('post-block-36 inclusion output stays byte-identical while ghost paint is d
     incl:c.inclState(t)
   })));
   assert.equal(bytes,
-    '[{"id":"bare","eligible":true,"inherited":false,"activeToday":true,"activeTomorrow":true,"incl":"pressed"},'+
+    /* owner 2026-08-20 (task 11): `bare` — no start, no end — flipped activeTomorrow true → false, and
+       it is the ONLY byte that moved. `ghostSpan` closed the dateless span at the last instant of today
+       instead of tomorrow's midnight, so an undated task no longer occupies a second day. `today`
+       (a real B → B+DAY window) is deliberately unchanged: an explicit end AT tomorrow's midnight is a
+       different shape, and the owner's rule names tasks with NEITHER clock. */
+    '[{"id":"bare","eligible":true,"inherited":false,"activeToday":true,"activeTomorrow":false,"incl":"pressed"},'+
     '{"id":"today","eligible":true,"inherited":false,"activeToday":true,"activeTomorrow":true,"incl":"pressed"},'+
     '{"id":"future","eligible":false,"inherited":false,"activeToday":false,"activeTomorrow":false,"incl":"unpressed"},'+
     '{"id":"past-open","eligible":true,"inherited":true,"activeToday":true,"activeTomorrow":true,"incl":"pressed"},'+

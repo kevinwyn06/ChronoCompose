@@ -100,3 +100,91 @@ test('duration preserved: one clock only is untouched', () => {
   c.setDate('d', 'end', B + 18 * H, true);
   assert.equal(c.state.tasks[0].start, null);
 });
+
+// ---------------------------------------------------------------------------
+// Task 14 (owner 2026-08-20) — the meridiem becomes VISIBLE and EDITABLE.
+//
+// `resolveBareHour` above already picks the right nine. The defect was that nothing on screen said
+// which nine it picked: the field rendered `21:00`, a 24-hour string with no meridiem at all, so the
+// only way to check the inheritance was to close the picker and read the row. This task changes the
+// display and adds a one-click flip. The resolution logic is deliberately untouched.
+
+function walk(node, out) {
+  out = out || [];
+  if (!node || typeof node !== 'object') return out;
+  out.push(node);
+  (node.children || []).forEach(k => walk(k, out));
+  return out;
+}
+const nodes = c => walk(c.renderDatePick());
+const timeField = c => nodes(c).find(n => n.type === 'input' && n.props.defaultValue !== undefined);
+const merBtns = c => nodes(c).filter(n => n.props && n.props['data-dp-mer']);
+const fakeEv = () => ({ stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ left: 0, right: 0, top: 0, bottom: 0, width: 0, height: 0 }) } });
+
+function picker(c, hours) {
+  const B = c.startOfDay(Date.now());
+  c.state.tasks = [clocked(c, B, 'a', hours, hours + 1)];
+  c.openDatePick(fakeEv(), 'a', 'start');
+  return B;
+}
+
+test('meridiem: the field shows a 12-hour clock, never 21:00', () => {
+  const c = make();
+  picker(c, 21);
+  assert.equal(timeField(c).props.defaultValue, '9:00');
+  picker(c, 9);
+  assert.equal(timeField(c).props.defaultValue, '9:00', 'both nines read the same in the FIELD');
+});
+
+test('meridiem: the control says which nine you got', () => {
+  const c = make();
+  picker(c, 21);
+  const btns = merBtns(c);
+  assert.equal(btns.length, 2, 'a two-segment control, am and pm');
+  assert.equal(btns.map(b => b.props['data-dp-mer']).join(','), 'am,pm');
+  assert.equal(btns.find(b => b.props['data-dp-mer'] === 'pm').props['data-dp-on'], '1');
+  assert.equal(btns.find(b => b.props['data-dp-mer'] === 'am').props['data-dp-on'], '0');
+});
+
+test('meridiem: one click flips it, and only the meridiem', () => {
+  const c = make();
+  picker(c, 21);                       // 9pm
+  merBtns(c).find(b => b.props['data-dp-mer'] === 'am').props.onClick(fakeEv());
+  assert.equal(new Date(c.state.datePick.ms).getHours(), 9, '9pm -> 9am');
+  assert.equal(new Date(c.state.datePick.ms).getMinutes(), 0, 'the minutes are untouched');
+
+  merBtns(c).find(b => b.props['data-dp-mer'] === 'pm').props.onClick(fakeEv());
+  assert.equal(new Date(c.state.datePick.ms).getHours(), 21, 'and back again');
+});
+
+test('meridiem: a flip preserves a non-zero minute and keeps the draft timed', () => {
+  const c = make();
+  picker(c, 21);
+  c.dpSetTime('9:37pm');
+  merBtns(c).find(b => b.props['data-dp-mer'] === 'am').props.onClick(fakeEv());
+  const d = new Date(c.state.datePick.ms);
+  assert.equal(d.getHours(), 9);
+  assert.equal(d.getMinutes(), 37);
+  assert.equal(c.state.datePick.dpTimed, true, 'the flip writes through dpSetTime, so the draft is timed');
+});
+
+test('meridiem: with no clock in the field there is nothing to flip', () => {
+  const c = make();
+  const B = c.startOfDay(Date.now());
+  c.state.tasks = [c.normalizeTask({ id: 'u', name: 'u', type: 'Proportional',
+    start: B, end: B + DAY, priority: 4, deps: [], pct: 0, planned: 60, spent: 0 })];
+  c.openDatePick(fakeEv(), 'u', 'start');
+  assert.equal(timeField(c).props.defaultValue, '', 'a bare date does not masquerade as 12:00am');
+  // The control is present but inert: neither segment claims to be the answer, because there is no
+  // answer yet. Rendering "AM" as selected would be a lie the user cannot see through.
+  assert.equal(merBtns(c).filter(b => b.props['data-dp-on'] === '1').length, 0);
+});
+
+test('meridiem: typing a bare hour then flipping gives the other one', () => {
+  const c = make();
+  picker(c, 22);                       // 10pm — the owner's actual case
+  c.dpSetTime('9');
+  assert.equal(new Date(c.state.datePick.ms).getHours(), 21, 'inherited pm, per 2026-08-19');
+  merBtns(c).find(b => b.props['data-dp-mer'] === 'am').props.onClick(fakeEv());
+  assert.equal(new Date(c.state.datePick.ms).getHours(), 9, 'and the mistake is one click to undo');
+});

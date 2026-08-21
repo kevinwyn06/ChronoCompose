@@ -372,10 +372,11 @@ not by two renderers that happen to agree (the drift this repo has already paid 
 
 The Dashboard has four tabs (`dashMode`): **Overview · Plan · Focus · Review**. Overview
 (`renderDashOverview`) is the sheet + Gantt split and owns the six scheduling views via `state.planView`;
-**Plan** (`renderDashPlan`, V2.10) owns Selection and Matrix via `state.planTab`. The split is a statement
-about what each surface answers: the six Overview views place work **in time**, the two Plan views decide
-**what is in today**. Before V2.10 all eight sat in one toggle, which read as "pick one instead of the
-others" rather than "decide, then place".
+**Plan** (`renderDashPlan`, V2.10) owned Selection and Matrix via `state.planTab`. The split was a
+statement about what each surface answers: the six Overview views place work **in time**, the Plan views
+decide **what is in today**. Before V2.10 all eight sat in one toggle, which read as "pick one instead of
+the others" rather than "decide, then place". Both later moved: block 27a rehomed Selection into
+Overview's left pane, and A8b (2026-08-21) deleted the Matrix outright.
 
 Both tabs render their sub-view selector through `renderFilterBar`'s leading slot, so the same chips and
 sort narrow every surface. `dashMode` and `planView` both survived a meaning change in V2.10 and are read
@@ -384,11 +385,13 @@ board before the rename and the selection surface after it (disambiguated by a `
 `planView` may still hold `'select'`/`'matrix'`, which have left that enum. Both failures land a returning
 user on a surface they never chose, without erroring — hence the named helpers and their tests.
 
-**Selection** is a 3×2 grid of derived origin columns (`originOf`: existing/new/extra) by inclusion rows;
-**Matrix** is an Eisenhower grid whose urgency axis is derived from dates while importance is read from
-`priority`. Both render `planCard` and share one card-drag path; the drop zone string encodes only the
-target row/half, so sideways movement is structurally a no-op rather than a suppressed gesture.
-`unpressed` renders visibly distinct (dashed edge) so undecided work is never displayed as decided work.
+**Selection** is a set of derived origin buckets (`originOf`) rendered as `planCard`s.
+**Matrix** was an Eisenhower grid beside it, sharing one card-drag path. It is **deleted** (owner ruling
+A8b, 2026-08-21) along with `renderMatrixView`, the Eisenhower axes, and the shared drag: the surface was
+retired in V5 block 32 for never touching inclusion or scheduling, and once Task 8 made ticking the
+Selection gesture the drag had no consumer left. Do not resurrect either from git history without an
+owner decision — this deletion IS the decision. `unpressed` renders visibly distinct (dashed edge) so
+undecided work is never displayed as decided work.
 
 **Selection band sizing, and the two defects it took to get right (2026-08-13).** Each column carries its
 own divider, and its two halves are balanced by pure flexbox — `flex-basis` = content height,
@@ -457,7 +460,7 @@ reach the Extra column.
 column renders only while occupied; `new` admits both a window that opened today and a snooze that ended
 today (`snoozeEndedToday`, read off `snoozeUntil`, which is never cleared on expiry). `rescheduleToToday`
 is the Overdue card's `→ Today` control — per card, never per column, because a bulk date rewrite is the
-same lossy gesture the Matrix drag rules already refuse.
+same lossy gesture this app has always refused.
 
 Drags that must also place a text caret — sheet row, section header, column reorder — cannot call
 `preventDefault` on mousedown, so text-selection suppression happens at **drag begin** instead: a
@@ -680,14 +683,20 @@ The multi-day grid (V4.1) is `renderMultiDayView` over N `renderDayColumn`s that
 one vertical scroll. Each column carries `data-tl-col` (its day, epoch-ms midnight) and `data-tl-today`;
 weekend columns are tinted and today's is accent-washed, and the day header shows the month on the first
 column and wherever a month turns over, so a straddling week still says which month each half is in. Inside
-a column the hours are readable without labels: an alternating band per hour plus a stronger line every
-sixth hour, both `pointerEvents:none` so neither can intercept a block drag, with each band painted before
-its own hour line.
+a column the hours are readable without labels: a stronger line every sixth hour, `pointerEvents:none` so
+it cannot intercept a block drag. The alternating band per hour that V4.1 added beside it was **deleted**
+by the owner on 2026-08-20 (Task 17): the stronger sixth-hour line carries the same rhythm without
+striping the surface the blocks are read against.
 
-Blocks distinguish **locked** from **auto-scheduled** by marking the RARE case (V5 block 25b). A
-clock-fixed or hand-pinned block carries a `TL_LOCK_BORDER_PX` border in `--tl-lock-border` and a solid
-inset left rail; everything the app placed carries `TL_BLK_BORDER_PX`. The signal is border **width**
-first, so it survives greyscale, and the 📌/📍 glyphs remain the non-colour channel on top of that.
+Blocks used to distinguish **locked** from **auto-scheduled** by marking the RARE case with a heavier
+border (V5 block 25b, `TL_LOCK_BORDER_PX` in `--tl-lock-border`). **The owner CUT that on 2026-08-20**
+(Task 23), having been shown three restyled replacements: *"they look better. I just don't see the need
+for a locked indicator at all."* Every block carries `TL_BLK_BORDER_PX` now, on the timeline and on the
+Schedule agenda chip alike — the two carried the same signal deliberately, so they lost it together.
+`--tl-lock-border` is gone with it. `tests/e2e/block-colour.spec.js` asserts the ABSENCE (one border
+width across locked and auto blocks), because "no signal" can regress as quietly as a signal can.
+What survives says something else: a **dashed** border still means drag-pinned or a fixed window (the
+shape of the day, not its lock state), and the 📌/📍 glyphs still name why a block sits where it does.
 V5 block 25a **deleted** the diagonal hatch that used to mark auto-scheduled blocks, along with
 `--tl-hatch`: nearly everything is auto-scheduled, so the texture covered ~90% of the week and carried no
 information — the same measurement that retired `ambientRowBackground` in V2.9.
@@ -775,3 +784,56 @@ task with "Exact" unticked no longer generates a block-end notification. That is
 task's end genuinely floats, so there is no fixed end to announce.
 
 Tests mount the component in a Node VM with mocked runtime/storage. Browser QA uses localhost.
+
+## The 2026-08-20 owner round, surface by surface
+
+**Selection is two equal columns** (`selectionLayout`, Task 9). Five buckets stacked — Overdue/New/
+Continued on your plate, Upcoming/Snoozed not — with each COLUMN owning the scrollbar and each bucket
+header `position: sticky` inside it. Sections size to content; equal vertical bands were rejected because
+they starve a busy Continued to give an empty New the same room. Column widths are equal flex factors that
+read no count at all. `selectionColCount` is what the left pane's width floor reads, so the floor cannot
+drift from what is painted, and `selectionFlat` walks the same layout so j/k moves the way the eye does.
+
+**Timeline block controls** are a column of `HIT_MIN_PX` slots and the block's left padding follows the
+slot COUNT. Three of them appear only when the task has earned them (✕ unpin, ⧉ regroup, ↺ reset); the
+fourth, 💤 per-day snooze (Task 19), applies to every block there is and is therefore **hover-gated** —
+mounting it unconditionally took a `HIT_MIN_PX` column off the left of every block, which 34 drag specs
+reported at once. Hover-gated controls are children of the block that owns the hover, per the standing
+rule. `tests/e2e/_seed.js` strips the control glyphs out of a block's title, and 💤 had to join that list
+because it appears mid-drag.
+
+**The block hover card** (Task 18) replaced the native `title` string for blocks that belong to a task: a
+tooltip cannot carry a progress bar or two lines of different weight. `blockTooltipModel` is pure and
+decides which countdown LEADS, which is a statement about who chose the time — a start clock leads with
+"starts in", a deadline-only task with "due in" and its packer-chosen start as the secondary, a running
+task with a progress bar and "ends in" alone. The card is a SIBLING of the block, never a child: the block
+clips its own overflow to ellipsise long titles, and a card inside it would be clipped with them.
+
+**Day-bound handles** (Task 12) are a `HIT_MIN_PX` hit box carrying a 3px bar and a grip, positioned at
+the bound's own line rather than at the body edge — because `TL_BOUND_PAD_MIN` of hatched room opens in
+the drag direction on drag-start and moves those two apart. `px` is computed from the UNPADDED window so
+opening the room never rescales the day under the cursor; only `H` grows. The readout is the 12-hour
+formatter; the STORED bound stays `HH:MM`, which is the settings format and not a rendering.
+
+**Drag autoscroll** (Task 20) is one helper called from `onMouseMove` before any branch decides what the
+move means, wired to the timeline drawer and the sheet. Speed ramps with depth into the edge zone, and it
+is driven by pointer MOVES rather than a timer: a stationary pointer stops scrolling, and "stops when the
+drag ends" is true by construction rather than by clearing an interval. A consequence worth knowing when
+writing specs: a drag that reaches an edge scrolls the container, so one instant in the day can sit at
+different viewport y's during a single gesture — assert the readout, not the box.
+
+**The Schedule view's now-marker** (Task 24) is a rule BETWEEN entries, not the day timeline's
+absolutely-positioned `nowLine`: an agenda list has no pixel-per-minute axis. It sorts into the same
+ordered `items` list the chips and Points merge into, so it lands between the right two entries, and a tie
+goes to the block — the rule marks where you are up TO.
+
+**The sheet** gained two columns where there was one cell with an arrow (Task 27). `planned` keeps its key
+so saved `colW`/`colHidden`/`colOrder` still name the column they always named, and `orderedCols` appends
+`allot` to any older order. `planned` stays three-valued — `null` is an em dash, `0` renders `0:00` — and
+both columns render `H:MM`, never the clock formatter. `taskFlowCell` survives as the CARD's rendering,
+where the arrow still says which number feeds which because a card has no columns.
+
+**Deleted this round**: the capacity readout, both the Today header figure and the per-day Week/4-Day
+strip (`CAP_STRIP_H` and the reserved height with it); the Today view's active-task banner, Pomodoro bar
+and music dock (Focus keeps the panel and the dock, and the pomo state machine is untouched); the
+alternating hour band; and the `+15 min` button, replaced by a box that SETS today's tracked minutes.

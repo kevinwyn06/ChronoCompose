@@ -20,18 +20,23 @@ test('ghostSpan: a solid task (both dates set) returns the real span, no ghost e
   assert.strictEqual(g.ghostEnd, false);
 });
 
-test('ghostSpan: a double-ghost (both null) derives today→today+1d and never goes overdue', () => {
+test('ghostSpan: a double-ghost (both null) derives TODAY ONLY and never goes overdue', () => {
   const c = make();
   const t = mk(c);
   const g = c.ghostSpan(t, TODAY);
   assert.strictEqual(g.start, TODAY);
-  assert.strictEqual(g.end, TODAY + DAY);
+  // owner 2026-08-20 (task 11): the span CLOSES at the last instant of today, not at tomorrow's
+  // midnight. Every window test in the app is inclusive of the end DAY, so the old exclusive boundary
+  // made an undated task occupy today AND tomorrow.
+  assert.strictEqual(g.end, TODAY + DAY - 1);
+  assert.strictEqual(c.startOfDay(g.end), TODAY, 'one day, by the test every caller actually applies');
   assert.strictEqual(g.ghostStart, true);
   assert.strictEqual(g.ghostEnd, true);
   // Re-derived "tomorrow": the span tracks the new today, so it is still not overdue.
   const g2 = c.ghostSpan(t, TODAY + DAY);
   assert.strictEqual(g2.start, TODAY + DAY);
   assert.ok(g2.end > TODAY + DAY);
+  assert.strictEqual(c.startOfDay(g2.end), TODAY + DAY, 'and it is still exactly one day');
 });
 
 test('ghostSpan: a half-ghost (future start, no end) derives a non-overdue end after the start', () => {

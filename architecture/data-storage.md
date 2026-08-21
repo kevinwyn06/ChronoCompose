@@ -17,6 +17,8 @@ Scheduling-specific fields:
 | `included` | `true` means pressed into today; `false`/`null` are unpressed. A dateless task defaults `true`; a task with either date defaults `null`, so hand-created and Calendar-imported future work does not enter today early. |
 | `includedExplicit` | Boolean provenance for `included`, added by migration `0014`. `true` only when the user manually presses work into today; `false` for dateless automatic inclusion, dated bound-derived inclusion, unpresses, defaults, and migrated legacy rows. It lets incoming sync distinguish a current decision from the old unconditional `included:true` default. |
 | `snoozeIndef` | Boolean DATELESS snooze, added by migration `0016` (owner, 2026-08-19). `snoozeUntil` answers “not until when”; this answers “not until something happens”, and the two are independent — an expired `snoozeUntil` still falls back to `included`, and this one does not expire at all. `snoozeWakeReason(t, B, now)` is the only thing that ends it: an explicit include, a real start arriving, a due date passing, or the last blocking predecessor completing. It asks “is it woken”, never “was it woken TODAY”, so a wake missed while the app was closed still fires. `NOT NULL DEFAULT false` — unlike `uncompressable` there is no “never decided” state to preserve. In `SYNC_FIELDS`. |
+| `snoozeDays` | The set of days this task is put away **on** — `ymd` day keys (`"2026-08-20"`), added by migration `0018` (owner, 2026-08-20). `snoozeUntil` says "not until this date"; this says "not on THAT day", and the two are deliberately independent, because skipping Thursday's run is not the same statement as putting the whole task away until Friday. Task-level rather than a `recur.overrides` entry so one field covers both a repeat's occurrence and a plain multi-day window — a window has no occurrence index to hang an override on. Read via `isDaySnoozed`, never directly; `normalizeTask` coerces a junk value to `[]` because every day predicate reads it. In `SYNC_FIELDS`; `jsonb not null default '[]'` (the shape `deps`/`labels`/`pin` already use). |
+| `onListSince` | The day this task **arrived on today's list**, added by migration `0017` (owner, 2026-08-20). A `ymd` day KEY (`"2026-08-20"`), **never epoch ms**: it is only ever compared for identity, so a key is sufficient, and unlike an epoch day-start it cannot be shifted a day by a DST boundary. `null` = not on the list. It is set when the task arrives, held unchanged across days, and cleared when it **leaves** — that clear-and-re-set cycle is what lets triage tell a NEW row from one that has been sitting there. Leaving means the user took it off the list (unticked, snoozed, completed, archived) or a repeat moved into a gap. **A window that merely passed is NOT a departure** (owner ruling A8c, 2026-08-21): an overdue task is still owed, so it HOLDS the key it has and a rescue therefore returns it to Continued rather than New. The asymmetry is deliberate — `onListNow` still reports false for an overdue task, so one can never *acquire* a key by going late, only keep one. Read the rule from `isOverdueBucket`, which `originOf` and `sweepOnListSince` share so the bucket and the sweep cannot drift apart. Written from the once-per-day maintenance pass only, **never from a render path**. In `SYNC_FIELDS`; nullable `text` column added by migration `0017`. |
 | `rowHidden` | Boolean sheet-row visibility, added by migration `0015`. `true` replaces the ordinary row with a reversible compact marker; it does not archive/delete the task or change scheduling, inclusion, Calendar identity, or persisted order. |
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
@@ -86,12 +88,13 @@ or a milestone; undated tasks have no measurable age and are left to Extra/unpla
 `JOURNAL_AGING_MAX` (8): a review cue, not a backlog dump.
 
 `pp-prefs` view state includes `groupBy` (`section` | `inclusion` | `none`), `planView` (the Plan tab's
-sub-view, now including `select` and `matrix`), and `collapsedSections` (band key → truthy when
+sub-view, which no longer includes `select` or `matrix`), and `collapsedSections` (band key → truthy when
 collapsed). The inclusion bands use the reserved keys `__incl_in` / `__incl_out`; **absence of a key is
 not "expanded"** for `__incl_out`, which defaults to collapsed, so collapse toggles pass the effective
-painted state rather than reading the stored value alone. `pp-settings` gained `eisenhowerUrgentDays`
-(default 2). The Selection and Matrix views add **no** persisted task fields — they write the existing
-`included`, `snoozeUntil`, and `priority`.
+painted state rather than reading the stored value alone. `pp-settings` had an `eisenhowerUrgentDays`
+setting; it was **deleted with the Matrix** (owner ruling A8b, 2026-08-21) and a stale copy in a saved
+`pp-settings` is simply ignored. The Selection view adds **no** persisted task fields — it writes the
+existing `included` and `snoozeUntil`.
 
 **The batched sync migration (0008, block 10).** `snoozeUntil` and the new `blocking` field entered
 `SYNC_FIELDS` **together**, as the one batch the backlog asked for rather than a migration per field.
@@ -237,6 +240,29 @@ select column_name, is_nullable, data_type, column_default
   from information_schema.columns
  where table_name='tasks' and column_name='snoozeIndef';
 ```
+
+**On-list age (migration 0017, 2026-08-20).** `onListSince` is a **nullable `text`** column on
+`public.tasks` and in `SYNC_FIELDS`. It is a `ymd` day key rather than a bigint on purpose: the value is
+compared for identity and never for arithmetic, and a string key is immune to the DST edges that move an
+epoch day-start by an hour. Apply `0017_on_list_since.sql` before deploying a client carrying the field;
+an older schema rejects every task write that names a missing column. As with 0013-0016, the fingerprint
+change causes one expected full task re-push on first upgraded sync. It mirrors because "how long has
+this been sitting on my list" is a property of the work, not of the device that first noticed it — an
+unmirrored field would restart every task's age on a second device.
+
+**Per-day snooze (migration 0018, 2026-08-20).** `snoozeDays` is a **`jsonb not null default '[]'`**
+column on `public.tasks` and in `SYNC_FIELDS`. jsonb rather than `text[]` because every other
+array-valued field in this table (`deps`, `labels`, `pin`) is already jsonb, so the mirror stays one
+shape. Apply `0018_snooze_days.sql` before deploying a client carrying the field; an older schema
+rejects every task write that names a missing column. As with 0013–0017, the fingerprint change causes
+one expected full task re-push on first upgraded sync.
+
+A **one-time** backfill (`migrateOnListSince`, once-flag `on-list-since-backfill`) seeds existing
+workspaces from the occurrence window: a window that opened on or before today yields that open day; a
+later window, and a task with no dates, stay `null`; a repeat resolves against its live occurrence, not
+the series anchor. **That derivation is a migration only.** Deriving arrival from window-opening was
+considered as a standing rule and rejected — the two are different events — which is exactly why the
+value is otherwise observed by a maintenance pass rather than computed by a reader.
 
 **The two 2026-08-13 additions share one principle: a container's name is not one of the user's tags.**
 

@@ -60,7 +60,8 @@ test('a task whose window opens today reports origin `new`', () => {
   const { c, T } = ctx();
   const t = untouched(c, { start: T, end: T + 3 * DAY });
   c.state.tasks = [t];
-  assert.equal(c.originOf(t), 'new', 'today brought it in, and the New column is where you cheaply say no');
+  c.sweepOnListSince(c.state.tasks, T, Date.now());
+  assert.equal(c.originOf(t), 'new', 'today brought it in, and the New bucket is where you cheaply say no');
 });
 
 test('a task whose window opens today is NOT filed under the EXCLUDED band header', () => {
@@ -68,11 +69,12 @@ test('a task whose window opens today is NOT filed under the EXCLUDED band heade
   const t = untouched(c, { start: T, end: T + 3 * DAY });
   c.state.tasks = [t];
   assert.equal(c.isOptedOut(t), false, 'opted out is a decision the user never made');
-  assert.equal(c.inclusionRow(t), 'included');
+  assert.equal(c.inclBand(t), 'included');
   assert.equal(c.isUndecided(t), false);
+  c.sweepOnListSince(c.state.tasks, T, Date.now());
   const proj = c.selectionProjection(c.state.tasks);
-  assert.equal(proj.cells.new.included.length, 1, 'New / Included');
-  assert.equal(proj.cells.new.excluded.length, 0, 'and nothing under New / Excluded');
+  assert.equal(proj.cells.new.length, 1, 'it is in New');
+  assert.equal(proj.colCount.upcoming, 0, 'and not parked in the Upcoming fallback');
 });
 
 test('auto-inclusion reaches the top-hover chip too', () => {
@@ -94,6 +96,7 @@ test('a snooze expiring today auto-includes and reports origin `new`, not `exist
   assert.equal(c.snoozeEndedToday(t), true, 'fixture sanity: the snooze runs out today');
   assert.equal(c.isActiveOn(t, T), true);
   assert.ok(allotOf(c, t, T) > 0);
+  c.sweepOnListSince(c.state.tasks, T, Date.now());
   assert.equal(c.originOf(t), 'new', 'the day it comes back is the day you need to be told');
 });
 
@@ -104,17 +107,24 @@ test('a snooze expiring on the day the window opens still brings the task back',
   c.state.tasks = [t];
   assert.equal(c.isInheritedToday(t), false, 'fixture sanity: inheritance cannot rescue this one');
   assert.equal(c.isActiveOn(t, T), true);
+  c.sweepOnListSince(c.state.tasks, T, Date.now());
   assert.equal(c.originOf(t), 'new');
 });
 
-test('a snooze that expired three days ago and was never seen still brings the task back, as `existing`', () => {
+test('a snooze that expired three days ago and was never seen still brings the task back', () => {
   const { c, T } = ctx();
   const t = untouched(c, { start: T - 5 * DAY, end: T + 3 * DAY, snoozeUntil: T - 3 * DAY });
   c.state.tasks = [t];
   assert.equal(c.snoozeEndedToday(t), false, 'the expiry day is long gone');
   assert.equal(c.isActiveOn(t, T), true, 'a missed expiry must not strand the task');
-  assert.equal(c.originOf(t), 'existing', 'it joined the existing column after its one day in New');
-  assert.notEqual(c.originOf(t), 'extra', 'and it is not a someday pick');
+  c.sweepOnListSince(c.state.tasks, T, Date.now());
+  /* PP-EXT (owner 2026-08-20): `onListSince` is OBSERVED, and this workspace has no observation of the
+     days the app was shut. The first sweep that sees the task on the list therefore stamps TODAY, so it
+     reads `new` rather than `continued`. That is inherent to an observed field rather than a defect —
+     and it is exactly why Task 3 ships a one-time backfill for workspaces that predate it. What matters
+     for THIS test is unchanged: the task came back and is not parked in the someday fallback. */
+  assert.equal(c.originOf(t), 'new');
+  assert.notEqual(c.originOf(t), 'upcoming', 'and it is not a someday pick');
 });
 
 // --- boundaries: what auto-inclusion must NOT swallow -------------------------------------------------
@@ -137,7 +147,8 @@ test('a dateless someday pick is NOT auto-included, snoozed or not', () => {
   for(const t of c.state.tasks){
     assert.equal(c.isScheduled(t), false, 'fixture sanity: dateless');
     assert.equal(c.isActiveOn(t, T), false, t.id + ': the someday pile must not pour into today');
-    assert.equal(c.originOf(t), 'extra');
+    c.sweepOnListSince([t], T, Date.now());
+    assert.equal(c.originOf(t), 'upcoming');
   }
 });
 
@@ -160,25 +171,43 @@ test('auto-inclusion is a TODAY rule — it does not change any other day', () =
 
 // --- saying no must stay one gesture (block 24 makes it cheap; it must WORK today) --------------------
 
-test('opting out of an auto-included task actually removes it from today', () => {
+/* PP-EXT (owner 2026-08-20): the REMOVAL these two guard is real and still required — an opt-out that
+   auto-inclusion immediately undoes is not an opt-out. What changed is which verb performs it. It used to
+   be a hidden snooze tail inside `setIncludedOff`; that tail made "Snooze today" and "Take out of today"
+   write identical state, which is the defect the owner reported. Snooze is now the only verb that
+   removes, and it is what the UI offers, so these assert through it. */
+
+test('snoozing an auto-included task actually removes it from today', () => {
   const { c, T } = ctx();
   const t = untouched(c, { start: T, end: T + 3 * DAY });
   c.state.tasks = [t];
   assert.equal(c.isActiveOn(t, T), true, 'in first');
-  c.setIncludedOff(t.id);
+  c.snoozeToday(t.id);
   const after = c.state.tasks.find(x => x.id === t.id);
   assert.equal(c.isActiveOn(after, T), false, 'an opt-out that auto-inclusion immediately undoes is not an opt-out');
   assert.equal(c.isOptedOut(after), true);
   assert.equal(allotOf(c, after, T), 0);
 });
 
-test('opting out of a snooze-returned task actually removes it from today', () => {
+test('snoozing a snooze-returned task actually removes it from today', () => {
   const { c, T } = ctx();
   const t = untouched(c, { start: T - 2 * DAY, end: T + 3 * DAY, snoozeUntil: T });
   c.state.tasks = [t];
-  c.setIncludedOff(t.id);
+  c.snoozeToday(t.id);
   const after = c.state.tasks.find(x => x.id === t.id);
   assert.equal(c.isActiveOn(after, T), false);
+});
+
+test('unpressing alone only un-chooses — it does not pretend to remove', () => {
+  const { c, T } = ctx();
+  const t = untouched(c, { start: T, end: T + 3 * DAY });
+  c.state.tasks = [t];
+  c.setIncludedOff(t.id);
+  const after = c.state.tasks.find(x => x.id === t.id);
+  assert.equal(after.included, null, 'un-chosen');
+  assert.equal(after.snoozeUntil, null, 'and no hidden snooze written on the way out');
+  assert.equal(c.isActiveOn(after, T), true,
+    'auto-inclusion legitimately brings it back: the window IS open, and hiding that was the old lie');
 });
 
 // --- the invariant the block must not break -----------------------------------------------------------

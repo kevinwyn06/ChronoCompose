@@ -7,16 +7,27 @@ const { make, activeTask, DAY } = require('./_load.js');
 // task's own triggers can press it back later instead of it being stuck out of today forever. The one
 // subtlety: activeTask's window covers yesterday, so V2.2 inheritance would undo a bare unpress on the
 // spot - hence the snooze, which is what makes the gesture actually take effect.
-test('setIncludedOff: unpresses (never writes false) and snoozes inherited work; one commit', () => {
+/* PP-EXT (owner 2026-08-20): these tests used to assert that `setIncludedOff` SNOOZES work that
+   inheritance or auto-inclusion would otherwise pull straight back. That tail is deleted — it is exactly
+   why the owner reported "Snooze today" and "Take out of today" as "practically the exact same thing".
+   The division of labour is now explicit: removing work from today needs a duration, so SNOOZE removes
+   and unpress only un-chooses. The tests below therefore assert the honest new contract — unpress writes
+   `included` and nothing else — and the removal behaviour they were guarding is asserted through the
+   snooze verbs instead, which is the path the UI actually offers (see Task 8: unticking opens the snooze
+   window). */
+
+test('setIncludedOff: unpresses, never writes false, and touches nothing else; one commit', () => {
   const c = make();
-  const today = c.startOfToday();
   const t = activeTask(c, { snoozeUntil: Date.now() + DAY });
+  const before = c.state.tasks;
   c.state.tasks = [t];
+  const was = t.snoozeUntil;
   const histLen = c.history.length;
   c.setIncludedOff(t.id);
   assert.strictEqual(c.state.tasks[0].included, null, 'unpressed, not off');
-  assert.strictEqual(c.state.tasks[0].snoozeUntil, today + DAY, 'inherited work is snoozed through today');
+  assert.strictEqual(c.state.tasks[0].snoozeUntil, was, 'the snooze is left exactly as it was');
   assert.strictEqual(c.history.length, histLen + 1, 'exactly one undo entry');
+  void before;
 });
 
 test('setIncludedOff on work nothing would inherit leaves the snooze alone', () => {
@@ -305,5 +316,8 @@ test('indefinite snooze: a woken task reads as new, not inherited', () => {
   const B = c.startOfToday();
   const t = activeTask(c, { snoozeIndef: true, start: B + 9 * 3600000, startClock: true });
   c.state.tasks = [t];
+  // A woken task is back ON the list, and the sweep is what records that — the bucket is read off the
+  // key it stamps rather than re-deriving "woken" a second time inside originOf.
+  c.sweepOnListSince(c.state.tasks, B, Date.now());
   assert.equal(c.originOf(t), 'new');
 });

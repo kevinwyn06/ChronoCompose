@@ -34,7 +34,7 @@ test('a plan card carries the list row controls: complete, tags, inclusion, time
   const B = c.startOfToday();
   const t = activeTask(c, { id:'t', start:B, end:B+DAY, included:true, labels:['work'], planned:60 });
   c.state.tasks = [t];
-  const card = c.planCard(t, 'incl:included');
+  const card = c.planCard(t);
   const ttl = titles(card).join(' | ');
 
   assert.match(ttl, /Click to complete/, 'complete + priority');
@@ -42,7 +42,10 @@ test('a plan card carries the list row controls: complete, tags, inclusion, time
   assert.match(ttl, /Add a tag/, 'tag add');
   assert.match(ttl, /click to change/, 'inclusion control');
   assert.match(ttl, /Start timer|Stop timer/, 'timer');
-  assert.match(ttl, /minutes worked/, 'add-time');
+  // Task 26 (2026-08-20): the `+15` button became a box that SETS today's figure, so the shared
+  // builder's title changed with its behaviour. The parity rule is unchanged — the card offers what
+  // the row offers — which is why this asserts the new control rather than dropping the line.
+  assert.match(ttl, /Time worked today/, 'set-time-worked box');
   assert.match(ttl, /Planned time/, 'planned is editable on the card');
   assert.match(ttl, /description/i, 'description disclosure');
 });
@@ -52,22 +55,15 @@ test('a card opens details on click, activates on double-click, and opens the ro
   const B = c.startOfToday();
   const t = activeTask(c, { id:'t', start:B, end:B+DAY });
   c.state.tasks = [t];
-  const card = c.planCard(t, 'incl:included');
-  ['onClick','onDoubleClick','onContextMenu','onMouseDown'].forEach(k =>
+  const card = c.planCard(t);
+  ['onClick','onDoubleClick','onContextMenu'].forEach(k =>
     assert.strictEqual(typeof card.props[k], 'function', 'card wires ' + k));
+  // A8b (2026-08-21): `onMouseDown` is gone with the card drag — there is no surface left to start one.
+  assert.strictEqual(typeof card.props.onMouseDown, 'undefined', 'no card drag to arm');
 });
 
-test('the card drag still owns mousedown, so parity did not steal the include/exclude gesture', () => {
-  const c = make();
-  const B = c.startOfToday();
-  const t = activeTask(c, { id:'t', start:B, end:B+DAY });
-  c.state.tasks = [t];
-  c.planCard(t, 'incl:included').props.onMouseDown({ button:0, clientX:5, clientY:5,
-    stopPropagation(){}, preventDefault(){} });
-  assert.ok(c.cardPending && c.cardPending.id === 't', 'mousedown arms the card drag');
-  assert.strictEqual(c.cardPending.zone, 'incl:included');
-});
-
+// A8b (2026-08-21): the card-drag test is DELETED with `cardPointerDown`. Parity never depended on the
+// drag — it is about the two surfaces offering the same CONTROLS, which the tests above still pin.
 test('card description state is separate from the sheet, so a card cannot offset the Gantt rows', () => {
   const c = make();
   const t = activeTask(c, { id:'t' });
@@ -134,6 +130,8 @@ test('the active-state inclusion glyph is a checkbox, never a play triangle', ()
   assert.match(title, /timer running/);
 });
 
+const got0 = (c) => c.state.tasks.find(x => x.id === 'late');
+
 test('rescheduleToToday moves the due date to today and presses the task in', () => {
   const c = make();
   const B = c.startOfToday();
@@ -141,13 +139,22 @@ test('rescheduleToToday moves the due date to today and presses the task in', ()
   c.state.tasks = [late];
   assert.strictEqual(c.isOverdueToday(late), true, 'precondition: overdue');
 
+  // The task's HISTORY is played out first, because that is the order it happens in: the sweep runs on
+  // each day the task lives, long before the user reaches for "→ Today".
+  c.sweepOnListSince(c.state.tasks, B - 2 * DAY, Date.now());   // on the list two days ago: key stamped
+  assert.strictEqual(got0(c).onListSince, c.ymdOf(B - 2 * DAY), 'it was on the list back then');
+  c.sweepOnListSince(c.state.tasks, B, Date.now());             // window has passed: the key is HELD
+  assert.strictEqual(got0(c).onListSince, c.ymdOf(B - 2 * DAY),
+    'A8c: going overdue is not leaving the list, so the arrival day survives');
+
   c.rescheduleToToday('late');
-  const got = c.state.tasks.find(x => x.id === 'late');
+  const got = got0(c);
   assert.strictEqual(c.isOverdueToday(got), false, 'no longer overdue');
   assert.strictEqual(got.included, true, 'rescuing work from overdue also decides to do it');
-  // It lands in Existing, not New: its window still covers yesterday and it is still unfinished, so it
-  // genuinely IS a leftover. Rescheduling changes the deadline, not the history.
-  assert.strictEqual(c.originOf(got), 'existing', 'and it leaves the Overdue column');
+  // A8c, ruled by the owner 2026-08-21: a rescued overdue task is old work still being carried, not
+  // something newly decided today. `rescheduleToToday` is unchanged — `tickOnToday` only stamps a NULL
+  // key — so this follows entirely from the sweep no longer treating a passed window as a departure.
+  assert.strictEqual(c.originOf(got), 'continued', 'and it leaves the Overdue bucket carrying its age');
 });
 
 test('the Overdue column renders only when something is in it', () => {

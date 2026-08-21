@@ -102,6 +102,28 @@ into `mergeCalendarEvents`, which keeps local name, dates, all-day shape, and re
 until the write drains; `planned`, `goal`, `description`, and blocking retain their existing
 local-authority rules.
 
+**Closing the insert loop is a synced write (2026-08-20).** `stampEventId` writes `eventId` and
+`calendarId`, and **both are in `SYNC_FIELDS`**. It was the one write to mirrored columns that skipped
+both funnels — a bare `setState` + `saveTasks`, with no `updatedAt` stamp and no Supabase push. That is
+what produced the reported "double import": the server never learned the link, so the next echo of the row
+it *did* hold arrived strictly newer (its `touch_updated_at` trigger guarantees that), `mergeRemoteOverLocal`
+assigned `eventId = null` back over the stamp, and the following commit saw `!t.eventId` at the outbound
+insert guard and queued a **second** insert. Two real Google events for one task, deterministically — not a
+race. `stampEventId` now calls `stampUpdated` and `syncOut`, which is all LWW ever needed from it.
+
+The rule, stated generally: **any write to a `SYNC_FIELDS` column must carry a fresh `updatedAt` and reach
+`syncOut`, whatever else it skips.** `stampEventId` deliberately skips the other two — no `commit()`, because
+Google reporting the id it assigned is not a user step and an undo that reverted the `eventId` would re-arm
+the very insert this prevents; and no `gcalSyncOut`, because diffing the id Google just handed us straight
+back out to Google would queue an immediate PATCH of the event we just created. Skipping the undo snapshot
+and the outbound Calendar diff is fine. Skipping the clock and the Supabase push was the bug.
+
+A second, distinct duplication mechanism is recorded but **not** fixed here: `mergeCalendarEvents` builds its
+`byEid` map once from the task array it is handed, so two merges racing on the same pre-state each add a
+task, producing two task ids sharing **one** `calendarId|eventId`. Note also that `byEid` keys on `eventId`
+alone while `handled` and the prune/verify paths key on `calendarId|eventId` — three call sites that do not
+agree on what identity means. See `docs/superpowers/findings/2026-08-20-gcal-double-import.md`.
+
 Five ordering guards close races around that queue. Calendar restoration after account sign-in is chained
 behind the initial Supabase **task** reconciliation, so an import cannot mint a second local task id while
 the already-linked row is still waiting in the cloud pull. A failed initial pull releases its promise gate

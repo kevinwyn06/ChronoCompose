@@ -46,7 +46,9 @@ test.describe('Overview left pane: the rehoming', () => {
 
     /* The left pane really holds Selection... */
     await expect(page.locator('[data-left-surface="select"]')).toHaveCount(1);
-    await expect(page.locator('[data-dropzone="incl:included"]').first()).toBeVisible();
+    /* Task 8 retired the Selection drop zones with the card drag; a bucket list is what proves the
+       surface is rendered now. */
+    await expect(page.locator('[data-selbucket]').first()).toBeVisible();
 
     /* ...and the right pane is still a scheduling view with real width. "Merged into the left one,
        NOT replacing the right panel" is precisely this assertion: a rehoming that swallowed the whole
@@ -70,7 +72,7 @@ test.describe('Overview left pane: the rehoming', () => {
 
     /* Real pointer input on each surface button, and the pane content changes to match. */
     /* V5 block 32: 'matrix' dropped from this sweep — the surface is retired and its button is gone. */
-    for (const [key, marker] of [['select', '[data-dropzone]'], ['list', '[data-task-id]']]) {
+    for (const [key, marker] of [['select', '[data-selbucket]'], ['list', '[data-task-id]']]) {
       const btn = page.locator(`[data-surface-btn="${key}"]`);
       const b = await btn.boundingBox();
       /* Owner tenet: clickboxes are generous, and the glyph is not the hit box. 24 CSS px inside the
@@ -96,7 +98,7 @@ test.describe('Overview left pane: the rehoming', () => {
 
     /* Every rendered column stays readable — the floor block 26 refused to have deleted, re-derived.
        Measured, because the floor is a CSS min() that only the engine resolves. */
-    const cols = await page.locator('[data-selhalf$="-included"]').evaluateAll(
+    const cols = await page.locator('[data-selbucket]').evaluateAll(
       (els) => els.map((e) => e.getBoundingClientRect().width));
     expect(cols.length, 'several origin columns are on screen').toBeGreaterThan(1);
     cols.forEach((w) => expect(w, 'no column is crushed').toBeGreaterThan(90));
@@ -112,10 +114,11 @@ test.describe('Overview left pane: the rehoming', () => {
     const viewport = page.viewportSize();
     expect(left.width, 'the floor is capped, not unbounded')
       .toBeLessThan(viewport.width * 0.85);
-    /* Block 30a removed the quick swap this used to assert on. The surviving proof that the SURFACE
-       (not just the pane) came across is block 24a's per-column half, which only Selection renders. */
-    await expect(page.locator('[data-selhalf]').first(),
-      'the block-24a per-column bands came across with the surface').toBeVisible();
+    /* Block 30a removed the quick swap this used to assert on, and task 8 removed the per-column
+       Included/Excluded halves that replaced it. The surviving proof that the SURFACE (not just the
+       pane) came across is a bucket list, which only Selection renders. */
+    await expect(page.locator('[data-selbucket]').first(),
+      'the five-bucket partition came across with the surface').toBeVisible();
   });
 });
 
@@ -125,7 +128,7 @@ for (const theme of ['light', 'dark']) {
   test(`SHOT: Overview with Selection in the left pane (${theme})`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await bootPlan(page, 'select', { theme, tasks: busy() });
-    await expect(page.locator('[data-dropzone="incl:included"]').first()).toBeVisible();
+    await expect(page.locator('[data-selbucket]').first()).toBeVisible();
     await page.screenshot({ path: shot(`27-overview-select-${theme}.png`) });
   });
 

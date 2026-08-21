@@ -1,3 +1,9 @@
+/* DELETED 2026-08-20 (Task 28): the tests removed here rendered `renderCapacityBar`, and the owner
+ * deleted that readout — both the Today header figure and the per-day strip under the Week/4-Day
+ * columns. The ARITHMETIC they were built on is not gone and is still asserted in this file:
+ * `dayCapacity` answers the same two numbers, and it is the pool-agreement invariant that matters, not
+ * the bar that drew it. (Task 29 then removes the out-param behind `dayCapacity` itself, separately.) */
+
 // Chain 4 / block 21 — the capacity indicator, and past-day journal figures.
 //
 // The indicator answers the one question nothing on screen answers: "how much have I said yes to,
@@ -275,27 +281,6 @@ test('a day already past has no capacity to report — null, not a zero ratio', 
   assert.equal(c.dayCapacity(today - DAY), null, 'yesterday');
   assert.ok(c.dayCapacity(today), 'today still reports');
   assert.ok(c.dayCapacity(today + DAY), 'and tomorrow');
-});
-
-test('the indicator renders both figures, with over-subscription marked in the DOM', () => {
-  const c = make();
-  poolDay(c, 540);
-  const today = c.startOfToday();
-  c.state.tasks = [activeTask(c, { id: 'a', planned: 120 })];
-  const under = c.renderCapacityBar(today);
-  assert.equal(under.props['data-cap-demand'], '120');
-  assert.equal(under.props['data-cap-pool'], '540');
-  assert.equal(under.props['data-cap-over'], '0', 'an under-subscribed day carries no alarm state');
-
-  c.state.tasks.push(activeTask(c, { id: 'b', planned: 600 }));
-  const over = c.renderCapacityBar(today);
-  assert.equal(over.props['data-cap-demand'], '720');
-  assert.equal(over.props['data-cap-over'], '1');
-  assert.match(over.props.title, /Nothing has been dropped/,
-    'the tooltip reports compression — it must never read as a warning to obey');
-
-  assert.equal(c.renderCapacityBar(today - DAY), null, 'nothing is drawn on a past day');
-  assert.ok(c.renderCapacityBar(today, true), 'the Week-grid variant renders');
 });
 
 // --- 21b: past-day journal figures ---------------------------------------------------------------

@@ -128,5 +128,7 @@ test('a task at 10pm, typing 9, becomes 9pm', async ({ page }) => {
   await timeBox(page).fill('9');
   await page.keyboard.press('Enter');
 
-  await expect(cell).toContainText('9:00 PM');
+  /* Task 13 (2026-08-20): the cell renders through the one clock formatter now, so "9:00pm" rather than
+     the browser locale's "9:00 PM". The behaviour under test — which NINE you get — is unchanged. */
+  await expect(cell).toContainText('9:00pm');
 });

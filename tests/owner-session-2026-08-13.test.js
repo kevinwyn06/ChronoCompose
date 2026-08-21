@@ -155,8 +155,8 @@ test('a running task gets no ring and no wash on the sheet row OR the plan card'
   assert.strictEqual(String(rs.boxShadow || 'none'), String(is.boxShadow || 'none'), 'row: no accent ring');
 
   // Plan card.
-  const rc = styleOf(c.planCard(running, 'incl:included'));
-  const ic = styleOf(c.planCard(idle, 'incl:included'));
+  const rc = styleOf(c.planCard(running));
+  const ic = styleOf(c.planCard(idle));
   assert.strictEqual(String(rc.boxShadow), String(ic.boxShadow), 'card: parity holds — no ring here either');
 });
 
@@ -187,84 +187,25 @@ test('the running state is still fully legible, because the timer control carrie
 // surface consumes it. Hence the first test here reads the RENDERED style.
 // ===========================================================================================
 
-function selHalves(c) {
-  const view = c.renderSelectionView(c.state.tasks);
-  return findAll(view, n => attr(n, 'data-selhalf'));
-}
+/* PP-EXT (owner 2026-08-20): the rendered-floor test that lived here is RETIRED with its subject. The
+   Selection view's Included/Excluded halves are gone — the five-bucket partition replaced the vertical
+   dimension outright, so there is no half to floor and `data-selhalf` no longer exists. The lesson the
+   test recorded is NOT retired and is worth keeping in view: a pure function asserted in isolation proves
+   nothing about a surface unless something also asserts that the surface consumes it. The equivalent
+   guard for the new surface is in tests/v2-plan-tab.test.js ("the width floor and the renderer agree on
+   which columns exist"), which pins selectionCols against the rendered grid. */
 
-test('the rendered Excluded half carries a real CSS floor — the mirror is not the layout', () => {
-  const c = make();
-  const B = c.startOfToday();
-  // 12 included, 1 excluded: the owner's fixture. The deficit exceeds the Excluded half's whole basis.
-  c.state.tasks = [];
-  for (let i = 0; i < 12; i++) c.state.tasks.push(activeTask(c, { id: 'in' + i, name: 'in' + i, start: B, end: B + DAY, included: true, planned: 30 }));
-  c.state.tasks.push(activeTask(c, { id: 'out1', name: 'out', start: B, end: B + DAY, included: null, snoozeUntil: B + DAY, planned: 30 }));
-  c.renderVals();
+/* PP-EXT (owner 2026-08-20): the four band-sizing tests that lived here are RETIRED with their subject.
+   `selectionSplitHeights` and its SEL_* constants are gone — Task 8 deleted the Included/Excluded halves
+   along with the arithmetic that balanced them. See the note at the top of tests/v5-selection-ux.test.js
+   for what carried forward. */
 
-  const halves = selHalves(c);
-  assert.ok(halves.length >= 2, 'the surface renders halves at all');
-  halves.forEach(hf => {
-    const mh = String(styleOf(hf).minHeight || '');
-    assert.notEqual(mh, '0', attr(hf, 'data-selhalf') + ' must not re-disable the flexbox floor');
-    // A PLAIN px value. A `min(112px, 45%)` was tried first and applied no floor at all in Chromium —
-    // the percentage resolves against an indefinite parent height and takes the whole min() with it.
-    assert.equal(mh, c.SEL_HALF_MIN_PX + 'px',
-      'the same constant selectionSplitHeights uses, expressed the same way, so they cannot drift again');
-  });
-});
-
-test('12 included against 1 excluded: Excluded keeps a whole card, never 0', () => {
-  const c = make();
-  const H = 6 * c.SEL_CARD_EST_PX;
-  const r = c.selectionSplitHeights(12, 1, H);
-  assert.ok(r.excluded >= c.SEL_CARD_EST_PX,
-    'a full card stays visible (' + r.excluded + 'px) — "I should ALWAYS be able to see both"');
-  assert.ok(r.included > 0, 'and Included is not starved to pay for it');
-  assert.ok(Math.abs(r.included + r.excluded - H) < 0.001, 'the two halves still exactly fill the column');
-});
-
-test('the floor is one whole card plus its band label — derived, not picked', () => {
-  const c = make();
-  assert.equal(c.SEL_HALF_MIN_PX, c.SEL_CARD_EST_PX + c.SEL_BAND_LABEL_PX);
-});
-
-test('raising the floor did NOT cost the equal-scroll rule at ratios where it already worked', () => {
-  const c = make();
-  const H = 6 * c.SEL_CARD_EST_PX;
-  // The 24a fixture. The floor must not bite hard enough here to unbalance a split that was fine.
-  const r = c.selectionSplitHeights(7, 3, H);
-  assert.ok(Math.abs(r.scrollIncluded - r.scrollExcluded) <= 0.5 * c.SEL_CARD_EST_PX,
-    'still comparable max scroll (' + r.scrollIncluded + ' vs ' + r.scrollExcluded + ')');
-});
-
-test('the mirror models a too-short column the way the browser does: floor, then clip', () => {
-  const c = make();
-  // The floor is FLAT, matching the renderer's flat min-height. When the column cannot hold two floors
-  // the halves still get their floor and the column clips (it carries overflow:hidden) — so the mirror
-  // reporting a sum past H is the truth. A mirror that "helpfully" scaled the floor down instead is
-  // exactly how this surface shipped a 0px band with a green test.
-  for (const H of [120, 200, 320, 564, 1200]) {
-    const r = c.selectionSplitHeights(30, 30, H);
-    assert.ok(r.included >= c.SEL_HALF_MIN_PX, 'Included keeps its floor at H=' + H);
-    assert.ok(r.excluded >= c.SEL_HALF_MIN_PX, 'Excluded keeps its floor at H=' + H);
-  }
-  // And whenever the column CAN hold both, the halves fill it exactly and nothing is clipped.
-  for (const H of [400, 564, 900, 1200]) {
-    const r = c.selectionSplitHeights(12, 1, H);
-    assert.ok(Math.abs(r.included + r.excluded - H) < 0.001, 'halves fill the column exactly at H=' + H);
-  }
-});
-
-// ===========================================================================================
-// (4) "Focus mode should have a separator between the tasks that are included for today and the ones
-//      that are not, with the included ones at the top, and the excluded ones [collapsed] by default."
-// ===========================================================================================
+const focusRowIds = c => findAll(c.renderDashFocus(c.state.tasks), n => attr(n, 'data-task-id')).map(n => attr(n, 'data-task-id'));
 
 function focusCol(c) {
   const view = c.renderDashFocus(c.state.tasks);
   return find(view, n => find(n, x => attr(x, 'data-task-id')) || attr(n, 'data-task-id')) ? view : view;
 }
-const focusRowIds = c => findAll(c.renderDashFocus(c.state.tasks), n => attr(n, 'data-task-id')).map(n => attr(n, 'data-task-id'));
 
 function focusFixture(c) {
   const B = c.startOfToday();
@@ -307,15 +248,15 @@ test('the band disappears entirely when nothing is excluded — no empty divider
   assert.equal(findAll(c.renderDashFocus(c.state.tasks), n => text(n) === 'Not in today').length, 0);
 });
 
-test('Focus reuses inclusionRow, so it cannot invent a fifth opinion about "in today"', () => {
+test('Focus reuses inclBand, so it cannot invent a fifth opinion about "in today"', () => {
   const c = make();
   focusFixture(c);
   c.setState({ focusExclOpen: true });
   const ids = focusRowIds(c);
-  const expectIn = c.state.tasks.filter(t => c.inclusionRow(t) === 'included').map(t => t.id);
-  const expectOut = c.state.tasks.filter(t => c.inclusionRow(t) !== 'included').map(t => t.id);
+  const expectIn = c.state.tasks.filter(t => c.inclBand(t) === 'included').map(t => t.id);
+  const expectOut = c.state.tasks.filter(t => c.inclBand(t) !== 'included').map(t => t.id);
   expectIn.forEach(id => assert.ok(ids.indexOf(id) >= 0));
-  // Every included id precedes every excluded id — the division IS inclusionRow's.
+  // Every included id precedes every excluded id — the division IS inclBand's.
   expectIn.forEach(i => expectOut.forEach(o => assert.ok(ids.indexOf(i) < ids.indexOf(o), i + ' before ' + o)));
 });
 

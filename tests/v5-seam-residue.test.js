@@ -1,3 +1,9 @@
+/* DELETED 2026-08-20 (Task 28): the tests removed here rendered `renderCapacityBar`, and the owner
+ * deleted that readout — both the Today header figure and the per-day strip under the Week/4-Day
+ * columns. The ARITHMETIC they were built on is not gone and is still asserted in this file:
+ * `dayCapacity` answers the same two numbers, and it is the pool-agreement invariant that matters, not
+ * the bar that drew it. (Task 29 then removes the out-param behind `dayCapacity` itself, separately.) */
+
 // Chain 4 / block 28 — the seam's rounding residue, and the appointment-only day.
 //
 // 28a. `compressionSeam` used to round each task's share with `Math.round` INDEPENDENTLY, while the
@@ -119,48 +125,4 @@ test('a day booked solid with appointments has a pool of zero, and says so', () 
   assert.deepEqual({ demand: cap.demand, pool: cap.pool, booked: cap.booked },
     { demand: 0, pool: 0, booked: true },
     'the appointments are placed work, not flexible demand — so both numbers are zero');
-});
-
-test('…and the indicator reads "no room", not "0% of nothing"', () => {
-  const { c, today } = bookedSolid();
-  const full = c.renderCapacityBar(today);
-  assert.equal(full.props['data-cap-booked'], '1');
-  assert.equal(full.props['data-cap-over'], '0', 'a fully committed day is not an alarm');
-  assert.match(full.props.title, /no free time — the day is fully committed/);
-  const labels = full.children.filter(x => x && x.children && typeof x.children[0] === 'string')
-    .map(x => x.children[0]);
-  assert.ok(labels.includes('no room'), 'the right-hand figure is a word, not "0m free": ' + labels.join(' | '));
-
-  const mini = c.renderCapacityBar(today, true);
-  const pct = mini.children[mini.children.length - 1].children[0];
-  assert.equal(pct, 'full', 'the Week strip reads "full" rather than a calm 0%');
-});
-
-test('…and the track is drawn FULL rather than empty, so it cannot be read as an empty day', () => {
-  const { c, today } = bookedSolid();
-  const track = c.renderCapacityBar(today).children[1];
-  assert.equal(track.children[0].props.style.width, '100%', 'the committed bar spans the whole track');
-  assert.equal(track.children[1], null, 'and nothing is coloured as overshoot — nothing overshot');
-});
-
-test('a zero pool with real flexible demand still reads as demand with nowhere to go', () => {
-  const { c, today } = bookedSolid();
-  c.state.tasks.push(activeTask(c, { id: 'flex', planned: 60 }));
-  const cap = c.dayCapacity(today);
-  assert.equal(cap.booked, true);
-  assert.equal(cap.over, true, '60 minutes asked of a day with none left really is over');
-  const mini = c.renderCapacityBar(today, true);
-  assert.equal(mini.children[mini.children.length - 1].children[0], '—',
-    'a ratio against zero is not a number, and pretending otherwise was the original defect');
-});
-
-test('a day that still has free time is untouched by any of this', () => {
-  const c = make();
-  poolDay(c, 540);
-  c.state.tasks = [activeTask(c, { id: 'a', planned: 120 })];
-  const cap = c.dayCapacity(c.startOfToday());
-  assert.equal(cap.booked, false);
-  const mini = c.renderCapacityBar(c.startOfToday(), true);
-  assert.equal(mini.children[mini.children.length - 1].children[0], '22%');
-  assert.equal(c.renderCapacityBar(c.startOfToday() - DAY), null, 'and a past day still draws nothing');
 });

@@ -171,7 +171,7 @@ test('date picker: untimed dates render a blank TIME field and date-only preview
   assert.equal(preview.children[0], c.fmtDT(B, true), 'untimed preview omits the clock');
 });
 
-test('date picker: explicit midnight renders 00:00 and applies startClock:true', () => {
+test('date picker: explicit midnight renders 12:00am and applies startClock:true', () => {
   const B = at(2026, 6, 24);
   const { c, t } = withTask({ start: B, startClock: true });
   c.openDatePick(fakeEvent(), 't1', 'start');
@@ -182,8 +182,17 @@ test('date picker: explicit midnight renders 00:00 and applies startClock:true',
     if(node.type === 'input' && node.props.defaultValue !== undefined) timeInput = node;
     (node.children || []).forEach(walk);
   })(tree);
-  assert.equal(timeInput.props.defaultValue, '00:00');
-  c.dpSetTime('00:00');
+  // Task 14 (2026-08-20): the field is 12-hour now and the meridiem lives in the control beside it,
+  // so an explicit midnight reads '12:00' with AM selected rather than the 24-hour '00:00'.
+  assert.equal(timeInput.props.defaultValue, '12:00');
+  const merOn = [];
+  (function walk(node) {
+    if(!node || typeof node !== 'object') return;
+    if(node.props && node.props['data-dp-on'] === '1') merOn.push(node.props['data-dp-mer']);
+    (node.children || []).forEach(walk);
+  })(tree);
+  assert.deepEqual(merOn, ['am'], 'and it says which twelve');
+  c.dpSetTime('12:00am');
   c.dpApply();
   assert.equal(t().start, B);
   assert.equal(t().startClock, true, 'typed 00:00 survives as an explicit clock');
@@ -622,6 +631,11 @@ test('setRecur on a GHOST commits the derived span first — a repeat needs a re
   const today = c.startOfToday();
   c.setRecur('t1', 'day');
   assert.equal(t().start, today, 'the double-ghost derived start is now real data');
-  assert.equal(t().end, today + 86400000);
+  // owner 2026-08-20 (task 11): the derived span now closes at 23:59:59.999 so day-membership tests put
+  // an undated task on today only — but a non-midnight timestamp is what `hasEndTime` reads as a typed
+  // end CLOCK. So the commit rounds up to the clean boundary: membership wants the closed span, stored
+  // data wants midnight.
+  assert.equal(t().end, today + 86400000, 'persisted on a midnight boundary, not at 23:59:59.999');
+  assert.equal(c.hasEndTime(t()), false, 'de-ghosting must not invent an end clock');
   assert.equal(c.isScheduled(t()), true, 'so expandTask can produce occurrences (and the bar still exists)');
 });

@@ -49,7 +49,11 @@ for, and its branch order is the design:
 
 1. `predictManual` → the typed figure.
 2. `planned != null` → the figure, so a deliberate `0` asks for 0 and competes normally.
-3. both clocks set → `clockSpanMinutes`, because an appointment carries its duration in its clocks.
+3. both clocks set **and not explicitly Flexible** → `clockSpanMinutes`, because an appointment carries
+   its duration in its clocks. `uncompressable === false` (a stored user decision, never a derived one)
+   skips this rung: an end that may change is an end that no longer states a duration, so a Flexible task
+   falls to rung 4. The gate reads the RAW field and lives in `requestedMinutes` — `isUncompressable`
+   derives itself from `clockSpanMinutes`, so gating either of those would be circular.
 4. otherwise → `DEFAULT_TASK_MINUTES`, now **5** (was 30). Named cost: unestimated work renders as a sliver
    in the timeline, a deliberate nudge to estimate.
 
@@ -68,7 +72,11 @@ read" from "a zero-length span".
 **`uncompressable`** is a **tri-state** field ("Time needed: Flexible / Exact" in the detail panel, written
 through `setUncompressable` → `commit()`). Ticked, the row reserves off the top and is never compressed. It
 **gates `isFixedOn`**, so unticking a clocked task stops it being a fixed block — and `notBeforeMsOf` is
-deliberately untouched, so the start still holds and only the end floats.
+deliberately untouched, so the start still holds and only the end floats. Since 2026-08-20 it also gates
+`requestedMinutes` rung 3 (above): releasing the end releases the clocks' claim on the duration too, so a
+Flexible appointment competes at its `planned` figure or the 5-minute default rather than reserving its
+full span. Only an explicit `false` does this; a never-decided clocked task derives as Exact and keeps
+its span.
 
 `null` means **never decided**, and `isUncompressable(t)` — the single reader, the rule `isBlockingTask`
 follows for `blocking` — then derives the answer from `clockSpanMinutes(t) != null` **on every read**. So a
@@ -377,3 +385,136 @@ Current invariants:
 - `completedHistoryBlocks` re-packs at most ONCE per call, whatever the number of completed tasks.
 - Manual movement/resize remains undoable through `commit()`.
 - Keep helpers pure and test them through `tests/_load.js` where possible.
+
+## The five-bucket triage partition (owner decision, 2026-08-20)
+
+The Selection surface files every task into exactly one of five buckets. `ORIGIN_KEYS()` is
+`['overdue','new','continued','upcoming','snoozed']` and `originOf(t)` is the only thing that assigns
+one. `upcoming` is the exhaustive FALLBACK, the same role `No section` plays, so nothing can fall out of
+the view.
+
+The rules, in the order `originOf` applies them:
+
+1. **Overdue outranks everything**, including the departures below. Once work is late, why it arrived
+   stopped being the interesting question. This is a stated rule with its own guard, not an accident of
+   statement order, and it is what stops the laziest user path from silently dropping a deadline.
+   One exception: a REPEAT with a live occurrence still ahead is not overdue — last Wednesday's standup
+   is superseded by next Wednesday's, not owed.
+2. **Finished work leaves the surface entirely** — `originOf` returns `null` and `selectionProjection`
+   drops it. Not greyed in place, not at the next rollover: immediately. A non-recurring task at 100%
+   goes; a recurring series whose last occurrence is done goes.
+3. **A completed recurring occurrence with more to come lands in `upcoming`.** This is the only case
+   where completing something MOVES a task between buckets instead of removing it, because the next
+   occurrence genuinely is still ahead.
+4. **`onListSince` decides the rest.** Equal to today's key → `new`; earlier → `continued`. The spec
+   phrases Continued as "onListSince < today AND included", but a non-null key already *means* on the
+   list — that is what `sweepOnListSince` maintains — so the second clause is a restatement, and
+   implementing it as one keeps a single definition of "on the list" instead of two that can drift.
+   A8c (owner, 2026-08-21): because a passed window no longer clears the key, **a rescued overdue task
+   lands in `continued`, not `new`** — it is old work still being carried. `originOf` and
+   `sweepOnListSince` both read the overdue rule from `isOverdueBucket` so they cannot disagree about it.
+5. Otherwise an active snooze (dated or indefinite) reads `snoozed`, and everything else is `upcoming`.
+
+**The buckets are derived, but they are not untouchable.** The old comment claimed "no user gesture moves
+a task between them — only the calendar does", and that is now false: ticking an undated task stamps
+`onListSince` and moves it Upcoming → New, and snoozing moves anything to Snoozed. What remains true is
+the weaker, useful thing — a bucket is never *assigned*. It is read off state that changes by acting on
+the work rather than by filing it.
+
+**Only `overdue` collapses when empty** (`selectionCols`). Every other bucket keeps its place so the
+surface has a stable shape, and an empty New is itself information: nothing arrived today.
+
+### What was deleted
+
+`inclusionRow` and `setInclusionRow` are gone. They gave Selection a second, vertical dimension
+(Included over Excluded inside each column) and the partition replaces it outright — Snoozed is a bucket
+now, and everything else on the surface is on the list by definition. Do not reintroduce a row dimension
+there. The SHEET keeps its own Included/Excluded grouping (`groupBy==='inclusion'`), which answers a
+different question on a different surface; its predicate is `inclBand`/`setInclBand`, named separately so
+it cannot be mistaken for a Selection concept again.
+
+### A known consequence of an observed field
+
+Because `onListSince` is observed rather than derived, a workspace that was closed for a week stamps
+TODAY on the first sweep after it reopens, so long-standing work can read as `new` for a day. That is
+inherent to observing rather than deriving — the alternative is re-deriving arrival from the window,
+which is the rule the owner rejected — and it is why Task 3 ships a one-time backfill for workspaces
+that predate the field.
+
+## Appointments never inherit (owner decision, 2026-08-20, spec A2)
+
+`isInheritedToday` returns false for any task where `clockSpanMinutes(t, yesterday) != null`. V2.2
+inheritance — "unfinished work that participated yesterday carries into today" — is right for flexible
+work and wrong for a fixed booking: yesterday's 09:00 standup does not become today's 09:00 standup by
+not having been ticked. An appointment exists on the days its occurrence covers, and on no others.
+
+**The predicate is `clockSpanMinutes`, never `hasStartTime`/`hasEndTime`.** Those two derive a clock from
+the timestamp, so "has both clocks" is a strictly wider set than "is an appointment" — it also catches a
+three-week task that merely starts and ends at non-midnight instants, which must keep carrying over.
+Three separate defects have come from that substitution. `clockSpanMinutes` also refuses a span longer
+than a day, which is why a multi-day conference is not caught: Tuesday is *inside* its occurrence, so
+inheritance was never what put it on today's list.
+
+**Suppressing is not forgetting.** A missed appointment still reaches Overdue through `originOf`. The
+missed-flight case in `tests/owner-2026-08-20-inheritance.test.js` pins this and is deliberately marked
+not optional — it is the standing rule that the laziest user path must never silently drop a deadline.
+
+The guard asks about *yesterday*, the day being inherited from. If that occurrence cannot be resolved
+(a cold `_occById` memo), `clockSpanMinutes` returns null and the guard does not fire — the safe
+direction, leaving the task visible rather than vanishing it.
+
+## The checkbox is the gesture (owner decision, 2026-08-20, spec A6)
+
+Ticking a task puts it on today. Unticking opens the snooze window. **The asymmetry is the design, not an
+inconsistency.**
+
+- **Ticking needs no further information.** "Yes, today" is a complete answer, so `tickOnToday(id)` just
+  does it, in one commit: `included = true`, `includedExplicit = true`, any snooze cleared, and
+  `onListSince` stamped **if it is null**. Only a null key is stamped — re-ticking work that has been on
+  the list for a week must not reset its age, which is the whole point of the field. This also honours
+  the 2026-08-12 rule that a click with one possible outcome performs it rather than opening a
+  single-item menu, which is a confirmation dialog for a checkbox.
+- **Unticking is not a complete answer.** "Not today", "not until Thursday" and "not until it matters"
+  differ, and the app cannot choose for the user. `untickOnToday(e, id)` opens the snooze window and
+  **writes nothing** until a variant is picked — no optimistic unpress, no placeholder snooze. There is
+  nothing to undo because nothing happened.
+
+The `onListSince` stamp is what moves an **undated** task from Upcoming to New: such a task has no window
+to observe, so an explicit press is the only evidence it arrived (see `onListNow`).
+
+Keyboard: `space` ticks, and deliberately does not untick — a sweep that opened a popover on every other
+press would not be a sweep.
+
+**Retained on purpose: `isUndecided`.** "Never looked at" must not render identically to "decided
+against". It now separates Upcoming from Snoozed, and the dashed card edge is the channel that says so.
+
+**Deleted:** the Selection view's vertical-only card drag and the two-row band sizing —
+`selectionHalfFlex`, `selectionSplitHeights`, `SEL_CARD_EST_PX`, `SEL_BAND_LABEL_PX`, `SEL_SHRINK_CEIL`,
+`SEL_HALF_MIN_PX`, plus their unit and e2e tests. This first left `planCard` attaching a drag only when
+handed a `zone`, with the Matrix as the last caller that passed one. **A8b (owner, 2026-08-21) deleted the
+rest:** the Matrix surface, the Eisenhower axes, and the whole shared chain `cardPointerDown` →
+`beginCardDrag` → `resolveCardZone` → the `onMouseUp` drop branch. `planCard` has no `zone` parameter at
+all now, and no surface in the app starts a card drag.
+
+
+## What "split" means (owner 2026-08-20, Task 22)
+
+The ⧉ regroup control exists to rejoin work the day has **split**. Its gate used to be
+`data.chunks.filter(x => x.id === c.id).length > 1`, which counts CHUNKS. Task 21 found that a partial
+drag-pin and the packed remainder abut — two chunks, zero gap, one continuous bar — so the control was
+offered on work that was never apart. The mechanism: `buildDayTimeline`'s same-id merge runs over the
+packer's `segs`, and the pinned and fixed pieces are appended afterwards by `busy.forEach`, so nothing
+merges across that boundary. The merge is not wrong; it runs before half its input exists.
+
+`chunkPieces(chunks, id, kcMs)` is the answer: a pure fold of same-id chunks wherever they touch or
+overlap, and the gate counts ITS output. "Is this task split" now means "are there pieces the user can
+see are apart".
+
+**The fold is for counting, not for rendering** — a deliberate correction to the plan's wording, made
+because two established rules said otherwise. `fixedBlocksToday` emits one block per PIN RECORD, and the
+✕ unpin control is per block; folding a pinned piece into a packed one would leave the user unable to
+unpin minutes they had placed by hand, and would make a bar carrying two pins report one. Tests 18 and
+20 in `tests/scheduling.gen.test.js` encode that render rule and still pass untouched.
+
+`kcMs` are keep-clear instants — a Point's clock. A run split there is split on purpose ("no work crosses
+this moment"), so the fold must never undo it.

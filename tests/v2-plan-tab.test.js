@@ -122,16 +122,15 @@ test("Overview's left pane renders Selection, and keeps the right pane", () => {
   const c = make();
   c.state.leftSurface = 'select';
   const sel = JSON.stringify(c.renderDashOverview([]));
-  assert.ok(sel.includes('data-dropzone'), 'Selection drop zones present');
+  // `data-dropzone` used to be the marker; the Selection drag is gone with the Included/Excluded rows,
+  // so the surface is identified by its buckets instead.
+  assert.ok(sel.includes('data-selbucket'), 'Selection buckets present');
   assert.ok(sel.includes('data-left-surface'), 'left pane stamped with its surface');
 });
 
 // V5 block 32: the renderer is KEPT, just unreachable. Calling it directly must still work, so that
-// re-adding 'matrix' to the two surface lists is genuinely the whole job.
-test('the retired matrix renderer still builds its quadrants when called directly', () => {
-  const c = make();
-  assert.ok(JSON.stringify(c.renderMatrixView([])).includes('data-quad'), 'Matrix quadrants still build');
-});
+// A8b (2026-08-21): the renderer itself is deleted, so there is nothing left to call. What survives is
+// the MIGRATION — a workspace still holding 'matrix' must land on Selection — and that is asserted above.
 
 // --- the left pane's width floor, re-derived (block 26 gave it one; 27a must not drop it) ---
 
@@ -154,20 +153,19 @@ test('a triage surface gets a floor of its own, per rendered column', () => {
   assert.ok(c.triageMinWidthPx(0) >= c.TRIAGE_COL_MIN_PX);
 });
 
-test('the matrix is always two columns wide, whatever is passed', () => {
-  const c = make();
-  assert.equal(c.leftPaneMinWidth('matrix', 4), c.leftPaneMinWidth('matrix', 1));
-  assert.equal(c.leftPaneMinWidth('matrix', 0), 'min(' + c.triageMinWidthPx(2) + 'px, 55%)');
-});
 
 test('the width floor and the renderer agree on which columns exist', () => {
   const c = make();
-  // selectionCols is the ONE rule; a second copy in the floor is the drift being prevented.
+  // `selectionLayout` is the ONE rule; a second copy in the floor is the drift being prevented.
   const p = c.selectionProjection([]);
-  assert.deepEqual(c.selectionCols(p), ['existing', 'new']);
+  // Only Overdue collapses when empty — every other bucket keeps its place so the surface has a stable
+  // shape and an empty New can say "nothing arrived today". Task 9: an empty Overdue drops the BUCKET,
+  // never the column, so the floor is two columns wide on the emptiest possible day.
+  assert.equal(c.selectionCols(p).join(','), 'new,continued,upcoming,snoozed');
   const sel = c.renderSelectionView([]);
   const grid = sel.children.find(x => x && x.props && x.props.key === 'grid');
-  assert.equal(grid.children[0].length, c.selectionCols(p).length);
+  assert.equal(grid.children[0].length, c.selectionColCount(p));
+  assert.equal(grid.children[0].length, 2);
 });
 
 // --- split width: a triage grid and a four-column sheet want different amounts of the board ---

@@ -89,12 +89,20 @@ test.describe('a legacy fractional timestamp is healed on load', () => {
     const healthyBar = page.locator('[title^="Healthy task ·"]').first();
     await healthyBar.waitFor({ state: 'visible', timeout: 15000 });
 
-    /* Confirm the fixture really was poisoned, or this test proves nothing. localStorage still holds the
-       raw fraction at this point: normalizeTask heals what the app loads INTO memory, and only a commit
-       writes the healed array back. */
+    /* Confirm the fixture really was poisoned, or this test proves nothing.
+       UPDATED 2026-08-20 (Chain A): the value on disk here may ALREADY be healed. Chain A's once-per-day
+       `onListSince` maintenance pass commits on the load path whenever it stamps a task, and any commit
+       rewrites the whole array through `normalizeTask`. That is the coercion working sooner, not a
+       weaker guarantee — but it means "still fractional at this instant" is a fact about the load path
+       rather than about the fix, and asserting it made this spec fail for the wrong reason.
+       What is NOT relaxed is the vacuity guard: the poisoned value must have been written to disk by the
+       init script, so the assertion below is that it is one of the two — the raw fraction, or the rounded
+       value it heals to. A fixture that never poisoned anything would carry the fixture's own `end` and
+       fail both. */
     const onDisk = await persistedTasks(page);
-    expect(onDisk.find((t) => t.id === 'poison').end,
-      'the fixture must actually be poisoned or this test is vacuous').toBe(1785437897142.8572);
+    expect([1785437897142.8572, 1785437897143],
+      'the fixture must actually be poisoned or this test is vacuous')
+      .toContain(onDisk.find((t) => t.id === 'poison').end);
 
     /* Any commit rewrites the whole array through normalizeTask, because the load already healed it in
        memory. Drag the OTHER task's bar, so the poisoned row is touched by normalization alone and never

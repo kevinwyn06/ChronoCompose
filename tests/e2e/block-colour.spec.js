@@ -180,9 +180,18 @@ test.describe('block colour: hatching is gone', () => {
   });
 });
 
-test.describe('block colour: a locked block is marked', () => {
+/* CUT by the owner, 2026-08-20 (Task 23). V5 block 25b made a locked block spottable with a heavier
+ * border, on the reasoning that width survives greyscale and a colour-blind reader. Shown three
+ * restyled replacements, the owner ruled the other way: *"they look better. I just don't see the need
+ * for a locked indicator at all."*
+ *
+ * The assertions are INVERTED rather than deleted, because "no signal" is a design decision that can
+ * regress just as quietly as a signal can. What is pinned now is that every block carries the same
+ * border weight — so a future change that quietly reintroduces a lock treatment has to argue with a
+ * test, exactly as adding one to begin with did. */
+test.describe('block colour: lock is NOT marked by border weight', () => {
   for (const theme of ['light', 'dark']) {
-    test(`the lock border is heavier than the auto border and visible against its own fill — ${theme}`, async ({ page }) => {
+    test(`every block carries the same border weight, locked or not — ${theme}`, async ({ page }) => {
       await bootToday(page, fixture(theme));
       await settleTimeline(page);
       const blocks = await blockColours(page);
@@ -192,23 +201,9 @@ test.describe('block colour: a locked block is marked', () => {
       expect(locked.length, 'the fixture drew a locked block').toBeGreaterThan(0);
       expect(auto.length, 'and auto-scheduled ones to compare it against').toBeGreaterThan(0);
 
-      const thinnestLock = Math.min(...locked.map((b) => b.borderW));
-      const thickestAuto = Math.max(...auto.map((b) => b.borderW));
-      /* A strict inequality, not "locked >= 3": a change that made EVERY block 3px would satisfy a
-         threshold and destroy the signal, which is the whole point of the mark. */
-      expect(thinnestLock, `${theme}: the locked border (${thinnestLock}px) is heavier than the auto one (${thickestAuto}px)`)
-        .toBeGreaterThan(thickestAuto);
-      /* Expressed as a RATIO, never as an absolute pixel count. Everything is drawn inside the
-         `zoom:0.8` wrapper (and block 23 made every pane ~25% taller in CSS px), so the 3px source
-         border measures 2.5px here — an absolute threshold would be asserting the zoom factor, not
-         the design. The ratio is what the eye actually reads. */
-      expect(thinnestLock / thickestAuto, `${theme}: the lock border is at least twice the auto border`)
-        .toBeGreaterThanOrEqual(2);
-
-      locked.forEach((b) => {
-        expect(b.borderContrast, `${theme}: ${b.title}'s lock border stands out from its own fill`)
-          .toBeGreaterThan(3);
-      });
+      const widths = [...locked, ...auto].map((b) => Math.round(b.borderW * 100) / 100);
+      expect(new Set(widths).size,
+        `${theme}: border widths across locked and auto blocks: ${widths.join(', ')}`).toBe(1);
     });
   }
 });

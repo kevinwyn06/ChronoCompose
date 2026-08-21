@@ -153,14 +153,18 @@ test.describe('A day in the life', () => {
        precisely what the "spent survives a reload" step has to prove. */
     await bootPlan(page, 'select', dayFixture({ seedOnce: true }));
 
-    /* The sweep order IS the DOM order: `selectionFlat` walks Included then Excluded, columns in
-       `p.keys` order, which is the order `rowBand` renders them. Reading the cursor's target off
-       the page instead of counting by hand is what keeps this step honest. */
+    /* The sweep order IS the DOM order: `selectionFlat` walks the buckets in `p.keys` order and each
+       bucket is one flat list, which is exactly the order `renderSelectionView` paints. Reading the
+       cursor's target off the page instead of counting by hand is what keeps this step honest. */
     const cards = await page.$$eval('[data-card-id]', (els) => els.map((e) => e.getAttribute('data-card-id')));
     expect(cards, 'the backlog is on the board').toContain('t-someday');
     expect(cards.length, 'and so is everything else').toBeGreaterThan(4);
 
-    const included = () => page.$$eval('[data-dropzone="incl:included"] [data-card-id]',
+    /* "On the day" used to be a ROW — the Included half of each column. Task 8 deleted that dimension,
+       so the honest reading is now the buckets that MEAN on the list: New (arrived today) and Continued
+       (been there a while). Both are `onListSince != null`, which is the single definition of on-list
+       that `originOf` uses, so this is the same question asked of the surface that still answers it. */
+    const included = () => page.$$eval('[data-selbucket="new"] [data-card-id], [data-selbucket="continued"] [data-card-id]',
       (els) => els.map((e) => e.getAttribute('data-card-id')).sort());
     const inBefore = await included();
     expect(inBefore, 'the someday task starts out of the day').not.toContain('t-someday');
@@ -175,8 +179,8 @@ test.describe('A day in the life', () => {
     await page.keyboard.press('j');
     await page.keyboard.press(' ');
 
-    /* EXACTLY one card crossed the divider. A cursor that had drifted — or a space that toggled the
-       whole selection — would still put the target in, and only this comparison would notice. */
+    /* EXACTLY one card joined the day. A cursor that had drifted — or a space that toggled the whole
+       selection — would still put the target in, and only this comparison would notice. */
     expect(await included(), 'the sweep moved exactly one card into the day')
       .toEqual([...inBefore, 't-someday'].sort());
 
@@ -222,25 +226,23 @@ test.describe('A day in the life', () => {
         return mine.some((b) => b.y + b.h <= meal.y + 1) && mine.some((b) => b.y >= meal.y + meal.h - 1);
       });
     expect(splitTask, 'lunch splits somebody\'s work, either side of the meal block').toBeTruthy();
-
     /* ── 09:40 · log the morning's work, then run a timer and switch tasks ────────────────────
-       `+15` is `addSpentTime` — real tracked work on the same per-day ledger a timer writes, which
-       is what makes a deterministic magnitude available without the spec sleeping for it. */
+       Task 26 (2026-08-20) replaced the `+15` button with a box that SETS today's figure — "+15" could
+       only add, so an overcount could not be corrected. Setting is the stronger move for this walkthrough
+       anyway: the ledger ends at a number this spec chose, rather than at a multiple of a constant it had
+       to read off a button. Task 15's duration grammar is what the box speaks. */
     const reportBefore = morning.charged['t-report'];
-    const addBtn = page.locator('[data-task-id="t-report"] [title$=" minutes worked"]');
-    await expect(addBtn, 'the row has one add-time control').toHaveCount(1);
-    /* Read the step off the button rather than hard-coding it, so retuning FOCUS_ADD_MINUTES cannot
-       turn this into a false failure — the assertion is about the ledger, not about the constant. */
-    const step = parseInt((await addBtn.textContent()).replace(/[^0-9]/g, ''), 10);
-    expect(step, 'and it says how much it logs').toBeGreaterThan(0);
-    for (let i = 0; i < 3; i++) await addBtn.click();
+    const spentBox = page.locator('[data-task-id="t-report"] [data-spent-box]');
+    await expect(spentBox, 'the row has one time-worked box').toHaveCount(1);
+    await spentBox.fill('45m');
+    await spentBox.press('Enter');
     await settleTimeline(page);
 
     const afterWork = await allottedByTask(page);
     expect(afterWork['t-report'], 'time spent comes off what the task still needs today')
       .toBeLessThan(reportBefore);
     expect(reportBefore - afterWork['t-report'], 'by exactly the amount that was logged')
-      .toBeCloseTo(3 * step, -0.7);
+      .toBeCloseTo(45, -0.7);
 
     /* The timer itself: start one, then start another. V2.4's strict single-timer policy means the
        second start stops the first — a cross-subsystem rule no per-widget test can see, because it

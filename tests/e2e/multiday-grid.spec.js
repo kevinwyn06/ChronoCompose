@@ -177,22 +177,20 @@ test.describe('multi-day grid: locked vs auto-scheduled', () => {
     const auto = all.filter((b) => b.title.includes('Every day'));
     expect(auto.length, 'the flexible task is drawn across the grid').toBeGreaterThan(0);
     auto.forEach((b) => expect(b.kind, 'and every one of its blocks is auto-scheduled').toBe('auto'));
+    /* The distinction still has to be legible where it matters, but WHICH channels carry it has now
+       changed twice.
 
-    /* The distinction has to be legible, not merely encoded in an attribute. Two independent channels
-       are asserted separately so that dropping either one fails here rather than quietly halving the
-       signal.
+       V5 block 25a replaced the first channel: "auto blocks carry a hatch the locked one does not"
+       marked the COMMON case (~90% of the week is auto-scheduled) and so said nothing, and the owner
+       deleted it. 25b inverted the signal onto the rare case as a heavier border — and the owner CUT
+       that too on 2026-08-20 (Task 23): *"I just don't see the need for a locked indicator at all."*
 
-       V5 block 25a REPLACED the first channel. It used to be "auto blocks carry a hatch the locked one
-       does not" — but the hatch marked the COMMON case (~90% of the week is auto-scheduled) and so said
-       nothing, and the owner deleted it. The signal is now inverted onto the rare case: the LOCKED block
-       carries a heavier border. Asserted as a strict width inequality plus an explicit "and nothing is
-       hatched any more", so neither the old texture creeping back nor the new border being dropped can
-       pass here. */
-    expect(auto[0].borderW, 'an app-placed block carries the thin border').toBeLessThan(appt[0].borderW);
-    /* A ratio, not an absolute px count: the whole app is drawn inside the `zoom:0.8` wrapper, so a
-       3px source border measures 2.5px here and a pixel threshold would be asserting the zoom. */
-    expect(appt[0].borderW / auto[0].borderW, 'and by a factor the eye can read, not a hairline')
-      .toBeGreaterThanOrEqual(2);
+       So the border-width inequality that used to be asserted here is asserted the other way round: the
+       two surfaces carry the SAME weight, and a change that quietly reintroduces a lock treatment has to
+       argue with this test. The rail and the 📌/📍 glyph survive, because they answer "what gesture does
+       this block support" rather than "is this locked", and the rail is still asserted below. */
+    expect(auto[0].borderW, 'no block is bordered more heavily for being locked')
+      .toBeCloseTo(appt[0].borderW, 1);
     all.forEach((b) => expect(b.bg, `${b.title}: nothing on the grid is hatched any more`)
       .not.toContain('repeating-linear-gradient'));
     expect(appt[0].rail, 'locked blocks carry an inset rail').toContain('inset');

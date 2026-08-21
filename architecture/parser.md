@@ -33,3 +33,28 @@ date, clock, recurrence, or repeat-until token won; otherwise it restores the ca
 Unitless numbers and non-duration units remain ordinary text. The snooze parser accepts the same bare
 form, but any snooze resolving to today is floored forward to tomorrow so a sub-day duration has an
 observable effect.
+
+## The title bar (owner 2026-08-20, Task 16)
+
+Editing a task's title runs the same parser, through the same `shapeParsedTask` binding quick-add uses,
+and writes the parsed fields and the new name in **one `commit()`** — one Ctrl+Z restores both. That much
+shipped on 2026-08-17.
+
+What Task 16 changed is what the title is left holding. **The recognised words stay.** Eating them is
+right in quick-add, where you are turning a phrase into a task; a title edit is not that, and silently
+deleting the word the user just typed reads as the app losing their text. The report is the
+**highlight**: `titleHighlightSegments(text)` parses and segments in one call (the quick-add mirror is
+handed an already-parsed `matches`; a title editor has only text), and the detail panel paints those
+segments in an `aria-hidden`, pointer-inert mirror behind the contenteditable — the same technique and
+the same treatment as the quick-add input.
+
+Two things make a mirror work over a **contenteditable** rather than an input, and both are load-bearing:
+the two layers carry identical metrics and `white-space: pre-wrap`, so a wrapped line breaks in the same
+place; and `state.titleDraft` holds the live text while editing, because a contenteditable is uncontrolled
+and React must never rewrite its children mid-edit (they stay `t.name` throughout, so the caret is safe).
+
+The ambiguity chooser is the same one: a bare day with no cue is genuinely two readings, so the title
+offers `[ On Fri | By Fri ]` and flipping re-applies the whole title through `rename`, keeping it one
+commit. It shapes **dates only** — `shapeParsedTask` refuses to let a candidate tuple's `planned`
+overwrite a duration the text itself gave, so "gym friday for 45m" keeps its 45 minutes under either
+branch.

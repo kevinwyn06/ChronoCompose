@@ -27,7 +27,10 @@ test('a future dated task stays visible but inactive until one press includes it
   c.state.tasks=[t];
   assert.equal(c.isActiveOn(t,B), false);
   const p=c.selectionProjection(c.state.tasks);
-  assert.equal(p.rowCount.included+p.rowCount.excluded, 1, 'the sheet projection does not drop it');
+  // The projection is a flat bucket map since 2026-08-20 — no rows. A future dated task lands in the
+  // Upcoming fallback, which is exactly the point: visible, and not silently dropped.
+  assert.equal(p.keys.reduce((n,k)=>n+p.colCount[k],0), 1, 'the projection does not drop it');
+  assert.equal(p.colCount.upcoming, 1);
   c.setIncludedOn(t.id);
   const pressed=c.state.tasks[0];
   assert.equal(pressed.included, true);

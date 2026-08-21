@@ -157,9 +157,12 @@ test.describe('visual evidence', () => {
         ],
       });
       await expect(page.locator('[data-card-id]')).toHaveCount(11);
-      /* Both bands populated — a Selection shot with an empty Excluded row hides half the design. */
-      expect(await page.locator('[data-dropzone="incl:included"] [data-card-id]').count()).toBeGreaterThan(2);
-      expect(await page.locator('[data-dropzone="incl:excluded"] [data-card-id]').count()).toBeGreaterThan(2);
+      /* Several buckets populated — a Selection shot where every card sits in one column hides the
+         partition, which is the whole design. (This replaces the old Included/Excluded band check:
+         task 8 removed that dimension, so "both bands full" no longer describes anything.) */
+      const filled = await page.locator('[data-selbucket]').evaluateAll(
+        (els) => els.filter((e) => e.querySelector('[data-card-id]')).length);
+      expect(filled, 'the shot shows a real partition, not one full column').toBeGreaterThan(2);
       await page.screenshot({ path: shot(`selection-${theme}`), fullPage: false });
     });
   }

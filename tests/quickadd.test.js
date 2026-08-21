@@ -877,7 +877,9 @@ test('quick-add date-only hint omits midnight while an explicit clock keeps it',
 
   c.parseDateText=()=>({date:midnight,clock:true,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
   hints=walk(c.renderQuickAddPopup()).filter(n=>n.props && n.props['data-qa']==='quick-hint');
-  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01, 00:00']);
+  // Task 13 (2026-08-20): the clock half is 12-hour now, through the one formatter. The rule this test
+  // exists for is unchanged — a date-only parse omits the clock, an explicit one keeps it.
+  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01, 12:00am']);
 });
 
 test('quick-add card uses a fixed viewport anchor so rows grow downward', () => {

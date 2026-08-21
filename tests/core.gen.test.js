@@ -30,10 +30,15 @@ test('parseDur reads H:MM into minutes', () => {
   assert.equal(c.parseDur('100:00'), 6000);
 });
 
-test('parseDur treats a bare number as decimal hours', () => {
+// CHANGED (owner 2026-08-20, Task 15): a bare number is MINUTES now, not decimal hours. One duration
+// grammar across every field was the owner's ask — "just one example there might be more" — and the
+// grammar table they gave reads `90` as ninety minutes. H:MM is how you type hours, as it always was.
+test('parseDur treats a bare number as minutes, and a unit says otherwise', () => {
   const c = make();
-  assert.equal(c.parseDur('2'), 120);
-  assert.equal(c.parseDur('1.5'), 90);
+  assert.equal(c.parseDur('2'), 2);
+  assert.equal(c.parseDur('1.5'), 2, 'rounded to the nearest minute');
+  assert.equal(c.parseDur('2h'), 120);
+  assert.equal(c.parseDur('1.5h'), 90);
 });
 
 test('parseDur handles empty / malformed input as 0 and clamps negative', () => {

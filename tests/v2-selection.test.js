@@ -8,53 +8,41 @@ const { make, activeTask, DAY } = require('./_load.js');
 
 /* ---------- §4.1 origin: the three columns ---------- */
 
-test('V2.11 origin: overdue / existing / new / extra are derived, exhaustive, and never chosen', () => {
+/* PP-EXT (owner 2026-08-20): the `overdue / existing / new / extra` trio that lived here is SUPERSEDED.
+   The partition is now five buckets read off `onListSince` — see the A1 worked-cases table in
+   tests/owner-2026-08-20-triage-buckets.test.js, which covers every case these three did and several they
+   could not express (completion removing a row, a recurrence gap, an undated task nobody pressed).
+   What survives here is the part that is still true of the new partition: the keys are exhaustive, and
+   Overdue outranks everything else. */
+
+test('origin: every task on the surface lands in exactly one declared bucket', () => {
   const c=make(); const B=c.startOfToday();
-  /* carried over: yesterday was inside the window, unfinished, and it is not yet due */
-  const existing=activeTask(c,{id:'existing',start:B-2*DAY,end:B+2*DAY,included:null,pct:20});
-  /* today entered the range: the window STARTS today */
-  const fresh=activeTask(c,{id:'fresh',start:B,end:B+2*DAY,included:null,pct:0});
-  /* a future window the user pulled in by hand: not inherited, does not start today */
+  const cont=activeTask(c,{id:'cont',start:B-2*DAY,end:B+2*DAY,included:null,pct:20,onListSince:c.ymdOf(B-2*DAY)});
+  const fresh=activeTask(c,{id:'fresh',start:B,end:B+2*DAY,included:null,pct:0,onListSince:c.ymdOf(B)});
   const pulled=activeTask(c,{id:'pulled',start:B+2*DAY,end:B+3*DAY,included:true,pct:0});
-  /* dateless discretionary pick */
-  const dateless=activeTask(c,{id:'dateless',start:null,end:null,included:true,pct:0});
-  c.state.tasks=[existing,fresh,pulled,dateless];
+  const dateless=activeTask(c,{id:'dateless',start:null,end:null,included:true,pct:0,onListSince:c.ymdOf(B)});
+  c.state.tasks=[cont,fresh,pulled,dateless];
 
-  assert.strictEqual(c.originOf(existing),'existing','yesterday leftovers are Existing');
-  assert.strictEqual(c.originOf(fresh),'new','a window that starts today is New');
-  assert.strictEqual(c.originOf(pulled),'extra','an out-of-window pick falls to the Extra fallback');
-  assert.strictEqual(c.originOf(dateless),'extra','a dateless pick is Extra, never New');
+  assert.strictEqual(c.originOf(cont),'continued');
+  assert.strictEqual(c.originOf(fresh),'new');
+  assert.strictEqual(c.originOf(pulled),'upcoming','a window that has not opened is Upcoming');
+  assert.strictEqual(c.originOf(dateless),'new','pressed today, so today is when it arrived');
 
-  /* V2.11 consequence worth naming: with Off retired, MID-WINDOW work can no longer reach Extra. Nothing
-     can block V2.2 inheritance any more, so any task whose window covered yesterday is Existing. Extra is
-     now dateless picks, out-of-window picks, and work that finished yesterday. */
   const keys=c.ORIGIN_KEYS();
-  c.state.tasks.forEach(t=>assert.ok(keys.includes(c.originOf(t)), t.id+' has a column'));
+  c.state.tasks.forEach(t=>assert.ok(keys.includes(c.originOf(t)), t.id+' has a bucket'));
 });
 
-test('V2.11 Overdue outranks every other column rule', () => {
+test('Overdue outranks every other bucket rule', () => {
   const c=make(); const B=c.startOfToday();
   /* both carried over AND past due - overdue has to win, because once work is late, where it came from
      stopped being the interesting question */
-  const late=activeTask(c,{id:'late',start:B-3*DAY,end:B-DAY,included:null,pct:20});
+  const late=activeTask(c,{id:'late',start:B-3*DAY,end:B-DAY,included:null,pct:20,onListSince:c.ymdOf(B-3*DAY)});
   const lateButDone=activeTask(c,{id:'done',start:B-3*DAY,end:B-DAY,included:null,pct:100});
   c.state.tasks=[late,lateButDone];
   assert.strictEqual(c.isOverdueToday(late),true);
-  assert.strictEqual(c.originOf(late),'overdue','overdue beats existing');
+  assert.strictEqual(c.originOf(late),'overdue','overdue beats continued');
   assert.strictEqual(c.isOverdueToday(lateButDone),false,'completed work is never overdue');
-  assert.strictEqual(c.originOf(lateButDone),'extra');
-});
-
-test('V2.11 New admits a snooze that ended today, not just a window that opened', () => {
-  const c=make(); const B=c.startOfToday();
-  /* snoozeUntil is never cleared on expiry, so the field itself records that the snooze ran out today */
-  const back=activeTask(c,{id:'back',start:B+2*DAY,end:B+3*DAY,included:true,snoozeUntil:B});
-  const stillOut=activeTask(c,{id:'still',start:B+2*DAY,end:B+3*DAY,included:true,snoozeUntil:B+DAY});
-  c.state.tasks=[back,stillOut];
-  assert.strictEqual(c.snoozeEndedToday(back),true);
-  assert.strictEqual(c.originOf(back),'new','a snooze that ended today is work today brought back');
-  assert.strictEqual(c.snoozeEndedToday(stillOut),false,'a snooze still running has not ended');
-  assert.strictEqual(c.originOf(stillOut),'extra');
+  assert.strictEqual(c.originOf(lateButDone),null,'and finished work leaves the surface entirely');
 });
 
 test('V2.9 startsToday is strictly "the window begins today", not merely "today is inside it"', () => {
@@ -74,16 +62,16 @@ test('V2.9 startsToday is strictly "the window begins today", not merely "today 
 
 /* ---------- §4.2 inclusion: the two rows ---------- */
 
-test('V2.11 inclusion folds four states into two rows and keeps undecided distinct from snoozed', () => {
+test('the sheet inclusion band folds four states into two, keeping undecided distinct from snoozed', () => {
   const c=make(); const B=c.startOfToday();
   const pressed=activeTask(c,{id:'pressed',start:B,end:B+DAY,included:true});
   const undecided=activeTask(c,{id:'undecided',start:B+2*DAY,end:B+3*DAY,included:null});
   const snoozed=activeTask(c,{id:'snoozed',start:B,end:B+DAY,included:true,snoozeUntil:B+DAY});
   c.state.tasks=[pressed,undecided,snoozed];
 
-  assert.strictEqual(c.inclusionRow(pressed),'included');
-  assert.strictEqual(c.inclusionRow(undecided),'excluded');
-  assert.strictEqual(c.inclusionRow(snoozed),'excluded','a snooze excludes for today');
+  assert.strictEqual(c.inclBand(pressed),'included');
+  assert.strictEqual(c.inclBand(undecided),'excluded');
+  assert.strictEqual(c.inclBand(snoozed),'excluded','a snooze excludes for today');
 
   /* The failure mode this guards: collapsing "I haven't looked" into "I said no". */
   assert.strictEqual(c.isUndecided(undecided),true);
@@ -91,19 +79,19 @@ test('V2.11 inclusion folds four states into two rows and keeps undecided distin
   assert.strictEqual(c.isUndecided(pressed),false);
 });
 
-test('V2.9 setInclusionRow writes through the existing mutators and adds no new fields', () => {
+test('setInclBand writes through the existing mutators and adds no new fields', () => {
   const c=make(); const B=c.startOfToday();
   /* V5 block 20 (F19): the window must NOT open today, or auto-inclusion would legitimately add the
      snooze on the way out. A window that has not started yet is the case where a bare unpress suffices. */
   const t=activeTask(c,{id:'t1',start:B+2*DAY,end:B+4*DAY,included:null,snoozeUntil:B+DAY});
   c.state.tasks=[t];
 
-  c.setInclusionRow('t1','included');
+  c.setInclBand('t1','included');
   let got=c.state.tasks.find(x=>x.id==='t1');
   assert.strictEqual(got.included,true,'dropping into Included presses the task');
   assert.strictEqual(got.snoozeUntil,null,'turning on clears any snooze');
 
-  c.setInclusionRow('t1','excluded');
+  c.setInclBand('t1','excluded');
   got=c.state.tasks.find(x=>x.id==='t1');
   /* V2.11: excluding UNPRESSES (null) rather than writing the retired `false`. Nothing pulls this
      fixture back into today — no inheritance, and no auto-inclusion — so no snooze is needed. */
@@ -111,7 +99,7 @@ test('V2.9 setInclusionRow writes through the existing mutators and adds no new 
   assert.strictEqual(got.snoozeUntil,null,'nothing to suppress, so no snooze is added');
 });
 
-test('V2.11 excluding work V2.2 would inherit snoozes it, so the gesture is not a no-op', () => {
+test('snoozing work V2.2 would inherit actually removes it, so the gesture is not a no-op', () => {
   const c=make(); const B=c.startOfToday();
   /* yesterday sits inside this window and it is unfinished, so unpressing alone would be undone
      immediately by inheritance - the exact failure that makes retiring Off more than a deleted branch */
@@ -119,132 +107,56 @@ test('V2.11 excluding work V2.2 would inherit snoozes it, so the gesture is not 
   c.state.tasks=[t];
   assert.strictEqual(c.isInheritedToday(t),true,'precondition: inheritance would carry it');
 
-  c.setIncludedOff('carry');
+  /* PP-EXT (owner 2026-08-20): SNOOZE is the verb that removes. `setIncludedOff` used to write this
+     snooze itself, which is what made it indistinguishable from the snooze button. */
+  c.snoozeToday('carry');
   const got=c.state.tasks.find(x=>x.id==='carry');
-  assert.strictEqual(got.included,null,'unpressed, never "off"');
-  assert.strictEqual(got.snoozeUntil,B+DAY,'snoozed through today so the unpress actually takes effect');
+  assert.strictEqual(got.included,true,'snoozing never touches inclusion — an expiry falls back to it');
+  assert.strictEqual(got.snoozeUntil,B+DAY,'snoozed through today so the opt-out actually takes effect');
   assert.strictEqual(c.isActiveToday(got),false,'and it really is out of today');
   assert.strictEqual(c.isActiveOn(got,B+2*DAY),true,'...but tomorrow it returns on its own - no dead end');
 });
 
-/* ---------- §5 the 3x2 projection ---------- */
+/* ---------- §5 the projection ---------- */
 
-test('V2.9 selectionProjection fills a 3x2 grid with per-column and per-row counts', () => {
+test('selectionProjection places every live task in exactly one flat bucket', () => {
   const c=make(); const B=c.startOfToday();
   const tasks=[
-    activeTask(c,{id:'o-in', start:B-3*DAY,end:B-DAY,included:true, pct:10}),  /* overdue · included */
-    activeTask(c,{id:'e-in', start:B-2*DAY,end:B+2*DAY,included:true,pct:10}), /* existing · included */
-    activeTask(c,{id:'n-in', start:B,       end:B+DAY,included:true}),          /* new · included */
-    /* V5 block 20 (F19): a window OPENING today can no longer be undecided — it auto-includes, which is
-       the whole point of the block. Undecided work now shows up in Extra: a dateless someday pick that
-       the calendar never surfaced and the user never pressed. */
-    activeTask(c,{id:'x-un', start:null,    end:null, included:null}),          /* extra · undecided */
-    activeTask(c,{id:'x-in', start:null,    end:null, included:true})           /* extra · included */
+    activeTask(c,{id:'over', start:B-3*DAY,end:B-DAY,included:true, pct:10, onListSince:c.ymdOf(B-3*DAY)}),
+    activeTask(c,{id:'cont', start:B-2*DAY,end:B+2*DAY,included:true,pct:10, onListSince:c.ymdOf(B-2*DAY)}),
+    activeTask(c,{id:'new',  start:B,       end:B+DAY,included:true,        onListSince:c.ymdOf(B)}),
+    activeTask(c,{id:'up',   start:null,    end:null, included:null}),
+    activeTask(c,{id:'snz',  start:B,       end:B+DAY,included:true, snoozeUntil:B+DAY})
   ];
   c.state.tasks=tasks;
   const p=c.selectionProjection(tasks);
 
   /* join, not deepStrictEqual: the app runs in a VM realm, so its Array has a different prototype */
-  assert.strictEqual(p.keys.join(','),'overdue,existing,new,extra');
-  /* every task is placed exactly once */
-  const placed=p.keys.reduce((n,k)=>n+p.cells[k].included.length+p.cells[k].excluded.length,0);
-  assert.strictEqual(placed,tasks.length,'nothing falls out of the grid');
-  assert.strictEqual(p.rowCount.included+p.rowCount.excluded,tasks.length,'row counts are exhaustive');
-  assert.strictEqual(p.keys.reduce((n,k)=>n+p.colCount[k],0),tasks.length,'column counts are exhaustive');
+  assert.strictEqual(p.keys.join(','),'overdue,new,continued,upcoming,snoozed');
+  const placed=p.keys.reduce((n,k)=>n+p.cells[k].length,0);
+  assert.strictEqual(placed,tasks.length,'nothing falls out of the partition');
+  assert.strictEqual(p.keys.reduce((n,k)=>n+p.colCount[k],0),tasks.length,'counts are exhaustive');
 
-  assert.ok(p.cells.new.included.some(t=>t.id==='n-in'));
-  assert.ok(p.cells.extra.excluded.some(t=>t.id==='x-un'),'undecided sits in the Excluded row');
-  assert.ok(p.cells.extra.included.some(t=>t.id==='x-in'));
+  assert.ok(p.cells.overdue.some(t=>t.id==='over'));
+  assert.ok(p.cells.continued.some(t=>t.id==='cont'));
+  assert.ok(p.cells.new.some(t=>t.id==='new'));
+  assert.ok(p.cells.upcoming.some(t=>t.id==='up'));
+  assert.ok(p.cells.snoozed.some(t=>t.id==='snz'));
 });
 
-test('V2.9 selectionProjection ignores archived tasks', () => {
+test('selectionProjection ignores archived tasks', () => {
   const c=make(); const B=c.startOfToday();
-  const live=activeTask(c,{id:'live',start:B,end:B+DAY,included:true});
+  const live=activeTask(c,{id:'live',start:B,end:B+DAY,included:true,onListSince:c.ymdOf(B)});
   const gone=activeTask(c,{id:'gone',start:B,end:B+DAY,included:true,archivedAt:B-DAY});
   c.state.tasks=[live,gone];
   const p=c.selectionProjection(c.state.tasks);
-  assert.strictEqual(p.rowCount.included,1,'archived work is not part of today\'s selection');
+  assert.strictEqual(p.keys.reduce((n,k)=>n+p.colCount[k],0),1,"archived work is not part of today's selection");
 });
 
-/* ---------- §3 Eisenhower ---------- */
-
-test('V2.9 urgency is derived from dates and undated work is never urgent', () => {
-  const c=make(); const B=c.startOfToday();
-  c.state.settings=Object.assign({},c.state.settings,{eisenhowerUrgentDays:2});
-  const overdue=activeTask(c,{id:'overdue',start:B-3*DAY,end:B-DAY});
-  const soon=activeTask(c,{id:'soon',start:B+DAY,end:B+2*DAY});
-  const far=activeTask(c,{id:'far',start:B+9*DAY,end:B+10*DAY});
-  const spanning=activeTask(c,{id:'spanning',start:B-DAY,end:B+9*DAY});
-  const undated=activeTask(c,{id:'undated',start:null,end:null});
-  c.state.tasks=[overdue,soon,far,spanning,undated];
-
-  assert.strictEqual(c.isUrgent(overdue,B),true,'overdue is urgent');
-  assert.strictEqual(c.isUrgent(soon,B),true,'due inside the horizon is urgent');
-  assert.strictEqual(c.isUrgent(far,B),false,'due beyond the horizon is not urgent');
-  assert.strictEqual(c.isUrgent(spanning,B),true,'today inside the window is urgent');
-  assert.strictEqual(c.isUrgent(undated,B),false,'undated work is never urgent');
-});
-
-test('V2.9 the urgency horizon honours the eisenhowerUrgentDays setting', () => {
-  const c=make(); const B=c.startOfToday();
-  const t=activeTask(c,{id:'t',start:B+4*DAY,end:B+4*DAY});
-  c.state.tasks=[t];
-  c.state.settings=Object.assign({},c.state.settings,{eisenhowerUrgentDays:2});
-  assert.strictEqual(c.isUrgent(t,B),false,'outside a 2-day horizon');
-  c.state.settings=Object.assign({},c.state.settings,{eisenhowerUrgentDays:7});
-  assert.strictEqual(c.isUrgent(t,B),true,'inside a 7-day horizon');
-});
-
-test('V2.9 importance is declared via priority, never inferred', () => {
-  const c=make();
-  assert.strictEqual(c.isImportant({priority:1}),true);
-  assert.strictEqual(c.isImportant({priority:2}),true);
-  assert.strictEqual(c.isImportant({priority:3}),false);
-  assert.strictEqual(c.isImportant({priority:4}),false);
-  assert.strictEqual(c.isImportant({}),false,'the normalizeTask default (4) reads as not-important');
-});
-
-test('V2.9 quadrantOf maps the two axes onto the four cells', () => {
-  const c=make(); const B=c.startOfToday();
-  c.state.settings=Object.assign({},c.state.settings,{eisenhowerUrgentDays:2});
-  const mk=(id,priority,start,end)=>activeTask(c,{id,priority,start,end});
-  const doIt   =mk('do',1,B-DAY,B);          /* important + overdue */
-  const sched  =mk('sched',1,B+9*DAY,B+9*DAY);
-  const deleg  =mk('deleg',4,B-DAY,B);
-  const drop   =mk('drop',4,B+9*DAY,B+9*DAY);
-  c.state.tasks=[doIt,sched,deleg,drop];
-
-  assert.strictEqual(c.quadrantOf(doIt,B),'do');
-  assert.strictEqual(c.quadrantOf(sched,B),'schedule');
-  assert.strictEqual(c.quadrantOf(deleg,B),'delegate');
-  assert.strictEqual(c.quadrantOf(drop,B),'drop');
-
-  const p=c.eisenhowerProjection(c.state.tasks,B);
-  assert.strictEqual(p.do.length,1);
-  assert.strictEqual(p.schedule.length,1);
-  assert.strictEqual(p.delegate.length,1);
-  assert.strictEqual(p.drop.length,1);
-  assert.strictEqual(p.do.length+p.schedule.length+p.delegate.length+p.drop.length,4,
-    'every task lands in exactly one quadrant');
-});
-
-test('V2.9 a quadrant drag writes priority ONLY and never touches dates', () => {
-  const c=make(); const B=c.startOfToday();
-  const t=activeTask(c,{id:'t',priority:4,start:B+9*DAY,end:B+9*DAY});
-  c.state.tasks=[t];
-  const start0=t.start, end0=t.end;
-
-  c.setQuadrantImportance('t',true);
-  let got=c.state.tasks.find(x=>x.id==='t');
-  assert.strictEqual(got.priority,2,'promoted into the important row');
-  assert.strictEqual(got.start,start0,'start is untouched');
-  assert.strictEqual(got.end,end0,'end is untouched — a drop must never silently reschedule work');
-
-  c.setQuadrantImportance('t',false);
-  got=c.state.tasks.find(x=>x.id==='t');
-  assert.strictEqual(got.priority,3);
-  assert.strictEqual(got.end,end0,'still untouched');
-});
+/* ---------- §3 Eisenhower — DELETED 2026-08-21 (A8b) ----------
+   `isUrgent`, `isImportant`, `quadrantOf`, `eisenhowerProjection` and `setQuadrantImportance` went with
+   the Matrix surface on the owner's ruling. Their tests are deleted rather than skipped: a skipped test
+   for code that no longer exists is a claim the surface is coming back, and it is not. */
 
 /* ---------- §6 the Gantt inclusion division ---------- */
 

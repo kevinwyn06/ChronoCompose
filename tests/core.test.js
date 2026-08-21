@@ -31,10 +31,14 @@ test('normalizeTask: no pin fields, clock flags default to null (derive)', () =>
   assert.equal(t.endClock, null);
 });
 
-test('parseDur / fmtDur (minutes; bare number = hours)', () => {
+// CHANGED (owner 2026-08-20, Task 15): a bare number is MINUTES now, not decimal hours. One duration
+// grammar across every field was the owner's ask — "just one example there might be more" — and the
+// grammar table they gave reads `90` as ninety minutes. H:MM is how you type hours, as it always was.
+test('parseDur / fmtDur (minutes; bare number = minutes)', () => {
   const c = make();
   assert.strictEqual(c.parseDur('1:30'), 90);
-  assert.strictEqual(c.parseDur('2'), 120);
+  assert.strictEqual(c.parseDur('2'), 2);
+  assert.strictEqual(c.parseDur('2h'), 120);
   assert.strictEqual(c.parseDur(''), 0);
   assert.strictEqual(c.parseDur('0:45'), 45);
   assert.strictEqual(c.fmtDur(90), '1:30');
