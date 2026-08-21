@@ -8027,19 +8027,50 @@ class Component extends DCLogic {
   /* merge a pulled snapshot into local tasks. Row-level LWW: newer updatedAt wins; a tie keeps local
      (avoids needless churn/echo). Local-only rows are kept (pending pushes). A remote row whose id was
      tombstoned locally more recently than the row's own clock is skipped (don't resurrect our delete). */
-  applyRemoteSnapshot(local, remote, tombstones){
+  applyRemoteSnapshot(local, remote, tombstones, opts){
     const ts=tombstones||{};
     const byId={}; (local||[]).forEach(t=>byId[t.id]=t);
     const order=(local||[]).map(t=>t.id);
+    const seen={};
     (remote||[]).forEach(row=>{
       const r=this.migrateIncomingRow(this.rowToTask(row));
+      seen[r.id]=1;
       if(ts[r.id]!=null && this.syncTs(ts[r.id]) >= this.syncTs(r.updatedAt)) return; /* our delete is newer */
       const l=byId[r.id];
       if(!l){ byId[r.id]=r; order.push(r.id); return; }
       if(this.syncTs(r.updatedAt) > this.syncTs(l.updatedAt)) byId[r.id]=this.mergeRemoteOverLocal(l, r);
     });
-    return order.map(id=>byId[id]);
+    /* PP-EXT (owner 2026-08-20, tasks.md S1): a LOCAL row the server does not have is now two different
+       situations, and this used to conflate them into one. See syncAbsentDecision. `opts` is optional so
+       every pre-existing caller keeps the old keep-everything behaviour verbatim. */
+    const o=opts||{};
+    if(o.acked) order.forEach(id=>{
+      if(seen[id]) return;
+      if(this.syncAbsentDecision(id, o.acked, o.pending||{})==='delete') delete byId[id];
+    });
+    return order.filter(id=>byId[id]).map(id=>byId[id]);
   }
+  /* PP-EXT (owner 2026-08-20, tasks.md S1): the one question the sync layer could not previously answer —
+     a row is on this device and NOT on the server; who is right?
+       • we have positive evidence the backend once held this id (a pull returned it, or our push of it was
+         accepted) and it is gone now  -> ANOTHER ORIGIN DELETED IT -> delete locally.
+       • no such evidence                                          -> WE NEVER PUSHED IT -> keep and insert.
+     The second branch is the whole of the old never-delete rule, which existed for a real reason: a first
+     sync from a device whose workspace was never uploaded must not wipe itself against an empty backend,
+     and for sections a wrong delete orphans every task filed under it. Nothing about that changes; the ack
+     ledger just stops it from also swallowing genuine deletes.
+     A PENDING local write outranks the ack: an unflushed edit is a newer local intent than our knowledge
+     of the delete, so the row is re-created rather than silently losing the user's work. That is the one
+     place this differs from server-side soft-delete (option A in tasks.md), which could compare clocks.
+     Deliberately conservative in every ambiguous case — an over-kept row is visible and fixable, a
+     wrongly deleted one is neither. */
+  syncAbsentDecision(id, acked, pending){
+    if(pending && pending[id]) return 'keep';
+    return (acked && acked[id]) ? 'delete' : 'keep';
+  }
+  /* PURE ledger helpers. Ids the backend has CONFIRMED — returned by a pull, or accepted from a push. */
+  syncAckIds(acked, ids){ const a=Object.assign({}, acked||{}); (ids||[]).forEach(id=>{ a[id]=1; }); return a; }
+  syncUnackIds(acked, ids){ const a=Object.assign({}, acked||{}); (ids||[]).forEach(id=>{ delete a[id]; }); return a; }
   /* PP-EXT (16/F6): a remote WIN replaces the MIRRORED COLUMNS ONLY, never the whole row. `r` comes out
      of rowToTask -> normalizeTask, so every local-only field on it is a fresh DEFAULT, not the user's
      value: taking `r` wholesale reset `sectionId` to null (and `demo` to false) on every remote-wins
@@ -8091,6 +8122,23 @@ class Component extends DCLogic {
   /* PURE: given the local value for an id (or undefined), an incoming remote value (null = a remote delete),
      and our tombstone ts for it (or null), decide the merge: 'set' (take remote), 'delete', or 'none'.
      Row-level LWW by updatedAt; a remote row older-or-equal to local, or not newer than our tombstone, loses. */
+  /* PURE (owner 2026-08-20, tasks.md S1): the kv counterpart of applyRemoteSnapshot. Merges a pulled map
+     into the local map by the existing row-level LWW, then applies the SAME absent-row rule so a section,
+     habit or journal entry deleted on another origin stops coming back. Every reconcile branch used to
+     open-code this merge inline and then strip deletes from the diff, which is how the three funnels
+     drifted apart; they now share one tested decision. `opts` optional -> old behaviour. */
+  syncKvMergeMap(localMap, remoteMap, tombs, opts){
+    const out=Object.assign({}, localMap||{}); const tomb=tombs||{}; const rm=remoteMap||{};
+    Object.keys(rm).forEach(id=>{
+      if(this.kvMergeDecision(out[id], rm[id], tomb[id])==='set') out[id]=rm[id];
+    });
+    const o=opts||{};
+    if(o.acked) Object.keys(out).forEach(id=>{
+      if(rm[id]!==undefined) return;
+      if(this.syncAbsentDecision(id, o.acked, o.pending||{})==='delete') delete out[id];
+    });
+    return out;
+  }
   kvMergeDecision(local, remote, tombTs){
     if(remote==null) return (local!=null) ? 'delete' : 'none';
     if(tombTs!=null && this.syncTs(tombTs) >= this.kvTs(remote)) return 'none';
@@ -8107,6 +8155,27 @@ class Component extends DCLogic {
       Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
       if(ch) this.saveSyncTombstones(t); return t; }catch(e){ return {}; } }
   saveSyncTombstones(t){ try{ this.lsSet('pp-sync-tombstones', JSON.stringify(t)); }catch(e){} }
+  /* PP-EXT (owner 2026-08-20, tasks.md S1): `pp-sync-acked` — per table, the set of ids the backend has
+     confirmed. This is what lets `syncAbsentDecision` tell "the server deleted it" from "we never pushed
+     it", which is what makes deletions cross origins at all.
+     A missing or CORRUPT ledger must read as "nothing acked", never as "everything acked": the empty
+     reading keeps rows, the inverted one would delete a whole workspace on a single bad parse. It is
+     workspace-scoped like every other pp-* store, so two accounts cannot confuse each other's evidence,
+     and it is cheap to rebuild — one pull re-acks everything the server holds. */
+  SYNC_ACK_TABLES(){ return ['tasks'].concat(this.KV_TABLES()); }
+  loadSyncAcked(){ const out={}; this.SYNC_ACK_TABLES().forEach(t=>{ out[t]={}; });
+    try{ const raw=JSON.parse(this.lsGet('pp-sync-acked')||'{}')||{};
+      this.SYNC_ACK_TABLES().forEach(t=>{ const v=raw[t]; if(v && typeof v==='object' && !Array.isArray(v)) out[t]=Object.assign({}, v); });
+    }catch(e){ /* corrupt -> nothing acked, the safe direction */ }
+    return out; }
+  saveSyncAcked(a){ try{ const out={}; this.SYNC_ACK_TABLES().forEach(t=>{ out[t]=(a&&a[t])||{}; });
+    this.lsSet('pp-sync-acked', JSON.stringify(out)); }catch(e){} }
+  /* ack/un-ack one table without disturbing the others. */
+  syncAckTable(table, ids){ const a=this.loadSyncAcked(); a[table]=this.syncAckIds(a[table], ids); this.saveSyncAcked(a); }
+  syncUnackTable(table, ids){ const a=this.loadSyncAcked(); a[table]=this.syncUnackIds(a[table], ids); this.saveSyncAcked(a); }
+  /* ids with an unflushed outbound write, so a pending edit can outrank a remote delete. */
+  syncPendingTaskIds(){ const p={}; this.loadSyncQueue().forEach(o=>{ if(o.op!=='delete') p[o.id]=1; }); return p; }
+  syncPendingKvIds(table){ const p={}; this.loadKvQueue().forEach(o=>{ if(o.table===table && o.op!=='delete') p[o.id]=1; }); return p; }
   /* Coalescing enqueue: a delete supersedes any pending write for its id and drops a tombstone; an
      insert/update coalesces to the latest full-row write and clears any stale tombstone (re-create). */
   syncEnqueue(ops){
@@ -8201,7 +8270,7 @@ class Component extends DCLogic {
   WS_SCOPED_KEYS(){ return ['pp-tasks','pp-settings','pp-prefs','pp-gcal','pp-run','pp-pomo','pp-notify',
     'pp-migrations','pp-habits','pp-journal','pp-sections'/* PP-EXT V2.6 */,
     'pp-scratch'/* PP-EXT V3.1 */,'pp-journal-prompts'/* PP-EXT V3.2 */, /* both per-account user data: omitting them from this list would make a future explicit import silently drop the pad and the prompt set */
-    'pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue',
+    'pp-sync-queue','pp-sync-tombstones','pp-sync-kv-queue','pp-sync-acked'/* PP-EXT owner 2026-08-20: the delete-propagation ledger is per-workspace evidence and must travel with the namespace */,
     'pp-sync-kv-tombstones','pp-gcal-queue','pp-gcal-tombstones']; }
   /* ==== PP-EXT (17/F5): anon workspace promotion ====
      Before this, `importAnonInto`/`anonHasData` were dead code: sign-in was a pure clean switch, so
@@ -8522,9 +8591,16 @@ class Component extends DCLogic {
         return send.map(w=>w.key);
       })
       .then(okKeys=>{
+        /* PP-EXT (owner 2026-08-20): a row the backend ACCEPTED is now confirmed to exist there. Without
+           this, a task created and pushed by this device would stay un-acked forever, so if another origin
+           later deleted it we would read "never pushed" and resurrect it — the very bug being fixed. */
+        const okIds={}; send.forEach(w=>{ okIds[w.key]=w.row.id; });
+        this.syncAckTable('tasks', okKeys.map(k=>okIds[k]).filter(Boolean));
         if(!dead.length) return okKeys;
         return Promise.resolve(this._sb.from('tasks').delete().in('id', dead))
-          .then(r=>{ if(r && r.error) throw r.error; return okKeys.concat(deadKeys); });
+          .then(r=>{ if(r && r.error) throw r.error;
+            this.syncUnackTable('tasks', dead); /* it is gone from the backend; drop the evidence */
+            return okKeys.concat(deadKeys); });
       })
       .then(okKeys=>finish(okKeys.concat(quarantinedKeys)))
       .catch(e=>{ this._syncSending=false; this.saveSync({sending:false}); this.syncError(e); });
@@ -8550,10 +8626,19 @@ class Component extends DCLogic {
       .then(({data, error})=>{ if(error) throw error;
         const remote=(data||[]).map(r=>this.rowToTask(r));
         /* compute the merge locally (do NOT read this.state.tasks after setState — it's async in React) */
-        let merged=this.applyRemoteSnapshot(this.state.tasks, data||[], this.loadSyncTombstones()).map(t=>this.normalizeTask(t));
+        /* PP-EXT (owner 2026-08-20, tasks.md S1): the ack ledger + the pending set are what let this pull
+           DELETE a row another origin removed, instead of re-inserting it. Both are read BEFORE the merge:
+           `syncPendingTaskIds` reads the queue as it stands now, and the merge itself enqueues into it. */
+        const acked=this.loadSyncAcked();
+        let merged=this.applyRemoteSnapshot(this.state.tasks, data||[], this.loadSyncTombstones(),
+          { acked:acked.tasks, pending:this.syncPendingTaskIds() }).map(t=>this.normalizeTask(t));
         this._syncApplying=true;                              /* echo guard while we persist the pull */
         try{ this.autoSchedule(merged); this.setState({tasks:merged}); this.saveTasks(merged); }
         finally{ this._syncApplying=false; }
+        /* PP-EXT (owner 2026-08-20): every id the server just returned is now CONFIRMED evidence that the
+           backend holds it. Recorded before the outbound diff, so a crash between the two loses only an
+           ack (rebuilt by the next pull) rather than mis-classifying a row as deleted. */
+        this.syncAckTable('tasks', remote.map(t=>t.id));
         const ops=this.computeSyncOps(remote, merged);        /* inserts/updates/deletes the backend needs */
         if(ops.length) this.syncEnqueue(ops);
         this.saveSync({pulling:false, msg:'Synced.', lastError:null});
@@ -8637,9 +8722,14 @@ class Component extends DCLogic {
       this.syncClearError();
       if(this.loadKvQueue().length) this.syncKvFlushSoon(); };
     let chain=Promise.resolve();
+    /* PP-EXT (owner 2026-08-20, tasks.md S1): record what the backend accepted, so the next reconcile can
+       tell "the server deleted it" from "we never pushed it". Ack after the upsert lands, un-ack after the
+       delete lands — never before, or a failed write would leave evidence of a row that is not there. */
     this.KV_TABLES().forEach(t=>{ const g=byTable[t];
-      if(g.rows.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).upsert(g.rows)).then(r=>{ if(r&&r.error) throw r.error; }));
-      if(g.dead.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).delete().in('id', g.dead)).then(r=>{ if(r&&r.error) throw r.error; }));
+      if(g.rows.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).upsert(g.rows)).then(r=>{ if(r&&r.error) throw r.error;
+        this.syncAckTable(t, g.rows.map(x=>x.id)); }));
+      if(g.dead.length) chain=chain.then(()=>Promise.resolve(this._sb.from(t).delete().in('id', g.dead)).then(r=>{ if(r&&r.error) throw r.error;
+        this.syncUnackTable(t, g.dead); }));
     });
     chain.then(finish).catch(e=>{ this._syncKvSending=false; this.syncError(e); });
   }
@@ -8649,33 +8739,47 @@ class Component extends DCLogic {
   syncInitialSyncKv(){
     if(!this._sb || !this._session) return;
     const tomb=this.loadKvTombstones();
+    const acked=this.loadSyncAcked();
     this._sb.from('habits').select('*').then(({data, error})=>{ if(error) throw error;
-      let local=(this.state.habits||[]).slice(); const byId={}; local.forEach(h=>byId[h.id]=h);
-      const remoteMap={};
-      (data||[]).forEach(r=>{ const inc=this.normalizeHabit(Object.assign({}, r.data||{}, {id:r.id})); remoteMap[r.id]=inc;
-        if(this.kvMergeDecision(byId[r.id], inc, tomb[this.kvTombKey('habits', r.id)])==='set'){
-          if(byId[r.id]) local=local.map(h=>h.id===r.id?inc:h); else local.push(inc); byId[r.id]=inc; } });
+      const remoteMap={}; const tombFor={};
+      (data||[]).forEach(r=>{ const inc=this.normalizeHabit(Object.assign({}, r.data||{}, {id:r.id}));
+        remoteMap[r.id]=inc; tombFor[r.id]=tomb[this.kvTombKey('habits', r.id)]; });
+      /* PP-EXT (owner 2026-08-20, tasks.md S1): one shared merge for all three kv tables, and it can now
+         DELETE a row another origin removed instead of re-pushing it. Ordered map -> list afterwards. */
+      const mergedMap=this.syncKvMergeMap(this.habitsToMap(this.state.habits), remoteMap, tombFor,
+        { acked:acked.habits, pending:this.syncPendingKvIds('habits') });
+      const local=Object.keys(mergedMap).map(id=>mergedMap[id]);
       this._syncApplying=true; try{ this.saveHabits(local); } finally{ this._syncApplying=false; }
-      const ops=this.computeKvOps(remoteMap, this.habitsToMap(local)).filter(o=>o.op!=='delete');
+      this.syncAckTable('habits', Object.keys(remoteMap));
+      const ops=this.computeKvOps(remoteMap, mergedMap);
       if(ops.length) this.syncKvEnqueue('habits', ops);
     }).catch(e=>this.syncError(e));
     this._sb.from('journal').select('*').then(({data, error})=>{ if(error) throw error;
-      const jmap=Object.assign({}, this.state.journal||{}); const remoteMap={};
-      (data||[]).forEach(r=>{ const inc=r.data||{}; remoteMap[r.id]=inc;
-        if(this.kvMergeDecision(jmap[r.id], inc, tomb[this.kvTombKey('journal', r.id)])==='set') jmap[r.id]=inc; });
+      const remoteMap={}; const tombFor={};
+      (data||[]).forEach(r=>{ remoteMap[r.id]=r.data||{}; tombFor[r.id]=tomb[this.kvTombKey('journal', r.id)]; });
+      const jmap=this.syncKvMergeMap(this.state.journal||{}, remoteMap, tombFor,
+        { acked:acked.journal, pending:this.syncPendingKvIds('journal') });
       this._syncApplying=true;
       try{ try{ this.lsSet('pp-journal', JSON.stringify(jmap)); }catch(e){} this.setState({journal:jmap}); }
       finally{ this._syncApplying=false; }
-      const ops=this.computeKvOps(remoteMap, jmap).filter(o=>o.op!=='delete');
+      this.syncAckTable('journal', Object.keys(remoteMap));
+      const ops=this.computeKvOps(remoteMap, jmap);
       if(ops.length) this.syncKvEnqueue('journal', ops);
     }).catch(e=>this.syncError(e));
-    /* PP-EXT (owner 2026-08-15): the sections reconcile. Same never-delete-on-first-reconcile rule as the
-       two above — a section absent remotely means "this device has not pushed it yet", not "deleted" —
-       which matters more here than for habits: a wrong delete would orphan every task filed under it. */
+    /* PP-EXT (owner 2026-08-15): the sections reconcile. It used to share the two branches above's
+       never-delete-on-first-reconcile rule — a section absent remotely meant "this device has not pushed
+       it yet", never "deleted" — which mattered more here than for habits: a wrong delete orphans every
+       task filed under it.
+       PP-EXT (owner 2026-08-20, tasks.md S1): that rule was ALSO swallowing genuine deletes, and it is why
+       the owner's two origins kept growing duplicate sections that no delete could remove. The protection
+       is now conditional rather than absolute: `syncKvMergeMap` only deletes an absent row the ack ledger
+       proves the backend once held, so a never-uploaded section is still kept and its tasks never orphan. */
     this._sb.from('sections').select('*').then(({data, error})=>{ if(error) throw error;
-      const map=this.sectionsToMap(this.state.sections); const remoteMap={};
-      (data||[]).forEach(r=>{ const inc=this.normalizeSection(Object.assign({}, r.data||{}, {id:r.id})); remoteMap[r.id]=inc;
-        if(this.kvMergeDecision(map[r.id], inc, tomb[this.kvTombKey('sections', r.id)])==='set') map[r.id]=inc; });
+      const remoteMap={}; const tombFor={};
+      (data||[]).forEach(r=>{ const inc=this.normalizeSection(Object.assign({}, r.data||{}, {id:r.id}));
+        remoteMap[r.id]=inc; tombFor[r.id]=tomb[this.kvTombKey('sections', r.id)]; });
+      const map=this.syncKvMergeMap(this.sectionsToMap(this.state.sections), remoteMap, tombFor,
+        { acked:acked.sections, pending:this.syncPendingKvIds('sections') });
       /* PP-EXT (owner 2026-08-17, fix): compute the push-back from the LOCAL MERGED VALUE, never from
          `this.state.sections` after `saveSections`. `setState` is async in React — the tasks path says so
          in as many words ("do NOT read this.state.tasks after setState") and the habits/journal branches
@@ -8686,7 +8790,8 @@ class Component extends DCLogic {
       const merged=this.sectionsFromMap(map);
       this._syncApplying=true;
       try{ this.saveSections(merged); } finally{ this._syncApplying=false; }
-      const ops=this.computeKvOps(remoteMap, this.sectionsToMap(merged)).filter(o=>o.op!=='delete');
+      this.syncAckTable('sections', Object.keys(remoteMap));
+      const ops=this.computeKvOps(remoteMap, this.sectionsToMap(merged));
       if(ops.length) this.syncKvEnqueue('sections', ops);
     }).catch(e=>this.syncError(e));
   }
@@ -8694,8 +8799,8 @@ class Component extends DCLogic {
      echo-suppressed (_syncApplying). Our own writes echo back but kvMergeDecision makes them no-ops. */
   syncOnKvChange(table, p){
     if(!p) return; const type=p.eventType||p.type;
-    if(type==='DELETE'){ const id=p.old && p.old.id; if(id) this.syncApplyKvRemote(table, id, null); }
-    else { const row=p.new; if(row) this.syncApplyKvRemote(table, row.id, row.data); }
+    if(type==='DELETE'){ const id=p.old && p.old.id; if(id){ this.syncUnackTable(table, [id]); this.syncApplyKvRemote(table, id, null); } }
+    else { const row=p.new; if(row){ if(row.id) this.syncAckTable(table, [row.id]); this.syncApplyKvRemote(table, row.id, row.data); } }
   }
   syncApplyKvRemote(table, id, data){
     const tomb=this.loadKvTombstones()[this.kvTombKey(table, id)];
@@ -8770,8 +8875,11 @@ class Component extends DCLogic {
      back here; applyRemoteSnapshot's LWW makes them content-identical no-ops (no re-queue loop). */
   syncOnRemoteChange(p){
     if(!p) return; const type=p.eventType||p.type;
-    if(type==='DELETE'){ const id=p.old && p.old.id; if(id) this.syncApplyRemote(null, [id]); }
-    else { const row=p.new; if(row) this.syncApplyRemote([row], null); }
+    /* PP-EXT (owner 2026-08-20): the changefeed is also evidence. A live DELETE means the backend no longer
+       holds the row, so drop the ack too — otherwise a later pull would see "acked but absent" for a row
+       this device has already removed and do the work twice. */
+    if(type==='DELETE'){ const id=p.old && p.old.id; if(id){ this.syncUnackTable('tasks', [id]); this.syncApplyRemote(null, [id]); } }
+    else { const row=p.new; if(row){ if(row.id) this.syncAckTable('tasks', [row.id]); this.syncApplyRemote([row], null); } }
   }
   /* Outbound funnel — called by commit/undo/redo alongside gcalSyncOut. Inert unless sync is enabled
      (B2 flips it on at sign-in) and not echoing a just-pulled remote snapshot (_syncApplying). */

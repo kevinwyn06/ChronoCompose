@@ -53,12 +53,34 @@ Three layers now hold the invariant, and each is load-bearing on its own:
 **Adding a numeric mirrored field means adding it to `INT_COLUMNS` too**, or the next fractional value
 repeats the wedge. `INT_COLUMNS` sits beside `SYNC_FIELDS` for exactly that reason.
 
-**The reconcile rule is still "never delete on first sync", and that is a known open defect** — see
-`tasks.md` S1. `applyRemoteSnapshot` keeps local-only rows and `syncInitialSync` re-`insert`s them, and the
-kv/sections path strips deletes outright, so a device that was closed during a delete resurrects the row
-for everyone. Tombstones are per-origin `localStorage` and cannot cross. Fixing it requires distinguishing
-"never pushed" from "server deleted it" — enabling deletes outright would orphan tasks under a section
-that a genuine first sync had simply not uploaded yet.
+**Delete propagation and the ack ledger (owner 2026-08-20, `tasks.md` S1 — RESOLVED).** The reconcile used
+to treat "absent from the server" as "not pushed yet" unconditionally: `applyRemoteSnapshot` kept local-only
+rows and `syncInitialSync` re-`insert`ed them, and the kv branches stripped deletes from the diff. A device
+closed during a delete therefore resurrected the row for everyone. Tombstones are per-origin `localStorage`
+and cannot cross, so they could never fix this.
+
+`pp-sync-acked` is a workspace-scoped ledger of ids the backend has **confirmed** — returned by a pull, or
+accepted from a push. `syncAbsentDecision(id, acked, pending)` is the single answer to "who is right":
+
+| local row absent from the server | decision |
+|---|---|
+| acked | the server deleted it → delete locally |
+| not acked | we never pushed it → keep and insert |
+| a pending unflushed write exists | keep, whatever the ack says |
+
+The un-acked branch **is** the old never-delete rule, kept for the case it was written for: a first sync
+must not wipe a never-uploaded workspace, and a wrongly deleted section orphans every task filed under it.
+A missing or corrupt ledger reads as "nothing acked" — never the inverse, which would delete a workspace on
+one bad parse. Acks are written **after** the backend confirms (post-pull, post-upsert) and dropped after an
+accepted delete or a Realtime `DELETE`, so the ledger never claims a row the backend does not have.
+
+Tasks go through `applyRemoteSnapshot(local, remote, tombstones, opts)`; habits, journal and sections go
+through `syncKvMergeMap(localMap, remoteMap, tombs, opts)` — one shared merge, replacing three open-coded
+copies that each stripped deletes differently. Both take `opts` optionally, so an omitted ledger reproduces
+the old keep-everything behaviour exactly.
+
+Still on the backlog: **option A**, a server-side `deleted_at` soft delete. It is the more complete answer
+because it can compare clocks on the deletion itself; the ack ledger can only resolve existence.
 
 ## Google Calendar
 
