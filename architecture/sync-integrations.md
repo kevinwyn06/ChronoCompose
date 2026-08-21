@@ -79,8 +79,13 @@ through `syncKvMergeMap(localMap, remoteMap, tombs, opts)` — one shared merge,
 copies that each stripped deletes differently. Both take `opts` optionally, so an omitted ledger reproduces
 the old keep-everything behaviour exactly.
 
-Still on the backlog: **option A**, a server-side `deleted_at` soft delete. It is the more complete answer
-because it can compare clocks on the deletion itself; the ack ledger can only resolve existence.
+**Option A (a server-side `deleted_at` soft delete) is CLOSED as WONTFIX, owner 2026-08-21** — it is no
+longer on the backlog. It is the more complete answer in the abstract, because it can compare clocks on the
+deletion itself where the ack ledger can only resolve existence. But the ledger fixes the resurrection bug
+that was actually reported, and the only thing A adds is resolving a delete-versus-concurrent-edit race
+that has never been observed here. The cost is a migration, a table that never shrinks, and a
+`deleted_at is null` filter on every read path whose *omission* silently resurrects deleted rows — the
+same failure this section exists to prevent. Do not reopen without an owner report of a real lost delete.
 
 ## Google Calendar
 
