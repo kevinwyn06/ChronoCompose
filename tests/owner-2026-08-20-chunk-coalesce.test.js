@@ -27,17 +27,22 @@ function ownerShape(c) {
     start: at(c, 12), end: at(c, 13), startClock: true, endClock: true, uncompressable: true,
     priority: 4, deps: [], pct: 0, planned: 60, spent: 0 });
   c.state.tasks = [work, lunch];
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '08:00', dayEnd: '18:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '08:00', dayEnd: '18:00' });
   return B;
 }
 
+/* PP-EXT (2026-08-21): every fixture below sets `packFromNow: false` EXPLICITLY. Without it the packer
+   starts the flexible remainder at the wall clock instead of at the day start, so these tests passed or
+   failed according to the time of day they were run — three of them were red at 11:22am on a tree with
+   no relevant change in it. The assertions are about where the packer puts work RELATIVE to a pin, and
+   that question only has a fixed answer once the day's start is fixed. */
 const mine = (data, id) => data.chunks.filter(x => x.start && x.id === id);
 const spans = (list, c) => list.map(x => c.fmtClock(x.start) + '–' + c.fmtClock(x.end)).join(', ');
 
 test('chunk coalesce: a partially pinned task draws ONE bar and counts as one PIECE', () => {
   const c = make();
   const B = c.startOfToday();
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '08:00', dayEnd: '18:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '08:00', dayEnd: '18:00' });
   /* THE REPRODUCTION (Task 21). A partial drag-pin holds the first two hours; the packer places the
      remainder immediately after it. The two pieces ABUT at 10:00 — one continuous bar on screen — but
      they are two chunks carrying the same id, because the pinned piece is pushed into the list AFTER the
@@ -71,7 +76,7 @@ test('chunk coalesce: a run split at a keep-clear instant stays split', () => {
 test('chunk coalesce: the day total is unchanged by however the pieces are counted', () => {
   const c = make();
   const B = c.startOfToday();
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '08:00', dayEnd: '18:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '08:00', dayEnd: '18:00' });
   c.state.tasks = [c.normalizeTask({ id: 'work', name: 'Work', type: 'Proportional', included: true,
     start: B, end: B + 3 * DAY, planned: 300, priority: 4, deps: [], pct: 0, spent: 0,
     pin: [{ day: B, start: at(c, 8), dur: 120, partial: true }] })];
@@ -97,7 +102,7 @@ test('chunk coalesce: genuinely split work still counts as split', () => {
   /* A packed task that cannot fit in one run: a fixed appointment sits in the middle of the day and the
      flexible work has to go round it, leaving a REAL gap between two pieces. This is the case the ⧉
      exists for, and it must survive whatever fixes the case above. */
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '09:00', dayEnd: '17:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '09:00', dayEnd: '17:00' });
   c.state.tasks = [
     c.normalizeTask({ id: 'appt', name: 'Appointment', type: 'Proportional', included: true,
       start: at(c, 12), end: at(c, 13), startClock: true, endClock: true, uncompressable: true,
@@ -118,7 +123,7 @@ test('chunk coalesce: the regroup gate itself is off on one bar and on across a 
   const kcOf = (data) => (data.points || []).map(p => p.ms);
 
   // One continuous bar, however many chunks it is made of: no ⧉.
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '08:00', dayEnd: '18:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '08:00', dayEnd: '18:00' });
   c.state.tasks = [c.normalizeTask({ id: 'work', name: 'Work', type: 'Proportional', included: true,
     start: B, end: B + 3 * DAY, planned: 300, priority: 4, deps: [], pct: 0, spent: 0,
     pin: [{ day: B, start: at(c, 8), dur: 120, partial: true }] })];
@@ -126,7 +131,7 @@ test('chunk coalesce: the regroup gate itself is off on one bar and on across a 
   assert.equal(c.chunkPieces(data.chunks, 'work', kcOf(data)).length, 1);
 
   // Genuinely fragmented work still offers it — the fix must not suppress the button everywhere.
-  c.state.settings = Object.assign({}, c.state.settings, { dayStart: '09:00', dayEnd: '17:00' });
+  c.state.settings = Object.assign({}, c.state.settings, { packFromNow: false, dayStart: '09:00', dayEnd: '17:00' });
   c.state.tasks = [
     c.normalizeTask({ id: 'appt', name: 'Appointment', type: 'Proportional', included: true,
       start: at(c, 12), end: at(c, 13), startClock: true, endClock: true, uncompressable: true,

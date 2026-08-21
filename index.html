@@ -504,9 +504,11 @@ class Component extends DCLogic {
        replacements, the owner ruled that a locked block does not need a signal at all — "they look
        better, I just don't see the need for a locked indicator". Every block now carries the one width.
        What survives, because each says something else: DASHED still marks a drag-pin or a fixed window
-       (the shape of the day), and the 📌/📍 glyph still names WHY a block sits where it does, which is a
+       (the shape of the day), and the 📌 glyph still names WHY a block sits where it does, which is a
        label rather than a paint treatment. Reintroducing a weight or colour difference FOR LOCK needs a
-       fresh owner ruling. */
+       fresh owner ruling.
+       PP-EXT (owner 2026-08-21, ruling 5): the 📍 half of that pair is GONE — a drag-pinned block
+       carries a ✕ saying the same thing, and the owner ruled the ✕ survives. See `blockGlyph`. */
     this.TL_BLK_BORDER_PX = 1;   // PP-EXT V5.25: border width on every timeline block, locked or not
     /* PP-EXT (V4.2): edge-drag = a sticky manual ALLOTTED override (predicted/predictManual). */
     this.EDGE_MIN_ALLOT = 5;     // PP-EXT V4.2: minutes floor for an edge-dragged allotment (a 0-minute task would vanish mid-gesture)
@@ -10448,6 +10450,32 @@ class Component extends DCLogic {
     const w=(opts&&opts.free) ? null : this.dropWallsOn(B, id);
     const pieces=w ? this.splitDropPieces(start, d, w.walls, w.winEnd) : null;
     const recs=(pieces && pieces.length) ? pieces : [{start, dur:d}];
+    /* PP-EXT (owner 2026-08-21, ruling 2): a drop that lands exactly where the packer would have put
+       this block anyway is NOT an override, so it must not leave a pin behind — that no-op pin is what
+       made `blockOverridden` show a ✕ on a block the user had effectively not moved. The owner chose
+       the CHEAP fix (drop it at WRITE time) over the data-driven one (re-pack per block at RENDER time,
+       i.e. an `autoStartFor` per block per paint); this is that fix. V4.3's original-magnet already
+       covered the release-on-the-snap case via `bd.atOrig`; this covers the rest — an Alt-free
+       placement, or any drop that simply coincides.
+       Scoped to a WHOLE-task, single-record drop: `autoStartFor` answers "where would this task's first
+       block start unpinned", which is only comparable to a pin describing the whole day's work in one
+       piece. A partial pin is one chunk of a split by construction and has no such single answer.
+       `autoStartFor` re-packs against a copy with day B's pins for this task removed, so it is the
+       right question even while the old pin is still in state. It returns null when the task would not
+       schedule at all unpinned — that is not a match, and the pin is written. */
+    if(!partial && recs.length===1){
+      const auto=this.autoStartFor(id, B);
+      if(auto!=null && auto===recs[0].start){
+        const t0=(this.state.tasks||[]).find(x=>x.id===id);
+        /* Clear day B only, and only when there IS something to clear: an unpinned block dropped back
+           onto its own auto position must write nothing at all rather than open an empty undo entry. */
+        if(t0 && this.pinsOf(t0).some(p=>p.day===B))
+          this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+            const rest=this.pinsOf(t).filter(p=>p.day!==B); t.pin=rest.length?rest:null; });
+        else this.forceUpdate();
+        return;
+      }
+    }
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       if(!partial){ t.pin=recs.map(p=>({day:B, start:p.start, dur:p.dur})); return; }
       /* keep other days' pins and this day's OTHER chunks; drop the record this drag replaces and any
@@ -10610,6 +10638,15 @@ class Component extends DCLogic {
      `togglePredictManual` leaves it: the seam only honours it while `predictManual` is set, and keeping
      the number means re-enabling the override restores the value the user chose.
      No parallel undo path: `commit()` snapshots, and Ctrl+Z is the same key it always was. */
+  /* PP-EXT (owner 2026-08-21, ruling 5): the glyph prefix on a timeline block / Schedule chip.
+     The owner's report was that the ✕ and the pin mark say the same thing — "the (x) is always
+     present when the pin is present, so there's extraneous info there" — and ruled the ✕ survives.
+     That redundancy is real for 📍 (a DRAG-PIN: the user put this block here, and the ✕ is the way
+     back), so 📍 is gone. It is NOT real for 📌 (a FIXED WINDOW: the task owns a time of its own
+     and carries no ✕ at all), so 📌 stays — dropping it would delete the only mark distinguishing
+     an appointment from auto-packed work. Pairs with the write-time no-op-pin drop in `pinBlockAt`:
+     between them, a ✕ on a block now means exactly "you moved this". */
+  blockGlyph(c){ return (c && c.type==='fixed' && !c.dragPin) ? '📌 ' : ''; }
   blockOverridden(t, B){ return !!t && (!!t.predictManual || (B!=null && this.pinsOf(t).some(p=>p.day===B))); }
   resetBlock(id, B){
     const t0=(this.state.tasks||[]).find(x=>x.id===id);
@@ -11012,8 +11049,8 @@ class Component extends DCLogic {
          V5 inverted the signal instead, marking the rare case with a heavier border — and the owner CUT
          that too on 2026-08-20 (Task 23): "I just don't see the need for a locked indicator at all".
          Two channels still tell the two apart where it matters for a GESTURE rather than for status:
-         the 📌/📍 glyph and the coloured left rail. Render only: nothing here changes which
-         minutes a task gets. */
+         the 📌 glyph (fixed windows only, since ruling 5 — see `blockGlyph`) and the coloured left
+         rail. Render only: nothing here changes which minutes a task gets. */
       const locked = c.type==='fixed';
       const kind = c.type==='meal' ? 'meal'
         : (locked ? (c.dragPin?'pinned':'fixed')
@@ -11126,7 +11163,7 @@ class Component extends DCLogic {
           border:this.TL_BLK_BORDER_PX+'px '
                  +((c.dragPin||ty.window)?'dashed':'solid')+' '
                  +(cur?'#ea4335':(ty.window?'var(--tl-win-border)':'var(--tl-blk-border)'))}},
-        (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title, ...leftEls, btn, edgeH);
+        (this.blockGlyph(c))+c.title, ...leftEls, btn, edgeH);
       /* The card is a SIBLING, not a child: the block clips its own overflow (that is what ellipsises a
          long title), so a card drawn inside it would be cut off at the block's own edge. */
       return tipCard ? [blockEl, tipCard] : blockEl; });
@@ -11567,7 +11604,7 @@ class Component extends DCLogic {
                    +((c.dragPin||ty.window)?'dashed':'solid')+' '
                    +(ty.window?'var(--tl-win-border)':'transparent')}},
           h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',opacity:0.85,fontWeight:700}}, this.fmtClock(st)+'–'+this.fmtClock(en)),
-          h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, (c.type==='fixed'?(c.dragPin?'📍 ':'📌 '):'')+c.title),
+          h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, (this.blockGlyph(c))+c.title),
           unpin,
           c.type!=='meal'?h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer',
             style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
