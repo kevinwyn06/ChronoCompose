@@ -463,6 +463,53 @@ The guard asks about *yesterday*, the day being inherited from. If that occurren
 (a cold `_occById` memo), `clockSpanMinutes` returns null and the guard does not fire — the safe
 direction, leaving the task visible rather than vanishing it.
 
+## "Has a usable window" is not "has two edges" (owner ruling, 2026-08-21)
+
+`isScheduled(t)` is `start != null && end != null`. It was being used for **two different questions** at
+once — *does this task have a usable window?* and *does it have both edges?* — and the dateless exclusion
+rode on the conflation. Today was the single day in the app decided by a predicate chain that consulted
+it; every other day went through `ghostSpan`, which handles a one-edge task correctly. The two paths
+therefore disagreed, and the owner saw the disagreement directly: a quick-added `test today` was **absent
+from today's list and present on tomorrow's**, `test today at 4pm` appeared on **no day at all**, a daily
+repeat **skipped its first day**, and a task with **no date was included while the same task with a date
+was not**. Only an explicit clock range like `3pm-4pm` — the one phrasing yielding two edges — worked.
+That is the exact inverse of the tenet the predicates exist to serve ("What? Of course it should be auto
+included"), and it penalised precisely the users who supplied a date.
+
+The conflation is now split into the two questions it was hiding:
+
+| Helper | Question |
+|---|---|
+| `hasDate(t)` | Is there **any** real edge? This is the dateless exclusion, and it is still necessary: `ghostSpan` anchors a dateless span at today, so without it every someday pick would trivially qualify. |
+| `todayWindow(t, B)` | The window — `isScheduled ? occForDay : ghostSpan`, the same selection `isActiveOn` already uses on every other day. Safe to hand `ghostSpan` a raw `B` here (unlike `isActiveOn`'s other-day branch, which must anchor at the real today) because `B` **is** today in every caller. |
+
+Three call sites carried the old guard and now share these: `autoIncludedToday`, `startsToday`, and
+`onListNow`. The third mattered most in practice — its short-circuit made the `ghostSpan` arm of its own
+selection unreachable, so `onListSince` was never stamped and `originOf` filed work today had just brought
+in under **Upcoming** rather than **New**. A task missing from Included was simultaneously mis-filed in
+triage, because both predicates failed together on the same input.
+
+**`ghostStart` replaces `isScheduled` as the "window opened today" test.** A *derived* start edge is not an
+opening. Without that clause a deadline-only task, whose ghost start is re-derived at today every day,
+would file as New every day until its deadline.
+
+**A typed start clock with no stated end is a default-duration block.** Owner ruling 2026-08-21, verbatim:
+*"test today at 4pm should be given the default duration and auto included today."* The parser's R2/R10
+branch and the chooser's `anchor` candidate now emit `end = start + DEFAULT_TASK_MINUTES` with
+`endClock: true`, so the block reads as an appointment and `requestedMinutes` rung 3 asks the day for
+exactly that span. This is the third slot the chooser reserved for "block with default duration", filled.
+Consequence worth knowing: **the parser no longer produces a keep-clear Point.** `isPointTask` and the F3
+own-day veto are untouched and still reachable by editing a task's end away; nothing in the parser
+reaches them any more.
+
+A **bare day** (`test today`) is deliberately left one-edged — no duration is invented for a phrase that
+named no time. It stays open-ended, and `ghostSpan`'s half-ghost branch carries it forward to the next day
+rather than dropping it, which is the shortest-effort tenet and not a residue of this defect.
+
+Pinned in `tests/owner-2026-08-21-auto-inclusion.test.js` and
+`tests/e2e/owner-2026-08-21-auto-inclusion.spec.js`; diagnosis in
+`docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md`.
+
 ## The checkbox is the gesture (owner decision, 2026-08-20, spec A6)
 
 Ticking a task puts it on today. Unticking opens the snooze window. **The asymmetry is the design, not an

@@ -689,10 +689,23 @@ test('topHover: a dated-but-untimed planned-0 task surfaces; timed/blocked/datel
   assert.deepEqual(c.buildDayTimeline(B).topHover.map(x => x.id).sort(), ['h','hd']);
 });
 
-test('topHover: an excluded (unpressed) dated-untimed task does not hover', () => {
+// Owner ruling 2026-08-21: an UNPRESSED task whose window opens today is auto-included, so it hovers.
+// This test used to assert the opposite, and asserting the opposite WAS the bug the owner reported —
+// "What? Of course it should be auto included." Being excluded now requires an actual decision, so the
+// genuinely-off case is a snooze, not merely an untouched `included:null`.
+test('topHover: an unpressed dated-untimed task whose window opens today DOES hover', () => {
   const c = make();
   const B = c.startOfToday();
-  const off = activeTask(c, { id:'o', name:'Out', start:B, end:null, planned:0, included:null });
+  const on = activeTask(c, { id:'o', name:'Out', start:B, end:null, planned:0, included:null });
+  c.state.tasks = [on]; c._allot = c.computeAllotted(c.state.tasks);
+  assert.deepEqual(c.buildDayTimeline(B).topHover.map(x => x.id), ['o']);
+});
+
+test('topHover: a snoozed dated-untimed task does not hover', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const off = activeTask(c, { id:'o', name:'Out', start:B, end:null, planned:0, included:null,
+    snoozeUntil: B + 3*24*60*60*1000 });
   c.state.tasks = [off]; c._allot = c.computeAllotted(c.state.tasks);
   assert.deepEqual(c.buildDayTimeline(B).topHover, []);
 });

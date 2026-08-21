@@ -2268,6 +2268,27 @@ class Component extends DCLogic {
     return t.included!==true && !this.isInheritedToday(t) && !this.autoIncludedToday(t);
     /* /PP-EXT */
   }
+  /* ==== PP-EXT (owner 2026-08-21): the today predicates ask for a WINDOW, not for two edges ====
+     Owner report: a quick-added `test today` was absent from today's list and present on tomorrow's.
+     Diagnosis in docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md; the root cause was
+     that `isScheduled` was doing TWO jobs at once — "has a usable window" and "has two edges" — and the
+     dateless exclusion had been riding on the conflation. Today was the one day in the app decided by a
+     chain that consulted `isScheduled`; every other day went through `ghostSpan`, which handles a
+     one-edge task correctly. Hence "absent today, present tomorrow": the two paths disagreed.
+
+     These split the conflation into its two real questions:
+       • `hasDate` — is there ANY real edge? This is the dateless exclusion, and it is still correct and
+         still necessary: `ghostSpan` anchors a dateless span at today, so without it every someday pick
+         would trivially qualify and the day would fill with work the calendar never surfaced.
+       • `todayWindow` — the same `isScheduled ? occForDay : ghostSpan` selection `isActiveOn` already
+         uses on every OTHER day. Safe to hand `ghostSpan` B directly here (unlike `isActiveOn`'s
+         other-day branch, which must anchor at the real today) because B *is* today in every caller.
+     `ghostStart` is what the callers then test instead of `isScheduled`: a DERIVED start edge is not a
+     window opening. Without that, a deadline-only task ("test by friday") — whose ghost start is
+     re-derived at today every day — would file as New every day until the deadline. */
+  hasDate(t){ return !!t && (t.start!=null || t.end!=null); }
+  todayWindow(t, B){ return this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, B); }
+  /* ==== /PP-EXT ==== */
   /* ==== PP-EXT V5 (F19 + F20, block 20): undecided work is not a refusal ====
      Owner, card 03, verbatim: "What? Of course it should be auto included."
      Owner, snooze, verbatim: "It should be autoincluded after its snooze ends. It shows up in the new
@@ -2292,13 +2313,13 @@ class Component extends DCLogic {
     if(t.included===true) return false;
     const B=this.startOfToday();
     if(t.snoozeUntil!=null && B<t.snoozeUntil) return false;
-    if(!this.isScheduled(t)) return false;
-    const win=this.occForDay(t, B);
+    if(!this.hasDate(t)) return false;      /* PP-EXT (owner 2026-08-21): dateless, not one-edged — see hasDate */
+    const win=this.todayWindow(t, B);
     if(!win || win.start==null || win.end==null) return false;
     if(this.startOfDay(win.start)>B || B>this.startOfDay(win.end)) return false;
     const done = t.recur && win.idx!=null ? this.occPct(t,win.idx)>=100 : (+t.pct||0)>=100;
     if(done) return false;
-    return this.startOfDay(win.start)===B   /* the window opened today */
+    return (win.ghostStart!==true && this.startOfDay(win.start)===B) /* the window opened today */
       || t.snoozeUntil!=null;               /* or a snooze ran out and today is still inside the window */
   }
   /* ==== /PP-EXT ==== */
@@ -2442,11 +2463,14 @@ class Component extends DCLogic {
      never actually surfaced. They fall to Extra, which is where a discretionary pick belongs. */
   startsToday(t){
     if(!t || t.archivedAt || this.isMilestone(t)) return false;
-    if(!this.isScheduled(t)) return false;
+    /* PP-EXT (owner 2026-08-21): the guard was `isScheduled`, which is why a one-edge task was missing
+       from Included and mis-filed in triage at the same time — the two predicates carried the identical
+       guard. They now share `hasDate`/`todayWindow`, so they cannot disagree about the same input. */
+    if(!this.hasDate(t)) return false;
     const B=this.startOfToday();
-    const win=this.occForDay(t, B);
+    const win=this.todayWindow(t, B);
     if(!win || win.start==null || win.end==null) return false;
-    return this.startOfDay(win.start)===B && B<=this.startOfDay(win.end);
+    return win.ghostStart!==true && this.startOfDay(win.start)===B && B<=this.startOfDay(win.end);
   }
   /* PP-EXT V2.11: did a snooze RUN OUT today? `snoozeUntil` is never cleared on expiry (only an explicit
      include/exclude clears it), so the field itself records the ending — no history table needed. This is
@@ -3898,7 +3922,12 @@ class Component extends DCLogic {
        day, and New would fill with work nothing surfaced — the same trap the old `startsToday` note
        records. An explicit press is the only evidence available, and it is the right evidence: it is
        exactly the gesture that moves an undated task from Upcoming to New. */
-    if(!this.isScheduled(t)) return t.included===true;
+    /* PP-EXT (owner 2026-08-21): `hasDate`, not `isScheduled` — the THIRD site of the same conflation.
+       With the old guard a one-edge task returned here on `included===true` alone, so the `ghostSpan`
+       arm of the selection below was unreachable, `onListSince` was never stamped, and `originOf` filed
+       a task that today had just brought in as `upcoming`. The dateless rule itself is unchanged and
+       still right: an undated task is on the list only once someone actually put it there. */
+    if(!this.hasDate(t)) return t.included===true;
     /* A REPEAT with no occurrence on B is IN THE GAP — that null is what clears the key between
        occurrences and lets the next one re-set it as `new`. This is `occOnDay`'s body with an EXPLICIT
        horizon rather than a call to it: `occOnDay` expands to `this._horizon || t.end`, a cache the
@@ -7069,8 +7098,16 @@ class Component extends DCLogic {
         result.endClock=!!clock;
         if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
         else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD
-      } else if(hasClock){                        // R2 / R10 — start clock, open end
-        result.start=result.date; result.startClock=true; result.end=null;
+      } else if(hasClock){                        // R2 / R10 — start clock, DEFAULT-DURATION block
+        /* PP-EXT (owner 2026-08-21): "test today at 4pm should be given the default duration and auto
+           included today." A typed start clock with no stated end used to leave `end` null, which is a
+           ONE-EDGE window — and one-edge windows were exactly what fell through the today predicates
+           (see docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md). The owner's answer to
+           "point or span-to-end-of-day?" was neither: it is a BLOCK of DEFAULT_TASK_MINUTES.
+           `endClock:true` is deliberate — the invented edge is a real clock, so `clockSpanMinutes`
+           reads the block and `requestedMinutes` rung 3 asks the day for exactly that span. */
+        result.start=result.date; result.startClock=true;
+        result.end=result.date + this.DEFAULT_TASK_MINUTES*60000; result.endClock=true;
       } else if(startCue){                        // R4 — not-before (start-cued all-day)
         result.start=result.date; result.startClock=null; result.end=null;
       } else {                                    // R8 — uncued bare day → start, clock flags left null (derive: midnight ⇒ untimed)
@@ -7093,9 +7130,15 @@ class Component extends DCLogic {
       const dueEnd = result.clock ? anchorDay
         : (()=>{ const e=new Date(anchorDay); e.setHours(23,59,59,999); return e.getTime(); })();
       result.candidates = [
-        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:null, start:anchorDay, end:null } },
+        /* PP-EXT (owner 2026-08-21): the At-branch of a CLOCK ambiguity is the default-duration block the
+           R2/R10 branch above now builds — same rule, same place the chooser's third slot was reserved
+           for. A bare DAY (no clock) still anchors with an open end; that shape is handled by the today
+           predicates rather than by inventing a duration nobody typed. */
+        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:result.clock?true:null,
+            start:anchorDay, end:result.clock ? anchorDay + this.DEFAULT_TASK_MINUTES*60000 : null } },
         { kind:'due',    tuple:{ startClock:null, endClock:!!result.clock, start:null, end:dueEnd } },
-        /* slot 3 (block-with-default-duration) intentionally empty in v1 — gated behind §7 */
+        /* Slot 3 is no longer reserved: §5's "block with default duration" IS the anchor branch above,
+           for clock ambiguities. A bare-day ambiguity still has exactly two readings, On and By. */
       ];
       result.ambiguous = result.clock ? 'time' : (result.date==null ? 'recur' : 'day');
     }
