@@ -21,6 +21,14 @@ Scheduling-specific fields:
 | `startClock` / `endClock` | Whether an edge carries a user-typed time. `null` derives from the timestamp; an explicit flag is needed only to distinguish a deliberate `00:00` from a bare date. |
 | `pin` | `null` or a list `[{day, start, dur, partial?}]` -- drawer timeline blocks dragged to a clock time, each fixed for its own day only. `partial:true` pins one chunk of a split task and leaves the rest flexible; no flag means the whole task is fixed that day. Legacy single-object rows still read, and `migrateDragPinList` normalizes them once. This manual drag-pin is unrelated to derived scheduling shapes. |
 
+**Epoch-ms fields are INTEGERS, and `normalizeTask` is what guarantees it (owner 2026-08-20).**
+`start`, `end`, `completion`, `archivedAt` and `snoozeUntil` (`INT_MS_FIELDS`) are rounded on every
+normalize. A fractional timestamp has no meaning in a day planner and is actively harmful: the mirrored
+columns are `bigint`, so one fractional `end` wedged an entire account's sync queue — see
+`architecture/sync-integrations.md`. **Null stays null**; a missing date is not epoch 0. `spent` and
+`predicted` are deliberately NOT rounded here — they are fractional minutes by design, and
+`syncRowForWrite` converts them to integer seconds on the way out.
+
 All task mutation, undo snapshotting, persistence, auto-scheduling, and outbound diffs flow through
 `commit()`. Do not create a second mutation path.
 

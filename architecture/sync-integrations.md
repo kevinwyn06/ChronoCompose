@@ -30,6 +30,36 @@ carries the meaningful "never decided → derive from the clocks" state — and 
 - Verify against `information_schema`, not the SQL editor's "Success. No rows returned" (0011's lesson).
   The query is in the migration's footer; expect `planned | YES` and `uncompressable | YES | boolean`.
 
+**Integer columns and the queue wedge (owner 2026-08-20).** `start`, `end`, `completion`, `archivedAt`
+and `snoozeUntil` are `bigint`; `priority`, `pct`, `planned`, `predicted` and `spent` are `int`. A
+**fractional** value in any of them is unsendable — Postgres answers `22P02 invalid input syntax for type
+bigint` — and because `syncFlushQueue` sent the whole queue as ONE upsert and kept it on failure, a single
+malformed row blocked every write from that origin permanently and silently. Measured on the owner's
+account: Vercel 11 tasks, localhost 28, 24 ops stuck, one task with `end = 1785437897142.8572`.
+
+Three layers now hold the invariant, and each is load-bearing on its own:
+
+- `normalizeTask` rounds `INT_MS_FIELDS` so the value cannot exist in memory. **Null stays null** — a
+  missing date is not epoch 0. `spent`/`predicted` are excluded: fractional minutes are correct in memory
+  and become integer seconds at the wire.
+- `syncRowForWrite` rounds `INT_COLUMNS` independently, because a row already in `localStorage` reaches
+  the queue **without** passing back through `normalizeTask`. That path is how the wedge formed, so the
+  wire layer may not assume normalized input.
+- `syncFlushQueue` pre-flights with `syncPartitionWritable` and, on a row-level rejection
+  (`syncIsRowLevelReject` — Postgres `22xxx`/`23xxx`), retries **per row** so the healthy majority drains.
+  Transport/auth failures are deliberately *not* row-level: retrying an expired JWT one row at a time
+  multiplies the failure by the queue length. Failures are surfaced by `syncReportUnwritable`.
+
+**Adding a numeric mirrored field means adding it to `INT_COLUMNS` too**, or the next fractional value
+repeats the wedge. `INT_COLUMNS` sits beside `SYNC_FIELDS` for exactly that reason.
+
+**The reconcile rule is still "never delete on first sync", and that is a known open defect** — see
+`tasks.md` S1. `applyRemoteSnapshot` keeps local-only rows and `syncInitialSync` re-`insert`s them, and the
+kv/sections path strips deletes outright, so a device that was closed during a delete resurrects the row
+for everyone. Tombstones are per-origin `localStorage` and cannot cross. Fixing it requires distinguishing
+"never pushed" from "server deleted it" — enabling deletes outright would orphan tasks under a section
+that a genuine first sync had simply not uploaded yet.
+
 ## Google Calendar
 
 `gcalImport`, `mergeCalendarEvents`, and `pruneDeletedEvents` implement pull/merge. Outbound operations

@@ -901,8 +901,28 @@ class Component extends DCLogic {
          each device derives the same answer from the same clocks. */
       uncompressable:null,
       labels:[], deps:[], recur:null, description:'', pct:0, priority:4 }, t);
+    /* PP-EXT (owner 2026-08-20): epoch-ms fields are INTEGERS, and this is the one place that guarantees
+       it. Owner report: localhost and Vercel showed different tasks on the same account. One task carried
+       a fractional `end` (1785437897142.8572); `start`/`end` are `bigint` columns (0001_init.sql:24-25),
+       so Postgres rejected the bulk upsert with 22P02 — and because the flush sends the whole queue as one
+       statement and keeps it on failure, that single row wedged EVERY write from that origin, silently
+       and permanently. 24 ops were stuck when it was diagnosed.
+       Rounding here rather than only at the wire is deliberate: a fractional timestamp is meaningless
+       everywhere (sub-millisecond precision has no meaning in a day planner), and letting it live in
+       memory means every derived value — day bucketing, span arithmetic, fingerprints — carries the dirt
+       too. `syncRowForWrite` still rounds independently, because rows already persisted in localStorage
+       reach the queue without passing back through here. Null stays null: a missing date is not epoch 0.
+       NOT applied to `spent`/`predicted`, which are fractional minutes by design — the timer accumulates
+       sub-minute time and `syncRowForWrite` is what converts them to integer seconds. */
+    this.INT_MS_FIELDS().forEach(k=>{ if(typeof n[k]==='number' && !Number.isInteger(n[k])) n[k]=Math.round(n[k]); });
     return n;
   }
+  /* PP-EXT (owner 2026-08-20): task fields backed by an integer/bigint Postgres column. Kept beside
+     SYNC_FIELDS because the two must agree: adding a numeric mirrored field means adding it here, or the
+     next fractional value repeats the wedge above. `spent`/`predicted` are excluded on purpose (see
+     normalizeTask); they are minutes here and seconds on the wire. */
+  INT_MS_FIELDS(){ return ['start','end','completion','archivedAt','snoozeUntil']; }
+  INT_COLUMNS(){ return this.INT_MS_FIELDS().concat(['priority','pct','planned','predicted','spent']); }
   /* PP-EXT: one-time cleanup — clear planned time that old imports stamped onto all-day tasks (60m default).
      New imports already leave all-day planned null; this only scrubs previously-persisted data, once. Planned
      stays user-editable afterwards (it is NOT re-cleared on every load). Writing null also makes this cleanup
@@ -8430,26 +8450,92 @@ class Component extends DCLogic {
     if(clk!=null && this.syncTs(clk)) r.updated_at = new Date(this.syncTs(clk)).toISOString();
     if(r.spent!=null) r.spent = Math.round(r.spent*60);         /* PP-EXT: minutes -> seconds */
     if(r.predicted!=null) r.predicted = Math.round(r.predicted*60); /* PP-EXT: minutes -> seconds */
+    /* PP-EXT (owner 2026-08-20): round EVERY integer-backed column, not just the two above. This used to
+       round spent/predicted only — because those were the only fields known to be fractional — and a
+       fractional `end` therefore reached Postgres verbatim and returned 22P02, wedging the whole queue
+       (see normalizeTask). normalizeTask now prevents the value existing, but this layer must stand on its
+       own: a row already persisted in localStorage goes localStorage -> queue -> here without being
+       re-normalized, which is exactly how the owner's stuck queue was shaped. Runs AFTER the
+       minutes -> seconds conversion so a fractional-minute spent still lands on a whole second. */
+    this.INT_COLUMNS().forEach(k=>{ if(typeof r[k]==='number' && !Number.isInteger(r[k])) r[k]=Math.round(r[k]); });
     return r; }
+  /* PP-EXT (owner 2026-08-20): is this backend error a rejection of the DATA in a row, rather than a
+     transport/auth failure? Only a row-level reject justifies falling back to per-row writes — retrying an
+     expired JWT or a dead network one row at a time would multiply the failure by the queue length.
+     22xxx = data exception (22P02 is the invalid-bigint that started this), 23xxx = integrity constraint. */
+  syncIsRowLevelReject(err){ const code=err && err.code; if(typeof code!=='string') return false;
+    return /^2[23]/.test(code); }
+  /* PURE: split rows into those safe to send and those that would be rejected on shape. Used to quarantine
+     a poison row so the rest of the queue still drains, and unit-testable without a backend. */
+  syncPartitionWritable(rows){ const ok=[], bad=[];
+    (rows||[]).forEach(r=>{ const dirty=this.INT_COLUMNS().some(k=>typeof r[k]==='number' && !Number.isInteger(r[k]));
+      (dirty?bad:ok).push(r); });
+    return {ok, bad}; }
   /* real flush: coalesced upserts + a single bulk delete. Keeps the queue on failure (retried on the next
      commit / re-auth) and drains anything enqueued mid-send. */
   syncFlushQueue(){
     if(!this._sb || !this._session || this._syncSending) return;
     const q=this.loadSyncQueue(); if(!q.length) return;
     this._syncSending=true; this.saveSync({sending:true});
-    const sentKeys=q.map(o=>this.syncOpKey(o));
-    const rows=q.filter(o=>o.op!=='delete').map(o=>this.syncRowForWrite(o.row));
+    /* PP-EXT (owner 2026-08-20): ONE BAD ROW MUST NOT WEDGE THE QUEUE.
+       This used to be a single bulk upsert of every queued row, and a whole-batch `throw` on any error
+       that kept the queue for a later retry. That is correct for a dropped connection and catastrophic
+       for a malformed row: the owner had a task with a fractional `end`, Postgres answered 22P02, and
+       the retry re-sent the same poison forever. Every write from that origin failed for weeks, silently,
+       while local edits kept piling into the queue (24 ops when it was found).
+       Two defences, in order:
+         1. PRE-FLIGHT — quarantine rows we can already tell the backend will reject, before sending.
+         2. PER-ROW FALLBACK — if the bulk write still comes back with a row-level rejection, resend one
+            row at a time so the healthy majority drains and only the genuinely bad rows stay behind.
+       A transport/auth failure is NOT row-level and still fails the whole batch for a normal retry —
+       see syncIsRowLevelReject. Deletes keep their single bulk statement; an id list cannot be malformed. */
     const dead=q.filter(o=>o.op==='delete').map(o=>o.id);
-    const finish=()=>{ this._syncSending=false;
-      const set={}; sentKeys.forEach(k=>set[k]=1);
+    const deadKeys=q.filter(o=>o.op==='delete').map(o=>this.syncOpKey(o));
+    const wire=q.filter(o=>o.op!=='delete').map(o=>({key:this.syncOpKey(o), row:this.syncRowForWrite(o.row)}));
+    const preflight=this.syncPartitionWritable(wire.map(w=>w.row));
+    const badIds={}; preflight.bad.forEach(r=>{ badIds[r.id]=1; });
+    const send=wire.filter(w=>!badIds[w.row.id]);
+    if(preflight.bad.length) this.syncReportUnwritable(preflight.bad.map(r=>r.id));
+    /* keys we consider handled: everything we successfully sent, plus the quarantined rows — holding a
+       row we will never be able to send just re-runs this whole dance on every future flush. */
+    const finish=(okKeys)=>{ this._syncSending=false;
+      const set={}; okKeys.forEach(k=>set[k]=1);
       const now=this.loadSyncQueue(); this.saveSyncQueue(now.filter(o=>!set[this.syncOpKey(o)]));
-      this.saveSync({sending:false}); this.syncClearError();
+      this.saveSync({sending:false});
+      if(!preflight.bad.length) this.syncClearError();
       if(this.loadSyncQueue().length) this.syncFlushSoon(); };
-    const write = rows.length ? Promise.resolve(this._sb.from('tasks').upsert(rows)) : Promise.resolve({error:null});
-    write.then(r=>{ if(r && r.error) throw r.error;
-        return dead.length ? Promise.resolve(this._sb.from('tasks').delete().in('id', dead)) : {error:null}; })
-      .then(r=>{ if(r && r.error) throw r.error; finish(); })
+    const quarantinedKeys=wire.filter(w=>badIds[w.row.id]).map(w=>w.key);
+    /* resend one row at a time, collecting the keys that land. Sequential on purpose: a poison row that
+       trips a constraint shared with its neighbours should not race them. */
+    const perRow=()=>{ const okKeys=[]; const failed=[];
+      return send.reduce((p,w)=>p.then(()=>Promise.resolve(this._sb.from('tasks').upsert([w.row]))
+        .then(r=>{ if(r && r.error) failed.push({id:w.row.id, error:r.error}); else okKeys.push(w.key); })
+        .catch(e=>{ failed.push({id:w.row.id, error:e}); })), Promise.resolve())
+        .then(()=>{ if(failed.length) this.syncReportUnwritable(failed.map(f=>f.id), failed[0].error); return okKeys; }); };
+    const bulk = send.length ? Promise.resolve(this._sb.from('tasks').upsert(send.map(w=>w.row)))
+                             : Promise.resolve({error:null});
+    bulk.then(r=>{
+        if(r && r.error){
+          if(!this.syncIsRowLevelReject(r.error)) throw r.error;  /* transport/auth -> whole-batch retry */
+          return perRow();                                        /* data reject -> salvage the rest */
+        }
+        return send.map(w=>w.key);
+      })
+      .then(okKeys=>{
+        if(!dead.length) return okKeys;
+        return Promise.resolve(this._sb.from('tasks').delete().in('id', dead))
+          .then(r=>{ if(r && r.error) throw r.error; return okKeys.concat(deadKeys); });
+      })
+      .then(okKeys=>finish(okKeys.concat(quarantinedKeys)))
       .catch(e=>{ this._syncSending=false; this.saveSync({sending:false}); this.syncError(e); });
+  }
+  /* PP-EXT (owner 2026-08-20): a row the backend will not accept is a BUG, and the old code's silence
+     about it is half of why this went unnoticed for so long — no toast, no console line, just a queue
+     that never shrank. Name the rows so the next report starts from the id instead of a bisect. */
+  syncReportUnwritable(ids, err){
+    const list=(ids||[]).join(', ');
+    try{ console.error('[pp-sync] backend rejected task row(s), quarantined:', list, err||''); }catch(e){}
+    this.syncError(new Error('Some tasks could not be synced ('+(ids||[]).length+'): '+list));
   }
   /* one-time reconcile at sign-in: pull the backend, merge into local (row-level LWW via the pure B1
      applyRemoteSnapshot), then push whatever the backend is missing or is stale on (computeSyncOps of
