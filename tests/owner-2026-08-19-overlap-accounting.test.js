@@ -67,14 +67,16 @@ test('overlap accounting: the day identity holds when two fixed blocks overlap',
   const tasks = [appt(c, B, 'a', 10, 11), appt(c, B, 'b', 10.5, 11.5)];
   c.state.tasks = tasks;
 
-  const cap = {};
-  const map = c.computeAllotted(tasks, B, { capacity: cap });
+  // Task 29 (2026-08-22): the pool comes from `allotPool`, which is the single computation both
+  // `computeAllotted` and `dayCapacity` now read. Same number, one fewer way for it to drift.
+  const pool = Math.round(c.allotPool(tasks, B).avail);
+  const map = c.computeAllotted(tasks, B);
   const allottedToFixed = Object.keys(map).reduce((a, id) => a + (map[id].fixed ? map[id].allotted : 0), 0);
 
   // The day is 1440 minutes. The two appointments really consume 90 of them. Anything the fixed set
   // claims beyond 90 is time the day does not have.
-  assert.equal(allottedToFixed + cap.pool, 1440,
-    `fixed claimed ${allottedToFixed} min against a ${cap.pool} min pool; the day is 1440`);
+  assert.equal(allottedToFixed + pool, 1440,
+    `fixed claimed ${allottedToFixed} min against a ${pool} min pool; the day is 1440`);
 });
 
 test('overlap accounting: non-overlapping fixed blocks are unchanged', () => {

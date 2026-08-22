@@ -4871,7 +4871,21 @@ class Component extends DCLogic {
     return out;
   }
   /* /PP-EXT */
-  computeAllotted(tasks, B, opts){
+  /* PP-EXT (Task 29, 2026-08-22): THE pool, extracted so there is ONE implementation of it.
+     Task 28 deleted the capacity UI, and Task 29's premise was that `computeAllotted`'s `opts.capacity`
+     out-param could then simply go. It could not: nothing RENDERED it, but the allotment suite reads it
+     through `dayCapacity` to assert the POOL-AGREEMENT INVARIANT — that the seam divides the same `avail`
+     between the same `acts` the readout reports. Deleting the out-param would have cost either that
+     coverage or a second, drifting computation of the pool outside this method, which is the exact defect
+     the out-param was introduced to prevent (the retired `scheduledLoadOn` disagreed with the drawn grid
+     by up to 7x).
+     So the pool is not deleted, it is LIFTED: everything up to and including `avail` lives here, and both
+     `computeAllotted` and `dayCapacity` call it. One implementation, no out-param, and the invariant is
+     now structural rather than merely asserted — the two callers cannot disagree because there is only
+     one computation to disagree about.
+     Returns the whole working set rather than a tidy subset deliberately: a caller that needed one more
+     field would otherwise be tempted to recompute it, which is how the drift starts. */
+  allotPool(tasks, B){
     const map={};
     const today=this.startOfToday();
     if(B==null) B=today;
@@ -4973,6 +4987,18 @@ class Component extends DCLogic {
        Drag-pins on a past day also survive, via the pinnedMin floor at the end of this method.
        TODAY AND FUTURE DAYS ARE UNTOUCHED — deliberate over-subscription there is a feature, not a defect. */
     const avail=(B<today) ? 0 : Math.max(0, rawAvail + pinBack - brk*Math.max(0, brkFams));
+    return { map, B, today, fixed, partialPin, kb, cand, fin, acts,
+             brk, brkFams, kc, di, rawAvail, pinnedMin, pinBack, avail };
+  }
+  /* PURE-ish: per-task allotted minutes for day B. The pool, the busy set and the competing set come
+     from `allotPool` (see there for why); this method owns the seam, the subtree distribution and the
+     pin floor. `opts` is retained for callers that pass one — the `capacity` out-param it used to carry
+     is gone, and `dayCapacity` reads the same figures from `allotPool` directly. */
+  computeAllotted(tasks, B, opts){
+    const ctx=this.allotPool(tasks, B);
+    const map=ctx.map, fixed=ctx.fixed, kb=ctx.kb, acts=ctx.acts,
+          pinnedMin=ctx.pinnedMin, avail=ctx.avail;
+    B=ctx.B;
     const spentById={}; acts.forEach(t=>{ spentById[t.id]= this.getSpentOn(t, B); });
     /* PP-EXT S1: one caller-facing compression seam; the default implementation is linear/proportional.
        PP-EXT (owner 2026-08-16): `demand` is precomputed HERE rather than inside the seam, because
@@ -4991,43 +5017,6 @@ class Component extends DCLogic {
            off the reserve path — the whole defect the derivation exists to prevent. */
         uncompressable:this.isUncompressable(t, B)})), avail);
     /* /PP-EXT */
-    /* PP-EXT (21): capacity out-param. The indicator MUST read the same two numbers the seam divides, or it
-       would drift from the grid the way the retired `scheduledLoadOn` did. `demand` is the RAW ask of the
-       flexible tasks competing on day B — per-day semantics, so a task in a multi-day window contributes its
-       whole day figure, never a fraction of it. `pool` is `avail`, the free minutes actually available after
-       fixed appointments, the pack start and the break reserve. Reporting only: nothing here caps anything. */
-    if(opts && opts.capacity){
-      /* PP-EXT V5 (34): TWO demand figures, because two different questions are being asked and one
-         number cannot honestly answer both.
-           · remaining — what the day is still ASKED for. Completed tasks contribute nothing: their
-                         remaining demand is what ticking them freed. This is what "all done" reads.
-           · demand    — what the day was asked for IN TOTAL, which is what the capacity bar has always
-                         shown. A completed task contributes the minutes actually SPENT on it that day,
-                         so finishing at 60% done leaves the morning's real work on the bar instead of
-                         erasing it. A completed task with no logged time contributes nothing, correctly.
-         Neither figure caps anything; both are still reporting-only, and `acts` — the set the seam
-         divides the pool between — is the same set both are derived from, so they cannot drift. */
-      /* PP-EXT (owner 2026-08-16): `, B` — the readout must divide the SAME demand figures the seam
-         does (precomputed with B at the call site above), or the indicator drifts from the grid. */
-      opts.capacity.remaining = Math.round(acts.reduce((a,t)=>a + this.requestedMinutes(t, B), 0));
-      opts.capacity.demand = opts.capacity.remaining
-        + Math.round(fin.reduce((a,t)=>a + Math.max(0, this.getSpentOn(t, B)), 0));
-      /* /PP-EXT */
-      opts.capacity.pool = Math.round(avail);
-      /* PP-EXT V5 (30b): WHY the pool is what it is. 28b made EVERY zero pool read "no room", and its own
-         handoff flagged that as wrong — an empty day window, or `packFromNow` with the day already over,
-         is not a booked day. The owner ruled the phrase splits three ways, so the readout needs the two
-         facts that distinguish them. Reporting only: nothing here feeds the seam, the pool arithmetic or
-         `planned`, and both figures are derived from the SAME `di` the pool came from so they cannot drift.
-           · committed — busy minutes inside the remaining window (appointments, pins, meals, keep-clear).
-                         Zero committed minutes means the day was never booked; it just has no window left.
-           · window    — the remaining window itself, lo → winEnd. Zero means there is no day left to plan. */
-      opts.capacity.committed = Math.round(di.busy.reduce((a,b)=>
-        a + Math.max(0, Math.min(b.end, di.winEnd) - Math.max(b.start, di.lo))/60000, 0));
-      opts.capacity.window = Math.round(Math.max(0, (di.winEnd - di.lo)/60000));
-      opts.capacity.finished = tasks.reduce((a,t)=>a + (this.isCompletedOn(t, B) ? 1 : 0), 0);
-      /* /PP-EXT */
-    }
     acts.forEach(t=>{ map[t.id]=Object.assign({},compressed[t.id],{active:true}); });
     tasks.forEach(t=>{ if(!map[t.id]) map[t.id]={allotted:0, computed:0, active:false}; });
     /* PP-EXT: subtasks — distribute each parent's allotted to its children proportional to child Planned
@@ -5148,10 +5137,34 @@ class Component extends DCLogic {
   dayCapacity(B, tasks){
     const today=this.startOfToday(); if(B==null) B=today;
     if(B<today) return null;
-    const cap={demand:0,pool:0,remaining:0};
-    this.computeAllotted(tasks||this.state.tasks||[], B, {capacity:cap});
-    const demand=Math.max(0,cap.demand), pool=Math.max(0,cap.pool);
-    const remaining=Math.max(0,cap.remaining);
+    /* PP-EXT (Task 29, 2026-08-22): reads the SAME `allotPool` the seam divides, instead of the
+       `opts.capacity` out-param `computeAllotted` used to fill. The figures below are unchanged, and
+       they are still REPORTING ONLY — nothing here caps, trims or feeds the seam. What changed is that
+       the pool-agreement invariant is now structural: there is one pool computation and both callers
+       read it, so the readout cannot drift from the grid the way the retired `scheduledLoadOn` did.
+         · remaining — what the day is still ASKED for. Completed tasks contribute nothing: their
+                       remaining demand is what ticking them freed. This is what "all done" reads.
+         · demand    — what the day was asked for IN TOTAL. A completed task contributes the minutes
+                       actually SPENT on it that day, so finishing at 60% done leaves the morning's real
+                       work on the bar instead of erasing it. Completed with no logged time contributes
+                       nothing, correctly.
+         · pool      — `avail`: free minutes after fixed appointments, the pack start and the break
+                       reserve. Per-day semantics throughout: a task in a multi-day window contributes
+                       its whole day figure, never a fraction.
+         · committed — busy minutes inside the remaining window. Zero committed means the day was never
+                       booked; it just has no window left.
+         · window    — the remaining window itself, lo → winEnd. Zero means no day left to plan. */
+    const ctx=this.allotPool(tasks||this.state.tasks||[], B);
+    const remaining=Math.max(0, Math.round(ctx.acts.reduce((a,t)=>a + this.requestedMinutes(t, B), 0)));
+    const demand=Math.max(0, remaining
+      + Math.round(ctx.fin.reduce((a,t)=>a + Math.max(0, this.getSpentOn(t, B)), 0)));
+    const pool=Math.max(0, Math.round(ctx.avail));
+    const cap={
+      committed: Math.round(ctx.di.busy.reduce((a,b)=>
+        a + Math.max(0, Math.min(b.end, ctx.di.winEnd) - Math.max(b.start, ctx.di.lo))/60000, 0)),
+      window: Math.round(Math.max(0, (ctx.di.winEnd - ctx.di.lo)/60000)),
+      finished: (tasks||this.state.tasks||[]).reduce((a,t)=>a + (this.isCompletedOn(t, B) ? 1 : 0), 0)
+    };
     return {demand, pool, remaining, over:demand>pool, booked: pool<=0,
       /* PP-EXT V5 (30b): `booked` stays exactly what it was (pool <= 0) because DOM hooks and other
          call sites read it. What is NEW is `state`, which says WHY, and it is the thing the readout
@@ -11441,9 +11454,9 @@ class Component extends DCLogic {
      and 4-Day column. Both are gone from the UI at the owner's direction. The reading it offered was
      never a verdict — the owner over-subscribes deliberately, and the readout said so — but a number
      that reports something you already decided is a number you stop looking at.
-     `dayCapacity` and `computeAllotted`'s `opts.capacity` out-param are DELIBERATELY still here: they
-     feed the pool-agreement invariant, and Task 29 removes them as a separate step with a green suite
-     in between, precisely so a break in that invariant cannot hide inside a UI deletion. */
+     `dayCapacity` is DELIBERATELY still here, and Task 29 (2026-08-22) resolved why: it is the only
+     reader of the pool-agreement invariant, so it was lifted onto the shared `allotPool` helper rather
+     than deleted with its out-param. See `allotPool`. */
   renderTodayView(){
     const h=React.createElement; const B=this.startOfToday();
     const now=new Date(this.state.nowTick||Date.now());

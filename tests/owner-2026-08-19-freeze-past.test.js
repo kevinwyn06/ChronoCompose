@@ -129,9 +129,12 @@ test('freeze the past: past days are untouched', () => {
   const m = appt(c, B, 'mtg', 13, 14, { pct: 100, completion: B + 14 * H });
   c.state.tasks = [m];
 
-  const cap = {};
-  c.computeAllotted([m], B, { capacity: cap });
-  assert.equal(cap.pool, 0, 'a past day already gets no flexible pool; history changes nothing there');
+  // Task 29 (2026-08-22): the pool is read from `allotPool`, the one place it is computed, rather than
+  // from the `opts.capacity` out-param that used to carry it back out of `computeAllotted`. The invariant
+  // under test is unchanged. Note this reads `allotPool` and not `dayCapacity`, deliberately: dayCapacity
+  // returns null for a past day, and a past day is exactly what this test is about.
+  assert.equal(Math.round(c.allotPool([m], B).avail), 0,
+    'a past day already gets no flexible pool; history changes nothing there');
 });
 
 test('freeze the past: the pool agreement invariant holds with history present', () => {
@@ -143,15 +146,14 @@ test('freeze the past: the pool agreement invariant holds with history present',
   c.state.tasks = [m, work];
   c.state.nowTick = B + 15 * H;
 
-  const cap = {};
-  c.computeAllotted([m, work], B, { capacity: cap });
+  const pool = Math.round(c.allotPool([m, work], B).avail);   // Task 29: see above
 
   // read the busy set through the same single point of use the pool and the packer share, so the
   // invariant is checked against what ships rather than against a re-implementation of it here
   const busy = c.fixedBlocksToday(B, [m, work]).concat(c.historyBusyToday(B, [m, work]));
   const di = c.dayIntervals(B, c.packStart(B), busy, c.keepClearToday(B, [m, work]));
   const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
-  assert.equal(cap.pool, Math.round(freeMin), 'allotment and packing must divide the same minutes');
+  assert.equal(pool, Math.round(freeMin), 'allotment and packing must divide the same minutes');
 });
 
 // Owner, verbatim: "remember to add a break after the task is marked done."
@@ -279,12 +281,11 @@ test('freeze the past: adversarial — a completion inside another task\'s fixed
   c.state.tasks = [mtg, t];
   c.state.nowTick = B + 16 * H;
 
-  const cap = {};
-  c.computeAllotted([mtg, t], B, { capacity: cap });
+  const pool = Math.round(c.allotPool([mtg, t], B).avail);   // Task 29: see above
   const busy = c.fixedBlocksToday(B, [mtg, t]).concat(c.historyBusyToday(B, [mtg, t]));
   const di = c.dayIntervals(B, c.packStart(B), busy, c.keepClearToday(B, [mtg, t]));
   const freeMin = di.free.reduce((a, iv) => a + (iv.end - iv.start) / 60000, 0);
-  assert.equal(cap.pool, Math.round(freeMin), 'overlapping history and fixed must not double-count');
+  assert.equal(pool, Math.round(freeMin), 'overlapping history and fixed must not double-count');
 });
 
 test('day bounds: the clamp keeps dayEnd after dayStart', () => {

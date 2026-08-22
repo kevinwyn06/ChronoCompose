@@ -6,6 +6,25 @@ fixed blocks, the free-time reserve, breaks, completed-history blocks, and point
 through `fixedBlocksToday` like any other appointment — see “Routines” below.) `buildDayTimeline` packs the daily timeline
 and supplies its day-specific allotment map during synchronous rendering.
 
+**One pool, two readers (Task 29, 2026-08-22).** `allotPool(tasks, B)` is the single computation of the
+day's pool — it owns everything from the fixed-block stamping through `avail`, and returns the whole
+working set (`map`, `fixed`, `kb`, `cand`, `fin`, `acts`, `di`, `pinnedMin`, `pinBack`, `avail`, …).
+`computeAllotted` calls it and then owns the seam, the subtree distribution and the pin floor;
+`dayCapacity` calls it and derives the readout figures. Neither recomputes the pool.
+
+This replaced an `opts.capacity` **out-param** on `computeAllotted`. That out-param existed to keep the
+readout reading the same two numbers the seam divides — the **pool-agreement invariant** — after the
+retired `scheduledLoadOn` disagreed with the drawn grid by up to 7x. When Task 28 deleted the capacity
+UI, the out-param looked like dead weight; it was not, because the allotment suite read it through
+`dayCapacity` and that coverage was the only proof of the invariant. Lifting the pool retires the
+out-param *and* strengthens the guarantee: the invariant is now **structural** — there is one
+computation, so the two callers cannot disagree about it — instead of a property two computations
+happened to share. `tests/owner-2026-08-22-allot-pool.test.js` pins that.
+
+The rule for anyone extending this: **a caller that needs another figure about the day's pool adds a
+field to `allotPool`'s return, never a second computation at the call site.** That is exactly how the
+7x drift arrived the first time.
+
 S1 keeps both future learning hooks behind pure seams. `compressionSeam(features, availableMinutes)` is the
 default allocator; `orderingSeam(features)` is the default priority, earliest-deadline, then longer-first
 order. Both receive feature records without mutating them, so a later learned implementation can use

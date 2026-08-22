@@ -30,7 +30,15 @@ const BAR_A = '[title^="Draft the spec ·"]';
 const BAR_B = '[title^="Build the thing ·"]';
 const BARRIER = '[data-dep-barrier="dep-b"]';
 
+/* The B bar is drawn ~10 days out, which at the default day width puts its CENTRE at x≈1282 — three
+   pixels past the right edge of Playwright's default 1280px viewport. `page.mouse.move` clamps to the
+   viewport, so the press landed on the board instead of the bar and the gesture never started: the
+   barrier assertion failed and, worse, the forward-drag test below still PASSED because its assertion
+   (`B.start > A.end`) was already true of the untouched fixture. A widened viewport is the honest fix —
+   the spec needs the bar reachable by a real pointer, and nothing here is about narrow layouts.
+   Diagnosed 2026-08-22: at 1600px the barrier renders and B clamps back exactly 6 days onto A's end. */
 async function bootGantt(page) {
+  await page.setViewportSize({ width: 1600, height: 900 });
   await bootSurface(page, { view: 'gantt' }, fixture());
   await page.locator('[data-gantt-task-id]').first().waitFor({ state: 'attached', timeout: 15000 });
   await page.locator(BAR_B).first().waitFor({ state: 'visible', timeout: 15000 });
@@ -89,6 +97,7 @@ test.describe('dependency drag clamp', () => {
   test('dragging B LATER is not clamped, and never moves A', async ({ page }) => {
     await bootGantt(page);
     const before = await dates(page, 'dep-a');
+    const b0Start = await dates(page, 'dep-b');
     const b0 = await box(page, BAR_B);
 
     await page.mouse.move(b0.x + b0.width / 2, b0.y + b0.height / 2);
@@ -97,8 +106,13 @@ test.describe('dependency drag clamp', () => {
     await expect(page.locator(BARRIER), 'a forward drag is unconstrained').toHaveCount(0);
     await page.mouse.up();
 
-    const B = await dates(page, 'dep-b');
-    expect(B.start, 'B really moved later').toBeGreaterThan(before.end);
+    /* Measured against B's OWN start before the drag, not against A's end. The old assertion compared
+       B.start to A.end, which the fixture already satisfies by six days — so it held even when the
+       gesture did nothing at all, and hid exactly the failure the sibling test was reporting.
+       Polled rather than read once: the drop persists through `saveTasks` after the mouseup handler
+       returns, so a single immediate read races the write. */
+    await expect.poll(async () => (await dates(page, 'dep-b')).start,
+      { message: 'B really moved later' }).toBeGreaterThan(b0Start.start);
     const after = await dates(page, 'dep-a');
     expect(after.start, 'dragging B never moves A').toBe(before.start);
     expect(after.end).toBe(before.end);
