@@ -51,9 +51,12 @@ test('rename parses temporal text and one undo restores title and schedule', () 
 
   c.rename('t1', 'Call mom Friday');
 
-  // Task 16 (2026-08-20): the recognised word STAYS. This used to assert 'Call mom' — the parse eating
-  // the day was the behaviour the owner objected to; the highlight is what reports it now.
-  assert.equal(task().name, 'Call mom Friday');
+  // REVERSED by the owner ruling of 2026-08-21, which lands with the When line. Task 16 kept the word
+  // on the reasoning that the highlight was the only proof the date had been taken — true while the
+  // title was the ONLY place a parsed date was visible, and untrue the moment the detail panel gained an
+  // editable When line. The word is not lost; it MOVED one line down, and `whenSentence` is where it now
+  // lives. See tests/owner-2026-08-21-when-line.test.js.
+  assert.equal(task().name, 'Call mom');
   assert.equal(task().start, at(2026, 5, 19), 'the uncued day uses quick-add\'s anchor default');
   assert.equal(task().end, null);
   assert.equal(task().startClock, null);
@@ -91,19 +94,26 @@ test('date picker consumes a duration-only parse without discarding the existing
 }));
 
 // ---------------------------------------------------------------------------
-// Task 16 (owner 2026-08-20) — the title bar parses, HIGHLIGHTS, and applies.
+// Task 16 (owner 2026-08-20) — the title bar parses, HIGHLIGHTS, and applies — as REVERSED by the
+// owner ruling of 2026-08-21.
 //
-// The parse-and-apply half shipped on 2026-08-17 and is asserted above. What changed here is what the
-// title is left holding: the recognised words STAY, and the highlight is what tells you the date was
-// taken. Eating the words was the old quick-add behaviour, where it is right — you are turning a phrase
-// into a task. Editing a name is not that, and silently deleting the word you just typed reads as the
-// app losing your text.
+// The parse-and-apply half shipped on 2026-08-17 and is asserted above. Task 16 then ruled that the
+// recognised words STAY, with the highlight reporting that the date had been taken. The 2026-08-21
+// ruling reverses that half, and the reversal is not a change of mind about the argument — it is the
+// argument's premise expiring. "The highlight is what says the date was taken" held only while the title
+// was the one place a parsed date was visible. The When line makes the date visible AND editable one
+// line below, so the word moves rather than disappears.
+//
+// The highlight tests below are untouched and still matter: the mirror still paints the span while the
+// caret is in the field, which is the live feedback DURING the edit. What changed is only what survives
+// the commit.
 
-test('title edit: the recognised words stay in the title', () => withNow(FIXED_NOW, () => {
+test('title edit: a recognised date is consumed, because the When line now shows it', () => withNow(FIXED_NOW, () => {
   const { c, task } = withTask({ name: 'walk the dog' });
   c.rename('t1', 'walk the dog today');
-  assert.equal(task().name, 'walk the dog today', 'the title is what you typed');
-  assert.equal(c.startOfDay(task().start), c.startOfDay(FIXED_NOW), 'and the date was still taken');
+  assert.equal(task().name, 'walk the dog', 'the word moved to the When line — it was not lost');
+  assert.equal(c.startOfDay(task().start), c.startOfDay(FIXED_NOW), 'and the date was taken');
+  assert.notEqual(c.whenSentence(task()).text, '', 'and it is visible and editable there');
 }));
 
 test('title edit: the temporal span is highlighted, with the quick-add treatment', () => {
@@ -128,7 +138,7 @@ test('title edit: still ONE commit — a single undo restores both the title and
     const { c, task } = withTask({ name: 'walk the dog' });
     const before = JSON.parse(JSON.stringify(task()));
     c.rename('t1', 'walk the dog friday');
-    assert.notEqual(task().name, before.name);
+    assert.equal(task().name, 'walk the dog', 'consumed, per the 2026-08-21 reversal');
     assert.notEqual(task().start, before.start);
     c.undo();
     assert.deepEqual(JSON.parse(JSON.stringify(task())), before, 'one undo, both fields');
@@ -158,5 +168,8 @@ test('title edit: a milestone marker still converts the type and still stays vis
     const { c, task } = withTask({ name: 'ship it' });
     c.rename('t1', 'ship it milestone');
     assert.equal(task().type, 'Milestone');
-    assert.equal(task().name, 'ship it milestone', 'what you typed is what the title says');
+    // `milestone` was ALWAYS stripped, on both sides of the Task 16 ruling — `shapeParsedTask` removes
+    // the marker words unconditionally, and a title edit only reached that name once the date changed.
+    // Now that the strip fires here, the marker goes with it.
+    assert.equal(task().name, 'ship it', 'the marker word is consumed, like every claimed token');
   }));

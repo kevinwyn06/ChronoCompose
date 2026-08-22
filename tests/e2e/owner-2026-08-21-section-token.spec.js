@@ -132,8 +132,9 @@ test('a title edit consumes the token and files the task, without eating the oth
   }, { timeout: 10000 }).toBe('sec_work');
 
   const t = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks') || '[]').find(x => x.id === 'r1'));
-  /* The section token is the ONE token a title edit consumes — its chip is not on the row, so leaving
-     it would read as un-acted-on. `friday` STAYS, per Task 16: its highlight is the proof it was taken. */
-  expect(t.name).toBe('Rewrite the intro friday');
+  /* Both tokens are consumed. `friday` goes because the 2026-08-21 strip ruling fires when the parse
+     CHANGES the stored date — it did, the task had none — and `/work` goes unconditionally. Neither is
+     lost: the date is on the When line and the section is in the Section field. */
+  expect(t.name).toBe('Rewrite the intro');
   expect(t.start).not.toBeNull();
 });

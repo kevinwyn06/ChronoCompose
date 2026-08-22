@@ -68,6 +68,67 @@ taken, and that proof does not survive the commit here, because the section chip
 **On a subtask it is a no-op**, consumed quietly: only roots carry `sectionId` and a subtree inherits its
 root's, so stamping the field would persist something nothing ever reads.
 
+## The When line, and the title strip (owner rulings 2026-08-21)
+
+Two rulings that had to land together. The owner rejected the recurrence panel — *"not a form"* — and
+asked for a plain-text display of the date state that can be edited and re-parsed. Framed correctly it is
+not a recurrence editor at all: it is the **same parser the title bar runs, round-tripped through
+readable text instead of consumed once**.
+
+`whenSentence(t)` is pure — task in, `{text, chip, sub, moved, empty, placeholder}` out — and it
+**replaces Start, Due and Duration** in the detail panel, so one line has to state all three
+unambiguously. The chip carries the one thing plain English states poorly, whether the task **reserves
+time**; the sub-line carries what has no sentence form at all. Ruling 8: `Planned` is not repeated
+outside the block, so it rides the sub-line and is edited by writing a duration into the sentence.
+
+| Shape | Reads as | Chip |
+|---|---|---|
+| no date | *someday — add a date…* | — |
+| bare day | `Fri 22 Aug` | `all day` |
+| clocked start, no end, no budget | `Tue 26 Aug, 3:00pm` | `marker` |
+| clocked start, no end, with a budget | `Tue 26 Aug, 3:00pm` | the budget (`45m`) |
+| appointment | `Tue 26 Aug, 3:00–4:00pm` | its length (`1h`) |
+| deadline | `by Fri 22 Aug` | `due` |
+| repeat | `every weekday, 9:00am, until 30 Sep` | `repeats` |
+
+The fourth row is not in the mockup's six-shape table and was found by building it: a written start clock
+with a budget is neither a Point nor a bare day, and rendering it as a bare day would make re-committing
+the line discard the hour.
+
+**The failure state is the case that justifies the approach.** A form cannot produce an unparseable
+value; a text editor can. `applyWhenText` therefore never destroys what is stored: nothing is committed,
+the input keeps the bad text, and the reason comes back as `error`. Two refusals are explicit rather than
+best-effort — an unreadable string, and **`"N times"`**, because `recurToRRule` emits `UNTIL` and never
+`COUNT`; converting a count to a date would silently rewrite what the user typed and go wrong the moment
+the interval was edited. The refusal names what *can* be written.
+
+`recur.overrides` has no text form, so moved occurrences are **counted, not sentenced** — writing them
+into the string would make it lie about the rule, hiding them would make it lie about the series.
+
+Two mechanics worth not re-deriving. The input is **uncontrolled**, which is what lets Escape's ladder
+rung 0 work here with no second cancel path: rung 0 restores the focus-time value and blurs, the blur
+re-applies the *original* sentence, and `applyWhenText` recognises that as a no-op. It has to be a real
+no-op — `commit()` snapshots unconditionally, so committing an unchanged task would leave an undo entry
+that undoes nothing. And a base-edge edit that crosses a calendar day clears `recur.overrides` /
+`shifts`, the same rule `setDate` applies and for the same reason.
+
+### The strip
+
+The title bar now **consumes the words it parses**, reversing Task 16. That is not a change of mind about
+Task 16's argument — it is the argument's premise expiring. *"The highlight is what says the date was
+taken"* held only while the title was the one place a parsed date was visible. The When line makes it
+visible **and editable** one line below, so the word **moves** rather than disappears. Ship the strip
+before the line and there is a state where a date is applied, deleted from the title, and shown nowhere
+editable — strictly worse than either ruling's status quo. Hence one branch.
+
+And the strip fires **only when the parse changes the stored date**. It edits work that already exists,
+so re-wording *"Move the friday deploy to staging"* must not pull `friday` out and reschedule the task; a
+re-parse yielding the date the task already holds is not new information. The section token is the one
+exception, consumed unconditionally — its chip is not on the row, so leaving it would read as un-acted-on.
+
+The highlight mirror is unchanged and still matters: it is the live feedback *during* the edit. What
+changed is only what survives the commit.
+
 ## The title bar (owner 2026-08-20, Task 16)
 
 Editing a task's title runs the same parser, through the same `shapeParsedTask` binding quick-add uses,

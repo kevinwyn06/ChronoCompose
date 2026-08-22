@@ -2,9 +2,16 @@ const { test, expect } = require('@playwright/test');
 const { boot, task } = require('./_seed');
 
 /* Owner, 2026-08-19: "esc should be able to get the user out of fields like the planned duration."
-   The detail sheet's Planned box is `durInput('planned')` (index.html:13694) — an uncontrolled
-   `input.pp-num` whose onBlur writes through `setPlanned`. That is exactly why Escape must REVERT before
-   it blurs: a bare blur would save, making Escape the one key in the ladder that commits. */
+   Rung 0 of the Escape ladder must REVERT before it blurs: a bare blur would save, making Escape the one
+   key in the ladder that commits.
+
+   The subject moved on 2026-08-21. The Planned box is gone — the When line replaced Start, Due and
+   Duration, and owner ruling 8 says Planned is not repeated outside that block. The When input is the
+   better subject anyway, and not only because it is what is there: it is the field where a cancel is
+   most load-bearing, because the thing being cancelled is a re-parse of the task's whole date state.
+   It is an uncontrolled `input.pp-num` whose onBlur writes through `applyWhenText`, which is exactly the
+   shape rung 0 was written for — and `applyWhenText` treats a re-commit of the unchanged sentence as a
+   real no-op, so the revert-then-blur leaves no undo entry behind. */
 
 const fixture = () => ({ seedOnce: true, tasks: [task('a', 'Write', { start: '0d', end: '+1d', planned: 60 })] });
 
@@ -13,24 +20,31 @@ async function openSheet(page) {
   await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
 }
 
-/* The sheet's Planned box. Addressed by its own `data-field` hook, not by input order: the task
-   sheet ROW behind the overlay also renders an `input.pp-num`, and `.first()` matched that one. */
-const plannedBox = (page) => page.locator('[data-field="planned"]');
+/* The sheet's When input. Addressed by its own `data-qa` hook, not by input order: the task sheet ROW
+   behind the overlay also renders an `input.pp-num`, and `.first()` matched that one. Opening it is a
+   click on the When line, which is a display until you ask to edit it. */
+const whenBox = (page) => page.locator('[data-qa="when-input"]');
+async function openWhen(page) {
+  await page.locator('[data-qa="when-line"]').click();
+  await expect(whenBox(page)).toBeFocused({ timeout: 5000 });
+  return whenBox(page);
+}
 
 test('Escape reverts a field and leaves it, without closing the sheet', async ({ page }) => {
   await boot(page, fixture());
   await openSheet(page);
 
-  const dur = plannedBox(page);
-  await dur.click();
+  const dur = await openWhen(page);
   const before = await dur.inputValue();
   expect(before).not.toBe('');
 
-  await dur.fill('9:99');
+  await dur.fill('nonsense that parses to nothing');
   await page.keyboard.press('Escape');
 
-  await expect(dur).toHaveValue(before, { timeout: 3000 });
-  await expect(dur).not.toBeFocused();
+  /* The When line is click-to-edit, so leaving the field returns it to its display form. The revert is
+     what that display proves: it reads back the ORIGINAL sentence, not the nonsense that was typed. */
+  await expect(whenBox(page)).toHaveCount(0, { timeout: 3000 });
+  await expect(page.locator('[data-qa="when-text"]')).toHaveText(before);
   // one press = one layer: the sheet the field lives in is still open
   await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
 });
@@ -39,25 +53,23 @@ test('Escape in a field records no undo entry — the value is unchanged after a
   await boot(page, fixture());
   await openSheet(page);
 
-  const dur = plannedBox(page);
-  await dur.click();
+  const dur = await openWhen(page);
   const before = await dur.inputValue();
-  await dur.fill('9:99');
+  await dur.fill('nonsense that parses to nothing');
   await page.keyboard.press('Escape');
 
   // A commit would have written the task and shown up here; a revert-then-blur writes nothing.
   await page.reload();
   await page.locator('[data-task-id="a"]').first().waitFor({ state: 'attached', timeout: 15000 });
   await openSheet(page);
-  await expect(plannedBox(page)).toHaveValue(before);
+  await expect(await openWhen(page)).toHaveValue(before);
 });
 
 test('a second Escape still closes the sheet — the field rung takes exactly one press', async ({ page }) => {
   await boot(page, fixture());
   await openSheet(page);
 
-  const dur = plannedBox(page);
-  await dur.click();
+  await openWhen(page);
   await page.keyboard.press('Escape');           // rung 0: leaves the field
   await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
 

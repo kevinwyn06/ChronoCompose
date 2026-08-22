@@ -20,9 +20,12 @@ test('detail title and date picker both consume the shared parser shape', async 
   const title = page.locator('.pp-edit[contenteditable="true"]');
   await title.fill('Call mom Friday');
   await title.press('Enter');
-  /* Task 16 (2026-08-20): the recognised word STAYS in the title. It used to be eaten, which read as
-     the app deleting text you had just typed; the highlight is what reports that the date was taken. */
-  await expect.poll(async () => (await stored(page)).name).toBe('Call mom Friday');
+  /* REVERSED by the owner ruling of 2026-08-21, which ships with the When line. Task 16 kept the word
+     because the highlight was the only proof the date had been taken — true while the title was the
+     only place a parsed date was visible, and untrue once the detail panel gained an editable When
+     line. The word is not deleted; it moved one line down, and the assertion below checks it is there. */
+  await expect.poll(async () => (await stored(page)).name).toBe('Call mom');
+  await expect(page.locator('[data-qa="when-text"]')).toContainText(/Fri/, { timeout: 5000 });
   let task = await stored(page);
   expect(new Date(task.start).getDay()).toBe(5);
   expect(task.end).toBeNull();
@@ -33,10 +36,13 @@ test('detail title and date picker both consume the shared parser shape', async 
   expect(new Date(task.start).getHours()).toBe(9);
   expect(new Date(task.end).getHours()).toBe(10);
 
-  const startField = page.getByText('Start', { exact: true }).locator('..').getByTitle('Click to edit');
-  await startField.click();
-  const natural = page.locator('input[placeholder="tomorrow 5pm"]');
-  await natural.fill('5-6pm');
+  /* The Start field is gone — the When line replaced Start, Due and Duration (owner ruling 2026-08-21).
+     The date picker it opened is still reachable from the Gantt bar and the sheet's date cells, and the
+     shared parser shape it consumes is now exercised through the When line itself, which runs the very
+     same `parseDateText` -> `shapeParsedTask` binding. */
+  await page.locator('[data-qa="when-line"]').click();
+  const natural = page.locator('[data-qa="when-input"]');
+  await natural.fill('today 5-6pm');
   await natural.press('Enter');
 
   await expect.poll(async () => (await stored(page)).startClock).toBe(true);
@@ -71,7 +77,9 @@ test('editing a title highlights the temporal span it took, live', async ({ page
   expect(mark.x + mark.width).toBeLessThanOrEqual(box.x + box.width + 1);
 
   await title.press('Enter');
-  await expect.poll(async () => (await stored(page)).name).toBe('Call mom today');
+  /* Committed: the span is consumed and now lives on the When line (2026-08-21 reversal). The mirror
+     above is unaffected — it is the live feedback DURING the edit, and that is still its job. */
+  await expect.poll(async () => (await stored(page)).name).toBe('Call mom');
   const task = await stored(page);
   const d = new Date(task.start);
   const now = new Date();

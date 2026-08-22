@@ -686,7 +686,7 @@ class Component extends DCLogic {
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
       splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
       detailId:null, menu:null,
-      showYears:false, settingsOpen:false, settingsTab:'general' /* PP-EXT C0 */, quickText:'', quickOpen:false, datePick:null, barMenu:null /* PP-EXT V1.4: right-click-a-bar editor menu */, scopePrompt:null,
+      showYears:false, settingsOpen:false, settingsTab:'general' /* PP-EXT C0 */, quickText:'', quickOpen:false, whenEdit:null /* PP-EXT (owner ruling 2026-08-21): the When line's live draft, {id,text,error} */, datePick:null, barMenu:null /* PP-EXT V1.4: right-click-a-bar editor menu */, scopePrompt:null,
       theme:this.initialTheme(),
       rowMode: pf.rowMode||'default',
       selCursor:null, /* PP-EXT V2.9 §5: j/k keyboard cursor in the Selection view — UI-only */
@@ -1948,18 +1948,37 @@ class Component extends DCLogic {
     const shaped=parsed?this.shapeParsedTask(parsed,choice||'anchor'):null;
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       if(!shaped){ t.name='Untitled'; return; }
+      const hasAnchor=parsed.date!=null || parsed.start!=null || parsed.end!=null || parsed.recur || parsed.mile;
       /* PP-EXT (owner ruling 2026-08-21): the section token is the ONE token a title edit consumes.
          Task 16's argument for keeping recognised words — deleting what the user just typed reads as
          the app losing their text — rests on the HIGHLIGHT being the proof the word was taken. That
          proof does not survive a commit: the section chip is not on the row, so a `/Work` left sitting
          in the title would read as un-acted-on when it had in fact filed the task. Consume it.
          Only the span the parser itself claimed is removed, so every other word survives verbatim. */
-      t.name=this.stripSectionToken(raw, parsed);
+      /* PP-EXT (owner ruling 2026-08-21): the parser STRIPS the words it consumes — reversing Task 16,
+         and only now that it is safe to. Task 16's argument was that deleting the word the user just
+         typed reads as the app losing their text, and that the HIGHLIGHT is what says the date was
+         taken. That was correct while the title was the ONLY place a parsed date was visible. The When
+         line is precisely what makes it untrue: the date is now shown and edited one line below, so the
+         word has MOVED rather than been lost. The two rulings therefore cannot ship apart — between them
+         lies a state where a date is consumed, deleted from the title, and shown nowhere editable.
+
+         And the strip fires only when the parse CHANGES the stored date (owner ruling, same day). It has
+         to: this edits work that already exists, so re-wording "Move the friday deploy to staging" must
+         not pull `friday` out and reschedule the task. A re-parse yielding the date the task already
+         holds is not new information, so it leaves the title alone. */
+      const dateChanged = hasAnchor && (
+        t.start!==shaped.start || t.end!==shaped.end ||
+        ((t.recur&&t.recur.label)||null)!==((shaped.recur&&shaped.recur.label)||null) ||
+        ((t.recur&&t.recur.until)||null)!==((shaped.recur&&shaped.recur.until)||null));
+      /* `shaped.name` is the parser's own `rest`: every claimed token already removed, in one place, so
+         the strip can never disagree with what was consumed. When nothing moved, only the section token
+         goes — it is consumed unconditionally, because its chip is not on the row to prove it landed. */
+      t.name = dateChanged ? shaped.name : this.stripSectionToken(raw, parsed);
       /* Only a ROOT carries `sectionId` — a subtree inherits its root's (see `setTaskSectionMulti`).
          On a subtask the token is therefore a no-op, and it is consumed above rather than left as
          litter: stamping the field here would persist something nothing ever reads. */
       if(parsed.sectionId!=null && t.parentId==null) t.sectionId=parsed.sectionId;
-      const hasAnchor=parsed.date!=null || parsed.start!=null || parsed.end!=null || parsed.recur || parsed.mile;
       if(hasAnchor){ t.start=shaped.start; t.end=shaped.end;
         t.startClock=shaped.startClock; t.endClock=shaped.endClock; t.recur=shaped.recur; }
       if(parsed.dur!=null) t.planned=shaped.planned;
@@ -1969,6 +1988,135 @@ class Component extends DCLogic {
       if(shaped.labels.length) t.labels=shaped.labels.slice();
       if(shaped.type==='Milestone') t.type='Milestone';
     });
+  }
+  /* /PP-EXT */
+  /* ==== PP-EXT (owner rulings 2026-08-21): the When line — a date-parse DISPLAY that is also its own
+     editor. The recurrence panel was rejected — "not a form" — and what replaces it is not a recurrence
+     editor at all: it is the same parser the title bar runs, round-tripped through readable text instead
+     of consumed once. It REPLACES Start, Due and Duration in the detail panel, which is why one line has
+     to state all three unambiguously.
+
+     `whenSentence` is PURE: task in, {text, chip, sub, moved, empty, placeholder} out. The chip carries
+     the one thing plain English states poorly — whether the task RESERVES time — and the sub-line carries
+     what has no sentence form at all: the planned budget (owner ruling 8: not repeated outside this
+     block) and the count of moved occurrences.
+
+     `recur.overrides` holds per-occurrence shifts no sentence expresses. They are COUNTED, never
+     sentenced: writing them into the text would make the editable string lie about the RULE, and hiding
+     them would make it lie about the series. */
+  whenSentence(t){
+    const out={text:'', chip:null, sub:'', moved:0, empty:false, placeholder:'someday \u2014 add a date\u2026'};
+    if(!t){ out.empty=true; return out; }
+    /* One occurrence can be both shifted and overridden; it is one moved occurrence, not two. */
+    if(t.recur){ const seen={};
+      Object.keys(t.recur.overrides||{}).forEach(k=>seen[k]=1);
+      (t.recur.shifts||[]).forEach(x=>{ if(x&&x.idx!=null) seen[x.idx]=1; });
+      out.moved=Object.keys(seen).length; }
+    const subs=[];
+    const clockPart=()=>{
+      const span=this.clockSpanMinutes(t);
+      if(span!=null) return this.fmtClock(t.start)+'\u2013'+this.fmtClock(t.end);
+      if(this.hasStartTime(t)) return this.fmtClock(t.start);
+      return '';
+    };
+    if(t.recur){
+      /* The rule, in the words it would be typed in. `label` is the rule's own name, so the sentence and
+         the recurrence menu can never describe the same rule differently. */
+      const bits=[String(t.recur.label||'repeats').toLowerCase()];
+      const cp=clockPart(); if(cp) bits.push(cp);
+      if(t.recur.until!=null) bits.push('until '+this.fmtDT(t.recur.until,true));
+      out.text=bits.join(', '); out.chip='repeats';
+    }
+    else if(t.start==null && t.end==null){ out.empty=true; return out; }
+    else if(t.start==null){
+      /* A deadline. An end-of-day due is stored as the last instant of the day, so it is READ as the day
+         it names rather than as 11:59pm — the same inclusive rule the date picker and the sheet apply. */
+      const timed=this.hasEndTime(t);
+      out.text='by '+this.fmtDT(timed?t.end:t.end-1, !timed);
+      out.chip='due';
+    }
+    else {
+      const span=this.clockSpanMinutes(t);
+      if(span!=null){ out.text=this.fmtDT(t.start,true)+', '+this.fmtClock(t.start)+'\u2013'+this.fmtClock(t.end);
+        out.chip=this.fmtDurCompact(span); }
+      else if(this.isPointTask(t)){ out.text=this.fmtDT(t.start,true)+', '+this.fmtClock(t.start);
+        out.chip='marker'; subs.push('reserves no time'); }
+      /* A written start clock with no end, but a budget — so it is not a Point and not all-day either.
+         The clock is a real thing the user typed and the line must SAY it, or the sentence reads back as
+         a bare day and re-committing it would quietly discard the hour. The chip carries the budget,
+         because that is what this shape reserves. */
+      else if(t.end==null && this.hasStartTime(t)){
+        out.text=this.fmtDT(t.start,true)+', '+this.fmtClock(t.start);
+        out.chip=(t.planned!=null)?this.fmtDurCompact(t.planned):'starts';
+        subs.push('starts at a set time, no end'); }
+      else if(t.end!=null && this.startOfDay(t.end-1)!==this.startOfDay(t.start)){
+        out.text=this.fmtDT(t.start,true)+' \u2192 '+this.fmtDT(t.end-1,true); out.chip='all day'; subs.push('no time set'); }
+      else { out.text=this.fmtDT(t.start,true); out.chip='all day'; subs.push('no time set'); }
+    }
+    /* Owner ruling 8: `Planned` is not repeated outside the When block. It rides here when the sentence
+       does not already state a span of its own — an appointment's chip IS its duration. */
+    if(t.planned!=null && this.clockSpanMinutes(t)==null && !this.isPointTask(t)
+       && !(t.end==null && t.start!=null && this.hasStartTime(t)))
+      subs.push(this.fmtDurCompact(t.planned)+' planned');
+    if(out.moved) subs.push(out.moved+' occurrence'+(out.moved===1?'':'s')+' moved \u00b7 review');
+    out.sub=subs.join(' \u00b7 ');
+    return out;
+  }
+  /* PP-EXT (owner ruling 2026-08-21): commit an edited When line.
+     THE FAILURE STATE IS THE CASE THAT JUSTIFIES THE WHOLE APPROACH. A form cannot produce an
+     unparseable value; a text editor can. So on a bad parse the stored value is NEVER destroyed:
+     nothing is committed, the caller keeps the bad text in the field, and the reason comes back as
+     `error`. Returns {ok, error}. */
+  applyWhenText(id, text){
+    const t=this.state.tasks.find(x=>x.id===id);
+    if(!t) return {ok:false, error:'No such task.'};
+    const raw=String(text==null?'':text).replace(/\s+/g,' ').trim();
+    /* Emptying the line is a real intention, not a failed parse: it clears the dates. */
+    if(!raw){
+      if(t.start==null && t.end==null && !t.recur) return {ok:true};
+      this.commit(tasks=>{ const x=tasks.find(y=>y.id===id); if(!x) return;
+        x.start=null; x.end=null; x.startClock=null; x.endClock=null; x.recur=null; });
+      return {ok:true};
+    }
+    /* `t.recur` has no COUNT field — `recurToRRule` emits UNTIL, never COUNT. Reading "every monday, 5
+       times" back as "until 22 Sep" would silently rewrite what the user typed, and that date goes wrong
+       the moment the interval is edited, with nothing announcing it. An honest refusal beats a silent
+       conversion, and the refusal names what CAN be written or it is just a wall. */
+    if(/\b\d+\s*times?\b/i.test(raw))
+      return {ok:false, error:'\u201cN times\u201d can\u2019t be stored \u2014 a repeat records an end DATE, not a count. Try \u201cuntil 30 Sep\u201d.'};
+    let p=null; try{ p=this.parseDateText(raw); }catch(e){ p=null; }
+    if(!p || (p.date==null && p.start==null && p.end==null && !p.recur && !p.mile))
+      return {ok:false, error:'Couldn\u2019t read \u201c'+raw+'\u201d as a date.'};
+    const shaped=this.shapeParsedTask(p,'anchor');
+    /* A re-commit of the sentence already shown is a NO-OP, and it has to be a real one: `commit()`
+       snapshots unconditionally, so committing an unchanged task would leave an undo entry that undoes
+       nothing. That matters most on the cancel path — Escape's rung 0 restores the field's value and
+       blurs, and the blur then re-applies the ORIGINAL sentence. */
+    const ruleOf=r=>r?JSON.stringify({kind:r.kind,n:r.n,days:r.days,label:r.label,until:r.until}):null;
+    const plannedAfter=(p.dur!=null)?shaped.planned:t.planned;
+    if(t.start===shaped.start && t.end===shaped.end && t.startClock===shaped.startClock
+       && t.endClock===shaped.endClock && ruleOf(t.recur)===ruleOf(shaped.recur)
+       && t.planned===plannedAfter) return {ok:true};
+    this.commit(tasks=>{ const x=tasks.find(y=>y.id===id); if(!x) return;
+      const prevStart=x.start, prevEnd=x.end, hadRecur=!!x.recur;
+      x.start=shaped.start; x.end=shaped.end;
+      x.startClock=shaped.startClock; x.endClock=shaped.endClock;
+      x.recur=shaped.recur;
+      /* The same rule `setDate` applies, for the same reason: occurrence overrides are indexed from the
+         series anchor, so moving an anchor edge to another CALENDAR DAY changes which real occurrence
+         every index names, and retaining them would transfer an old completion onto a newly dated one.
+         A rule kept across the edit keeps its exceptions only while both anchors stay on their days. */
+      if(x.recur && hadRecur){
+        const moved=(prevStart!=null&&x.start!=null&&this.startOfDay(prevStart)!==this.startOfDay(x.start))
+          || (prevEnd!=null&&x.end!=null&&this.startOfDay(prevEnd)!==this.startOfDay(x.end));
+        if(moved){ x.recur.overrides={}; x.recur.shifts=[]; }
+      }
+      /* A duration written in the line wins; otherwise a booked intra-day span is the plan, exactly as
+         it is on every other date-writing path. */
+      if(p.dur!=null) x.planned=shaped.planned;
+      else { const span=this.anchorSpanMinutes(x); if(span!=null) x.planned=span; }
+    });
+    return {ok:true};
   }
   /* /PP-EXT */
   setType(id,val){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.type=val; }); }
@@ -2003,6 +2151,17 @@ class Component extends DCLogic {
   }
   setNum(id,key,val){ const n=Math.max(0,Math.round(parseFloat(val)||0)); this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t[key]=n; }); }
   fmtDur(min){ if(min==null) return '—'; const h=Math.floor(min/60), m=Math.round(min%60); return h+':'+String(m).padStart(2,'0'); }
+  /* PP-EXT (owner ruling 2026-08-21): the compact WRITTEN register of the one duration grammar —
+     `45m`, `1h`, `1h 30m`. `fmtDur` stays `H:MM` for the numeric fields; this exists because the When
+     line's chip and sub-line are TEXT the user re-types, so they have to come back out in a spelling
+     `parseDurPhrase` reads. It is a third register of the same grammar, not a fourth private copy: any
+     string it emits must round-trip, which is what the round-trip test pins. */
+  fmtDurCompact(min){
+    if(min==null) return '';
+    const n=Math.max(0,Math.round(min)), h=Math.floor(n/60), m=n%60;
+    if(!h) return m+'m';
+    return h+'h'+(m?(' '+m+'m'):'');
+  }
   /* ==== PP-EXT (owner 2026-08-20, Chain A Task 13): THE clock formatter ====
      Every time of DAY in this app renders through here. The owner found four disagreeing renderings on
      one screen — 24-hour on the day-bound readout and in `fmtDT`, the browser's locale in the sheet's
@@ -14917,6 +15076,58 @@ class Component extends DCLogic {
       h('option',{key:'none',value:''},'No section'),
       ...this.sectionsInOrder().map(s=>h('option',{key:s.id,value:s.id},s.name)));
 
+    /* PP-EXT (owner ruling 2026-08-21): the When line. It REPLACES Start, Due and Duration — the owner
+       rejected the recurrence form ("not a form") and asked for a plain-text display of the date state
+       that can be edited and re-parsed. One source of truth, not a sentence plus a read-only echo of the
+       fields it derives from: that duplication is exactly what drifts.
+
+       THE FAILURE STATE IS THE POINT. A form cannot produce an unparseable value; this can. So on a bad
+       parse the stored value is never destroyed — the input KEEPS the bad text, the line says what it
+       could not read, and committing an unparseable string is impossible rather than merely discouraged.
+       Escape restores, through the ladder's rung 0 like every other field. */
+    const wl=this.whenSentence(t);
+    const we=(this.state.whenEdit&&this.state.whenEdit.id===t.id)?this.state.whenEdit:null;
+    const whenCommit=(val)=>{
+      const r=this.applyWhenText(t.id, val);
+      if(r.ok) this.setState({whenEdit:null});
+      /* Keep the draft AND the bad text on failure — clearing it here is the one thing that would make
+         the editor lose work the user can still fix. */
+      else this.setState({whenEdit:{id:t.id, text:val, error:r.error}});
+    };
+    const whenCtl = we
+      ? h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
+          /* UNCONTROLLED, deliberately — the same idiom as every other field in this sheet. It is what
+             lets Escape's rung 0 work here without a second cancel path: rung 0 restores the field's
+             focus-time value and blurs, the blur re-applies the ORIGINAL sentence, and `applyWhenText`
+             recognises that as a no-op and commits nothing. A controlled input would have made Escape
+             commit the draft instead, which is the exact inversion the ladder exists to prevent.
+             The key is the TASK, not the text, so a failed parse leaves the bad text in place to fix. */
+          h('input',{className:'pp-num',type:'text','data-qa':'when-input',autoFocus:true,
+            key:'when'+t.id, defaultValue:we.text,
+            onBlur:e=>whenCommit(e.target.value),
+            onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } },
+            style:{textAlign:'left',width:'100%',border:'1px solid '+(we.error?'var(--danger-strong)':'var(--divider)')}}),
+          we.error?h('div',{'data-qa':'when-error',
+            style:{fontSize:'11.5px',color:'var(--danger-strong)'}},we.error)
+            :h('div',{style:{fontSize:'11.5px',color:'var(--text-faint2)'}},
+              'Plain English, the same as quick add \u2014 Enter applies, Esc cancels.'))
+      : h('div',{'data-qa':'when-line',onClick:()=>this.setState({whenEdit:{id:t.id,text:wl.text,error:null}}),
+          title:'Click to edit',
+          style:{cursor:'pointer',padding:'2px 5px',margin:'-2px -5px',borderRadius:'5px'},
+          onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
+          onMouseLeave:e=>e.currentTarget.style.background='transparent'},
+          h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
+            h('span',{'data-qa':'when-text',
+              style:{fontSize:'13px',flex:1,minWidth:0,
+                color:wl.empty?'var(--text-faint2)':'var(--text-2)',
+                fontStyle:wl.empty?'italic':'normal'}}, wl.empty?wl.placeholder:wl.text),
+            wl.chip?h('span',{'data-qa':'when-chip',
+              style:{fontSize:'10.5px',fontWeight:600,color:'var(--text-mut)',background:'var(--field-bg)',
+                border:'1px solid var(--field-border)',borderRadius:'5px',padding:'1px 6px',whiteSpace:'nowrap',flex:'none'}},
+              wl.chip):null),
+          wl.sub?h('div',{'data-qa':'when-sub',
+            style:{fontSize:'11px',color:'var(--text-faint2)',marginTop:'3px'}},wl.sub):null);
+
     const actBtn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
       style:{flex:1,minHeight:this.HIT_MIN_PX+'px',cursor:'pointer',
         color:danger?'var(--danger-strong)':undefined}},label);
@@ -14930,7 +15141,7 @@ class Component extends DCLogic {
                      : actBtn('▣ Archive',()=>this.archiveMulti([t.id]))),
       actBtn('✕ Delete task',()=>this.deleteMulti([t.id]),true));
 
-    const sidebar=h('div',{style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
+    const sidebar=h('div',{'data-qa':'detail-sidebar',style:{flex:'0 0 300px',background:'var(--side-bg)',borderLeft:'1px solid var(--modal-border)',overflow:'auto'}},
       field('Project',h('div',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'13px',color:'var(--text-2)'}},
         h('span',{style:{color:'var(--text-mut)'}},'#'),this.PROJECT)),
       field(h('span',null,'Include today',this.infoNote('Whether this task counts toward today’s schedule and allotment. Auto = included when today falls in [start, due] (or a derived ghost window if it has no dates); click to force it on/off ("manual"), or snooze it a few days without turning it off entirely. Milestones and tasks with no Planned time never allot. Dates and typed times determine when it happens.')),inclCtl),
@@ -14941,12 +15152,13 @@ class Component extends DCLogic {
         h('span',{onClick:()=>this.outdentRows([t.id]),title:'Un-nest (make it a top-level task)',
           style:{cursor:'pointer',fontSize:'11px',color:'var(--text-faint2)'}},'✕'))):null,
       field('Tags',tagsEditor),
-      field('Start',valWithX(t.start,null,'start',t.allDay/* PP-EXT */)),
-      field('Due',valWithX(t.end, (!done&&t.end!=null&&t.end<Date.now())?'var(--danger)':'var(--text-2)', 'end', t.allDay/* PP-EXT */)),
-      field('Duration',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
+      field('When',whenCtl),
+      field('Span',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'var(--danger-strong)':(this._schedWarn?'var(--warn)':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},
-        field('Planned', durInput('planned'),{flex:1,borderRight:'1px solid var(--field-divider)'}),
+        /* PP-EXT (owner ruling 8, 2026-08-21): `Planned` is NOT repeated here — the When block's chip
+           and sub-line already carry it, and it is edited by writing a duration into the sentence
+           ("Fri 22 Aug for 45m"), which is the same grammar quick-add takes. */
         field('Spent',spentField,{flex:1})),
       field(h('span',null,'Allotted (remaining)',this.infoNote('Auto-scheduled time for this task today: its share of the day’s free time (window minus meals, reserved free time and fixed blocks), scaled by remaining Planned work and split across active tasks by priority then due date. Click ∿ auto → ✎ manual to pin a fixed amount off the top (a Predict override) instead of the computed value.')),allotField),
       blockingCtl?field(h('span',null,'Busy type',this.infoNote('Whether this appointment’s time is blocking (nothing else is scheduled through it) or background (a container — like a Work day — you deliberately place other tasks inside). Auto follows the imported calendar event’s busy/free setting, and defaults to blocking.')),blockingCtl):null,
