@@ -230,6 +230,39 @@ test('dpText: natural language drives the draft', () => {
   assert.equal(c.state.datePick.ms, at(2027, 6, 25, 16, 0));
 });
 
+test('dpApply: re-dating a recurring range does not transfer completed occurrence state', () => {
+  const oldStart=at(2026, 7, 21, 7, 0), oldEnd=at(2027, 4, 20, 8, 30);
+  const nextStart=at(2026, 7, 27, 7, 30), nextEnd=at(2026, 7, 27, 8, 0);
+  const { c, t } = withTask({
+    start:oldStart, end:oldEnd, startClock:null, endClock:null, planned:60,
+    recur:{kind:'day',n:1,label:'Daily',until:null,shifts:[{from:1,days:2}],
+      overrides:{0:{pct:100,completion:oldStart+30*60000}}}
+  });
+  c.state.datePick={id:'t1',key:'start',ms:nextStart,view:nextStart,text:'',parsed:{
+    start:nextStart,end:nextEnd,startClock:null,endClock:null,dur:null
+  }};
+  c.dpApply();
+  assert.equal(t().start,nextStart);
+  assert.equal(t().end,nextEnd);
+  assert.equal(Object.keys(t().recur.overrides).length,0,'the old occurrence completion is not reassigned to Aug 27');
+  assert.equal(t().recur.shifts.length,0, 'old occurrence-indexed shifts are invalid under the new anchor');
+  assert.equal(c.occPct(t(),0),0,'the newly anchored first occurrence starts unfinished');
+});
+
+test('setDate: a clock-only recurring edit keeps occurrence progress', () => {
+  const start=at(2026,7,21,7,0), end=at(2026,7,21,8,0);
+  const { c, t }=withTask({start,end,recur:{kind:'day',n:1,overrides:{0:{pct:40}},shifts:[]}});
+  c.setDate('t1','end',at(2026,7,21,8,30),true);
+  assert.equal(t().recur.overrides[0].pct,40,'changing only the clock still edits the same occurrence');
+});
+
+test('setDate: moving a recurring anchor edge to another day clears occurrence-indexed state', () => {
+  const start=at(2026,7,21,7,0), end=at(2027,4,20,8,30);
+  const { c, t }=withTask({start,end,recur:{kind:'day',n:1,overrides:{0:{pct:100,completion:start}},shifts:[]}});
+  c.setDate('t1','end',at(2026,7,21,8,30),true);
+  assert.equal(Object.keys(t().recur.overrides).length,0,'the malformed old span cannot leave a completed-history block behind');
+});
+
 test('dpText: unparseable text leaves the draft alone', () => {
   const { c } = withTask();
   c.openDatePick(fakeEvent(), 't1', 'start');

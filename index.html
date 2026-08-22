@@ -5462,7 +5462,7 @@ class Component extends DCLogic {
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       /* PP-EXT (owner 2026-08-19): read BEFORE the assignment — both the previous start and whether the
          task was an intra-day appointment have to be judged on its pre-edit shape. */
-      const prevStart=t.start, wasAppt=this.clockSpanMinutes(t)!=null;
+      const prevStart=t.start, prevEdge=t[key], wasAppt=this.clockSpanMinutes(t)!=null;
       t[key]=ms;
       if(timed!==undefined){
         const flag=key==='start'?'startClock':'endClock';
@@ -5494,6 +5494,13 @@ class Component extends DCLogic {
       if(key==='end' && t.start!=null){
         const maxStart = t.allDay ? ms-this.DAY : ms;
         if(t.start>maxStart) t.start=maxStart;
+      }
+      /* PP-EXT (owner 2026-08-21): occurrence overrides are indexed from the series anchor. Moving an
+         anchor edge to another CALENDAR DAY changes which real occurrence every index names; retaining
+         overrides would transfer an old completion (including its history reservation) onto the newly
+         dated occurrence. Clock-only edits stay on the same occurrence and deliberately keep progress. */
+      if(t.recur && prevEdge!=null && t[key]!=null && this.startOfDay(prevEdge)!==this.startOfDay(t[key])){
+        t.recur.overrides={}; t.recur.shifts=[];
       }
       /* PP-EXT (owner 2026-08-17): a clock edit always makes the booked intra-day span the plan.
          This deliberately overwrites even a typed estimate; clockSpanMinutes owns both the clock-shape
@@ -7098,16 +7105,19 @@ class Component extends DCLogic {
         result.endClock=!!clock;
         if(hasClock){ result.end=result.date; }  // R11: exact-clock due (date already carries the clock)
         else { const e=new Date(result.date); e.setHours(23,59,59,999); result.end=e.getTime(); } // R5/R6: EOD
-      } else if(hasClock){                        // R2 / R10 — start clock, DEFAULT-DURATION block
-        /* PP-EXT (owner 2026-08-21): "test today at 4pm should be given the default duration and auto
-           included today." A typed start clock with no stated end used to leave `end` null, which is a
-           ONE-EDGE window — and one-edge windows were exactly what fell through the today predicates
-           (see docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md). The owner's answer to
-           "point or span-to-end-of-day?" was neither: it is a BLOCK of DEFAULT_TASK_MINUTES.
-           `endClock:true` is deliberate — the invented edge is a real clock, so `clockSpanMinutes`
-           reads the block and `requestedMinutes` rung 3 asks the day for exactly that span. */
-        result.start=result.date; result.startClock=true;
-        result.end=result.date + this.DEFAULT_TASK_MINUTES*60000; result.endClock=true;
+      } else if(hasClock){                        // R2 / R10 — start clock, open end: a keep-clear POINT
+        /* PP-EXT (owner 2026-08-21, SECOND ruling — this REVERSES the default-duration block shipped in
+           v0.8.0 earlier the same day). Owner, verbatim: "My default task duration for point tasks is
+           wrong. test today at 4pm should be no duration, marker at 4pm in both the schedule and
+           timeline. We should retain the point behaviour."
+
+           So `end` stays null and the task is a keep-clear Point: it reserves NO minutes, and its clock
+           is a divider `dayIntervals` will not pack across. The first ruling's premise was that a Point
+           "occupies no day", but that was never the Point's own fault — it was the inclusion inversion
+           in `autoIncludedToday`/`startsToday`/`onListNow`, which is fixed and STAYS fixed. With that
+           fix in place a Point is auto-included today and renders as a ◆ marker on both surfaces, which
+           is exactly the behaviour asked for. Do not re-invent a duration here. */
+        result.start=result.date; result.startClock=true; result.end=null;
       } else if(startCue){                        // R4 — not-before (start-cued all-day)
         result.start=result.date; result.startClock=null; result.end=null;
       } else {                                    // R8 — uncued bare day → start, clock flags left null (derive: midnight ⇒ untimed)
@@ -7130,15 +7140,14 @@ class Component extends DCLogic {
       const dueEnd = result.clock ? anchorDay
         : (()=>{ const e=new Date(anchorDay); e.setHours(23,59,59,999); return e.getTime(); })();
       result.candidates = [
-        /* PP-EXT (owner 2026-08-21): the At-branch of a CLOCK ambiguity is the default-duration block the
-           R2/R10 branch above now builds — same rule, same place the chooser's third slot was reserved
-           for. A bare DAY (no clock) still anchors with an open end; that shape is handled by the today
-           predicates rather than by inventing a duration nobody typed. */
-        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:result.clock?true:null,
-            start:anchorDay, end:result.clock ? anchorDay + this.DEFAULT_TASK_MINUTES*60000 : null } },
+        /* PP-EXT (owner 2026-08-21, second ruling): the At-branch is the keep-clear POINT the R2/R10
+           branch above builds — open end, no invented duration. This reverts the default-duration block
+           tried earlier the same day; see that branch for the owner's reversal in full. */
+        { kind:'anchor', tuple:{ startClock:result.clock?true:null, endClock:null, start:anchorDay, end:null } },
         { kind:'due',    tuple:{ startClock:null, endClock:!!result.clock, start:null, end:dueEnd } },
-        /* Slot 3 is no longer reserved: §5's "block with default duration" IS the anchor branch above,
-           for clock ambiguities. A bare-day ambiguity still has exactly two readings, On and By. */
+        /* slot 3 (block-with-default-duration) intentionally empty — §5 reserved it, and the owner
+           REJECTED that shape on 2026-08-21: a clocked anchor with no stated end is a Point, and a
+           duration nobody typed is not to be invented. Kept as a record of the closed decision. */
       ];
       result.ambiguous = result.clock ? 'time' : (result.date==null ? 'recur' : 'day');
     }
@@ -7721,8 +7730,14 @@ class Component extends DCLogic {
       this.commit(tasks=>{ const task=tasks.find(x=>x.id===dp.id); if(!task) return;
         const range=p.start!=null && p.end!=null;
         if(range){
+          const anchorDayChanged=(task.start!=null && this.startOfDay(task.start)!==this.startOfDay(p.start))
+            || (task.end!=null && this.startOfDay(task.end)!==this.startOfDay(p.end));
           task.start=p.start; task.end=p.end;
           task.startClock=p.startClock; task.endClock=p.endClock;
+          /* PP-EXT (owner 2026-08-21): see setDate. A parsed range writes both base edges at once, so
+             invalidate occurrence-indexed edits once when either anchor day changes. Keep `until`: it
+             limits the series itself rather than describing an occurrence. */
+          if(task.recur && anchorDayChanged){ task.recur.overrides={}; task.recur.shifts=[]; }
         } else if(p.date!=null){
           /* PP-EXT (owner 2026-08-19): same rule as setDate — START moves end, END sets duration. The
              ordering trap: clockSpanMinutes must be judged on the task's PRE-edit shape, so both reads
@@ -11218,7 +11233,9 @@ class Component extends DCLogic {
        name now renders inline (truncated), so a Point reads as a task in every view, not a bare time. */
     const points=(data.points||[]).map((p,i)=>{
       const y=topOf(p.ms);
-      return h('div',{key:'pt'+i,
+      return h('div',{key:'pt'+i,'data-tl-point':p.id,'data-tl-point-ms':p.ms,
+        /* PP-EXT (owner 2026-08-21): a stable hook, for the reason `data-tl-block` has one — the repo
+           rule is to address a surface by its attribute and never by its label text. */
         style:{position:'absolute',left:gut+'px',right:'6px',top:y+'px',height:'0',
           borderTop:'2px dotted var(--tl-point)',zIndex:4,pointerEvents:'none'}}, /* PP-EXT (22) */
         h('span',{title:this.clockLabel(p.ms)+' · '+p.title,
@@ -11662,6 +11679,7 @@ class Component extends DCLogic {
         h('span',{style:{flex:'none',opacity:0.85,fontWeight:700}},'🕓 anytime'),
         h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, thv.title)));
       const pointEls=(data.points||[]).map((p,i)=>h('div',{key:'pp'+i,title:this.fmtClock(p.ms)+' · '+p.title,
+        'data-sched-point':p.id,'data-sched-point-ms':p.ms, /* PP-EXT (owner 2026-08-21): see data-tl-point */
         style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
           background:'transparent',color:'var(--text-2)',fontSize:'11.5px',fontWeight:600,border:'1px dashed var(--tl-point-soft)'/* PP-EXT (22) */}},
         h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',fontWeight:700,color:'var(--tl-point)'}}, '◆ '+this.fmtClock(p.ms)),

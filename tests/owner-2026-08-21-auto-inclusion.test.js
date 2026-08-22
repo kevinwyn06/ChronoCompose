@@ -42,22 +42,44 @@ test('owner 2026-08-21: a quick-added day phrase is on TODAY, not tomorrow', () 
   });
 });
 
-test('owner 2026-08-21: a typed start clock with no end gets the default duration and is on today', () => {
+test('owner 2026-08-21: a typed start clock with no end is a Point — no duration, on today', () => {
   withNow(FIXED_NOW, () => {
     const c = make();
     const t = quickAdd(c, 'test today at 4pm');
     const { today, tomorrow } = days(c);
     assert.equal(new Date(t.start).getHours(), 16, 'start is 16:00');
-    assert.notEqual(t.end, null, 'a start clock with no stated end must be given an end');
-    assert.equal((t.end - t.start) / 60000, c.DEFAULT_TASK_MINUTES,
-      'the invented end is exactly DEFAULT_TASK_MINUTES after the start');
+    assert.equal(t.end, null, 'NO end — no duration is invented for a time the user did not bound');
     assert.equal(t.startClock, true);
-    assert.equal(t.endClock, true, 'the invented end is a real clock, so the block reads as an appointment');
-    assert.equal(c.isScheduled(t), true);
-    assert.equal(c.isActiveOn(t, today), true, '`test today at 4pm` must be on today\'s list');
-    assert.equal(c.isActiveOn(t, tomorrow), false);
-    assert.equal(c.requestedMinutes(t, today), c.DEFAULT_TASK_MINUTES,
-      'and it asks the day for exactly the default duration');
+    assert.equal(t.endClock, null);
+    assert.equal(c.isPointTask(t), true, 'it is a keep-clear Point');
+    /* The whole point of the ruling: it is ON today, which is what it never was before. A Point was
+       always the right SHAPE; the inclusion inversion was what made it invisible. */
+    assert.equal(c.isActiveOn(t, today), true, 'it must be on today\'s list');
+    assert.equal(c.isPointOn(t, today), true);
+    /* F3: a Point exists only on its own day. */
+    assert.equal(c.isActiveOn(t, tomorrow), false, 'and on no other day');
+  });
+});
+
+/* "marker at 4pm in BOTH the schedule and timeline" — both surfaces read the same `points` list off
+   `buildDayTimeline`, so this is the one assertion that covers both. The rendered marker itself is
+   pinned in the e2e layer, where there is a real DOM to look at. */
+test('owner 2026-08-21: the Point reaches the day surfaces as a marker, reserving nothing', () => {
+  withNow(FIXED_NOW, () => {
+    const c = make();
+    const t = quickAdd(c, 'test today at 4pm');
+    const B = c.startOfToday();
+    c._allot = c.computeAllotted(c.state.tasks);
+    const data = c.buildDayTimeline(B);
+    const marker = (data.points || []).find(p => p.id === t.id);
+    assert.ok(marker, 'it is in the points list both the timeline and the Schedule view render');
+    assert.equal(new Date(marker.ms).getHours(), 16, 'the marker sits at 4pm');
+    assert.equal(marker.title, 'test');
+    /* Reserves nothing: no packed block, and no minutes off the day. */
+    assert.equal((data.chunks || []).some(ch => ch.id === t.id), false, 'a Point never packs a block');
+    assert.equal(c.allotOf(t.id).allotted || 0, 0, 'and takes no minutes from the day');
+    /* But its clock IS a divider the packer will not cross. */
+    assert.ok(c.keepClearToday(B, c.state.tasks).includes(marker.ms), 'it is a keep-clear divider');
   });
 });
 

@@ -359,6 +359,15 @@ and after the migration.
 The structural `meal` chunk kind survives, now meaning the one busy interval left with no task behind it:
 the free-time reserve.
 
+### Re-anchoring a recurring series invalidates occurrence-indexed state
+
+`recur.overrides` and `recur.shifts` are keyed by occurrence index relative to `task.start`. If a date
+editor moves either base edge onto another calendar day, those indices name different real occurrences,
+so both collections are cleared in the same task commit. This prevents an old completion and its history
+reservation from transferring to the newly dated first occurrence. A same-day clock-only edit keeps the
+collections because it still describes the same occurrence. `recur.until` is retained: it bounds the
+series itself and is not occurrence-indexed.
+
 ## Indefinite snooze (owner decision, 2026-08-19)
 
 *“Snooze today and take out of today are practically the exact same thing and is therefore useless.”*
@@ -493,14 +502,23 @@ triage, because both predicates failed together on the same input.
 opening. Without that clause a deadline-only task, whose ghost start is re-derived at today every day,
 would file as New every day until its deadline.
 
-**A typed start clock with no stated end is a default-duration block.** Owner ruling 2026-08-21, verbatim:
-*"test today at 4pm should be given the default duration and auto included today."* The parser's R2/R10
-branch and the chooser's `anchor` candidate now emit `end = start + DEFAULT_TASK_MINUTES` with
-`endClock: true`, so the block reads as an appointment and `requestedMinutes` rung 3 asks the day for
-exactly that span. This is the third slot the chooser reserved for "block with default duration", filled.
-Consequence worth knowing: **the parser no longer produces a keep-clear Point.** `isPointTask` and the F3
-own-day veto are untouched and still reachable by editing a task's end away; nothing in the parser
-reaches them any more.
+**A typed start clock with no stated end is a keep-clear Point.** Owner ruling 2026-08-21, verbatim:
+*"My default task duration for point tasks is wrong. test today at 4pm should be no duration, marker at
+4pm in both the schedule and timeline. We should retain the point behaviour."*
+
+This **reverses** a ruling made hours earlier the same day and shipped in `v0.8.0`, which gave such a task
+`end = start + DEFAULT_TASK_MINUTES`. Both rulings are recorded because the reversal carries the lesson:
+the first was made to answer *"should it be a point or a span to end of day?"*, and the question was
+malformed. The observation behind it — that `test today at 4pm` occupied no day — was **not the Point's
+fault**. It was the inclusion inversion described above, in `autoIncludedToday` / `startsToday` /
+`onListNow`. Fix that, and a Point behaves exactly as designed: auto-included today, drawn as a ◆ marker
+on the timeline and in the Schedule view, reserving no minutes while its clock still splits the packer's
+free intervals. Inventing a duration was treating the symptom.
+
+So R2/R10 and the chooser's `anchor` candidate emit `end: null`, `endClock: null`. The chooser's third
+slot stays empty, now as a **closed decision** rather than a reservation: a duration the user did not type
+is not to be invented. `isPointTask`, `keepClearToday`, `pointsToday` and the F3 own-day veto are the
+machinery, unchanged throughout; only whether the parser reaches them changed, twice.
 
 A **bare day** (`test today`) is deliberately left one-edged — no duration is invented for a phrase that
 named no time. It stays open-ended, and `ghostSpan`'s half-ghost branch carries it forward to the next day

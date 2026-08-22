@@ -118,10 +118,10 @@ test('an explicit time still lands as a clocked start', () => {
   const p = c.parseDateText('meeting 2pm');
   assert.equal(new Date(p.start).getHours(), 14);
   assert.equal(p.startClock, true);
-  // Owner ruling 2026-08-21: a typed start clock with no stated end is a DEFAULT-DURATION BLOCK, not a
-  // Point. The open end was the shape that fell through the today predicates entirely.
-  assert.equal(p.end, p.start + c.DEFAULT_TASK_MINUTES*60000, 'a bare time gets the default duration');
-  assert.equal(p.endClock, true);
+  // Owner ruling 2026-08-21 (second): a bare time is a keep-clear POINT — no end, no invented duration.
+  // The default-duration block tried earlier the same day was reversed: "test today at 4pm should be no
+  // duration, marker at 4pm". A Point was never the reason it went missing; the inclusion inversion was.
+  assert.equal(p.end, null, 'a bare time is a Point – no end');
 });
 
 test('parseDateText: "from HH:MM to HH:MM" yields both ends and a clean title', () => {
@@ -160,20 +160,20 @@ test('parseDateText: a range crossing midnight rolls the end to the next day', (
   assert.strictEqual(r.dur, 120);
 });
 
-test('parseDateText: a bare start-clock is a default-duration block (owner 2026-08-21)', () => {
+test('parseDateText: a bare start-clock is a Point (open end)', () => {
   const c = make();
   const r = c.parseDateText('meeting 2pm', BASE);
   assert.strictEqual(r.startClock, true, 'start has an explicit clock');
-  assert.strictEqual(r.endClock, true,   'the invented end is a real clock');
-  assert.strictEqual(r.end, r.start + c.DEFAULT_TASK_MINUTES*60000, 'default duration');
+  assert.strictEqual(r.endClock, null,   'a Point has no end clock');
+  assert.strictEqual(r.end,      null,  'no end');
 });
 
-test('parseDateText: "mon 9am" is a default-duration block too', () => {
+test('parseDateText: "mon 9am" is a Point too', () => {
   const c = make();
   const r = c.parseDateText('report mon 9am', BASE);
   assert.strictEqual(r.startClock, true);
-  assert.strictEqual(r.endClock,   true);
-  assert.strictEqual(r.end, r.start + c.DEFAULT_TASK_MINUTES*60000);
+  assert.strictEqual(r.endClock,   null);
+  assert.strictEqual(r.end,      null);
 });
 
 test('parseDateText: clock RANGE stays a both-pinned span (regression)', () => {
@@ -342,10 +342,10 @@ test('R1: "for <dur>" / "takes <dur>" / "~<dur>" set a budget but no anchors', (
 });
 
 // ---- R2 Start-time only (open-ended) ----
-test('R2: a lone future start clock pins the start and a default-duration end', () => {
+test('R2: a lone future start clock pins the start, no end', () => {
   const c = make();
   const r = c.parseDateText('standup at 11am', BASE); // 11:00 today > now 10:00, no roll
-  shape(r, { start: at(15, 11, 0), end: at(15, 11, 0) + 5*60000, startClock: true, endClock: true });
+  shape(r, { start: at(15, 11, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'standup');
 });
@@ -395,12 +395,11 @@ test('R4: "not before <day>" is a not-before start, not a deadline (was inverted
   assert.strictEqual(r.rest, 'submit'); // the orphaned "not" is stripped too
 });
 
-// The clocked form routes through R2: start pinned at the clock, end filled in at the default duration
-// (owner 2026-08-21 — R2 no longer emits an open end).
+// The clocked form routes through R2 (Point tuple): start pinned at the clock, end explicitly open.
 test('R2: "not before <day> <clock>" pins the start clock, not a due deadline', () => {
   const c = make();
   const r = c.parseDateText('deploy not before monday 5pm', BASE);
-  shape(r, { start: at(20, 17, 0), end: at(20, 17, 0) + 5*60000, startClock: true, endClock: true });
+  shape(r, { start: at(20, 17, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'deploy');
 });
@@ -448,14 +447,14 @@ test('R9: a day + clock span is a fixed block on that day (both pins)', () => {
 });
 
 // ---- R10 Start-clock on a day (open) ----
-test('R10: a day + start clock (no stated end) gets the default duration', () => {
+test('R10: a day + start clock (no end) pins the start only', () => {
   const c = make();
   const r = c.parseDateText('gym tomorrow at 3pm', BASE);
-  shape(r, { start: at(16, 15, 0), end: at(16, 15, 0) + 5*60000, startClock: true, endClock: true });
+  shape(r, { start: at(16, 15, 0), end: null, startClock: true, endClock: null });
   assert.strictEqual(r.clock, true);
   assert.strictEqual(r.rest, 'gym');
   const r2 = c.parseDateText('kickoff monday 9am', BASE);
-  shape(r2, { start: at(20, 9, 0), end: at(20, 9, 0) + 5*60000, startClock: true, endClock: true });
+  shape(r2, { start: at(20, 9, 0), end: null, startClock: true, endClock: null });
 });
 
 // ---- R11 Deadline at a clock ----
