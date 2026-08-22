@@ -291,6 +291,13 @@ async function timelineBlocks(page) {
       day: Number(el.getAttribute('data-tl-day')),
       kind: el.getAttribute('data-tl-kind') || '',
       taskId: el.getAttribute('data-tl-task') || '',
+      /* Owner ruling C1 (2026-08-21): a family is ONE block with its children as lines inside it, so a
+         child's minutes are declared on the line rather than drawn as a height of their own. The block
+         is still MEASURED; `drawnMinutes` only apportions that measurement across these. */
+      kids: [...el.querySelectorAll('[data-tl-kid]')].map((k) => ({
+        id: k.getAttribute('data-tl-kid'),
+        min: Number(k.getAttribute('data-tl-kid-min') || 0),
+      })),
       bg: cs.backgroundImage || '',
       rail: cs.boxShadow || '',
       /* V5 block 25b: the lock signal is border WIDTH first (survives greyscale) and colour second.
@@ -431,8 +438,17 @@ async function drawnMinutes(page, cal) {
     /* 0.1px of slack: Chromium snaps layout to 1/64px, so a clamped block measures a hair over 13·s. */
     if (bl.h <= floorPx + 0.1) { clamped++; return; }
     if (bl.kind === 'meal' || !bl.taskId) return; /* meals are the day's furniture, not anyone's allotment */
-    byTask[bl.taskId] = (byTask[bl.taskId] || 0) + (bl.h - b) / a;
-    total += (bl.h - b) / a;
+    const mins = (bl.h - b) / a;
+    total += mins;
+    /* A family block's MEASURED minutes are apportioned across its declared child shares. The block is
+       still the ruler — a height that drifts still fails — but the minutes land on the tasks the sheet
+       actually charges, which under C1 are the children and not the parent that contains them. */
+    const declared = bl.kids.reduce((n, k) => n + k.min, 0);
+    if (bl.kids.length && declared > 0) {
+      bl.kids.forEach((k) => { byTask[k.id] = (byTask[k.id] || 0) + mins * (k.min / declared); });
+      return;
+    }
+    byTask[bl.taskId] = (byTask[bl.taskId] || 0) + mins;
   });
   if (clamped) throw new Error(`drawnMinutes: ${clamped} block(s) hit the 13px height floor and cannot be measured`);
   return { byTask, total, a, b };

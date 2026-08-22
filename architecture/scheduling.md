@@ -30,6 +30,80 @@ default allocator; `orderingSeam(features)` is the default priority, earliest-de
 order. Both receive feature records without mutating them, so a later learned implementation can use
 priority, urgency, slack, labels, or other task fields without changing scheduling callers.
 
+
+## Subtasks on the timeline and the agenda (owner rulings 2026-08-21 / 2026-08-22)
+
+### The shape: C1 and S1
+
+A family is **ONE block with ONE border**, and its children ride inside it as `kids` lines. This replaced
+a run of sibling blocks titled `Parent › Child`; what won option C the ruling is that the parent is
+exactly one object, and a compound-titled run is not that. Depth is carried by **indent + tick colour**,
+not by a second structural device per level. C2 (a lip at every level) is the recorded fallback if depth
+reads as ambiguous in use — a CSS change to the same markup, not a different design. C3 (flatten past
+depth 2 into a count) is rejected: it makes the block lie about what is scheduled.
+
+The Schedule view draws the same subtree the same way (**S1**), and the constraint that decides it is not
+aesthetic: `renderScheduleView` merges blocks, Points and the now-rule into one array sorted by `ms`, so
+a parent has to occupy exactly **one sort position**. The two surfaces draw the same day one panel over.
+
+### The active cue: V2, and what "active" means
+
+**Active is the subtask whose scheduled span contains "now"** — the line the red now-rule crosses. Not the
+running timer, not the next incomplete child. It is the only one of the three that is a pure function of
+the packed layout and the clock, so it cannot disagree with what both surfaces already draw. Two
+consequences: **no cue on a day that is not today**, and **a running timer does not move it** — the timer
+keeps its own ▶/■ affordance, and the two signals may point at different children because they answer
+different questions.
+
+The treatment is **V2** — the gutter tick becomes a filled caret, plus a tint — and that was decided by a
+size constraint, not a taste one. A child line is ~10.5px text inside a block whose height comes from
+MINUTES, not from content, so a true border (V1) costs ~2px of box on a line with ~6px of slack and
+pushes the last child of a short parent out of view. V2 reuses the gutter already reserved for the tick,
+so it costs **zero layout** — which is what the e2e asserts, by measuring every line, moving the cue, and
+requiring the boxes to be identical. V3 (an inset edge) is the accepted fallback, same markup.
+
+### The depth-ordered splitting rule
+
+*Prefer splitting a task over a subtask, a subtask over a sub-subtask.* The distinction most easily lost:
+
+> **Splitting cost is about cutting THROUGH a node, never about ordering AROUND it.**
+
+Putting one child before an appointment and another after it splits the parent, not either child. A seam
+between siblings is **free at every depth**. `layFamily` therefore applies two rules in order: a WHOLE
+placement beats a cut at any depth, and only when nothing fits whole is the **shallowest** item cut.
+Depth is a **pre-filter only** — within a depth, items keep the order `orderingSeam` gave them.
+
+Two things make the rule reachable at all. `familyQueue` walks to **any depth** (the two-level
+subdivision it replaces drew grandchildren nowhere), and a family is laid across its **whole run of
+chunks in one pass** — a per-chunk walk could only ever cut at the boundary, so "a whole child either
+side of the appointment" was unreachable.
+
+Case 1 — *a plain task absorbs the shortfall* — lives in the packer rather than in `layFamily`: the
+strict pass refuses to fragment a subtree, so a flat task takes the hole first. The relaxed pass still
+allows a deep cut, which makes it **rare rather than impossible** — better than declaring a day
+unschedulable.
+
+### Dragging
+
+**A drag moves the piece you grabbed and everything contained in that piece.** Grab an uncut parent and
+the whole family moves, because the whole family *is* that one piece; grab one half of a cut parent and
+only the children packed into that half travel. Once a family is one chunk this is what the existing
+machinery already says — the drag unit is the CHUNK, and a cut parent has one chunk per piece, so the pin
+is `partial` and the other piece stays where the packer put it. The build was therefore mostly a
+*removal*: `blockDraggable` used to refuse a parent with children, because there was no single object to
+grab.
+
+Two consequences that had to be built deliberately: a **drag-pinned family keeps its children**, or the
+drag would appear to dissolve the subtree (the same `layFamily` pass lays the queue into the pinned
+span); and the drag handle is the **parent row**, a child line never pinning itself.
+
+### A note for whoever measures this next
+
+A child's minutes are no longer a measurable block height, because the family draws as one block. Each
+line therefore declares `data-tl-kid-min`, and `drawnMinutes` apportions the block's **measured** height
+across those shares — so "what the sheet charges is what the timeline draws" is still held to a tenth of
+a minute, and a drift in the block's own height still fails exactly as it did.
+
 ## Allotment: reserve → share → cap (owner report, 2026-08-16)
 
 `compressionSeam` was rewritten. The old shape paid zero-planned tasks off the top, in full, and never

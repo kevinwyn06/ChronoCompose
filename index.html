@@ -116,6 +116,10 @@
   --tl-rail-fixed:#5fbf8c;--tl-rail-pinned:#7ad3a4;
   --tl-ctl-bg:rgba(28,28,30,0.88);--tl-ctl-fg:#d8ecdd;--tl-grip:rgba(255,255,255,0.32);
   --tl-grip-active:rgba(255,255,255,0.7);
+  /* PP-EXT (C1, owner ruling 2026-08-21): subtask DEPTH is carried by tick colour + indent, and the
+     active line by a tint. Per-theme values, never one shared rgba — that is the 2026-08-12
+     ghost-contrast defect, and a tick this small has no contrast to spare. */
+  --tl-kid-d1:#9ab6e0;--tl-kid-d2:#7f8fa6;--tl-kid-active-bg:rgba(127,178,245,0.18);
   --tl-point:#7fb2f5;--tl-point-soft:rgba(127,178,245,0.5);--tl-hover-chip-soft:rgba(49,83,94,0.55);--tl-hover-chip-bg:rgba(49,83,94,0.92);--tl-hover-chip-fg:#d5e3e9;
   --tl-hover-chip-border:rgba(255,255,255,0.18);
   --tl-unsched-box-bg:rgba(230,124,0,0.14);--tl-unsched-box-border:rgba(230,124,0,0.38);
@@ -129,6 +133,7 @@
   --tl-rail-fixed:#14532d;--tl-rail-pinned:#1e7a4c;
   --tl-ctl-bg:rgba(255,255,255,0.85);--tl-ctl-fg:#233529;--tl-grip:rgba(0,0,0,0.28);
   --tl-grip-active:rgba(0,0,0,0.6);
+  --tl-kid-d1:#3c6ba8;--tl-kid-d2:#6b7a8c;--tl-kid-active-bg:rgba(26,115,232,0.14);
   --tl-point:#1a73e8;--tl-point-soft:rgba(26,115,232,0.5);--tl-hover-chip-soft:rgba(190,218,227,0.55);--tl-hover-chip-bg:rgba(190,218,227,0.92);--tl-hover-chip-fg:#2a3538;
   --tl-hover-chip-border:rgba(0,0,0,0.12);
   --tl-unsched-box-bg:rgba(230,81,0,0.08);--tl-unsched-box-border:rgba(230,81,0,0.3);
@@ -10622,6 +10627,97 @@ class Component extends DCLogic {
      time. A relaxed second pass fills sub-minChunk fragments so a fragmented day doesn't strand whole tasks. */
   /* PP-EXT S1: pure ordering seam. The default remains priority -> earliest due -> longer first and returns
      a new array, leaving both the feature list and its records untouched for deterministic reuse. */
+  /* ==== PP-EXT (owner ruling 2026-08-21): the depth-ordered splitting rule ====
+     "The scheduler must prefer splitting a task over splitting a subtask, and a subtask over a
+     sub-subtask, and so on down the tree. Splitting cost rises with depth."
+
+     THE DISTINCTION MOST LIKELY TO BE LOST HERE, so it is stated before the code: splitting cost is
+     about cutting THROUGH a node, never about ordering AROUND it. Putting "Headline pass" before an
+     appointment and "Body pass" after it splits the PARENT, not either child — a seam BETWEEN siblings
+     is free at every depth. Miss this and the rule over-counts, and the packer refuses arrangements
+     that are actually ideal.
+
+     `familyQueue` flattens a subtree into the items that carry minutes, in reading order and tagged
+     with depth. It walks to ANY depth: the two-level subdivision it replaces drew grandchildren
+     nowhere, which is the gap the owner flagged ("sub-subtasks are not illustrated at all"). The
+     parent's own remainder comes last, because it is what is left after its children are named. */
+  familyQueue(pid, kids, byId, B){
+    const out=[];
+    const walk=(id, depth)=>{
+      (kids[id]||[]).forEach(cid=>{
+        const ct=byId[cid]; if(!ct) return;
+        if(this.hasFullDragPinToday(ct, B)) return; /* a WHOLE-pinned child is its own fixed block */
+        const own=this.flexAllot(cid);
+        if(own>0) out.push({id:cid, name:ct.name, goal:ct.goal, depth, mins:own});
+        walk(cid, depth+1);
+      });
+    };
+    walk(pid, 1);
+    const own=this.flexAllot(pid);
+    if(own>0) out.push({id:pid, name:(byId[pid]||{}).name, goal:(byId[pid]||{}).goal, depth:0, mins:own});
+    return out;
+  }
+  /* PURE: lay `items` into `chunks`, spending the cheapest seam first.
+     Two rules, in this order, and the order is the whole rule:
+       1. A WHOLE placement always beats a cut, at any depth. That is "ordering around", which is free.
+       2. When nothing fits whole, cut the SHALLOWEST item. Depth is a PRE-FILTER only — within a depth
+          the items keep the order they arrived in, which is the order `orderingSeam` already decided
+          (owner ruling 2026-08-21 on ties: `orderingSeam` breaks them, unchanged).
+     Returns the placements, each carrying {cut, piece, pieces} so a block can read `CUT · 1 of 2`, plus
+     a `leftover` of minutes that did not fit — never silently dropped. */
+  layFamily(chunks, items){
+    const q=(items||[]).map(x=>Object.assign({}, x));
+    const out=[]; const runs={};
+    (chunks||[]).forEach(ch=>{
+      let cur=ch.start;
+      while(cur < ch.end-500 && q.length){
+        const cap=(ch.end-cur)/60000;
+        /* Rule 1 — the first item that fits WHOLE, in queue order. Scanning in order rather than
+           picking the "best" fit is deliberate: a best-fit would reshuffle equal-depth siblings, and
+           depth is only a pre-filter. */
+        let i=q.findIndex(x=>x.mins<=cap+0.5);
+        if(i<0){
+          /* Rule 2 — nothing fits whole, so something is cut through. Take the shallowest; ties keep
+             their arrival order, so `findIndex` on the minimum depth is exactly the tie rule. */
+          let minD=Infinity; q.forEach(x=>{ if(x.depth<minD) minD=x.depth; });
+          i=q.findIndex(x=>x.depth===minD);
+        }
+        const it=q[i];
+        const take=Math.min(it.mins, cap);
+        if(take<=0.5) break;
+        out.push({id:it.id, name:it.name, goal:it.goal, depth:it.depth, origin:it.origin!=null?it.origin:it.mins,
+          start:cur, end:cur+take*60000});
+        runs[it.id]=(runs[it.id]||0)+1;
+        cur+=take*60000; it.mins-=take;
+        if(it.mins<=0.5) q.splice(i,1);
+      }
+    });
+    /* A piece is only a CUT if the item ended up in more than one run. Numbering happens here, after
+       every chunk is laid, because piece 1 cannot know whether a piece 2 will exist. */
+    const seen={};
+    out.forEach(x=>{ const n=runs[x.id]||1;
+      seen[x.id]=(seen[x.id]||0)+1;
+      x.pieces=n; x.piece=seen[x.id]; x.cut=n>1; });
+    out.leftover=Math.round(q.reduce((n,x)=>n+x.mins,0));
+    return out;
+  }
+  /* ==== /PP-EXT ==== */
+  /* PP-EXT (owner ruling 2026-08-22): the ACTIVE SUBTASK is the one whose scheduled span contains
+     "now" — the line the red now-rule crosses. Not the subtask with a running timer, and not the next
+     incomplete child. "Active" is three different things in this app and they disagree constantly; this
+     is the only one that is a pure function of the packed layout and the clock, which is why it cannot
+     contradict what the surface is already drawing.
+     Two consequences the ruling states and this encodes: NO cue on a day that is not today (a future
+     day has no now-line to overlap), and a running timer does NOT move it — the timer keeps its own
+     ▶/■ affordance, and the two signals are allowed to point at different children because they answer
+     different questions. PURE given `now`. */
+  activeKidId(block, B, now){
+    if(!block || !block.kids || !block.kids.length) return null;
+    if(B!==this.startOfToday()) return null;
+    const t=(now!=null?now:(this.state.nowTick||Date.now()));
+    const hit=block.kids.find(k=>k.start!=null && k.start<=t && t<k.end);
+    return hit?hit.id:null;
+  }
   orderingSeam(features){
     return (features||[]).slice().sort((a,b)=>(Number(!!b.active)-Number(!!a.active))||(a.priority-b.priority)||(a.due-b.due)||(b.rem-a.rem));
   }
@@ -10671,7 +10767,7 @@ class Component extends DCLogic {
         return Object.assign({},t,{title:t.name,goal:t.goal,priority:t.priority,due:this.dueMsOf(t,B),
           active, dueMs:active?null:this.dueMsOf(t,B),
           notBefore:active?Math.max(this.state.nowTick||Date.now(),winStart):(this.hasStartTime(t)?this.notBeforeMsOf(t,B):null),
-          rem:amt,origin:amt}); }));
+          rem:amt,origin:amt,hasKids:!!(kb.kids[t.id]&&kb.kids[t.id].length)}); }));
     const minChunk=s.minChunk||30; const segs=[];
     /* place up to `rem` minutes of `task`; `allowFragment` ignores minChunk (relaxed fill). free is kept sorted
        and placements consume usable span, so iterations are bounded by the (growing) slot count; the guard is
@@ -10682,7 +10778,15 @@ class Component extends DCLogic {
           const st0=Math.max(slot.start, task.notBefore||0);                       /* clocked not-before */
           const en0=Math.min(slot.end, task.dueMs!=null?task.dueMs:Infinity);      /* hard due-by */
           const dur=(en0-st0)/60000; if(dur<=0) continue;
-          const take=Math.min(rem,dur); if(!allowFragment && take<rem && take<minChunk) continue;
+          const take=Math.min(rem,dur);
+          /* PP-EXT (owner ruling 2026-08-21), case 1 of the splitting rule and its whole purpose: keep
+             structure intact by spending the cheapest seam. In the STRICT pass a task that HAS a
+             subtree must place its family total whole — cutting it is a cost the rule wants paid last,
+             after every flat task has had a chance to absorb the shortfall. The relaxed pass (which
+             runs immediately after, for every task that did not fit) still allows it, so the rule makes
+             a deep cut RARE rather than impossible: better than declaring the day unschedulable. */
+          if(!allowFragment && task.hasKids && take<rem) continue;
+          if(!allowFragment && take<rem && take<minChunk) continue;
           const st=st0, en=st+take*60000;
           segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:st,end:en,type:'scheduled'});
           remove(st,en); rem-=take; placed=true; break; }
@@ -10703,36 +10807,66 @@ class Component extends DCLogic {
     const kcSet=new Set(kc); /* PP-EXT: keep-clear — don't merge across a Point's clock, or the split would be undone and a block would span it */
     segs.forEach(seg=>{ if(!seg.start){merged.push(seg);return;} const last=merged[merged.length-1];
       if(last&&last.start&&last.id===seg.id&&(seg.start-last.end)<=60000&&!kcSet.has(seg.start)){ last.end=seg.end; } else merged.push(Object.assign({},seg)); });
-    /* PP-EXT: subtasks — split each parent chunk into consecutive child sub-blocks ('Parent › Child',
-       child timers work per block); the parent's own remainder keeps its name. Two display levels only:
-       a child block spans its whole family share (grandchildren aren't separately drawn). */
-    const queues={};
-    const queueFor=pid=>{
-      if(queues[pid]) return queues[pid];
-      const q=[]; (kb.kids[pid]||[]).forEach(cid=>{ const ct=kb.byId[cid];
-        if(this.hasFullDragPinToday(ct, B)) return; /* PP-EXT: a WHOLE-pinned child renders as its own fixed block, not in the family */
-        const mins=this.famAllot(cid,kb.kids,kb.byId,B); /* PP-EXT (04): already net of a partial pin */
-        if(mins>0) q.push({id:cid,title:(kb.byId[pid].name+' › '+ct.name),goal:ct.goal,mins}); });
-      const own=this.flexAllot(pid);
-      if(own>0) q.push({id:pid,title:kb.byId[pid].name,goal:kb.byId[pid].goal,mins:own});
-      return queues[pid]=q;
-    };
+    /* PP-EXT (owner ruling 2026-08-21): subtasks are laid into their parent's chunks by the
+       DEPTH-ORDERED SPLITTING RULE (`layFamily`), not by the old greedy walk.
+       Two things changed, and both were gaps the owner named:
+         · the family's chunks are laid in ONE pass over the whole run rather than chunk by chunk, which
+           is what makes "put a whole child either side of the appointment" reachable at all — a seam
+           BETWEEN siblings is free, and a per-chunk walk could only ever cut at the boundary;
+         · `familyQueue` walks to ANY depth, so a sub-subtask is drawn. The walk this replaces stopped
+           at two levels and rendered grandchildren nowhere.
+       `origin` still carries the item's own share so the edge-drag and tooltip maths are unchanged, and
+       `cut`/`piece`/`pieces` ride along for the block label. */
+    const famQ={};
+    const familyRuns={};
+    merged.forEach((c,i)=>{ if(c.start && c.type==='scheduled' && kb.kids[c.id] && kb.kids[c.id].length)
+      (familyRuns[c.id]=familyRuns[c.id]||[]).push(i); });
+    const laidFor={};
+    Object.keys(familyRuns).forEach(pid=>{
+      const idxs=familyRuns[pid];
+      const q=famQ[pid]||(famQ[pid]=this.familyQueue(pid, kb.kids, kb.byId, B));
+      laidFor[pid]=this.layFamily(idxs.map(i=>({start:merged[i].start,end:merged[i].end})), q);
+    });
+    /* PP-EXT (owner ruling 2026-08-21, option C1): a family is ONE BLOCK, not a run of sibling blocks.
+       The parent keeps exactly one border and one object on the timeline; its children ride inside it
+       as `kids`, tagged with depth, and the renderer carries depth with indent + tick colour rather
+       than a second structural device per level (C2, kept as the CSS-level fallback if depth reads as
+       ambiguous in use).
+       A CUT parent still yields two blocks — one per chunk it was laid into — which is exactly what
+       "the parent block appears twice" means, and what makes a dragged half a handle on a PIECE. */
+    const pieceCount={};
+    Object.keys(familyRuns).forEach(pid=>{ pieceCount[pid]=familyRuns[pid].length; });
     const subdivided=[];
+    const pieceSeen={};
+    /* A drag-pinned family is still a family: the piece the user placed by hand contains its children,
+       and it must keep drawing them or the drag would appear to dissolve the subtree. Its span is one
+       chunk, so the same `layFamily` pass lays the queue into it. */
+    busy.forEach(b=>{ if(b.taskId && kb.byId[b.taskId] && this.hasDragPinToday(kb.byId[b.taskId], B)
+        && kb.kids[b.taskId] && kb.kids[b.taskId].length){
+      const q=famQ[b.taskId]||(famQ[b.taskId]=this.familyQueue(b.taskId, kb.kids, kb.byId, B));
+      if(!laidFor[b.taskId]) laidFor[b.taskId]=this.layFamily([{start:b.start,end:b.end}], q); } });
     merged.forEach(c=>{
-      if(!(c.start && c.type==='scheduled' && kb.kids[c.id] && kb.kids[c.id].length)){ subdivided.push(c); return; }
-      const q=queueFor(c.id); let cur=c.start;
-      while(cur < c.end-30000 && q.length){
-        const item=q[0];
-        const take=Math.min((c.end-cur)/60000, item.mins);
-        subdivided.push({id:item.id,title:item.title,goal:item.goal,origin:item.mins,start:cur,end:cur+take*60000,type:'scheduled'});
-        cur+=take*60000; item.mins-=take; if(item.mins<=0.5) q.shift();
-      }
-      if(cur<c.end) subdivided.push({id:c.id,title:c.title,goal:c.goal,origin:c.origin,start:cur,end:c.end,type:'scheduled'});
+      if(!(c.start && c.type==='scheduled' && familyRuns[c.id])){ subdivided.push(c); return; }
+      const parentName=(kb.byId[c.id]||{}).name||c.title;
+      const inside=(laidFor[c.id]||[]).filter(pl=>pl.start<c.end && pl.end>c.start);
+      pieceSeen[c.id]=(pieceSeen[c.id]||0)+1;
+      subdivided.push(Object.assign({}, c, {title:parentName,
+        kids:inside.map(pl=>({id:pl.id, name:pl.name, depth:pl.depth, start:pl.start, end:pl.end,
+          own:pl.id===c.id, cut:pl.cut, piece:pl.piece, pieces:pl.pieces})),
+        piece:pieceSeen[c.id], pieces:pieceCount[c.id], cut:pieceCount[c.id]>1}));
     });
     merged=subdivided;
-    busy.forEach(b=>merged.push(b.taskId?{id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed',
-        dragPin:kb.byId[b.taskId]?this.hasDragPinToday(kb.byId[b.taskId], B):false} /* PP-EXT: pinned task block (dragPin ⇒ draggable + unpin) */
-      :{title:b.note,start:b.start,end:b.end,type:'meal'}));
+    busy.forEach(b=>{
+      if(!b.taskId){ merged.push({title:b.note,start:b.start,end:b.end,type:'meal'}); return; }
+      const pinnedFam=laidFor[b.taskId] && !familyRuns[b.taskId]
+        ? (laidFor[b.taskId]||[]).filter(pl=>pl.start<b.end && pl.end>b.start)
+            .map(pl=>({id:pl.id,name:pl.name,depth:pl.depth,start:pl.start,end:pl.end,
+              own:pl.id===b.taskId,cut:pl.cut,piece:pl.piece,pieces:pl.pieces}))
+        : null;
+      merged.push({id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed',
+        kids:(pinnedFam&&pinnedFam.length)?pinnedFam:undefined,
+        dragPin:kb.byId[b.taskId]?this.hasDragPinToday(kb.byId[b.taskId], B):false}); /* PP-EXT: pinned task block (dragPin ⇒ draggable + unpin) */
+    });
     merged.sort(bySlot);
     return {chunks:merged, dayStart:winStart, dayEnd:winEnd,
       points:this.pointsToday(B, TL), topHover:this.topHoverToday(B, TL)}; /* PP-EXT (Group 2): render-only shapes */
@@ -10944,11 +11078,20 @@ class Component extends DCLogic {
   /* Timeline block draggable for any LEAF flexible block (top-level or subtask) or an existing drag-pin (to
      move it). Both-pinned / gcal-timed fixed blocks and parent (family) blocks are not draggable — a family
      block is subdivided, so there's no single span to pin. A pinned leaf subtask leaves its parent's family. */
+  /* PP-EXT (owner rulings 2026-08-21): A DRAG MOVES THE PIECE YOU GRABBED AND EVERYTHING CONTAINED IN
+     THAT PIECE. Two rulings meet here and they are not in conflict, because they answer different
+     questions: "dragging a parent moves its children" and "dragging one half of a split parent moves
+     only that half". Grab an uncut parent and the whole family moves, because the whole family IS that
+     one piece; grab the second half of a cut parent and only the children packed into that half travel.
+     The existing machinery already says exactly this once a family is ONE chunk (C1): the drag unit is
+     the CHUNK, `blockPointerDown` pins the chunk's own span, and a cut parent has one chunk per piece so
+     the pin is `partial` and the other piece stays where the packer put it.
+     So the whole change is removing the refusal below. It used to exclude a parent with children because
+     the family drew as a run of sibling blocks and there was no single object to grab. */
   blockDraggable(c, kb){
     if(c.type==='meal' || !c.start) return false;
     if(c.type==='fixed') return !!c.dragPin;
-    const t=kb.byId[c.id];
-    return !!t && !(kb.kids[c.id] && kb.kids[c.id].length);
+    return !!kb.byId[c.id];
   }
   blockPointerDown(e, c, B, opts){
     if(e.button!==0) return; e.stopPropagation(); e.preventDefault();
@@ -11350,6 +11493,58 @@ class Component extends DCLogic {
       const s = dg ? bd.previewStart : c.start;
       return {start:s, end:s+(c.end-c.start)+(eg?(ed.allot-ed.base)*60000:0)};
     }), px);
+    /* PP-EXT (owner ruling 2026-08-21, C1 + the 2026-08-22 active cue): a family block's body.
+       One lip on the PARENT — the block stays exactly one object with one border — and depth carried by
+       INDENT plus TICK COLOUR rather than a second structural device per level. C2 (a lip repeated at
+       every level) is the recorded fallback if depth reads as ambiguous in use: it is a CSS-level change
+       to this same markup, not a different design.
+       The active cue is V2, and it was decided by a size constraint rather than a taste one. A child
+       line is ~10.5px text inside a block whose height comes from MINUTES, not from content, so a true
+       border (V1) costs ~2px of box on a line with ~6px of slack and pushes the last child out of view
+       on a short parent. The gutter tick already reserved for every line becomes a FILLED CARET, plus a
+       tint and a bolder weight: zero layout cost, and the caret inherits the depth colour so cue and
+       depth reinforce each other. V3 (a 2px inset edge) is the accepted fallback — same markup, a CSS
+       swap. Non-family blocks are untouched. */
+    const DEPTH_TICK=['var(--text-mut)','var(--tl-kid-d1)','var(--tl-kid-d2)'];
+    const famBody=(c)=>{
+      if(!(c.kids && c.kids.length)) return [(this.blockGlyph(c))+c.title];
+      const activeId=this.activeKidId(c, B, now);
+      const head=h('div',{key:'fh','data-tl-fam-title':'1',
+        style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontWeight:700}},
+        (this.blockGlyph(c))+c.title
+        /* A cut parent says so on every piece — "CUT · 2 of 2" is what makes a second block read as the
+           same task rather than a duplicate of it. */
+        +(c.cut?('  \u00b7 CUT \u00b7 '+c.piece+' of '+c.pieces):''));
+      const lines=c.kids.map((k,ki)=>{
+        const on=activeId!=null && k.id===activeId;
+        const tick=DEPTH_TICK[Math.min(k.depth,DEPTH_TICK.length-1)];
+        return h('div',{key:'fk'+ki,'data-tl-kid':String(k.id),'data-tl-kid-depth':String(k.depth),
+          'data-tl-kid-active':on?'1':'0',
+          /* PP-EXT: the line's own minutes. A family draws as ONE block, so a child's share is no
+             longer a measurable height — and "what the sheet charges is what the timeline draws" is an
+             invariant the day-in-the-life spec holds to a tenth of a minute. Declaring the share lets
+             that spec keep MEASURING the block and merely apportion it, so a drift in the block's
+             height still fails the way it always did. */
+          'data-tl-kid-min':String(Math.round((k.end-k.start)/60000)),
+          onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); },
+          style:{display:'flex',alignItems:'center',gap:'4px',fontSize:'10.5px',lineHeight:1.65,
+            paddingLeft:(Math.max(0,k.depth-0)*8)+'px',
+            fontWeight:on?700:500,
+            background:on?'var(--tl-kid-active-bg)':'transparent',
+            borderRadius:on?'3px':'0',
+            whiteSpace:'nowrap',overflow:'hidden',cursor:'pointer'}},
+          /* THE GUTTER. One reserved slot per line, holding a dash normally and a filled caret when the
+             now-line crosses this child. Fixed width so the caret costs nothing — that is the whole
+             reason V2 was chosen over a border. */
+          h('span',{key:'g','data-tl-kid-gutter':'1',
+            style:{width:'8px',flex:'none',textAlign:'center',color:tick,fontWeight:700}},
+            on?'\u25b8':'\u2013'),
+          h('span',{key:'n',style:{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis'}},
+            k.name+(k.cut?('  \u00b7 '+k.piece+'/'+k.pieces):'')));
+      });
+      return [h('div',{key:'fam','data-tl-family':String(c.id),
+        style:{display:'flex',flexDirection:'column',height:'100%',overflow:'hidden'}}, head, ...lines)];
+    };
     const blocks=drawn.map((c,i)=>{
       /* PP-EXT: while dragging this block on THIS day, float it to the (snapped) preview position */
       /* PP-EXT (04): match the ONE dragged chunk by (id, start) — matching by id alone floated every
@@ -11560,7 +11755,7 @@ class Component extends DCLogic {
           border:this.TL_BLK_BORDER_PX+'px '
                  +((c.dragPin||ty.window)?'dashed':'solid')+' '
                  +(cur?'#ea4335':(ty.window?'var(--tl-win-border)':'var(--tl-blk-border)'))}},
-        (this.blockGlyph(c))+c.title, ...leftEls, btn, edgeH);
+        ...famBody(c), ...leftEls, btn, edgeH);
       /* The card is a SIBLING, not a child: the block clips its own overflow (that is what ellipsises a
          long title), so a card drawn inside it would be cut off at the block's own edge. */
       return tipCard ? [blockEl, tipCard] : blockEl; });
@@ -11988,14 +12183,42 @@ class Component extends DCLogic {
           style:{flex:'none',cursor:'pointer',width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center'}},
           h('span',{style:{width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
             fontSize:'9px',background:'var(--tl-ctl-bg)',color:'var(--tl-ctl-fg)'}}, '✕')) : null; /* PP-EXT (22) */
-        return h('div',{key:'sc'+i,
+        /* PP-EXT (owner ruling 2026-08-21, S1): a subtree is ONE lipped chip with its children as
+           indented lines — identical to the timeline's C1. The agenda merges blocks, Points and the
+           now-rule into ONE array sorted by `ms`, so a parent has to occupy exactly one sort position;
+           that is what rules out a chip per scheduled child (S2) before any aesthetic judgement. And
+           these two surfaces draw the SAME DAY one panel over, so a subtree that looks like one object
+           in one place must not look like four in the other.
+           The drag handle stays the PARENT row: a child line never starts its own drag, per the drag
+           ruling. The agenda has no gesture that reaches a child, and that is deliberate — the timeline
+           is where you arrange, the agenda is where you read. */
+        const kidLines=(c.kids&&c.kids.length)?(()=>{
+          const activeId=this.activeKidId(c, B, this.state.nowTick||Date.now());
+          const TICK=['var(--text-mut)','var(--tl-kid-d1)','var(--tl-kid-d2)'];
+          return c.kids.map((k,ki)=>{ const on=activeId!=null && k.id===activeId;
+            return h('div',{key:'sk'+ki,'data-sched-kid':String(k.id),'data-sched-kid-depth':String(k.depth),
+              'data-sched-kid-active':on?'1':'0',
+              onMouseDown:e=>e.stopPropagation(),
+              onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); },
+              style:{display:'flex',alignItems:'center',gap:'5px',fontSize:'10.5px',lineHeight:1.65,
+                paddingLeft:(6+Math.max(0,k.depth)*10)+'px',fontWeight:on?700:500,
+                background:on?'var(--tl-kid-active-bg)':'transparent',borderRadius:on?'3px':'0',
+                whiteSpace:'nowrap',overflow:'hidden',cursor:'pointer'}},
+              h('span',{key:'g',style:{width:'8px',flex:'none',textAlign:'center',
+                color:TICK[Math.min(k.depth,TICK.length-1)],fontWeight:700}}, on?'\u25b8':'\u2013'),
+              h('span',{key:'n',style:{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis'}},
+                k.name+(k.cut?('  \u00b7 '+k.piece+'/'+k.pieces):'')));
+          });
+        })():null;
+        const row=h('div',{key:'sc'+i,
           title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
           onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
           /* PP-EXT (owner 2026-08-04): same details-on-click rule as the Today timeline block above. */
           onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
-          style:{display:'flex',alignItems:'center',gap:'8px',margin:'4px 12px',padding:'5px 9px',borderRadius:'7px',
-            background:ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,
-            boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 2px rgba(0,0,0,0.12)',
+          style:{display:'flex',alignItems:'center',gap:'8px',
+            margin:kidLines?'0':'4px 12px',padding:'5px 9px',borderRadius:kidLines?'0':'7px',
+            background:kidLines?'transparent':ty.bg,color:ty.fg,fontSize:'11.5px',fontWeight:600,
+            boxShadow:kidLines?'none':(dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 2px rgba(0,0,0,0.12)'),
             cursor:canDrag?(dragging?'grabbing':'grab'):'default',opacity:dragging?0.9:1,
             /* PP-EXT (25b), CUT 2026-08-20 (Task 23): the agenda chip tracked the timeline block's lock
                signal deliberately, so the two lose it together — the owner objected to it on BOTH. */
@@ -12003,11 +12226,24 @@ class Component extends DCLogic {
                    +((c.dragPin||ty.window)?'dashed':'solid')+' '
                    +(ty.window?'var(--tl-win-border)':'transparent')}},
           h('span',{style:{flex:'none',fontVariantNumeric:'tabular-nums',opacity:0.85,fontWeight:700}}, this.fmtClock(st)+'–'+this.fmtClock(en)),
-          h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, (this.blockGlyph(c))+c.title),
+          h('span',{style:{flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},
+            (this.blockGlyph(c))+c.title
+            /* A parent split across two DAYS appears as two lipped chips under two different dividers;
+               the second has to say so, with the same marker the timeline uses. */
+            +((kidLines&&c.cut)?('  \u00b7 CUT \u00b7 '+c.piece+' of '+c.pieces):'')),
           unpin,
           c.type!=='meal'?h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer',
             style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
-              fontSize:'9px',background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}, running?'■':'▶'):null); }); /* PP-EXT (22) */
+              fontSize:'9px',background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}, running?'■':'▶'):null); /* PP-EXT (22) */
+        /* ONE chip, with the LIP on it — the same single-object rule C1 states for the timeline. */
+        return kidLines
+          ? h('div',{key:'scw'+i,'data-sched-family':String(c.id),
+              style:{margin:'4px 12px',borderLeft:'3px solid var(--tl-kid-d1)',borderRadius:'7px',
+                background:ty.bg,color:ty.fg,overflow:'hidden',
+                boxShadow:dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 2px rgba(0,0,0,0.12)',
+                opacity:dragging?0.9:1}},
+              row, h('div',{key:'k',style:{padding:'0 9px 5px'}}, ...kidLines))
+          : row; });
       /* PP-EXT (#68): Points (clocked anchors that reserve no time) and top-hover agenda items
          (dated-but-untimed tasks) never packed a block, so the block list above dropped them — the
          Schedule view silently lost them. Surface both here: untimed "🕓" chips ride at the day's top

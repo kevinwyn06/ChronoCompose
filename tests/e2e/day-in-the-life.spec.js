@@ -212,8 +212,11 @@ test.describe('A day in the life', () => {
       'the appointment is drawn locked').toBe(true);
     /* 2026-08-19: lunch is a task, so it is drawn as a `fixed` block like any other appointment. */
     expect(blocks.some((b) => b.kind === 'fixed' && b.taskId === 't-lunch'), 'lunch is on the day').toBe(true);
-    expect(blocks.some((b) => b.taskId === 't-move-a'),
-      'a subtask is drawn under its parent\'s family time').toBe(true);
+    /* Owner ruling C1 (2026-08-21): the subtask is a LINE inside its parent's single block, not a
+       block of its own. Containment is the whole point of the ruling, so the assertion follows it
+       there — the parent stays exactly one object with one border. */
+    expect(blocks.some((b) => b.taskId === 't-move' && b.kids.some((k) => k.id === 't-move-a')),
+      'a subtask is drawn INSIDE its parent\'s block').toBe(true);
     expect(morning.charged['t-move-a'], 'and it is charged its share of the family').toBeGreaterThan(0);
 
     /* Something runs into lunch: the meal splits somebody's work into two chunks that sit either

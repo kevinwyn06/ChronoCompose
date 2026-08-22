@@ -75,7 +75,11 @@ test('allotment: oversubscribed children split everything, parent keeps nothing'
   assert.equal(map['p'].allotted, 0);
 });
 
-test('timeline: parent block subdivides into consecutive child sub-blocks', () => {
+// REWRITTEN for owner ruling C1 (2026-08-21). This used to assert one scheduled CHUNK per child,
+// titled `Parent › Child`. The ruling replaced that with a single lipped parent block whose children
+// ride inside it as `kids` — "the parent is exactly one object with one border". The minutes and their
+// order are unchanged and still asserted; what moved is where they live in the shape.
+test('timeline: a family is ONE block, with its children inside it', () => {
   const c = make();
   cleanDay(c, '02:00');
   c.state.tasks = [activeTask(c, { id: 'p', name: 'Parent', planned: 120 }),
@@ -83,15 +87,23 @@ test('timeline: parent block subdivides into consecutive child sub-blocks', () =
     activeTask(c, { id: 'c2', name: 'Beta', planned: 30, parentId: 'p' })];
   c._allot = c.computeAllotted(c.state.tasks);
   const chunks = c.buildDayTimeline().chunks.filter(x => x.type === 'scheduled');
-  const byId = {};
-  chunks.forEach(x => { byId[x.id] = (byId[x.id] || 0) + Math.round((x.end - x.start) / 60000); });
-  assert.equal(byId['c1'], 60);
-  assert.equal(byId['c2'], 30);
-  assert.equal(byId['p'], 30, 'parent remainder block');
-  const alpha = chunks.find(x => x.id === 'c1');
-  assert.equal(alpha.title, 'Parent › Alpha');
+
+  assert.equal(chunks.length, 1, 'one object on the timeline, not three');
+  const block = chunks[0];
+  assert.equal(block.id, 'p');
+  assert.equal(block.title, 'Parent', 'the block is the PARENT — no `Parent › Child` compound title');
+  assert.equal(Math.round((block.end - block.start) / 60000), 120, 'it spans the whole family share');
+
+  const mins = {};
+  block.kids.forEach(k => { mins[k.id] = (mins[k.id] || 0) + Math.round((k.end - k.start) / 60000); });
+  assert.equal(mins['c1'], 60);
+  assert.equal(mins['c2'], 30);
+  assert.equal(mins['p'], 30, 'the parent\'s own remainder is a line like any other');
   // children are not packed independently — total is exactly the family allotment
-  assert.equal(Object.values(byId).reduce((a, b) => a + b, 0), 120);
+  assert.equal(Object.values(mins).reduce((a, b) => a + b, 0), 120);
+  // Depth is carried on the line, which is what the renderer indents and colours by (C1).
+  assert.deepEqual(JSON.parse(JSON.stringify(block.kids)).map(k => k.depth), [1, 1, 0]);
+  assert.equal(block.cut, false, 'one chunk, so nothing was cut through');
 });
 
 test('cascades: delete/archive/complete a parent affects the whole subtree', () => {

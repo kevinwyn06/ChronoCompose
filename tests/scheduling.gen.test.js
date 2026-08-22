@@ -332,13 +332,18 @@ test('drag-pin: a pinned subtask becomes a standalone fixed block, out of the fa
   assert.strictEqual(fx.length, 1, 'one fixed block for the pinned subtask');
   assert.ok(fx[0].dragPin, 'flagged as a drag-pin (draggable + unpin)');
   assert.strictEqual(fx[0].title, 'Parent › Alpha', 'pinned subtask keeps its Parent › Child label');
+  // Under C1 (owner ruling 2026-08-21) the family is ONE block whose children are `kids` lines, so the
+  // pinned child's absence is asserted on both: it is not a block of its own, and not a line either.
+  const famBlocks = chunks.filter(x => x.type === 'scheduled' && x.id === 'p');
+  const kidLines = famBlocks.reduce((a, b) => a.concat(b.kids || []), []);
   assert.strictEqual(chunks.filter(x => x.type === 'scheduled' && x.id === 'c1').length, 0,
     'pinned subtask is not also packed inside the family');
+  assert.strictEqual(kidLines.filter(k => k.id === 'c1').length, 0,
+    'and it is not drawn as a line inside the parent either');
 
   // sibling c2 and the parent remainder still pack, and never overlap the pinned child
-  assert.ok(schedMin(chunks, 'c2') > 0, 'sibling still scheduled inside the family');
-  const fam = chunks.filter(x => x.type === 'scheduled' && (x.id === 'c2' || x.id === 'p'));
-  for (const s of fam) assert.ok(!overlaps(s, fx[0]), 'family blocks never overlap the pinned child');
+  assert.ok(kidLines.some(k => k.id === 'c2'), 'sibling still scheduled inside the family');
+  for (const s of famBlocks) assert.ok(!overlaps(s, fx[0]), 'family blocks never overlap the pinned child');
 });
 
 // 16. snapPinStart magnet: a proposed start (or end) within PIN_MAGNET of a neighbour edge snaps to abut it;
