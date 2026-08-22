@@ -34,6 +34,40 @@ Unitless numbers and non-duration units remain ordinary text. The snooze parser 
 form, but any snooze resolving to today is floored forward to tomorrow so a sub-day duration has an
 observable effect.
 
+## `/` is the section identifier (owner rulings 2026-08-21 / 2026-08-22)
+
+`sectionId` is a **one-per-task, exclusive, ordered container** in `pp-sections` — deliberately not a
+`@tag` (see `tasksBySection`). So `/` is exclusive assignment: a second `/` in one title is not a second
+section, it is a loser left in the text.
+
+**Tokenising.** `/` opens a section token only when it is preceded by whitespace or start-of-string
+**and** followed by a letter. That one rule kills `3/4`, `docs/README`, `and/or` and every URL at once,
+with no allow-list to maintain and nothing to keep in step with the date grammar.
+
+**Matching is greedy but SHORTEST-first.** With `Deep work` and `Deep work planning` both defined,
+longest-first lets the token reach a word further and start competing with the date parser;
+shortest-first stops at the first complete section name, so `/deep work friday` files under *Deep work*
+and still hands `friday` to chrono. The pass runs **before** chrono for exactly this reason.
+
+The accepted cost is that typing the longer name in full *still* resolves to the shorter one, with the
+extra words left in the title. `sectionCompletions` / `completeSectionToken` are therefore part of the
+feature and not a nicety: **Tab** (and **↓**) cycle the token through every name that extends it,
+shortest first, wrapping at the end. Tab rewrites only the token span, and it also **pins** the chosen
+id (`matchSectionToken`'s `preferId`, reaching the parser as `opts.sectionPick`) — rewriting the text
+alone would change nothing, since shortest-first would re-resolve it to the shorter name.
+
+**An unmatched name is never auto-created.** Section *order* drives timeline block hue (`sectionHue`),
+so a typo would repaint real work. The parser returns `sectionOffer` instead and quick-add renders a
+create affordance; creating is one deliberate click, after which the same unchanged text files the task.
+
+**Stripping** follows the same principle both ways: a match is consumed, an offer is not. And the section
+token is the **one** token a *title edit* consumes (`stripSectionToken`, reading the parser's own span) —
+the Task 16 argument for keeping recognised words rests on the highlight being the proof the word was
+taken, and that proof does not survive the commit here, because the section chip is not on the row.
+
+**On a subtask it is a no-op**, consumed quietly: only roots carry `sectionId` and a subtree inherits its
+root's, so stamping the field would persist something nothing ever reads.
+
 ## The title bar (owner 2026-08-20, Task 16)
 
 Editing a task's title runs the same parser, through the same `shapeParsedTask` binding quick-add uses,

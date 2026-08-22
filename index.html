@@ -1948,7 +1948,17 @@ class Component extends DCLogic {
     const shaped=parsed?this.shapeParsedTask(parsed,choice||'anchor'):null;
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       if(!shaped){ t.name='Untitled'; return; }
-      t.name=raw;
+      /* PP-EXT (owner ruling 2026-08-21): the section token is the ONE token a title edit consumes.
+         Task 16's argument for keeping recognised words — deleting what the user just typed reads as
+         the app losing their text — rests on the HIGHLIGHT being the proof the word was taken. That
+         proof does not survive a commit: the section chip is not on the row, so a `/Work` left sitting
+         in the title would read as un-acted-on when it had in fact filed the task. Consume it.
+         Only the span the parser itself claimed is removed, so every other word survives verbatim. */
+      t.name=this.stripSectionToken(raw, parsed);
+      /* Only a ROOT carries `sectionId` — a subtree inherits its root's (see `setTaskSectionMulti`).
+         On a subtask the token is therefore a no-op, and it is consumed above rather than left as
+         litter: stamping the field here would persist something nothing ever reads. */
+      if(parsed.sectionId!=null && t.parentId==null) t.sectionId=parsed.sectionId;
       const hasAnchor=parsed.date!=null || parsed.start!=null || parsed.end!=null || parsed.recur || parsed.mile;
       if(hasAnchor){ t.start=shaped.start; t.end=shaped.end;
         t.startClock=shaped.startClock; t.endClock=shaped.endClock; t.recur=shaped.recur; }
@@ -6901,7 +6911,95 @@ class Component extends DCLogic {
     if(at<text.length) out.push({text:text.slice(at),highlight:false,kind:null});
     return out;
   }
-  parseDateText(text, baseMs){
+  /* ==== PP-EXT (owner ruling 2026-08-21): `/` is the SECTION identifier ====
+     `sectionId` is a one-per-task, EXCLUSIVE, ordered container in `pp-sections` — deliberately not a
+     `@tag` (see `tasksBySection`) — so `/` is exclusive assignment and a second `/` in one title is not
+     a second section.
+
+     TOKENISING, and the reason it needs no allow-list: `/` opens a section token only when it is
+     preceded by whitespace or start-of-string AND followed by a letter. That single rule kills `3/4`,
+     `docs/README`, `and/or` and every URL at once.
+
+     MATCHING (owner ruling 2026-08-22): multi-word names match greedily but SHORTEST-first. With both
+     `Deep work` and `Deep work planning` defined, longest-first would let `/deep work friday` reach one
+     token further and start competing with the date parser; shortest-first stops at the first complete
+     name and `sectionCompletions` keeps the longer one one Tab away.
+
+     An unmatched name is NEVER auto-created: section ORDER drives timeline block hue (`sectionHue`), so
+     a typo would repaint real work. It is returned as an `offer` instead, and — unlike a match — it is
+     not consumed, because stripping a word the app did not act on would just lose the user's text.
+
+     PURE. `text` is matched case-insensitively; offsets are over `text` exactly as given.
+     `preferId` is the ONE escape hatch from shortest-first, and it is not a heuristic: it carries a
+     section the user chose by hand from `sectionCompletions`. It applies only where that section
+     genuinely matches the typed text, so it can never file a task somewhere the words do not say.
+     Without it Tab could rewrite the text and change nothing — `/Deep work planning` still resolves to
+     `Deep work` under shortest-first, which is exactly the outcome Tab exists to escape.
+
+     Returns {index, len, id, name, offer} | null. */
+  matchSectionToken(text, sections, preferId){
+    const src=String(text==null?'':text);
+    const low=src.toLowerCase();
+    const defs=(sections||[]).map(x=>({id:x&&x.id, name:String((x&&x.name)||'')}))
+      .filter(x=>x.id && x.name.trim())
+      /* Shortest FIRST is the ruling; ties break on name so two same-length sections resolve the same
+         way on every device, the same stability rule `sectionsFromMap` applies to order. */
+      .sort((a,b)=> a.name.length-b.name.length || (a.name<b.name?-1:a.name>b.name?1:0));
+    if(preferId!=null){ const i=defs.findIndex(d=>d.id===preferId); if(i>0) defs.unshift(defs.splice(i,1)[0]); }
+    let firstToken=null;
+    for(let i=0;i<low.length;i++){
+      if(low[i]!=='/') continue;
+      if(i>0 && !/\s/.test(low[i-1])) continue;      // `3/4`, `docs/readme`, `and/or`, `https://`
+      if(!/[a-z]/.test(low[i+1]||'')) continue;      // a bare `/`, and the second slash of `//`
+      const tail=low.slice(i+1);
+      if(firstToken==null) firstToken={index:i, word:(tail.split(/\s+/)[0]||'')};
+      for(const d of defs){
+        const nm=d.name.toLowerCase().replace(/\s+/g,' ').trim();
+        /* A name matches only on a WORD boundary: `/work` must not match a section called `Workshop`. */
+        if(tail.slice(0,nm.length)!==nm) continue;
+        const after=tail.charAt(nm.length);
+        if(after && !/\s/.test(after)) continue;
+        return {index:i, len:1+nm.length, id:d.id, name:d.name, offer:null};
+      }
+    }
+    return firstToken ? {index:firstToken.index, len:1+firstToken.word.length, id:null, name:null, offer:firstToken.word} : null;
+  }
+  /* PURE: the Tab/↓ autocomplete behind the shortest-first ruling. Every section whose name EXTENDS what
+     the token already resolves to (or, when nothing matched, what was typed), shortest first — so index
+     0 is what is already applied and Tab moves forward from there. Returns null when there is nothing to
+     offer, which is also what a line with no section token returns. */
+  sectionCompletions(text, sections){
+    const defs=sections||this.state.sections||[];
+    const m=this.matchSectionToken(text, defs);
+    if(!m) return null;
+    const typed=(m.id!=null ? m.name : m.offer).toLowerCase().replace(/\s+/g,' ').trim();
+    const names=defs.map(x=>String((x&&x.name)||'')).filter(Boolean)
+      .filter(n=>n.toLowerCase().replace(/\s+/g,' ').trim().indexOf(typed)===0)
+      .sort((a,b)=> a.length-b.length || (a<b?-1:a>b?1:0));
+    if(!names.length) return null;
+    const byName={}; defs.forEach(x=>{ if(x&&x.name && byName[x.name]==null) byName[x.name]=x.id; });
+    return {token:String(text).slice(m.index, m.index+m.len), index:m.index, len:m.len,
+      names, ids:names.map(n=>byName[n])};
+  }
+  /* PURE: rewrite ONLY the token span, so completing a section cannot disturb the date or the words
+     around it. `n` cycles and wraps rather than dead-ending at the longest name. */
+  completeSectionToken(text, n, sections){
+    const r=this.sectionCompletions(text, sections);
+    if(!r) return String(text==null?'':text);
+    const name=r.names[((n||0)%r.names.length+r.names.length)%r.names.length];
+    const src=String(text);
+    return src.slice(0,r.index)+'/'+name+src.slice(r.index+r.len);
+  }
+  /* PURE: remove the section token from a raw title, for the surfaces that keep the rest of the words.
+     Reads the parser's own span rather than re-matching, so the strip can never disagree with the file. */
+  stripSectionToken(raw, parsed){
+    const src=String(raw==null?'':raw);
+    const span=((parsed&&parsed.matches)||[]).find(m=>m.kind==='section');
+    if(!span) return src;
+    return (src.slice(0,span.start)+src.slice(span.end)).replace(/\s+/g,' ').trim();
+  }
+  /* `opts.sectionPick` is a hand-chosen section id from the Tab completer; see `matchSectionToken`. */
+  parseDateText(text, baseMs, opts){
     const now = baseMs!=null ? new Date(baseMs) : new Date();
     let s = ' '+text.toLowerCase()+' ';
     const rawMatches=[];
@@ -6915,7 +7013,10 @@ class Component extends DCLogic {
     };
     /* PP-EXT: `end`/`dur` carry a parsed clock range or "for <dur>"; `clock` records whether an explicit
        time was written (a bare date defaults to 9am and must NOT be treated as a real clock commitment). */
-    const result = {date:null, end:null, dur:null, clock:false, recur:null, priority:null, labels:[], until:null, rest:text};
+    const result = {date:null, end:null, dur:null, clock:false, recur:null, priority:null, labels:[], until:null, rest:text,
+      /* PP-EXT (owner ruling 2026-08-21): the section `/` files into, and — when the name matched nothing
+         — the name it would have to CREATE, which the parser deliberately refuses to do itself. */
+      sectionId:null, sectionOffer:null};
     /* PP-EXT: the MONTHS()/WD() name tables the old hand-rolled date branches indexed are no longer
        read here — chrono owns month/weekday recognition now. Both accessors survive for other callers. */
     const eat=(re)=>claim(s.match(re),null);
@@ -6928,6 +7029,18 @@ class Component extends DCLogic {
     let lm; const lre=/@([a-z0-9_-]+)/g; let lx; const labelMatches=[];
     while((lx=lre.exec(s))){ result.labels.push(lx[1]); labelMatches.push(lx); }
     for(const m of labelMatches) mask(m.index,m.index+m[0].length);
+
+    /* PP-EXT (owner ruling 2026-08-21): the section token. Runs BEFORE chrono deliberately — `/deep work
+       friday` must hand `friday` to the date parser with `deep work` already claimed, or the two compete
+       for the same words. `s` is lowercased with one leading space, so a span here is offset by exactly
+       the one the `mark`/`mask` pair already accounts for.
+       Only a MATCH is masked. An unmatched name stays in the title: the app did not act on it, so eating
+       it would just lose the user's words, and creating the section instead is forbidden (order drives
+       block hue, so a typo would repaint real work). */
+    const secTok=this.matchSectionToken(s, this.state.sections, opts&&opts.sectionPick);
+    if(secTok && secTok.id!=null){ result.sectionId=secTok.id;
+      mark('section', secTok.index, secTok.index+secTok.len); mask(secTok.index, secTok.index+secTok.len); }
+    else if(secTok) result.sectionOffer=secTok.offer;
 
     /* ---- clock range / duration ----
        PP-EXT: must run BEFORE the repeat-until clause and the relative-offset pass — "meeting from 5
@@ -7198,7 +7311,11 @@ class Component extends DCLogic {
     const tup=this.pickCandidate(p,choice);
     const out={name,type:p.mile?'Milestone':'Proportional',start:p.start,end:p.end,
       startClock:p.startClock,endClock:p.endClock,planned:p.dur==null?null:p.dur,
-      priority:p.priority||4,labels:(p.labels||[]).slice(),recur};
+      priority:p.priority||4,labels:(p.labels||[]).slice(),recur,
+      /* PP-EXT (owner ruling 2026-08-21): one field, never a list — `/` is exclusive assignment. Null
+         means "the text named no section", which callers must read as "leave it alone", NOT as
+         "move this task to No section". */
+      sectionId:(p.sectionId!=null?p.sectionId:null), sectionOffer:(p.sectionOffer||null)};
     if(tup){ out.start=tup.start; out.end=tup.end; out.startClock=tup.startClock; out.endClock=tup.endClock;
       /* PP-EXT (owner 2026-08-20, Task 16): the chooser shapes DATES. A duration written in the text
          ("gym friday for 45m") is not ambiguous and neither branch of On/By may overwrite it — the
@@ -7484,7 +7601,12 @@ class Component extends DCLogic {
   renderQuickAddPopup(){
     if(!this.state.quickOpen) return null;
     const h=React.createElement;
-    const parsed = this.state.quickText.trim() ? this.parseDateText(this.state.quickText) : null;
+    /* PP-EXT (owner ruling 2026-08-22): `_secPick` is the section the user reached with Tab. It is the
+       one input the preview parse takes beyond the text, and it is cleared by any edit — see the
+       onChange below — so the chip, the strip and the commit can never disagree about which section
+       the line names. */
+    const qaOpts={sectionPick:this._secPick||null};
+    const parsed = this.state.quickText.trim() ? this.parseDateText(this.state.quickText, null, qaOpts) : null;
     const segments=this.quickHighlightSegments(this.state.quickText,parsed?parsed.matches:[]);
     const chip=(txt,col)=>h('span',{'data-qa':'quick-hint',style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',background:col,borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap'}},txt);
     const hints=[];
@@ -7499,6 +7621,25 @@ class Component extends DCLogic {
       if(parsed.recur) hints.push(chip('↻ '+parsed.recur.label,'var(--success-strong)'));
       if(parsed.priority) hints.push(chip('P'+parsed.priority, this.PCOL[parsed.priority]));
       (parsed.labels||[]).forEach(l=>hints.push(chip('@'+l,'#5a6270')));
+      /* PP-EXT (owner ruling 2026-08-21): the `/` section token. The chip wears the SECTION's own hue,
+         which is the same colour its blocks take on the timeline — so the chip is the filing, not a
+         label about the filing. */
+      if(parsed.sectionId!=null){
+        const sec=(this.state.sections||[]).find(x=>x.id===parsed.sectionId);
+        if(sec) hints.push(h('span',{key:'sec','data-qa':'quick-hint','data-qa-section':sec.id,
+          style:{fontSize:'10.5px',fontWeight:600,color:'var(--on-accent)',background:this.sectionHue(sec.id),
+            borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap'}},'/'+sec.name));
+      }
+      /* An unmatched name is OFFERED, never created by the parse: section order drives block hue, so a
+         typo would repaint real work. Creating it is one deliberate click, and the re-parse then files
+         the task on the next keystroke-free render because the name now matches. */
+      else if(parsed.sectionOffer){
+        hints.push(h('button',{key:'secoffer','data-qa-section-offer':parsed.sectionOffer,
+          onClick:()=>{ this.addSection(parsed.sectionOffer); this.quickEl&&this.quickEl.focus(); },
+          style:{fontSize:'10.5px',fontWeight:600,color:'var(--text-mut)',background:'var(--field-bg)',
+            border:'1px dashed var(--field-border)',borderRadius:'5px',padding:'2px 7px',whiteSpace:'nowrap',cursor:'pointer'}},
+          '+ New section “'+parsed.sectionOffer+'”'));
+      }
     }
     /* PP-EXT Track B Group 3: the ambiguity chooser. When the parse is genuinely ambiguous (a bare
        day/recur/time with no cue — `gym friday` could mean do-it-Fri OR due-Fri) show a segmented
@@ -7533,11 +7674,31 @@ class Component extends DCLogic {
       /* PP-EXT (Group 3): reset the chooser to the safe default on every text change — simplest
          correct version of the re-parse rule; a leftover 'due' from a previous phrase can never
          silently apply to a different parse. */
-      onChange:e=>this.setState({quickText:e.target.value, quickChoice:'anchor'}),
+      /* PP-EXT (owner ruling 2026-08-22): `_secCycle` is the Tab cursor into `sectionCompletions`, and
+         `_secBase` the text it completes FROM. Both are cleared by any edit, so a completion is always
+         computed against what the user typed rather than against the previous completion — cycling off
+         the already-completed text would keep appending words to the token. */
+      onChange:e=>{ this._secBase=null; this._secCycle=0; this._secPick=null; this.setState({quickText:e.target.value, quickChoice:'anchor'}); },
       onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.runQuickAdd(e.shiftKey?'top':'bottom'); return; }
         /* PP-EXT (Group 3): ←/→ flip the ambiguity chooser (owner-approved D4). Only intercepts the
            caret while an ambiguous parse is showing the toggle; otherwise arrows behave normally. */
-        if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); } },
+        if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); return; }
+        /* PP-EXT (owner ruling 2026-08-22): shortest-first only works if the longer names stay one
+           keystroke away — that is the whole other half of the ruling. Tab and ↓ cycle the token
+           through them; the cycle wraps rather than dead-ending at the longest. Tab is intercepted ONLY
+           while a section token is on the line, so it keeps its normal focus behaviour otherwise. */
+        if(e.key==='Tab'||e.key==='ArrowDown'){
+          const base=this._secBase!=null?this._secBase:this.state.quickText;
+          if(!this.sectionCompletions(base)) return;
+          e.preventDefault();
+          const r=this.sectionCompletions(base);
+          this._secBase=base; this._secCycle=(this._secCycle||0)+1;
+          /* Pin the section as well as the text. Rewriting the text alone would change nothing:
+             `/Deep work planning` still resolves to `Deep work` under shortest-first, which is the very
+             thing Tab exists to escape. */
+          this._secPick=r.ids[((this._secCycle%r.names.length)+r.names.length)%r.names.length]||null;
+          this.setState({quickText:this.completeSectionToken(base, this._secCycle), quickChoice:'anchor'});
+        } },
       style:Object.assign({},inputMetrics,{position:'relative',zIndex:1,width:'100%',
         background:'transparent',border:'none',outline:'none',color:'var(--text)'})});
     const inputWrap=h('div',{'data-qa':'quick-input-wrap',
@@ -8069,7 +8230,8 @@ class Component extends DCLogic {
 
   runQuickAdd(where){
     const raw=this.state.quickText.trim(); if(!raw) return;
-    const p=this.parseDateText(raw);
+    /* Same `sectionPick` the preview parsed with, so what the chip showed is what commits. */
+    const p=this.parseDateText(raw, null, {sectionPick:this._secPick||null});
     /* PP-EXT V1.1B: the parser owns the temporal SHAPE. It emits null start/end for floating (R0) and
        deadline (R5) parses — we no longer stamp Date.now(), so an undated quick-add stays a ghost (V1.2)
        instead of being pinned onto "now". pins/type come straight from the shaped result. */
@@ -8084,6 +8246,7 @@ class Component extends DCLogic {
       if(where==='top') tasks.unshift(t); else tasks.push(t);
       this._qaId=id;
     });
+    this._secBase=null; this._secCycle=0; this._secPick=null;
     this.setState({quickText:'', quickChoice:'anchor', selectedIds:this._qaId?[this._qaId]:[]}); /* PP-EXT: reset chooser to the safe default for the next entry (Group 3) */
   }
 

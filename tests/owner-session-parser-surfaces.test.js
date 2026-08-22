@@ -37,6 +37,10 @@ test('shapeParsedTask is a pure single binding for quick-add task fields', () =>
     startClock: null, endClock: false, planned: 30, priority: 2,
     labels: ['@family'],
     recur: { kind: 'week', n: 1, until: 99, shifts: [], overrides: {} },
+    // Owner ruling 2026-08-21: the `/` section token rides the same single binding. Both fields are
+    // always present and null when the text named no section — "leave the section alone", which is
+    // NOT the same as "move this task to No section".
+    sectionId: null, sectionOffer: null,
   });
   assert.equal(JSON.stringify(parsed), before, 'shaping does not mutate the parser result');
 });
