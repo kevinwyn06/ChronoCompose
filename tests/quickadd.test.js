@@ -262,10 +262,16 @@ test('parseDateText: a weekday lands at midnight and drops the preposition', () 
   assert.strictEqual(r.endClock, false);
 });
 
-test('parseDateText: relative offset still suppresses the 9am default', () => {
-  const c = make(); // "in 3 days" means 3*24h from now (10:00), not 09:00
+// SUPERSEDED by the owner ruling of 2026-08-21 (midnight-untimed). This used to assert that a
+// relative offset kept chrono's implied time-of-day — 3*24h from now, i.e. 10:00. But "in 3 days"
+// answers WHICH DAY, not what time; the hour was an artifact of the reference instant, and carrying
+// it made the task a keep-clear Point reserving no minutes. The floor now applies to every phrase
+// that carries no clock. See tests/owner-2026-08-21-midnight-floor.test.js.
+test('parseDateText: a relative offset is an untimed day, floored to midnight', () => {
+  const c = make();
   const r = c.parseDateText('task in 3 days', BASE);
-  assert.strictEqual(r.date, at(18, 10, 0));
+  assert.strictEqual(r.date, at(18, 0, 0));
+  assert.strictEqual(r.clock, false);
   assert.strictEqual(r.rest, 'task');
 });
 

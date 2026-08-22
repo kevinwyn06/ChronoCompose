@@ -6993,7 +6993,6 @@ class Component extends DCLogic {
        position an `m` unit means months (spec §3 P2·F), so claim it before chrono ever sees it. Only
        fires after `in`; a duration elsewhere ("homework ~2m") has no `in` and stays minutes, already
        claimed by parseDurPhrase above. `minutes`/`mins` are excluded by the word boundary. */
-    let relOffset=false;
     /* PP-EXT: snapshot the masked, source-aligned residue as the date matchers see it. The cue test
        below measures what sits immediately before the matched date after unrelated passes are masked. */
     const sBeforeDate = s;
@@ -7007,9 +7006,10 @@ class Component extends DCLogic {
     };
     const moM = s.match(/\bin\s+(\d+)\s*(?:months?|mo|m)\b/i);
     if(moM){ const d=new Date(now); d.setMonth(d.getMonth()+parseInt(moM[1]));
-      /* keep the time-of-day, like every other relative offset ("in 3 days" lands at now's clock) —
-         `relOffset` makes that hold for all spellings, not just the ones the 9am guard's regex sees. */
-      date=d; relOffset=true; dateSpanText=moM[0]; dateSpanIndex=moM.index; claimDate(moM,'date'); }
+      /* The time-of-day chrono leaves here is an artifact of the reference instant, never something
+         the user wrote — the midnight floor below discards it, as it does for every other untimed day
+         (owner ruling 2026-08-21, midnight-untimed). */
+      date=d; dateSpanText=moM[0]; dateSpanIndex=moM.index; claimDate(moM,'date'); }
     if(!date && eng){
       /* A bare "N to M" / "5-6" with no colon and no meridiem is a COUNT, not a clock ("buy 5 to 6
          apples"). chrono happily reads it as 05:00–06:00, so drop those spans — the pre-pass
@@ -7022,9 +7022,8 @@ class Component extends DCLogic {
       const r0 = rs.find(r=>['day','weekday','month','year'].some(u=>r.start.isCertain(u))) || rs[0];
       if(r0){
         /* `clock` is a real user-written time only when chrono is CERTAIN about the hour; an implied
-           hour (a bare day) must keep falling through to the 9am default below. NOTE: chrono's date is
-           NOT floored to midnight — for a relative offset ("in 3 days") its implied time-of-day IS the
-           answer, and the 9am-default guard below deliberately skips those. */
+           hour (a bare day) must keep falling through to the midnight floor below. A relative offset
+           ("in 3 days") is no exception: it names a DAY, so its implied time-of-day is discarded too. */
         if(!range && r0.start.isCertain('hour')){ clock={ h:r0.start.get('hour'), m:r0.start.get('minute')||0 }; }
         /* PP-EXT: a time-of-day WORD ("tonight", "this evening", "tomorrow morning") is a soft window,
            not a clock commitment — `clock` stays false, but chrono's implied hour is a far better
@@ -7071,8 +7070,13 @@ class Component extends DCLogic {
 
     /* PP-EXT: a bare day is MIDNIGHT, not a 9am placeholder. The placeholder existed only so an
        untimed task had somewhere to sit on the timeline; shapes are now derived from whether a real
-       clock was written (result.clock), so a fake hour would read as a real appointment. */
-    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else if(!relOffset && !/\b(?:days?|weeks?|months?|hours?)\b/.test(text)) date.setHours(0,0,0,0); result.date=date.getTime(); }
+       clock was written (result.clock), so a fake hour would read as a real appointment.
+       The floor applies to EVERY phrase that carries no clock (owner ruling 2026-08-21). It used to be
+       skipped for a relative offset and — via a regex tested against the whole raw title — for any title
+       containing `day`/`week`/`month`/`hour`, so `plan my day today` anchored at the current instant and
+       became a keep-clear Point reserving no minutes while `plan today` scheduled normally. That is the
+       same whole-string mis-binding the `dueCue` guard above already fixed once. */
+    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else date.setHours(0,0,0,0); result.date=date.getTime(); }
     /* PP-EXT: resolve the end instant once the start is known. A range that ends at/before its start
        crosses midnight ("23:00-01:00") and rolls to the next day. */
     if(result.date!=null){
