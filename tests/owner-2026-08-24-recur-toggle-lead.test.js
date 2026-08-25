@@ -144,6 +144,50 @@ test('lead window: a completed birthday leaves the surface; the daily standup st
   });
 });
 
+// THE OWNER REPORT, 2026-08-25: "I still don't see a resolution for yearly recurring tasks not hiding
+// itself." The window was only ever consulted on the ONE day the occurrence falls on: `originOf` reached
+// it inside `if (occ && occ.idx != null && occPct >= 100)`, and `occInDay` is null on every other day. So
+// a birthday ticked off on the day did leave the surface that day — and reappeared the next morning, and
+// every morning after, for eleven months, because the gate was no longer reachable. These two tests are
+// the day AFTER, which is the case the original pair never asked about.
+test('lead window: a settled yearly repeat stays gone the DAY AFTER, not just on the day', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    // Anchored three days ago: the occurrence is settled and behind us, the next one is ~362 days out.
+    const t = repeating(c, 'bday', 'year', today - 3 * DAY);
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+
+    const past = c.expandTask(t, today + 400 * DAY).find(o => o.start < today);
+    assert.notEqual(past, undefined, 'the fixture has an occurrence before today');
+    c.commit(tasks => {
+      const x = tasks.find(y => y.id === 'bday');
+      x.recur.overrides = { [past.idx]: { pct: 100, completion: Date.now() } };
+    });
+
+    assert.equal(c.occInDay(get(c, 'bday'), today), null,
+      'the fixture really is a day with NO occurrence — which is the case that used to slip through');
+    assert.equal(c.originOf(get(c, 'bday')), null,
+      'next year is still not today’s business on the day after; the birthday stays off the surface');
+  });
+});
+
+test('lead window: a daily repeat on a day it has no occurrence is NOT hidden by the same gate', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    // A weekday rule anchored so that today may or may not carry an occurrence; either way its next one
+    // is days, not months, away — so the gate must never remove it. This is the guard that stops the fix
+    // above from becoming "any repeat without an occurrence today disappears".
+    repeating(c, 'standup', 'weekday', today - 3 * DAY);
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+    assert.notEqual(c.originOf(get(c, 'standup')), null,
+      'a repeat whose next occurrence is inside the window stays, occurrence today or not');
+  });
+});
+
 test('lead window: the series is not deleted — the birthday comes back inside the window', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
@@ -169,6 +213,86 @@ test('lead window: the series is not deleted — the birthday comes back inside 
 
 // THE NEGATIVE THIS FILE EXISTS FOR. The window reduces noise; it must never be the reason a missed
 // deadline goes quiet. Overdue outranks it, exactly as it outranks every other bucket.
+// THE SECOND SURFACE. `originOf` decides which triage BUCKET a task sits in; `isActiveOn` decides
+// whether it takes a slice of TODAY. Gating only the first left the two disagreeing about the same task:
+// the list said "not today's business" while the timeline kept drawing a block and claiming minutes,
+// every day, for eleven months. `included===true` is what made it stick — a real press, and V2.11 retired
+// the "Off" that used to clear it.
+test('lead window: a pressed yearly repeat stops claiming time on today, not just its bucket', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    const t = repeating(c, 'bday', 'year', today - 3 * DAY,
+      { task: { included: true, includedExplicit: true } });
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+    const past = c.expandTask(t, today + 400 * DAY).find(o => o.start < today);
+    c.commit(tasks => {
+      const x = tasks.find(y => y.id === 'bday');
+      x.recur.overrides = { [past.idx]: { pct: 100, completion: Date.now() } };
+    });
+
+    assert.equal(c.isActiveToday(get(c, 'bday')), false,
+      'a press says WHEN to do the work, not that work eleven months out is due now');
+    assert.equal(c.originOf(get(c, 'bday')), null, 'and the two surfaces agree');
+  });
+});
+
+test('lead window: a pressed DAILY repeat is untouched by the same gate', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    repeating(c, 'standup', 'day', today - 3 * DAY,
+      { task: { included: true, includedExplicit: true } });
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+    assert.equal(c.isActiveToday(get(c, 'standup')), true,
+      'tomorrow IS today’s business, so nothing about a daily repeat changes');
+  });
+});
+
+// The carve-out this gate cannot ship without. `nextPendingOcc` looks FORWARD from today, so a renewal
+// missed last week is not in it; gating on "the next one is eleven months out" would take a genuinely
+// owed deadline off today's list — the silent drop the standing tenet forbids, committed by the rule
+// meant to reduce noise.
+test('lead window: a MISSED yearly occurrence still claims today, however far the next one is', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    // Anchored three days ago and never completed: the occurrence has ended, unfinished.
+    repeating(c, 'renewal', 'year', today - 3 * DAY,
+      { task: { included: true, includedExplicit: true } });
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+
+    assert.equal(c.hasMissedOcc(get(c, 'renewal')), true, 'the fixture really is a missed occurrence');
+    assert.equal(c.recurBeyondLeadToday(get(c, 'renewal')), false, 'owed work is never gated');
+    assert.equal(c.isActiveToday(get(c, 'renewal')), true, 'and it keeps its place on today');
+    assert.equal(c.originOf(get(c, 'renewal')), 'overdue', 'overdue outranks the window, as it always did');
+  });
+});
+
+// Fail-safe direction. `recurPeriodDays` and `occStart` both fall back for an unrecognised `kind`, and
+// their fallbacks disagree — so an unreadable rule must not be judged at all. Treating "I could not tell"
+// as "hide it" would make legacy data silently vanish from today.
+test('lead window: an unreadable recurrence rule is never gated', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    // The RRULE-ish `{freq}` shape rather than the local `{kind}` one. `rruleToRecur` converts between
+    // them, but older data and fixtures still carry this.
+    const t = c.normalizeTask({ id: 'legacy', name: 'legacy', start: today - 3 * DAY,
+      end: today - 3 * DAY + DAY - 1, included: true,
+      recur: { freq: 'DAILY', interval: 1 } });
+    c.state.tasks = [t];
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+    assert.equal(c.recurKindKnown(t.recur), false, 'the fixture really is an unreadable rule');
+    assert.equal(c.recurBeyondLeadToday(t), false, 'so the gate declines to act rather than guessing');
+    assert.equal(c.isActiveToday(t), true, 'and the task stays visible');
+  });
+});
+
 test('lead window: an OVERDUE occurrence is never gated, however far the next one is', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();

@@ -375,8 +375,37 @@ cannot change part-way through a day and flicker a task off the list at an arbit
 Daily, weekly and monthly repeats are unaffected: their next occurrence is always inside the window. A
 yearly repeat leaves today's surfaces once its occurrence is settled and returns 30 days before the next
 one. **Nothing is deleted** — the series, its overrides and its Gantt row are untouched; the occurrence
-is simply not yet today's business. The gate sits in `originOf`, in the one branch where a done
-occurrence with a live series would otherwise move the task to *Upcoming*.
+is simply not yet today's business.
+
+**The gate sits on BOTH surfaces, and it asks about `pending` rather than about today (fixed
+2026-08-25).** As first shipped it lived inside `originOf`'s "today's occurrence is done" branch, and
+`occInDay` is null on every day the series does not fall on — so the gate was unreachable on 364 days
+out of 365, and a ticked-off birthday came back the next morning and stayed for eleven months. It now
+asks whether the **next occurrence with work left in it** (`nextPendingOcc`) is inside the window, which
+is both the fix and the simpler statement of the rule: if that one is beyond the window there is nothing
+to do now, whatever today happens to contain. It cannot hide a live occurrence today — an unfinished one
+IS `pending`, zero days out.
+
+`originOf` decides which triage **bucket** a task sits in; `isActiveOn` decides whether it takes a slice
+of **today**. Gating only the first left the two disagreeing about the same task — the list saying "not
+today's business" while the timeline drew a block and claimed minutes — because `included===true` is
+sticky (a real press, and V2.11 retired the "Off" that cleared it). `recurBeyondLeadToday` is the shared
+predicate; the today-branch of `isActiveOn` consults it **below** the running-timer check, since a timer
+the user actually started outranks every rule here.
+
+Two guards are load-bearing:
+
+- **Missed occurrences are carved out.** `nextPendingOcc` looks forward from today, so a renewal missed
+  last week is not in it, and vetoing on "the next one is eleven months out" would take an owed deadline
+  off today's list — the silent drop the standing tenet forbids, committed by the rule meant to reduce
+  noise. `hasMissedOcc` asks the stored occurrences, not `taskDisp`.
+- **An unreadable rule is never judged.** `recurPeriodDays` and `occStart` both fall back for an
+  unrecognised `kind` and their fallbacks **disagree**, so `recurKindKnown` gates the gate. Treating "I
+  could not tell" as "hide it" would make legacy data silently vanish from today.
+
+`recurBeyondLeadToday` caches per paint (`_leadGate`, dropped wherever `_occById` is), because
+`nextPendingOcc` expands up to `RECUR_MAX` occurrences and the predicate runs inside per-task-per-day
+loops.
 
 **The window also decides supersession, and closing that loop fixed an older bug.** "Last Wednesday's
 standup is superseded by next Wednesday's" is true of a weekly rule and false of a yearly one, so

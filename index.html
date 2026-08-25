@@ -2307,6 +2307,17 @@ class Component extends DCLogic {
      quote</div>` reads back as `call Samre the quote`. Truncation is on a word boundary where one is
      near the limit, because a snippet cut mid-word looks like corrupted data rather than an excerpt. */
   DESC_SNIPPET_MAX(){ return 140; }
+  /* PP-EXT (owner 2026-08-25): the description line a NATIVE tooltip appends. The rich timeline hover
+     card has carried the description since 2026-08-24 (`blockTooltipModel.desc`); the Gantt bar and the
+     sheet row are plain `title` attributes, and the owner asked for the description on the hover tooltip
+     without qualifying which one. Two surfaces answering "what was this again?" differently is the kind
+     of split this repo has paid for, so both get it, through ONE definition rather than two snippets that
+     can drift. A newline is used rather than the ` · ` the rest of the title uses: a title is the one
+     place a line break renders, and the description is a different KIND of fact from the metadata before
+     it. Empty description → empty string, so callers can concatenate unconditionally. */
+  descTitleLine(t){
+    return (t && this.hasDesc(t.description)) ? ('\n' + this.descSnippet(t.description)) : '';
+  }
   descSnippet(html, max){
     max = max||this.DESC_SNIPPET_MAX();
     let s = String(html==null?'':html)
@@ -2629,6 +2640,12 @@ class Component extends DCLogic {
     if(B===this.startOfToday()){
       if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
       if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
+      /* PP-EXT (owner report 2026-08-25): a repeat with nothing due inside the lead window is not today's
+         business, and that outranks a sticky `included===true` — a press is a decision about WHEN to do
+         the work, not a claim that eleven-months-away work is due now. It sits BELOW the running-timer
+         check deliberately: a timer the user actually started outranks every rule here. Missed
+         occurrences are carved out inside the predicate. */
+      if(this.recurBeyondLeadToday(t)) return false;
       /* PP-EXT V5 (F19/F20, block 20): `autoIncludedToday` is the third way in — an opening window or an
          expired snooze. Adding demand here makes the day fuller on purpose; over-subscription is the
          signal the owner uses, so nothing elsewhere is trimmed to compensate. */
@@ -2792,14 +2809,26 @@ class Component extends DCLogic {
     if(t.recur){
       /* Every occurrence done and none left: the series is finished and leaves. */
       if(pending==null) return null;
+      /* Whether a repeat is on the surface at all is the lead window's question (owner ruling
+         2026-08-24). A daily standup's next instance is tomorrow, so it stays; a birthday's is eleven
+         months out, so once this year's is settled it leaves and comes back 30 days before the next one.
+
+         PP-EXT (owner report 2026-08-25): THE GATE ASKS ABOUT `pending`, NOT ABOUT TODAY. It used to sit
+         inside the "today's occurrence is complete" branch below, and `occInDay` is null on every day the
+         series does not fall on — so a ticked-off birthday left the surface on its own day and was BACK
+         the next morning, and every morning for eleven months, because the gate was no longer reachable.
+         That is the owner's "yearly recurring tasks not hiding itself".
+
+         Asking `pending` instead is both the fix and the simpler statement of the rule: `pending` is the
+         next occurrence with work left in it, so if THAT is beyond the window there is nothing to do now,
+         whatever today happens to contain. It cannot hide a live occurrence today — if today's is
+         unfinished then it IS `pending`, zero days out, inside every window. And it cannot silence a
+         missed one: `isOverdueBucket` has already returned 'overdue' above, which outranks this. */
+      if(!this.occWithinLead(t, pending)) return null;
       const occ=this.occInDay(t, this.startOfToday());
-      /* This occurrence is done but the series is not — and whether that MOVES the task to Upcoming or
-         removes it from the surface is the lead window's question (owner ruling 2026-08-24). A daily
-         standup's next instance is tomorrow, so it moves; a birthday's is eleven months out, so once
-         this year's is settled it leaves and comes back 30 days before the next one. `pending` is
-         non-null here by the guard above, so this is the only place the gate needs to sit. */
-      if(occ && occ.idx!=null && this.occPct(t, occ.idx)>=100)
-        return this.occWithinLead(t, pending) ? 'upcoming' : null;
+      /* Today's occurrence is done but the series is not, and the next one is near: move to Upcoming
+         rather than leaving. */
+      if(occ && occ.idx!=null && this.occPct(t, occ.idx)>=100) return 'upcoming';
     } else if((+t.pct||0)>=100) return null;
     /* `onListSince` answers "is it on the list, and since when" in one field — see sweepOnListSince. The
        spec phrases Continued as "onListSince < today AND included"; a non-null key already MEANS on the
@@ -3436,7 +3465,9 @@ class Component extends DCLogic {
      which would also overwrite nothing but would churn every row's sync fingerprint. PURE. */
   blockingFromEvent(ev){ return (ev && ev.transparency==='transparent') ? false : null; }
   /* PP-EXT (10): the detail-panel toggle. Routed through commit() like every other task mutation. */
-  setBlocking(id, v){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.blocking=(v==null?null:!!v); }); }
+  /* PP-EXT (owner 2026-08-25): `setBlocking` is REMOVED with the Busy type control, which was its only
+     caller. `blocking` is now written in exactly one place — `blockingFromEvent`, on first import — and
+     read in exactly one — the drag-wall filter in `dropWallsFor`. See the note in renderDetail. */
   /* PP-EXT (owner 2026-08-16): resolve the tri-state `uncompressable` field. The ONLY reader of the raw
      value — everything else asks this, so "null means derive" can never drift between callers, the same
      rule `isBlockingTask` follows for `blocking`.
@@ -5849,6 +5880,16 @@ class Component extends DCLogic {
      `recurPeriodDays` is PURE and is the single definition of a rule's period; `recurStartIndex` divides
      by it rather than keeping a second copy of the same per-kind table. Fractional periods are correct
      here: a weekday rule steps 7/5 of a day on average. */
+  /* PURE: does this rule name a period we can actually measure? `recurPeriodDays` and `occStart` BOTH
+     fall back to a default for an unrecognised `kind`, and their defaults disagree — the period table
+     assumes a week while `occStart` steps a week per index from a different base. That mismatch is
+     harmless where the fallback only estimates a start index, and NOT harmless where the answer decides
+     whether work is hidden. So the lead-window gate asks this first and declines to act when it is false.
+     `t.recur` is supposed to carry the local `{kind}` shape (`rruleToRecur` converts the RRULE `{freq}`
+     form into it), but older data and fixtures still reach here without one. */
+  recurKindKnown(r){
+    return !!r && ['day','week','weekday','weekdays','month','monthDay','year'].indexOf(r.kind)>=0;
+  }
   recurPeriodDays(r){
     if(!r) return 7;
     switch(r.kind){
@@ -5874,6 +5915,44 @@ class Component extends DCLogic {
     if(!occ || occ.start==null) return false;
     const B=this.startOfDay(now==null?Date.now():now);
     return (occ.start-B) <= this.recurLeadDays(t)*this.DAY;
+  }
+  /* PP-EXT (owner report 2026-08-25): the lead window's SECOND half. Gating `originOf` alone was not
+     enough, and the owner said so plainly — "I still don't see a resolution for yearly recurring tasks
+     not hiding itself." `originOf` decides which triage bucket a task sits in; `isActiveOn` decides
+     whether it takes a slice of TODAY. They are different surfaces, and `included===true` is sticky (it
+     is a real press, and V2.11 retired the "Off" that used to clear it), so a birthday pressed into
+     today once kept drawing a block and claiming minutes every day for eleven months — with the triage
+     list, after the first half of the fix, correctly saying it was not today's business. Two surfaces
+     disagreeing about the same task is worse than either answer alone.
+
+     THE MISSED-OCCURRENCE CARVE-OUT IS NOT OPTIONAL. `nextPendingOcc` looks forward from today, so a
+     renewal missed last week does not appear in it, and vetoing on the strength of "the next one is
+     eleven months out" would take a genuinely owed deadline off today's list — exactly the silent drop
+     the standing tenet forbids, committed by the rule meant to reduce noise. `hasMissedOcc` asks the
+     storage layer rather than `taskDisp`, which reports the occurrence to DISPLAY and skips missed ones.
+
+     Cached per paint: `nextPendingOcc` expands up to RECUR_MAX occurrences and this is called inside
+     per-task-per-day loops. The cache is dropped wherever `_occById` is (a commit re-renders), so
+     ticking an occurrence flips the answer immediately rather than one paint late. */
+  recurBeyondLeadToday(t){
+    if(!t || !this.recurKindKnown(t.recur)) return false;
+    const B=this.startOfToday();
+    if(!this._leadGate || this._leadGate.day!==B) this._leadGate={day:B, map:{}};
+    const hit=this._leadGate.map[t.id];
+    if(hit!==undefined) return hit;
+    let out;
+    if(this.hasMissedOcc(t)) out=false;                 /* owed work is never gated — see above */
+    else {
+      /* The gate fires ONLY on a positive answer: an occurrence we can actually see, that is beyond the
+         window. `p == null` means the expansion gave us nothing to judge — a finished bounded series, or
+         a `recur` shape the expander cannot read (an RRULE-ish `{freq}` object rather than the local
+         `{kind}` one still reaches this code from older data and from fixtures). Treating "I could not
+         tell" as "hide it" makes an unreadable rule silently vanish today's work, which is the wrong
+         direction to fail in and is the same reasoning `isInheritedToday` states for its own null case.
+         A genuinely finished series is already removed by the completion paths and by `originOf`. */
+      const p=this.nextPendingOcc(t); out = p!=null && !this.occWithinLead(t, p); }
+    this._leadGate.map[t.id]=out;
+    return out;
   }
   /* ==== /PP-EXT lead window ==== */
   /* PP-EXT: approximate occurrence index whose start is ~`floor`, so long-past series don't waste the 400-cap
@@ -7821,7 +7900,7 @@ class Component extends DCLogic {
         horizon=Math.max(bmax+75*this.DAY, isFinite(uMax)?uMax:-Infinity);
       }
       this._horizon=horizon;
-      this._occById={}; let gmin=bmin,gmax=bmax;
+      this._occById={}; this._leadGate=null; /* PP-EXT: the lead gate caches an expansion — same lifetime */ let gmin=bmin,gmax=bmax;
       tasks.forEach(t=>{ if(!this.isScheduled(t)){
           /* PP-EXT (V1.2): a dateless (or half-dated) NON-recurring task still gets one draggable GHOST
              occurrence, derived from today — the task's start/end stay null in data. */
@@ -13031,7 +13110,7 @@ class Component extends DCLogic {
       onClick:e=>this.rowClick(e,t.id),
       onDoubleClick:e=>this.rowDblClick(e,t.id),
       onContextMenu:e=>this.rowMenu(e,t.id),
-      title:t.name+(undecided?' · not yet decided':''),
+      title:t.name+(undecided?' · not yet decided':'')+this.descTitleLine(t),
       style:{display:'flex',flexDirection:'column',gap:'4px',padding:'6px 8px',borderRadius:'var(--r-2)',
         background:'var(--card-bg)',cursor:'default',opacity:t.archivedAt?0.5:1,
         /* PP-EXT V2.9 §4.2, still load-bearing after V2.11 retired Off: undecided ("I haven't looked at
@@ -14877,7 +14956,7 @@ class Component extends DCLogic {
          rotated node would have inherited the 45° rotation. The wrapper outlived the outside name label
          it was introduced for (removed 2026-08-12) and is kept: the rotation-isolation reason stands on
          its own, and anything added beside a diamond later needs exactly this shape. */
-      return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,title:t.name+occLbl},hov,{
+      return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,title:t.name+occLbl+this.descTitleLine(t)},hov,{
           style:{position:'absolute',left:(left+this.state.dayW/2-sz/2)+'px',top:top+'px',width:sz+'px',height:sz+'px',
           cursor:'grab',zIndex:5}}),
         h('div',{key:'dia',style:{position:'absolute',inset:0,
@@ -14909,7 +14988,7 @@ class Component extends DCLogic {
         /* PP-EXT (owner 2026-08-13): `optedOutTitle` dropped with the rest of the not-in-today channel;
            `displacedTitle` stays — displacement is an unattributed background rewrite, not a user state
            already reported by a row control. */
-        title:(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details')+displacedTitle,
+        title:(t.name+occLbl+' · '+Math.round((en-st)/this.DAY)+'d · click for details')+displacedTitle+this.descTitleLine(t),
         style:{position:'absolute',inset:0,
           background:base,
           borderRadius:'var(--r-1)'/* PP-EXT B3 round2: 4px maps exactly to --r-1 */,cursor:'grab',overflow:'hidden',
@@ -15514,26 +15593,21 @@ class Component extends DCLogic {
           h('span',{onClick:()=>this.togglePredictManual(t.id),title:t.predictManual?'Revert to auto':'Override manually',
             style:{cursor:'pointer',fontSize:'12px',color:t.predictManual?'var(--danger)':'var(--text-faint2)'}}, t.predictManual?'✎ manual':'∿ auto'));
 
-    /* PP-EXT (10): blocking vs background. Only meaningful for a task that HAS a fixed clock span (that is
-       what becomes a busy interval), so the row is hidden otherwise rather than shown inert. Three states
-       because the field is tri-state: Auto is what an untouched or opaque-imported task holds, and clicking
-       the active state returns to it, so a mis-toggle is one click from undone. HIT_MIN_PX per the owner's
-       hit-target tenet — the glyph is not the hit box. NOTHING reads this to schedule yet (block 11). */
-    const blockingCtl = (!this.isMilestone(t) && this.hasStartTime(t)) ? (()=>{
-      const cur = t.blocking;
-      const opt=(val,label,title)=>{ const on = (cur===val);
-        return h('div',{key:String(val),onClick:()=>this.setBlocking(t.id, on&&val!=null ? null : val),title,
-          role:'button',tabIndex:0,'aria-pressed':on,
-          onKeyDown:e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); this.setBlocking(t.id, on&&val!=null?null:val); } },
-          style:{flex:1,minHeight:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
-            cursor:'pointer',fontSize:'12px',borderRadius:'var(--r-2)',
-            color:on?'var(--on-accent)':'var(--text-mut2)',background:on?(this._accent||'#3f7bd6'):'var(--field-bg)',
-            border:'1px solid '+(on?'transparent':'var(--field-border)')}}, label); };
-      return h('div',{style:{display:'flex',gap:'5px'}},
-        opt(null,'Auto','Inherit the default (blocking), or the calendar event’s busy/free setting on import.'),
-        opt(true,'Blocking','Nothing else may be scheduled through this span.'),
-        opt(false,'Background','A container you work inside — other tasks may be scheduled within it.')); })() : null;
+    /* PP-EXT (owner 2026-08-25): THE "BUSY TYPE" CONTROL IS GONE. The owner asked for it back on
+       2026-08-19 ("what happened to the old blocking vs nonblocking toggle?"), then ruled on 2026-08-21 to
+       leave it exactly as it was, and has now asked for it to be removed. The reason it never earned its
+       place is measurable rather than aesthetic: the row was gated on `hasStartTime(t)`, so it vanished
+       for any task without a start clock, and `blocking` was read for SCHEDULING in exactly ONE place —
+       the drag-wall filter in `dropWallsFor`. Automatic packing never read it at all, so a background
+       appointment obstructed the packer exactly as a blocking one did. A tri-state control that is hard
+       to find and that changes almost nothing is worse than no control.
 
+       THE FIELD STAYS, and this is deliberate. `blocking` is still seeded from the Google event's
+       busy/free transparency on first import (`blockingFromEvent`) and still filters drag walls, so a
+       "Work 08:00-18:30" container imported as FREE keeps letting you drop work inside it. Deleting the
+       field would silently turn every such container into a wall — a behaviour change nobody asked for,
+       dressed up as a UI removal. What is gone is the app ASKING: Google's answer is now the only one.
+       `setBlocking` went with the control, since it was that control's only caller. */
     /* PP-EXT (owner 2026-08-16): the uncompressable tick. Ticked = allotted is exactly requestedMinutes
        (less anything already spent today), reserved off the top and never compressed. Unticked on a
        clocked task = the start holds and the end floats. Offered for every non-milestone task, not only
@@ -15542,7 +15616,7 @@ class Component extends DCLogic {
        even though the FIELD is tri-state: null means "not decided yet, follow the clocks", which is a
        state the control shows the resolved answer for and never offers as a choice — picking either
        option is precisely the act of deciding, and deciding is what stops the re-derivation.
-       Mirrors blockingCtl's markup and its HIT_MIN_PX hit box exactly; no new control primitive. */
+       HIT_MIN_PX per the owner's hit-target tenet — the glyph is not the hit box. */
     const uncompCtl = this.isMilestone(t) ? null : (()=>{
       const cur = this.isUncompressable(t);
       const opt=(val,label,title)=>{ const on = (cur===val);
@@ -15679,7 +15753,6 @@ class Component extends DCLogic {
            ("Fri 22 Aug for 45m"), which is the same grammar quick-add takes. */
         field('Spent',spentField,{flex:1})),
       field(h('span',null,'Allotted (remaining)',this.infoNote('Auto-scheduled time for this task today: its share of the day’s free time (window minus meals, reserved free time and fixed blocks), scaled by remaining Planned work and split across active tasks by priority then due date. Click ∿ auto → ✎ manual to pin a fixed amount off the top (a Predict override) instead of the computed value.')),allotField),
-      blockingCtl?field(h('span',null,'Busy type',this.infoNote('Whether this appointment’s time is blocking (nothing else is scheduled through it) or background (a container — like a Work day — you deliberately place other tasks inside). Auto follows the imported calendar event’s busy/free setting, and defaults to blocking.')),blockingCtl):null,
       /* PP-EXT (owner 2026-08-16): the uncompressable tick, rendered in the same field row group. */
       uncompCtl?field(h('span',null,'Time needed',this.infoNote('Flexible tasks share the day and shrink when it is full. Exact tasks take their planned time in full — the day reserves it off the top and never squeezes it. An appointment with both a start and an end time is Exact by default; setting it Flexible keeps its start but lets its end move.')),uncompCtl):null,
       /* /PP-EXT */

@@ -46,19 +46,27 @@ test('normalizeTask preserves an existing blocking value (upgrade is a no-op on 
   assert.equal(c.normalizeTask({ id:'d', blocking:false }).blocking, false);
 });
 
-test('setBlocking routes through commit() and cycles true -> false -> null', () => {
+/* REPLACED 2026-08-25. `setBlocking` is gone with the "Busy type" control, which was its only caller —
+ * the owner asked for the control back on 2026-08-19, ruled on 2026-08-21 to leave it as it was, and has
+ * now asked for it to be removed. What this test used to pin (a user-driven tri-state cycle through
+ * commit) no longer exists as a behaviour.
+ *
+ * The FIELD stays and is still load-bearing, so the coverage moves rather than disappearing: `blocking`
+ * is now written in exactly one place — `blockingFromEvent`, on first import — and read in exactly one —
+ * the drag-wall filter. This asserts the surface that remains, so a future change that quietly deletes
+ * the field (turning every imported FREE container into a wall) fails here.
+ */
+test('blocking is no longer user-writable: setBlocking is gone with its control', () => {
   const c = make();
-  const t = activeTask(c, { id:'sb' });
-  c.state.tasks = [t];
-  c.setBlocking('sb', false);
-  assert.equal(c.state.tasks.find(x=>x.id==='sb').blocking, false);
-  c.setBlocking('sb', true);
-  assert.equal(c.state.tasks.find(x=>x.id==='sb').blocking, true);
-  c.setBlocking('sb', null);
-  assert.equal(c.state.tasks.find(x=>x.id==='sb').blocking, null, 'Auto is reachable again');
-  assert.ok(c.history.length >= 3, 'every toggle is undoable (it went through commit)');
-  c.undo();
-  assert.equal(c.state.tasks.find(x=>x.id==='sb').blocking, true, 'undo restores the previous value');
+  assert.equal(typeof c.setBlocking, 'undefined',
+    'the only caller was the removed Busy type control; leaving the setter would leave a dead seam');
+});
+
+test('the field survives the control: an imported FREE event is still background', () => {
+  const c = make();
+  const t = c.normalizeTask({ id: 'work', blocking: c.blockingFromEvent({ transparency: 'transparent' }) });
+  assert.equal(t.blocking, false, 'a Work-shaped container imported as FREE stays background');
+  assert.equal(c.isBlockingTask(t), false, 'and the resolver agrees, so drags may still land inside it');
 });
 
 // =======================================================================

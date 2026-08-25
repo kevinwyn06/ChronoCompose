@@ -103,3 +103,30 @@ test('a habit added from Focus is scheduled today, so it appears in the list it 
       'a new habit defaults to daily — creating one from Focus and not seeing it would read as a failure');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Owner ask 2026-08-25: "make sure description is in hover tooltip".
+//
+// The rich timeline hover card has carried it since 2026-08-24. The Gantt bar, the milestone diamond and
+// the sheet row are plain `title` attributes and did not, so the answer to "what was this again?"
+// depended on which surface you happened to hover. `descTitleLine` is the single definition both native
+// surfaces append, so the two cannot drift apart.
+test('descTitleLine appends the snippet on its own line, and nothing at all when there is no description', () => {
+  const c = make();
+  assert.equal(c.descTitleLine({ description: '' }), '', 'empty description adds nothing to concatenate');
+  assert.equal(c.descTitleLine({ description: '<p><br></p>' }), '',
+    'an empty rich-text shell is not a description — hasDesc is what decides');
+  assert.equal(c.descTitleLine(null), '', 'a missing task must not throw');
+  assert.equal(c.descTitleLine({ description: '<div>call Sam</div><div>re the quote</div>' }),
+    '\ncall Sam re the quote',
+    'block boundaries become a space BEFORE tags are stripped, and the line is prefixed with a newline');
+});
+
+test('descTitleLine truncates through the same snippet rule as the hover card', () => {
+  const c = make();
+  const long = 'word '.repeat(80);
+  const line = c.descTitleLine({ description: long });
+  assert.equal(line[0], '\n');
+  assert.ok(line.length - 1 <= c.DESC_SNIPPET_MAX() + 1,
+    'the native tooltip is bounded by the same constant as the card, not by a second number');
+});
