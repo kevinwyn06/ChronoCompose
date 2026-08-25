@@ -733,6 +733,14 @@ Every block carries `data-tl-block`,
 Those hooks are the supported way for tests to address a block — the e2e layer previously matched three
 tooltip **strings**, so a copy change read as a gesture regression.
 
+The Schedule agenda's chips (`renderScheduleView`) carry the same idiom as of 2026-08-25:
+`data-sched-block`, `data-sched-task`, and `data-sched-kind` (`drag` when the chip is draggable,
+`static` when it is not). The kind is not decoration — it says which code path a click on that chip
+takes. A draggable chip has `onClick:null` and opens details through the block **mouseup**'s no-move
+branch; a non-draggable one opens details through its own `onClick`. A spec that cannot tell the two
+apart cannot say which one it proved. Families additionally carry `data-sched-family` and
+`data-sched-kid`, from the C1 subtask ruling. Pinned by `tests/e2e/block-click-details.spec.js`.
+
 **Overlapping blocks** are laid out by `overlapLayout(list, px)` — pure, `tests/overlap.test.js`. The owner
 spec (2026-08-06, Google Calendar as the reference) is *"side by side if the titles will overlap (50/50),
 offset otherwise (~90/10), recursively defined for >2 tasks"*, and the rule is: group blocks into clusters

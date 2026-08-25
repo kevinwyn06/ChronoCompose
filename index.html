@@ -12626,6 +12626,14 @@ class Component extends DCLogic {
           });
         })():null;
         const row=h('div',{key:'sc'+i,
+          /* PP-EXT (2026-08-25): a stable hook, the same idiom as `data-tl-block` / `data-sched-family`.
+             The agenda chip was otherwise addressable only by its TOOLTIP, which `timeline-drag.spec.js`
+             already names as a known fragility — a copy change there reads as a gesture regression.
+             `data-sched-kind` carries `canDrag`, because "clicking opens details" runs through two
+             different code paths depending on it (the chip's own onClick when it cannot drag, the block
+             mouseup's no-move branch when it can) and a spec must be able to say which one it is on. */
+          'data-sched-block':'1','data-sched-task':(c.id!=null?String(c.id):''),
+          'data-sched-kind':canDrag?'drag':'static',
           title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
           onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
           /* PP-EXT (owner 2026-08-04): same details-on-click rule as the Today timeline block above. */
