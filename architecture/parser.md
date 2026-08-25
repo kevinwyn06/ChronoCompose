@@ -202,3 +202,51 @@ offers `[ On Fri | By Fri ]` and flipping re-applies the whole title through `re
 commit. It shapes **dates only** — `shapeParsedTask` refuses to let a candidate tuple's `planned`
 overwrite a duration the text itself gave, so "gym friday for 45m" keeps its 45 minutes under either
 branch.
+
+## The parser reads the TASK, not only the text (owner ask 2026-08-25)
+
+`shapeParsedTask` is context-free — text in, task fields out — and every surface fed it text alone. That
+made the title bar and the When line disagree about the same edit:
+
+| surface | task before | typed | result |
+|---|---|---|---|
+| title bar | start 8:30pm | `deep work 45m` | planned 45, **end null** |
+| When line | start 8:30pm | `Mon Jun 15, 8:30pm for 45m` | **end 9:15pm** |
+
+Same parser, same shaping, opposite outcome — because the When line RESTATES the start in the text, so
+the parse saw both sides. The shaping rule was never wrong; it was being applied to the text instead of
+to the task.
+
+`reconcileWhen(base, shaped, parsed)` is the one resolver that owns endpoint arithmetic. It is pure,
+mutates neither argument, and `base` is how context reaches it. `shapeParsedTask` calls it with `null`,
+so quick-add, the preview and the When line keep byte-identical behaviour; `rename` calls it with the
+task.
+
+**Absence is not deletion.** A side the text never mentions is retained from the task — which is what
+makes `by 9:00pm` on a task starting 8:30pm mean the obvious thing. Retention is dropped whenever it
+would INVERT the span (`by 8:00pm` on an 8:30pm start): `rename` has no error channel to refuse through,
+so there the text wins and the task becomes the plain deadline that was typed. A recurrence rule is
+retained on the same principle — a title naming no repeat is not an instruction to stop repeating, and
+before this it silently cleared `recur`.
+
+**A duration derives the missing endpoint, but only from a REAL INSTANT.** Both edges known, or neither,
+and it stays the movable budget it always was. The test is the CLOCK FLAG, not merely a non-null edge: a
+bare day is a container, so `gym friday for 45m` must never collapse into a 00:00–00:45 appointment. With
+both edges already clocked a typed duration RESIZES from the start (owner's pick over storing a 90m
+budget on a 60m block).
+
+The clock flags are a **three-state** field — `true`, an explicit `false` the ambiguity chooser writes
+for an unclocked EOD deadline, and `null` for "never asked". `reconcileWhen` passes them through
+verbatim and only its own derivation tests read them as booleans; coercing falsy to null erased the
+middle state on every parse, and two quick-add regressions caught it.
+
+**Only the title bar merges.** The When line PRINTS the whole date state — which is what makes clearing
+it mean "no dates" — so what it omits is a statement, not a silence. It is handed no base.
+
+### A deadline cue plus a duration runs BACK from the clock
+
+`hasSpan` (a clock plus a resolved end) is tested before the cue branch, so `write by 9pm for 2h` fell
+into R3/R9 and emitted **9pm → 11pm**: a task starting at its own deadline and overrunning it by two
+hours. When a `for <dur>` phrase supplied that end and the cue is a deadline, the clock is the END and
+the start is derived backwards. An explicit clock RANGE is untouched — it states both edges itself, so
+there is no missing endpoint to derive and nothing to reverse.

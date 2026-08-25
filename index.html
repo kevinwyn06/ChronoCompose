@@ -1973,10 +1973,21 @@ class Component extends DCLogic {
          to: this edits work that already exists, so re-wording "Move the friday deploy to staging" must
          not pull `friday` out and reschedule the task. A re-parse yielding the date the task already
          holds is not new information, so it leaves the title alone. */
-      const dateChanged = hasAnchor && (
-        t.start!==shaped.start || t.end!==shaped.end ||
-        ((t.recur&&t.recur.label)||null)!==((shaped.recur&&shaped.recur.label)||null) ||
-        ((t.recur&&t.recur.until)||null)!==((shaped.recur&&shaped.recur.until)||null));
+      /* PP-EXT (owner ask 2026-08-25): the title bar is the ONE surface that reads the task as well as
+         the text — see `reconcileWhen`. It is additive by nature (you are appending to a title that is
+         already there), so a side the text does not mention is retained rather than deleted. The When
+         line is deliberately NOT given a base: it PRINTS the whole date state, which is what makes
+         clearing it mean "no dates", so what it omits is a statement rather than a silence.
+         Every test below reads the RECONCILED result, not the raw parse: a merge can change a date the
+         parse alone did not, and comparing the wrong one would strip the user's words on a no-op. */
+      const rec=this.reconcileWhen(t, shaped, parsed);
+      /* A lone duration now writes an END when the task already carries a clocked start, so the write
+         can no longer be gated on the TEXT having named a date. */
+      const writesWhen = hasAnchor || parsed.dur!=null;
+      const dateChanged = writesWhen && (
+        t.start!==rec.start || t.end!==rec.end ||
+        ((t.recur&&t.recur.label)||null)!==((rec.recur&&rec.recur.label)||null) ||
+        ((t.recur&&t.recur.until)||null)!==((rec.recur&&rec.recur.until)||null));
       /* `shaped.name` is the parser's own `rest`: every claimed token already removed, in one place, so
          the strip can never disagree with what was consumed. When nothing moved, only the section token
          goes — it is consumed unconditionally, because its chip is not on the row to prove it landed. */
@@ -1985,9 +1996,9 @@ class Component extends DCLogic {
          On a subtask the token is therefore a no-op, and it is consumed above rather than left as
          litter: stamping the field here would persist something nothing ever reads. */
       if(parsed.sectionId!=null && t.parentId==null) t.sectionId=parsed.sectionId;
-      if(hasAnchor){ t.start=shaped.start; t.end=shaped.end;
-        t.startClock=shaped.startClock; t.endClock=shaped.endClock; t.recur=shaped.recur; }
-      if(parsed.dur!=null) t.planned=shaped.planned;
+      if(writesWhen){ t.start=rec.start; t.end=rec.end;
+        t.startClock=rec.startClock; t.endClock=rec.endClock; t.recur=rec.recur; }
+      if(parsed.dur!=null) t.planned=rec.planned;
       else if(hasAnchor && t.start!=null){ const span=this.clockSpanMinutes(t,this.startOfDay(t.start));
         if(span!=null) t.planned=span; }
       if(shaped.priority!==4 || /\bp[1-4]\b/i.test(raw)) t.priority=shaped.priority;
@@ -7647,7 +7658,15 @@ class Component extends DCLogic {
       else { result.end=null; }
       result.dur=null;
     } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges clocked
-      result.start=result.date; result.startClock=true; result.endClock=true;
+      /* PP-EXT (owner ask 2026-08-25): a DEADLINE cue plus a duration runs BACK from the clock, never
+         past it. "write by 9pm for 2h" fell straight into this branch and emitted 9pm → 11pm — a task
+         that starts at its own deadline and then overruns it by two hours. The cue is only consulted in
+         the branch BELOW, and `hasSpan` fires first, so the `by` was silently discarded.
+         Only a "for <dur>" phrase is re-bound. An explicit clock RANGE ("by 3pm to 4pm") already states
+         both edges itself: there is no missing endpoint to derive, so there is nothing to reverse. */
+      if(dueCue && !startCue && durPh && !range){ result.end=result.date; result.start=result.date-durPh.min*60000; }
+      else result.start=result.date;
+      result.startClock=true; result.endClock=true;
     } else if(result.date!=null){                // a single day, no span — bind by role (the binding rule)
       if(dueCue && !startCue){                   // R5 / R6 / R11 — deadline (a START cue wins the tie: "not
                                                  // before X" matches BOTH — the bare `before` in dueCue and
@@ -7721,6 +7740,70 @@ class Component extends DCLogic {
       || parsed.candidates.find(c=>c.kind==='anchor') || parsed.candidates[0];
     return pick ? pick.tuple : null;
   }
+  /* PP-EXT (owner ask 2026-08-25): the ONE resolver for endpoint arithmetic — pure, `base` in, fields
+     out, and it never mutates either argument.
+
+     The shaping rule was never wrong; it was being applied to the TEXT instead of to the TASK. On the
+     code as it stood the title bar and the When line disagreed about the same edit:
+
+       title bar : start 8:30pm + "deep work 45m"              -> planned 45, end NULL
+       When line : start 8:30pm + "Mon Jun 15, 8:30pm for 45m" -> end 9:15pm
+
+     Same parser, same shaping, opposite outcome — because the When line RESTATES the start in the text,
+     so the parse saw both sides. `shapeParsedTask` is context-free and saw a lone duration, so it called
+     it a movable budget. Rather than teach `shapeParsedTask` about tasks (four call sites depend on its
+     purity, including the live quick-add preview), the arithmetic moves here, and `base` is how context
+     reaches it: the title bar hands over the task, everything else hands over `null` and therefore keeps
+     byte-identical behaviour.
+
+     TWO RULES, both owner-stated 2026-08-25.
+
+     1. ABSENCE IS NOT DELETION. A side the text never mentions is retained from the task — which is what
+        makes "by 9:00pm" on a task starting 8:30pm mean the obvious thing instead of nulling the start.
+        Retention is dropped whenever it would INVERT the span (`by 8:00pm` on an 8:30pm start), because
+        `rename` has no error channel to refuse through; there the text simply wins and the task becomes
+        the plain deadline that was typed. A recurrence rule is retained on the same principle: a title
+        that names no repeat is not an instruction to stop repeating.
+
+     2. A DURATION DERIVES THE MISSING ENDPOINT — but only from a REAL INSTANT. Both edges known, or
+        neither, and it stays the movable budget it has always been. A bare day is a container, not an
+        instant, so "gym friday for 45m" must never collapse into a 00:00-00:45 appointment; that is why
+        the test is the CLOCK FLAG and not merely a non-null edge. With both edges already clocked a typed
+        duration RESIZES from the start (owner's pick over storing a 90m budget on a 60m block — a typed
+        duration on a fully constrained task has no other plausible reading).
+
+     `planned` is only written when the text actually carried a duration; otherwise it is passed through
+     untouched, and callers keep deriving it from the booked span exactly as they did before. */
+  reconcileWhen(base, shaped, parsed){
+    const p=parsed||{}, sh=shaped||{};
+    let start=(sh.start!=null?sh.start:null), end=(sh.end!=null?sh.end:null);
+    /* The clock flags are a THREE-state field — true, an explicit `false` the ambiguity chooser writes
+       for an unclocked EOD deadline, and null for "never asked". Coercing falsy to null here would
+       quietly erase the middle state on every parse, so they are passed through verbatim and only the
+       derivation tests below read them as booleans. */
+    let startClock=(sh.startClock===undefined?null:sh.startClock);
+    let endClock=(sh.endClock===undefined?null:sh.endClock);
+    let planned=(sh.planned!=null?sh.planned:null);
+    let recur=sh.recur||null;
+    const dur=(p.dur!=null?p.dur:null);
+    /* A milestone is a zero-length marker: it has no second endpoint to derive and no span to retain. */
+    if(p.mile) return {start,end,startClock,endClock,planned,recur};
+    if(base){
+      if(!p.recur && base.recur) recur=base.recur;
+      if(start==null && base.start!=null && (end==null || base.start<=end)){ start=base.start; startClock=(base.startClock===undefined?null:base.startClock); }
+      if(end==null && base.end!=null && (start==null || start<=base.end)){ end=base.end; endClock=(base.endClock===undefined?null:base.endClock); }
+    }
+    if(dur!=null){
+      const knownStart = start!=null && !!startClock;
+      const knownEnd   = end!=null && !!endClock;
+      if(knownStart && !knownEnd){ end=start+dur*60000; endClock=true; }
+      else if(knownEnd && !knownStart){ start=end-dur*60000; startClock=true; }
+      else if(knownStart && knownEnd){ end=start+dur*60000; }
+      planned=dur;
+    }
+    return {start,end,startClock,endClock,planned,recur};
+  }
+  /* /PP-EXT */
   /* PP-EXT (owner 2026-08-17): the ONE pure binding from parser output to task fields. Quick-add and
      silent title parsing share it so title cleanup, ambiguity, recurrence and clock shape cannot drift. */
   shapeParsedTask(parsed, choice){
@@ -7741,6 +7824,13 @@ class Component extends DCLogic {
          ("gym friday for 45m") is not ambiguous and neither branch of On/By may overwrite it — the
          candidate's own `planned` is only a fallback for when the text gave no duration at all. */
       if(tup.planned!=null && p.dur==null) out.planned=tup.planned; }
+    /* PP-EXT (owner ask 2026-08-25): the duration rules run HERE too, with no base, so quick-add, the
+       When line and the title bar cannot drift apart on the arithmetic. With `base` null this only ever
+       restates what the parser already resolved (a clocked start plus "for 45m" already carries its
+       end), which is exactly why it is safe to put on the shared path. */
+    const rec=this.reconcileWhen(null,out,p);
+    out.start=rec.start; out.end=rec.end; out.startClock=rec.startClock; out.endClock=rec.endClock;
+    out.planned=rec.planned;
     return out;
   }
   /* /PP-EXT */
