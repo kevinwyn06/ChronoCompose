@@ -16,7 +16,7 @@
 const fs = require('fs');
 const path = require('path');
 const { test, expect } = require('@playwright/test');
-const { boot } = require('./_seed');
+const { boot, bootSurface } = require('./_seed');
 
 const SHOTS = path.join(__dirname, '..', '..', '.orchestration', 'shots');
 fs.mkdirSync(SHOTS, { recursive: true });
@@ -87,6 +87,41 @@ for (const view of ['today', 'schedule']) {
       expect(mainW, `the ${view} pane keeps usable width at ${w}px`).toBeGreaterThan(300);
     });
   }
+}
+
+/* H4 (chain H, recorded 2026-08-20; closed here 2026-08-25). H4 named the LEFT PANE opening wider than
+ * its own content and leaving whitespace to the right of Actions, and it was recorded as still live.
+ * It is not: Chain 6 block 46 made `sheetMinWidthPx()` the sum of the VISIBLE columns and used it as the
+ * pane's maxWidth. The cases above prove that on Today and Schedule, which render the pane through
+ * `leftPaneMaxWidth`. The Gantt/plan board is a SECOND, separately written pane (its maxWidth is spelled
+ * inline rather than through that helper), and it is the surface H4 was reported against — so it gets its
+ * own case rather than inheriting the claim. Hiding half the columns is the shape that used to fail:
+ * a percentage split has no idea the content got narrower.
+ */
+for (const { w, h } of WIDTHS) {
+  test(`gantt board at ${w}x${h}: the sheet pane never opens past its last visible column`, async ({ page }) => {
+    await page.setViewportSize({ width: w, height: h });
+    await bootSurface(page, { view: 'gantt' }, {});
+    await page.locator('[data-colk="actions"]').waitFor({ state: 'visible', timeout: 15000 });
+
+    const g = await sheetGeometry(page, 'actions');
+    expect(g.paneRight - g.cellRight, `no whitespace right of Actions at ${w}px`).toBeLessThanOrEqual(18);
+
+    /* Seeded through `_seed` rather than poked into `localStorage` and reloaded: `addInitScript` runs
+       before page scripts, so one load is enough and there is no window in which the app reads prefs
+       that are not yet written. */
+    await bootSurface(page, { view: 'gantt' },
+      { prefs: { colHidden: { start: true, end: true, labels: true, pct: true, exact: true } } });
+    await page.locator('[data-colk="actions"]').waitFor({ state: 'visible', timeout: 15000 });
+    const narrow = await sheetGeometry(page, 'actions');
+    expect(narrow.paneRight - narrow.cellRight,
+      `no whitespace right of Actions with five columns hidden at ${w}px`).toBeLessThanOrEqual(18);
+    /* The cap must CONTRACT with the columns. The gantt split defaults to 78%, far past the content edge,
+       so the pane's width is the cap; if the cap ignored hidden columns the pane would not move at all and
+       the gap measured above would be the whitespace H4 reported. */
+    expect(narrow.clientWidth, `the pane contracts with the hidden columns at ${w}px`)
+      .toBeLessThan(g.clientWidth - 60);
+  });
 }
 
 test('trusted divider drag compresses, persists, and clamps when dragged back past Actions', async ({ page }) => {

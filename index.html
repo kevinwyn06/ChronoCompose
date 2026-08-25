@@ -10085,8 +10085,63 @@ class Component extends DCLogic {
   /* ==== /PP-EXT: two-way sync ==== */
   /* PURE: merge fetched calendar events into `tasks` (mutates). results=[{cid,items}], masters={cid|masterId:masterEvent}.
      Recurring instances collapse to ONE task keyed by the master id, carrying a recur rule. Returns {added,updated}. */
+  /* PP-EXT (G2b, owner ruling 2026-08-21): the identity of a calendar-linked task is the FULL
+     `calendarId|eventId` pair. Three call sites used to disagree — `byEid` keyed on the bare event id,
+     `handled` on `cid|eid`, prune/verify on `calendarId|eventId` — and that disagreement is what made a
+     silent merge unsafe. Both halves are settled here: `gcalKey` is the one spelling of the identity, and
+     `collapseEventDuplicates` removes collisions that already exist in the workspace.
+
+     Why collisions form: `mergeCalendarEvents` builds its index ONCE from the array it is handed, so two
+     imports racing on the same pre-state each see no existing task and each push one. Once formed the
+     collision is permanent — the index is last-write-wins, so exactly one of the pair is ever updated
+     again, and prune only removes tasks whose event is MISSING from the live calendar, which this one is
+     not. So a duplicate is invisible to both halves of sync and survives forever.
+
+     The owner ruled the collapse a SILENT MERGE, not a visible deletion: a stray row is a sync artifact
+     they never created, so surfacing it as something to acknowledge is noise. It rides the shipped local
+     delete path (the ack ledger propagates it), so it needs no `deleted_at` migration. It must NOT reach
+     Google — the event itself is fine and is not being deleted; only the surplus local row is dropped,
+     exactly as `pruneDeletedEvents` drops rows without enqueueing a gcal op.
+
+     Keep the row with the newest `updatedAt`; ties keep the earliest in array order so the result does not
+     depend on iteration luck. Dependencies pointing at a dropped row are RE-POINTED at the survivor rather
+     than deleted — a merge preserves the graph, and dropping the edge would silently unblock a successor.
+     Archived rows are left alone (they are kept for stats and no longer import). PURE apart from mutating
+     the array it is given, in the manner of `pruneDeletedEvents`. */
+  gcalKey(cid, eid){ return String(cid)+'|'+String(eid); }
+  collapseEventDuplicates(tasks){
+    const groups={};
+    (tasks||[]).forEach(t=>{ if(!t || t.archivedAt || !t.eventId || !t.calendarId) return;
+      const k=this.gcalKey(t.calendarId, t.eventId); (groups[k]=groups[k]||[]).push(t); });
+    const remap={};
+    Object.keys(groups).forEach(k=>{ const g=groups[k]; if(g.length<2) return;
+      let keep=g[0];
+      for(let i=1;i<g.length;i++) if(this.syncTs(g[i].updatedAt) > this.syncTs(keep.updatedAt)) keep=g[i];
+      g.forEach(t=>{ if(t!==keep) remap[t.id]=keep.id; }); });
+    const losers=Object.keys(remap); if(!losers.length) return 0;
+    let collapsed=0;
+    for(let i=tasks.length-1;i>=0;i--) if(remap[tasks[i].id]){ tasks.splice(i,1); collapsed++; }
+    tasks.forEach(t=>{ if(!t.deps || !t.deps.length) return;
+      const seen={}; const out=[];
+      t.deps.forEach(d=>{ const id=this.depId(d); const to=remap[id]||id;
+        if(to===t.id) return;                                  /* a re-point must never become a self-dep */
+        const occ=this.depOcc(d); const sig=to+'@'+(occ==null?'':occ);
+        if(seen[sig]) return; seen[sig]=1;                     /* the merge can make two edges identical */
+        out.push((d&&typeof d==='object')?Object.assign({},d,{id:to}):to); });
+      t.deps=out; });
+    return collapsed;
+  }
   mergeCalendarEvents(tasks, results, masters, calById, tombstones, pendingOps){ /* PP-EXT: tombstones = locally-deleted event ids awaiting remote DELETE */
-    const byEid={}; tasks.forEach(t=>{ if(t.eventId) byEid[t.eventId]=t; });
+    /* PP-EXT (G2b): collapse any collision already in the workspace BEFORE indexing, so the index below
+       is built over a set with one row per event and cannot re-elect the wrong survivor. */
+    const collapsed=this.collapseEventDuplicates(tasks);
+    /* PP-EXT (G2b): keyed on the full `calendarId|eventId` pair, matching `handled` and the prune path.
+       `loose` is the legacy fallback ONLY: a task linked before `calendarId` was stored has no pair to
+       match, and without it the merge would read that task as absent and import a second copy — creating
+       the very duplicate this change exists to end. A paired hit always wins over a loose one. */
+    const byEid={}, loose={};
+    tasks.forEach(t=>{ if(!t.eventId) return;
+      if(t.calendarId) byEid[this.gcalKey(t.calendarId, t.eventId)]=t; else loose[t.eventId]=t; });
     /* A poll can land during the debounce or network flight of a local PATCH. Until that exact current-
        generation write drains, the local Calendar-owned fields are authoritative. */
     const pending={}; (pendingOps||[]).forEach(op=>{ if(op&&op.op==='patch'&&op.queueVersion===this.GCAL_QUEUE_VERSION) pending[op.taskId]=1; });
@@ -10109,7 +10164,7 @@ class Component extends DCLogic {
         const start = allDay ? this.parseYMD(st) : new Date(st).getTime();
         let end = en ? (allDay ? this.parseYMD(en) : new Date(en).getTime()) : start;
         if(allDay && end<=start) end = start + this.DAY;
-        let t=byEid[eid];
+        let t=byEid[this.gcalKey(cid, eid)] || loose[eid];
         if(t){ const keepLocal=!!pending[t.id];
           if(!keepLocal){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay; }
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
@@ -10122,7 +10177,10 @@ class Component extends DCLogic {
              imported FROM this calendar is the tag import wrote. */
           if(tag && !t.labels.includes(tag)) t.labels.push(tag);
           if(shed && t.labels.includes(shed)) t.labels=t.labels.filter(l=>l!==shed);
-          t.calendarId=cid; updated++; }
+          /* PP-EXT (G2b): a loose (calendarId-less) hit has just been given its calendar, so re-file it
+             under the pair key and drop the loose entry — otherwise a later event in this same run could
+             match it loosely again under a different calendar. */
+          t.calendarId=cid; byEid[this.gcalKey(cid, eid)]=t; delete loose[eid]; updated++; }
         else if(tombstones && tombstones[eid]){ /* PP-EXT: deleted locally — don't resurrect while the DELETE is in flight */ }
         else { const id='t'+Math.random().toString(36).slice(2,8);
           /* PP-EXT: first import — planned = the gcal event's own duration (minutes); all-day events leave it unestimated (null).
@@ -10140,9 +10198,9 @@ class Component extends DCLogic {
                it locally, that is the authority. Google omits `transparency` for Busy, so absent ⇒ null
                ⇒ inherit ⇒ blocking. The events list request sends no `fields=` mask, so the field arrives. */
             blocking:this.blockingFromEvent(src)});
-          tasks.push(nt); byEid[eid]=nt; added++; }
+          tasks.push(nt); byEid[this.gcalKey(cid, eid)]=nt; added++; }
       }); });
-    return {added,updated};
+    return {added,updated,collapsed};
   }
   /* PURE: remove calendar-linked tasks whose source event is gone from the selected calendars (mutates). Returns removed count.
      Never touches manual tasks (no eventId) or tasks from unselected calendars. */

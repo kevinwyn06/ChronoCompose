@@ -123,11 +123,38 @@ the very insert this prevents; and no `gcalSyncOut`, because diffing the id Goog
 back out to Google would queue an immediate PATCH of the event we just created. Skipping the undo snapshot
 and the outbound Calendar diff is fine. Skipping the clock and the Supabase push was the bug.
 
-A second, distinct duplication mechanism is recorded but **not** fixed here: `mergeCalendarEvents` builds its
-`byEid` map once from the task array it is handed, so two merges racing on the same pre-state each add a
-task, producing two task ids sharing **one** `calendarId|eventId`. Note also that `byEid` keys on `eventId`
-alone while `handled` and the prune/verify paths key on `calendarId|eventId` — three call sites that do not
-agree on what identity means. See `docs/superpowers/findings/2026-08-20-gcal-double-import.md`.
+**The second, distinct duplication mechanism (G2b) is fixed 2026-08-25.** `mergeCalendarEvents` built its
+`byEid` map once from the task array it was handed, so two merges racing on the same pre-state each added a
+task, producing two task ids sharing **one** `calendarId|eventId`. Once formed the collision was permanent:
+the map is last-write-wins, so exactly one of the pair was ever updated again, and the prune path only
+removes tasks whose event is *missing* from the live calendar — which this one is not. The duplicate was
+invisible to both halves of sync and survived forever. See
+`docs/superpowers/findings/2026-08-20-gcal-double-import.md`.
+
+**Identity is now one thing.** `gcalKey(calendarId, eventId)` is the single spelling, and the merge index
+uses it, so the three call sites that disagreed (`byEid` on the bare `eventId`, `handled` on `cid|eid`,
+prune/verify on `calendarId|eventId`) now agree. That agreement is a precondition, not a tidy-up: a silent
+collapse keyed on the bare event id could merge two rows that legitimately describe the same event id on two
+different calendars. A `loose` fallback keyed on the bare id covers **only** a legacy row linked before
+`calendarId` was stored — without it the merge reads that row as absent and imports a second copy, creating
+the duplicate this change exists to end. A paired hit always beats a loose one, and a loose hit is re-filed
+under its pair key the moment its calendar is known.
+
+**Collapse is a silent merge (owner ruling, 2026-08-21).** `collapseEventDuplicates` runs before the index
+is built, so the index cannot re-elect the wrong survivor. It keeps the row with the newest `updatedAt`
+(ties keep the earliest in array order, so the outcome does not depend on iteration luck) and drops the
+rest. Three properties matter:
+
+- **It is silent.** A stray row is a sync artifact the user never created, so surfacing it as a deletion to
+  acknowledge is noise. Nothing is added to the import message.
+- **It never reaches Google.** The event is fine and is not being deleted; only the surplus local row goes,
+  in the manner of `pruneDeletedEvents`, which likewise splices without enqueueing a Calendar op. The local
+  delete propagates to Supabase through the shipped ack ledger, so this needs no `deleted_at` migration.
+- **Dependencies are re-pointed at the survivor, not deleted.** A merge preserves the graph; dropping the
+  edge would silently unblock a successor, and that failure would surface as a task scheduling early with
+  nothing pointing back at the collapse. Re-pointing is de-duplicated and cannot produce a self-dependency.
+
+Archived rows and rows without a link are never touched.
 
 Five ordering guards close races around that queue. Calendar restoration after account sign-in is chained
 behind the initial Supabase **task** reconciliation, so an import cannot mint a second local task id while

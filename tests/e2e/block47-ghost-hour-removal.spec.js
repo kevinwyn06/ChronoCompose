@@ -41,11 +41,22 @@ test('half-dated bars are solid, dateless rows are empty, and wide zoom never be
     return n;
   });
   const box=await scroller.asElement().boundingBox();
-  await page.mouse.move(box.x+box.width/2,box.y+40);
+  /* Anchor the wheel over the SUBJECT, not over the middle of the scroller. Ctrl-wheel zoom is
+     cursor-anchored, so whatever sits under the pointer stays under it; anchoring anywhere else lets
+     twelve notches carry the Dated task bar out of the horizontal virtualization window, at which point
+     the locator no longer resolves and `boundingBox()` times out. That failure is the spec losing its
+     subject, not the app dropping a bar — so the fix is to keep the subject, NOT to loosen the width
+     assertion below, which is the whole point of the test. */
+  const anchor={x:Math.min(Math.max(beforeZoom.x+beforeZoom.width/2, box.x+8), box.x+box.width-8),
+                y:beforeZoom.y+beforeZoom.height/2};
+  await page.mouse.move(anchor.x,anchor.y);
   await page.keyboard.down('Control');
   for(let i=0;i<12;i++) await page.mouse.wheel(0,-240);
   await page.keyboard.up('Control');
   await page.waitForTimeout(300);
+  /* Belt and braces: a rounding drift of a few px across twelve notches must not decide the outcome. */
+  await datedBar.scrollIntoViewIfNeeded();
+  await expect(datedBar, 'the zoom kept its anchored subject in the window').toBeVisible();
 
   await expect(page.getByText('Hour',{exact:true}), 'the retired fourth zoom label never appears').toHaveCount(0);
   const afterZoom=await datedBar.boundingBox();
