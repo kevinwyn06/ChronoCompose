@@ -341,6 +341,7 @@ class Component extends DCLogic {
        longer exists; keeping it would leave a calibrated mechanism with nothing to calibrate. */
     /* PP-EXT: recurrence expansion bounds (named; see expandTask / recurStartIndex). */
     this.RECUR_MAX = 400;       // max occurrences materialized forward from the start index
+    this.RECUR_LEAD_MAX_DAYS = 30; // PP-EXT (owner ruling 2026-08-24): the cap on how far ahead a repeat's NEXT occurrence may reach today's surfaces once the current one is settled. See recurLeadDays.
     this.RECUR_BACKOFF = 3;     // occurrences to rewind when estimating the start index
     /* PP-EXT: timers persist across a closed tab / sleep (owner choice) — a running timer keeps counting until
        manually stopped or auto-paused at a pinned end; there is no inactivity auto-stop. See stopTimerAt / snapshot. */
@@ -2096,7 +2097,18 @@ class Component extends DCLogic {
     /* A re-commit of the sentence already shown is a NO-OP, and it has to be a real one: `commit()`
        snapshots unconditionally, so committing an unchanged task would leave an undo entry that undoes
        nothing. That matters most on the cancel path — Escape's rung 0 restores the field's value and
-       blurs, and the blur then re-applies the ORIGINAL sentence. */
+       blurs, and the blur then re-applies the ORIGINAL sentence.
+
+       The structural comparison below is not enough on its own, and the reason is worth stating because
+       it cost a data-loss bug: it assumes the sentence ROUND-TRIPS — that parsing what the line prints
+       reproduces the task it printed it from. When the parser disagreed with the printer even slightly
+       (`Aug 24` read on Aug 24 as next year), the guard saw a real change and committed it, so pressing
+       Escape moved the task twelve months and nulled its `end`. The parser bug is fixed at its root, but
+       the guard should never have DEPENDED on a perfect round-trip. Text identity is the honest test of
+       "the user did not edit this", it needs no round-trip to hold, and it covers every shape the
+       sentence can take — including the ones the parser cannot read back at all. */
+    const shown=String((this.whenSentence(t)||{}).text||'').replace(/\s+/g,' ').trim();
+    if(shown && raw===shown) return {ok:true};
     const ruleOf=r=>r?JSON.stringify({kind:r.kind,n:r.n,days:r.days,label:r.label,until:r.until}):null;
     const plannedAfter=(p.dur!=null)?shaped.planned:t.planned;
     if(t.start===shaped.start && t.end===shaped.end && t.startClock===shaped.startClock
@@ -2288,6 +2300,27 @@ class Component extends DCLogic {
   }
   /* True when a description has real content (ignoring empty tags/whitespace execCommand leaves behind). */
   hasDesc(html){ const s=String(html||'').replace(/<br\s*\/?>/gi,'').replace(/<[^>]*>/g,'').replace(/&nbsp;/gi,' ').trim(); return !!s; }
+  /* PP-EXT (owner 2026-08-24): the description as ONE LINE of plain text, for surfaces that can show
+     what a task is about but cannot host rich text — the timeline hover card is the first.
+     PURE, and deliberately not `innerHTML`-based: this runs inside a render pass and must not touch the
+     DOM. Block boundaries become a space BEFORE tags are stripped, or `<div>call Sam</div><div>re the
+     quote</div>` reads back as `call Samre the quote`. Truncation is on a word boundary where one is
+     near the limit, because a snippet cut mid-word looks like corrupted data rather than an excerpt. */
+  DESC_SNIPPET_MAX(){ return 140; }
+  descSnippet(html, max){
+    max = max||this.DESC_SNIPPET_MAX();
+    let s = String(html==null?'':html)
+      .replace(/<\s*(br|\/p|\/div|\/li|\/h[1-6]|\/tr)\s*\/?>/gi, ' ')
+      .replace(/<[^>]*>/g, '')
+      .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>')
+      .replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+      .replace(/\s+/g, ' ').trim();
+    if(!s) return '';
+    if(s.length<=max) return s;
+    const cut=s.slice(0, max);
+    const sp=cut.lastIndexOf(' ');
+    return (sp> max*0.6 ? cut.slice(0,sp) : cut).replace(/[\s.,;:]+$/,'') + '\u2026';
+  }
   /* PP-EXT owner 2026-08-18: description list autoformat is deliberately narrow. The caller passes only
      text from the start of the current visual line to the caret, immediately before Space. */
   descriptionListMarker(line){ line=String(line==null?'':line);
@@ -2709,10 +2742,37 @@ class Component extends DCLogic {
      the same answer — `originOf` (which bucket) and `sweepOnListSince` (whether a departure is real). Two
      copies of "is this overdue enough to matter" is exactly the drift this repo has paid for before.
      `pending` is passed in when the caller already computed it; `nextPendingOcc` is an expansion. */
+  /* PURE-ish: does this repeat have an occurrence that has already ENDED and was never completed?
+     Deliberately not routed through `taskDisp`/`currentOcc`, which answer a different question — they
+     report the occurrence to DISPLAY, and that one skips completed AND missed instances alike. */
+  hasMissedOcc(t, now){
+    if(!t||!t.recur) return false;
+    now = now==null?Date.now():now;
+    const occs=(this._occById&&this._occById[t.id])||this.expandTask(t,this._horizon||t.end);
+    return occs.some(o=>o.end!=null && o.end<now && this.occPct(t,o.idx)<100);
+  }
   isOverdueBucket(t, pending){
-    if(!t || !this.isOverdueToday(t)) return false;
+    if(!t || t.archivedAt || this.isMilestone(t)) return false;
     const p = pending!==undefined ? pending : (t.recur ? this.nextPendingOcc(t) : null);
-    return p==null;
+    if(t.recur){
+      /* PP-EXT (owner ruling 2026-08-24): a live occurrence ahead supersedes a missed one only if it is
+         INSIDE THE LEAD WINDOW. "Last Wednesday's standup is superseded by next Wednesday's" is true of
+         a weekly rule and false of a yearly one — a renewal missed three days ago is genuinely owed,
+         and telling the user to wait eleven months for the next one is precisely the silent drop the
+         standing tenet forbids. Near enough to supersede is the same question as near enough to show,
+         so it is the same window that lets a settled birthday leave the surface in `originOf`.
+
+         `hasMissedOcc` rather than `isOverdueToday` for the repeat case, and this is the hole the lead
+         window would otherwise have opened: `isOverdueToday` reads `taskDisp` → `currentOcc`, which
+         reports the occurrence to DISPLAY and therefore skips the missed one entirely. A yearly renewal
+         three days overdue reported NEXT YEAR'S date and read as perfectly on time. Under the old rule
+         that mattered less, because a repeat with any pending occurrence was never overdue anyway; the
+         moment the window lets one through, asking the display layer whether work was missed is asking
+         the wrong layer. */
+      if(p!=null && this.occWithinLead(t, p)) return false;
+      return this.hasMissedOcc(t) || this.isOverdueToday(t);
+    }
+    return this.isOverdueToday(t) && p==null;
   }
   originOf(t){
     if(!t || t.archivedAt || this.isMilestone(t)) return null;
@@ -2733,9 +2793,13 @@ class Component extends DCLogic {
       /* Every occurrence done and none left: the series is finished and leaves. */
       if(pending==null) return null;
       const occ=this.occInDay(t, this.startOfToday());
-      /* This occurrence is done but the series is not. The ONLY case where completing something MOVES a
-         task between buckets instead of removing it — the next occurrence is genuinely still ahead. */
-      if(occ && occ.idx!=null && this.occPct(t, occ.idx)>=100) return 'upcoming';
+      /* This occurrence is done but the series is not — and whether that MOVES the task to Upcoming or
+         removes it from the surface is the lead window's question (owner ruling 2026-08-24). A daily
+         standup's next instance is tomorrow, so it moves; a birthday's is eleven months out, so once
+         this year's is settled it leaves and comes back 30 days before the next one. `pending` is
+         non-null here by the guard above, so this is the only place the gate needs to sit. */
+      if(occ && occ.idx!=null && this.occPct(t, occ.idx)>=100)
+        return this.occWithinLead(t, pending) ? 'upcoming' : null;
     } else if((+t.pct||0)>=100) return null;
     /* `onListSince` answers "is it on the list, and since when" in one field — see sweepOnListSince. The
        spec phrases Continued as "onListSince < today AND included"; a non-null key already MEANS on the
@@ -4432,7 +4496,9 @@ class Component extends DCLogic {
       taskIds: Array.isArray(hb.taskIds)?hb.taskIds.slice():[],
       done: (hb.done&&typeof hb.done==='object')?Object.assign({},hb.done):{}, createdAt: hb.createdAt||Date.now(),
       updatedAt: hb.updatedAt!=null?hb.updatedAt:null /* PP-EXT B3a: row-level LWW clock for habits sync (stamped on change by the sync funnel) */ }; }
-  addHabit(){ const hb=this.normalizeHabit({name:'New habit'}); this.saveHabits([...(this.state.habits||[]), hb]); return hb.id; }
+  /* `name` is optional so the Habits view's ➕ keeps its old placeholder-then-rename flow; Focus mode
+     passes a real name, because it has no rename affordance to follow up with. */
+  addHabit(name){ const hb=this.normalizeHabit({name:(String(name||'').trim()||'New habit')}); this.saveHabits([...(this.state.habits||[]), hb]); return hb.id; }
   updateHabit(id, patch){ this.saveHabits((this.state.habits||[]).map(hb=> hb.id===id ? this.normalizeHabit(Object.assign({}, hb, patch)) : hb)); }
   deleteHabit(id){ this.saveHabits((this.state.habits||[]).filter(hb=>hb.id!==id)); }
   toggleHabitDone(id, dayMs){ const ymd=this.ymdOf(dayMs==null?Date.now():dayMs);
@@ -5601,20 +5667,31 @@ class Component extends DCLogic {
   toggleDone(id){
     const tt=this.state.tasks.find(x=>x.id===id);
     if(tt&&tt.recur){
-      /* PP-EXT: completing a repeat ADVANCES it. Overdue (uncompleted, before today) instances are caught up
-         first; otherwise the first upcoming (on/after today) uncompleted instance is completed — which then
-         drops out of the Gantt and shifts the shown dates to the next one. When everything visible is already
-         done, a click un-completes the earliest upcoming one (so it stays reversible without needing undo). */
+      /* ==== PP-EXT (owner ruling 2026-08-24): THE CIRCLE NEVER REACHES FORWARD ====
+         The old ladder ADVANCED: click 1 completed the current occurrence, click 2 completed the NEXT
+         one. On a daily standup that reads as a fast-forward; on a yearly birthday it silently marked
+         an occurrence twelve months away as done, and there was no way back except undo — the
+         un-complete branch only fired once EVERY upcoming occurrence was already done, which for an
+         unbounded series is never.
+
+         The ruling replaces it with a plain toggle over ONE occurrence: the first on or after today.
+         Click 1 completes it, click 2 undoes it, and nothing the user has not looked at is ever
+         touched. The catch-up branch is untouched — clearing missed occurrences is the one case where
+         acting on more than one is what the user meant.
+
+         Note the target is the first occurrence ON OR AFTER TODAY, not `currentOcc`: `currentOcc` skips
+         completed ones, so reading the target from it would walk to next year's occurrence the instant
+         this year's was done and hand the fast-forward straight back. */
       const todayStart=this.startOfToday();
-      const occs=this._occById[id]||this.expandTask(tt,this._horizon||tt.end);
+      /* Guarded like every other reader of the render cache (currentOcc, occOnDay, mostRecentOccIdx):
+         `_occById` does not exist until the first paint, and this handler can run before one. */
+      const occs=(this._occById&&this._occById[id])||this.expandTask(tt,this._horizon||tt.end);
       const setDone=(idxs,done)=>this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t||!t.recur) return; t.recur.overrides=t.recur.overrides||{};
         idxs.forEach(oi=>{ const o={...(t.recur.overrides[oi]||{})}; if(done){o.pct=100;o.completion=o.completion||Date.now();}else{o.pct=0;o.completion=null;} t.recur.overrides[oi]=o; }); });
       const overdue=occs.filter(o=>o.start<todayStart && this.occPct(tt,o.idx)<100).map(o=>o.idx);
       if(overdue.length){ setDone(overdue,true); return; }
-      const cur=occs.find(o=>o.start>=todayStart && this.occPct(tt,o.idx)<100);
-      if(cur){ setDone([cur.idx],true); return; }
-      const firstDone=occs.find(o=>o.start>=todayStart && this.occPct(tt,o.idx)>=100);
-      if(firstDone){ setDone([firstDone.idx],false); }
+      const target=occs.find(o=>o.start>=todayStart);
+      if(target) setDone([target.idx], this.occPct(tt,target.idx)<100);
       return; }
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       if(t.pct>=100){ t.pct=0; t.completion=null; } else { const now=Date.now(); t.pct=100; t.completion=now; this.archiveDone(tasks,id,now); /* PP-EXT: archive-on-complete */ }
@@ -5753,23 +5830,61 @@ class Component extends DCLogic {
       default: d.setDate(d.getDate()+i*7); return d.getTime();
     }
   }
+  /* ==== PP-EXT (owner ruling 2026-08-24): THE LEAD WINDOW ====
+     A repeat's next occurrence is not automatically today's business. A daily standup's next instance is
+     tomorrow and belongs on the surface the moment today's is done; a birthday's next instance is eleven
+     months out and does not. The rule that covers both without a per-task setting:
+
+         you never see more than ONE PERIOD ahead, and never more than RECUR_LEAD_MAX_DAYS ahead.
+
+     Daily, weekly and monthly repeats are unaffected — their next occurrence is always inside the window,
+     so nothing about them changes. A yearly repeat leaves the surface once its occurrence is settled and
+     returns 30 days before the next one, which is lead enough to buy a present.
+
+     NOTHING IS DELETED by this. The series, its overrides and its Gantt row are all untouched; the
+     occurrence is merely not yet on today's list. That distinction is what keeps this compatible with the
+     standing tenet that the laziest path must never silently drop a deadline — an OVERDUE occurrence is
+     never gated (see originOf, where the overdue rule still outranks everything).
+
+     `recurPeriodDays` is PURE and is the single definition of a rule's period; `recurStartIndex` divides
+     by it rather than keeping a second copy of the same per-kind table. Fractional periods are correct
+     here: a weekday rule steps 7/5 of a day on average. */
+  recurPeriodDays(r){
+    if(!r) return 7;
+    switch(r.kind){
+      case 'day':      return 1*(r.n||1);
+      case 'week':     return 7*(r.n||1);
+      case 'weekday':  return 7/5;
+      case 'weekdays': return 7/Math.max(1,(r.days||[]).length);
+      case 'month':    return 30.44*(r.n||1);
+      case 'monthDay': return 30.44;
+      case 'year':     return 365.25*(r.n||1);
+      default:         return 7;
+    }
+  }
+  /* PURE: how many days ahead this task's next occurrence may be and still count as today's business. */
+  recurLeadDays(t){
+    if(!t||!t.recur) return this.RECUR_LEAD_MAX_DAYS;
+    return Math.min(this.recurPeriodDays(t.recur), this.RECUR_LEAD_MAX_DAYS);
+  }
+  /* PURE: is `occ` near enough to be on the surface? Measured from the START OF TODAY rather than from
+     `now`, so the answer cannot change halfway through a day and make a task flicker off the list at
+     an arbitrary hour. */
+  occWithinLead(t, occ, now){
+    if(!occ || occ.start==null) return false;
+    const B=this.startOfDay(now==null?Date.now():now);
+    return (occ.start-B) <= this.recurLeadDays(t)*this.DAY;
+  }
+  /* ==== /PP-EXT lead window ==== */
   /* PP-EXT: approximate occurrence index whose start is ~`floor`, so long-past series don't waste the 400-cap
      on occurrences no one sees. Occurrence indices stay stable (relative to t.start) so overrides still line up;
      precision isn't needed since callers filter by today anyway, so an average-step estimate (backed off a few)
      is enough and stays O(1) even for weekday rules. */
   recurStartIndex(start, r, floor){
     if(start>=floor) return 0;
-    const days=(floor-start)/this.DAY; let est;
-    switch(r.kind){
-      case 'day': est=days/(r.n||1); break;
-      case 'week': est=days/(7*(r.n||1)); break;
-      case 'weekday': est=days*5/7; break;
-      case 'weekdays': est=days*Math.max(1,(r.days||[]).length)/7; break;
-      case 'month': est=days/(30.44*(r.n||1)); break;
-      case 'monthDay': est=days/30.44; break;
-      case 'year': est=days/(365.25*(r.n||1)); break;
-      default: est=days/7;
-    }
+    /* One definition of a rule's period, shared with the lead window. The per-kind table that used to
+       live here was the same table twice, which is the drift this repo has paid for before. */
+    const est=((floor-start)/this.DAY)/this.recurPeriodDays(r);
     return Math.max(0, Math.floor(est)-this.RECUR_BACKOFF);
   }
   expandTask(t, horizon){
@@ -7084,31 +7199,51 @@ class Component extends DCLogic {
      preceded by whitespace or start-of-string AND followed by a letter. That single rule kills `3/4`,
      `docs/README`, `and/or` and every URL at once.
 
-     MATCHING (owner ruling 2026-08-22): multi-word names match greedily but SHORTEST-first. With both
-     `Deep work` and `Deep work planning` defined, longest-first would let `/deep work friday` reach one
-     token further and start competing with the date parser; shortest-first stops at the first complete
-     name and `sectionCompletions` keeps the longer one one Tab away.
+     MATCHING (owner ruling 2026-08-24, REVERSING 2026-08-22): multi-word names match greedily,
+     LONGEST-first — the token means what the words say. The 2026-08-22 ruling chose shortest-first to
+     stop the token reaching a word further and competing with the date parser, but that fear does not
+     survive the mechanics: matching is prefix-anchored at the `/` AND requires a word boundary after
+     the name, so a longer name can only win where it was typed IN FULL. With both `Deep work` and
+     `Deep work planning` defined, `/deep work friday` still files under `Deep work` — `Deep work
+     planning` does not prefix-match it, and `friday` is never in reach. The shorter name is therefore
+     never starved. The ONE case the two orders disagree on is the user typing the longer name in full,
+     and shortest-first answered that one wrong: it filed under the shorter section and stranded the
+     remaining words in the title.
 
      An unmatched name is NEVER auto-created: section ORDER drives timeline block hue (`sectionHue`), so
      a typo would repaint real work. It is returned as an `offer` instead, and — unlike a match — it is
      not consumed, because stripping a word the app did not act on would just lose the user's text.
 
      PURE. `text` is matched case-insensitively; offsets are over `text` exactly as given.
-     `preferId` is the ONE escape hatch from shortest-first, and it is not a heuristic: it carries a
-     section the user chose by hand from `sectionCompletions`. It applies only where that section
-     genuinely matches the typed text, so it can never file a task somewhere the words do not say.
-     Without it Tab could rewrite the text and change nothing — `/Deep work planning` still resolves to
-     `Deep work` under shortest-first, which is exactly the outcome Tab exists to escape.
+     `preferId` is the escape hatch, and it is not a heuristic: it carries a section the user chose by
+     hand from `sectionCompletions`. It applies only where that section genuinely matches the typed
+     text, so it can never file a task somewhere the words do not say. Under longest-first it reaches
+     the other way from before — it is how you pin the SHORTER `Deep work` on a line that spells out
+     `Deep work planning` — but it is the same mechanism, and it is still what stops Tab from rewriting
+     the text and changing nothing.
 
      Returns {index, len, id, name, offer} | null. */
+  /* PURE. One spelling of a section name for comparison: lower-cased, inner whitespace collapsed. */
+  normSectionName(n){ return String(n==null?'':n).toLowerCase().replace(/\s+/g,' ').trim(); }
+  /* PURE. Does `name` claim the head of `tail` (the text after a `/`)? A name matches only on a WORD
+     BOUNDARY, so `/work` never matches a section called `Workshop`. Shared by matchSectionToken and
+     sectionCompletions deliberately: those two must agree about what "could be typed here" or Tab starts
+     offering completions that would not actually file. */
+  sectionNameFits(tail, name){
+    const nm=this.normSectionName(name); if(!nm) return false;
+    const low=String(tail==null?'':tail).toLowerCase();
+    if(low.slice(0,nm.length)!==nm) return false;
+    const after=low.charAt(nm.length);
+    return !(after && !/\s/.test(after));
+  }
   matchSectionToken(text, sections, preferId){
     const src=String(text==null?'':text);
     const low=src.toLowerCase();
     const defs=(sections||[]).map(x=>({id:x&&x.id, name:String((x&&x.name)||'')}))
       .filter(x=>x.id && x.name.trim())
-      /* Shortest FIRST is the ruling; ties break on name so two same-length sections resolve the same
+      /* LONGEST first is the ruling; ties break on name so two same-length sections resolve the same
          way on every device, the same stability rule `sectionsFromMap` applies to order. */
-      .sort((a,b)=> a.name.length-b.name.length || (a.name<b.name?-1:a.name>b.name?1:0));
+      .sort((a,b)=> b.name.length-a.name.length || (a.name<b.name?-1:a.name>b.name?1:0));
     if(preferId!=null){ const i=defs.findIndex(d=>d.id===preferId); if(i>0) defs.unshift(defs.splice(i,1)[0]); }
     let firstToken=null;
     for(let i=0;i<low.length;i++){
@@ -7118,41 +7253,63 @@ class Component extends DCLogic {
       const tail=low.slice(i+1);
       if(firstToken==null) firstToken={index:i, word:(tail.split(/\s+/)[0]||'')};
       for(const d of defs){
-        const nm=d.name.toLowerCase().replace(/\s+/g,' ').trim();
-        /* A name matches only on a WORD boundary: `/work` must not match a section called `Workshop`. */
-        if(tail.slice(0,nm.length)!==nm) continue;
-        const after=tail.charAt(nm.length);
-        if(after && !/\s/.test(after)) continue;
-        return {index:i, len:1+nm.length, id:d.id, name:d.name, offer:null};
+        if(!this.sectionNameFits(tail, d.name)) continue;
+        return {index:i, len:1+this.normSectionName(d.name).length, id:d.id, name:d.name, offer:null};
       }
     }
     return firstToken ? {index:firstToken.index, len:1+firstToken.word.length, id:null, name:null, offer:firstToken.word} : null;
   }
-  /* PURE: the Tab/↓ autocomplete behind the shortest-first ruling. Every section whose name EXTENDS what
-     the token already resolves to (or, when nothing matched, what was typed), shortest first — so index
-     0 is what is already applied and Tab moves forward from there. Returns null when there is nothing to
-     offer, which is also what a line with no section token returns. */
+  /* PURE: the Tab/↓ autocomplete, and under longest-first it has to reach in BOTH directions.
+     Two families of candidate, unioned:
+       · EVERY name that already fits the text at this token — including the shorter ones longest-first
+         just outranked. This is the direction the 2026-08-24 ruling created and the old prefix-only list
+         could not express: on `/deep work planning friday` the escape hatch is `Deep work`, which is
+         SHORTER than what matched, so a list of extensions would have been empty and Tab a dead key.
+       · Every name that EXTENDS what is applied — the original direction, and still the only one that
+         exists when nothing matched and all we have is an offer.
+     Sorted longest-first to mirror the matcher, then the applied name is forced to index 0 so Tab always
+     steps AWAY from what is already in effect. Candidates come from `sectionNameFits`, the matcher's own
+     boundary test, so Tab can never offer a completion that would not actually file.
+     Returns null when there is nothing to offer, which is also what a line with no section token returns. */
   sectionCompletions(text, sections){
     const defs=sections||this.state.sections||[];
     const m=this.matchSectionToken(text, defs);
     if(!m) return null;
-    const typed=(m.id!=null ? m.name : m.offer).toLowerCase().replace(/\s+/g,' ').trim();
+    const applied = m.id!=null ? m.name : null;
+    const typed=this.normSectionName(m.id!=null ? m.name : m.offer);
+    const tail=String(text).slice(m.index+1);
+    /* Built as a chain off `defs` rather than into a fresh literal, so the array keeps the CALLER's
+       Array prototype. Under the Node-VM test harness a sandbox-allocated array fails
+       `deepStrictEqual` against a host one on prototype identity alone — a green-to-red that says
+       nothing about behaviour. */
     const names=defs.map(x=>String((x&&x.name)||'')).filter(Boolean)
-      .filter(n=>n.toLowerCase().replace(/\s+/g,' ').trim().indexOf(typed)===0)
-      .sort((a,b)=> a.length-b.length || (a<b?-1:a>b?1:0));
+      .filter(n=>this.sectionNameFits(tail, n) || this.normSectionName(n).indexOf(typed)===0)
+      .filter((n,i,a)=>a.indexOf(n)===i)
+      .sort((a,b)=> b.length-a.length || (a<b?-1:a>b?1:0));
+    if(applied){ const i=names.indexOf(applied); if(i>0) names.unshift(names.splice(i,1)[0]); }
     if(!names.length) return null;
     const byName={}; defs.forEach(x=>{ if(x&&x.name && byName[x.name]==null) byName[x.name]=x.id; });
     return {token:String(text).slice(m.index, m.index+m.len), index:m.index, len:m.len,
       names, ids:names.map(n=>byName[n])};
   }
   /* PURE: rewrite ONLY the token span, so completing a section cannot disturb the date or the words
-     around it. `n` cycles and wraps rather than dead-ending at the longest name. */
+     around it. `n` cycles and wraps rather than dead-ending.
+
+     HOW MUCH of the span is replaced depends on which direction Tab moved, and getting this wrong would
+     DELETE WORDS THE USER TYPED. Completing to a name that already fits the text (the shortening
+     direction longest-first created) replaces only that name's own length, so the surplus words stay in
+     the line as title text — `/Deep work planning friday` shortened to `Deep work` reads back as
+     `/Deep work planning friday`, with `planning` now part of the title, exactly as it did under the
+     old ruling. Completing to a name that does NOT fit yet is an extension, and there the whole token is
+     replaced because the new name subsumes it. */
   completeSectionToken(text, n, sections){
     const r=this.sectionCompletions(text, sections);
     if(!r) return String(text==null?'':text);
     const name=r.names[((n||0)%r.names.length+r.names.length)%r.names.length];
     const src=String(text);
-    return src.slice(0,r.index)+'/'+name+src.slice(r.index+r.len);
+    const tail=src.slice(r.index+1);
+    const span=this.sectionNameFits(tail, name) ? (1+this.normSectionName(name).length) : r.len;
+    return src.slice(0,r.index)+'/'+name+src.slice(r.index+span);
   }
   /* PURE: remove the section token from a raw title, for the surfaces that keep the rest of the words.
      Reads the parser's own span rather than re-matching, so the strip can never disagree with the file. */
@@ -7296,7 +7453,7 @@ class Component extends DCLogic {
       /* Prefer a result chrono is CERTAIN names a day over an earlier vaguer one: "night shift
          tomorrow" yields both "night" (implied today) and "tomorrow" (certain) — rs[0] would pick
          the wrong day. */
-      const r0 = rs.find(r=>['day','weekday','month','year'].some(u=>r.start.isCertain(u))) || rs[0];
+      let r0 = rs.find(r=>['day','weekday','month','year'].some(u=>r.start.isCertain(u))) || rs[0];
       if(r0){
         /* `clock` is a real user-written time only when chrono is CERTAIN about the hour; an implied
            hour (a bare day) must keep falling through to the midnight floor below. A relative offset
@@ -7309,6 +7466,26 @@ class Component extends DCLogic {
         else if(!range && /\b(?:morning|noon|afternoon|evening|night|tonight|midnight)\b/.test(r0.text)){
           softHour={ h:r0.start.get('hour'), m:r0.start.get('minute')||0 }; }
         date = new Date(r0.start.date());
+        /* ==== PP-EXT (2026-08-24): NAMING TODAY'S DATE MEANS TODAY ====
+           `forwardDate` rolls anything not strictly after `now` to its next occurrence — but `now` is an
+           INSTANT and a written calendar date is a DAY. So `Aug 24` typed on the afternoon of Aug 24
+           implied midnight, compared as already past, and rolled a WHOLE YEAR to Aug 24 2027.
+
+           That is not a cosmetic misread. The When line prints exactly this shape (`Mon Aug 24`), and
+           `applyWhenText` re-commits the line's own sentence on the cancel path, so the bug moved a task
+           twelve months into the future and nulled its `end` — triggered by pressing ESCAPE. It reached
+           quick-add by the same route: any task filed on the day it names.
+
+           Re-read the SAME span with the roll disabled. If that lands on today, today is what the user
+           said; anything genuinely in the past still rolls forward exactly as before. Matched on the
+           span text so this can only ever correct the result chrono already chose. */
+        try{
+          const flat=(eng.parse(s, now, { forwardDate:false })||[]).find(x=>x.text===r0.text);
+          if(flat && this.startOfDay(flat.start.date().getTime())===this.startOfDay(now.getTime())){
+            date = new Date(flat.start.date());
+            if(flat.end) r0 = flat;   /* keep start and end reading the same occurrence */
+          }
+        }catch(e){}
         if(r0.end) chronoEnd = r0.end.date();
         dateSpanText = r0.text;
         dateSpanIndex = Number.isInteger(r0.index) ? r0.index : s.indexOf(r0.text);
@@ -7847,19 +8024,20 @@ class Component extends DCLogic {
         /* PP-EXT (Group 3): ←/→ flip the ambiguity chooser (owner-approved D4). Only intercepts the
            caret while an ambiguous parse is showing the toggle; otherwise arrows behave normally. */
         if(ambigLabels && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); setChoice(e.key==='ArrowLeft'?'anchor':'due'); return; }
-        /* PP-EXT (owner ruling 2026-08-22): shortest-first only works if the longer names stay one
-           keystroke away — that is the whole other half of the ruling. Tab and ↓ cycle the token
-           through them; the cycle wraps rather than dead-ending at the longest. Tab is intercepted ONLY
-           while a section token is on the line, so it keeps its normal focus behaviour otherwise. */
+        /* PP-EXT (owner ruling 2026-08-24): longest-first only works if the OTHER readings of the token
+           stay one keystroke away — that is the whole other half of the ruling. Tab and ↓ cycle the
+           token through them; the cycle wraps rather than dead-ending. Tab is intercepted ONLY while a
+           section token is on the line, so it keeps its normal focus behaviour otherwise. */
         if(e.key==='Tab'||e.key==='ArrowDown'){
           const base=this._secBase!=null?this._secBase:this.state.quickText;
           if(!this.sectionCompletions(base)) return;
           e.preventDefault();
           const r=this.sectionCompletions(base);
           this._secBase=base; this._secCycle=(this._secCycle||0)+1;
-          /* Pin the section as well as the text. Rewriting the text alone would change nothing:
-             `/Deep work planning` still resolves to `Deep work` under shortest-first, which is the very
-             thing Tab exists to escape. */
+          /* Pin the section as well as the text. Rewriting the text alone would change nothing in the
+             direction that matters now: on `/Deep work planning` the escape hatch is the SHORTER
+             `Deep work`, and the text already spells out the longer name, so only `preferId` can carry
+             that choice. */
           this._secPick=r.ids[((this._secCycle%r.names.length)+r.names.length)%r.names.length]||null;
           this.setState({quickText:this.completeSectionToken(base, this._secCycle), quickChoice:'anchor'});
         } },
@@ -11366,7 +11544,12 @@ class Component extends DCLogic {
   blockTooltipModel(c, tk, now){
     if(!c) return null;
     const out={title:c.title||(tk&&tk.name)||'', planned:false, window:null,
-      primary:null, secondary:null, progress:null};
+      primary:null, secondary:null, progress:null,
+      /* PP-EXT (owner 2026-08-24): what the task IS, not just when it is. The countdown answers "how
+         long have I got"; the description answers "what was this again", which is the question a bar
+         labelled with a four-word title actually raises. Empty string, never null, so the renderer's
+         test is the same shape as every other field's. */
+      desc: (tk && this.hasDesc(tk.description)) ? this.descSnippet(tk.description) : ''};
     if(c.start!=null && c.end!=null)
       out.window=this.fmtClock(c.start)+' – '+this.fmtClock(c.end);
     /* "planned" means the PACKER placed these times. A clock-fixed block and a hand-pinned one were both
@@ -11717,6 +11900,11 @@ class Component extends DCLogic {
             overflow:'hidden'}},
           h('div',{style:{width:Math.round(tipModel.progress*100)+'%',height:'100%',
             background:'var(--success)'}})) : null,
+        /* Above the countdown and below the window: the card reads top-down as what → when → how long.
+           Clamped to two lines so a long description cannot grow the card past the block it belongs to. */
+        tipModel.desc ? h('div',{key:'d','data-tl-tip-desc':'1',
+          style:{marginTop:'5px',color:'var(--text-mut)',display:'-webkit-box',WebkitLineClamp:2,
+            WebkitBoxOrient:'vertical',overflow:'hidden'}}, tipModel.desc) : null,
         tipModel.primary ? h('div',{key:'pr','data-tl-tip-primary':'1',
           style:{marginTop:'4px',fontWeight:700,color:'var(--text)'}}, tipModel.primary) : null,
         tipModel.secondary ? h('div',{key:'sc','data-tl-tip-secondary':'1',
@@ -12958,8 +13146,44 @@ class Component extends DCLogic {
         h('div',{style:{width:'20px',height:'20px',borderRadius:'50%',flex:'none',display:'flex',alignItems:'center',justifyContent:'center',
           border:'2px solid '+(done?this._accent:'var(--divider)'),background:done?this._accent:'transparent',color:'var(--on-accent)',fontSize:'12px'}}, done?'✓':''),
         h('span',{style:{fontSize:'13px',fontWeight:600,color:done?'var(--text-mut2)':'var(--text)'}}, hb.name)); };
-    const midCol=h('div',{style:{flex:'30 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'8px',padding:'16px',overflow:'auto'}},
+    /* PP-EXT (owner 2026-08-24): Focus mode can START a habit, not only tick one off. The habit you
+       realise you want is the one you notice while you are working, and until now that thought cost a
+       trip out to the Habits view and back.
+
+       It names the habit INLINE rather than calling `addHabit()` bare, and that is the whole reason this
+       is an input and not just a button: the Habits view's ➕ creates a placeholder called `New habit`
+       and relies on its own rename control to finish the job. Focus has no rename control, so a bare
+       button here would leave a row called `New habit` that could not be corrected from this screen.
+       A blank name is not an error, it is a no-op — Escape and Enter-on-empty both just close the field.
+       New habits default to `daily`, so what is created appears in the list below immediately. */
+    const draft=this.state.focusHabitDraft;
+    const closeDraft=()=>this.setState({focusHabitDraft:null});
+    /* `_focusHabitAbort` is a plain instance flag rather than state, and it is load-bearing: Escape has
+       to blur the field to dismiss it, and blur is what COMMITS. Reading `this.state` back inside the
+       blur would not save us either — React batches the setState from the keydown, so the state may not
+       have landed yet when the synchronous blur fires. The flag is set and consumed inside one gesture,
+       so it never needs to survive a render. */
+    const commitDraft=()=>{
+      if(this._focusHabitAbort){ this._focusHabitAbort=false; return; }
+      const n=String(draft||'').trim(); if(n) this.addHabit(n); closeDraft(); };
+    const addRow=h('div',{key:'add',style:{display:'flex',alignItems:'center',gap:'8px',flex:'none'}},
       label('Habits'),
+      h('div',{style:{flex:1}}),
+      draft==null ? h('button',{'data-qa':'focus-add-habit',onClick:()=>this.setState({focusHabitDraft:''}),title:'Add a habit',
+        style:{fontSize:'11px',fontWeight:700,cursor:'pointer',padding:'3px 10px',borderRadius:'7px',
+          border:'1px solid var(--divider)',background:'var(--chip-bg)',color:this._accent}},'＋ Add habit') : null);
+    const draftRow = draft==null ? null : h('input',{key:'draft','data-qa':'focus-habit-draft',autoFocus:true,value:draft,
+      placeholder:'Habit name, then Enter…',
+      onChange:e=>this.setState({focusHabitDraft:e.target.value}),
+      onBlur:commitDraft,
+      onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); commitDraft(); }
+        /* Escape ABANDONS — it must not fall through to the blur commit, which would save the very
+           text the user just said to discard. */
+        else if(e.key==='Escape'){ e.preventDefault(); this._focusHabitAbort=true; this.setState({focusHabitDraft:null}); e.target.blur(); } },
+      style:{fontSize:'13px',padding:'8px 12px',borderRadius:'9px',flex:'none',
+        background:'var(--field-bg)',border:'1px solid '+this._accent,color:'var(--text)',outline:'none'}});
+    const midCol=h('div',{style:{flex:'30 1 0',minWidth:0,display:'flex',flexDirection:'column',gap:'8px',padding:'16px',overflow:'auto'}},
+      addRow, draftRow,
       due.length? due.map(habitRow) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No habits scheduled today.'));
     /* Task checklist — every plan task, stripped to a checkbox + name. Complete inline; click the row to open
        the detail window (full edit). Incomplete first, then completed (struck through). */

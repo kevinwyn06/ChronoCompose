@@ -44,17 +44,35 @@ section, it is a loser left in the text.
 **and** followed by a letter. That one rule kills `3/4`, `docs/README`, `and/or` and every URL at once,
 with no allow-list to maintain and nothing to keep in step with the date grammar.
 
-**Matching is greedy but SHORTEST-first.** With `Deep work` and `Deep work planning` both defined,
-longest-first lets the token reach a word further and start competing with the date parser;
-shortest-first stops at the first complete section name, so `/deep work friday` files under *Deep work*
-and still hands `friday` to chrono. The pass runs **before** chrono for exactly this reason.
+**Matching is greedy, LONGEST-first** (owner ruling 2026-08-24, reversing 2026-08-22). The token means
+what the words say. The pass runs **before** chrono.
 
-The accepted cost is that typing the longer name in full *still* resolves to the shorter one, with the
-extra words left in the title. `sectionCompletions` / `completeSectionToken` are therefore part of the
-feature and not a nicety: **Tab** (and **↓**) cycle the token through every name that extends it,
-shortest first, wrapping at the end. Tab rewrites only the token span, and it also **pins** the chosen
-id (`matchSectionToken`'s `preferId`, reaching the parser as `opts.sectionPick`) — rewriting the text
-alone would change nothing, since shortest-first would re-resolve it to the shorter name.
+The earlier ruling chose shortest-first to stop the token reaching a word further and competing with the
+date parser. That fear does not survive the mechanics: matching is prefix-anchored at the `/` **and**
+requires a word boundary after the name, so a longer name can only win where it was typed IN FULL. With
+`Deep work` and `Deep work planning` both defined, `/deep work friday` still files under *Deep work* —
+`Deep work planning` is not a prefix of it — and `friday` was never in the token's reach. **The shorter
+name is never starved.** The two orders disagree on exactly one input, the longer name typed in full,
+and shortest-first answered it wrong: it filed under the shorter section and stranded the surplus words
+in the title.
+
+`sectionCompletions` / `completeSectionToken` are part of the feature and not a nicety, and under
+longest-first they reach in **both** directions. The list unions two families: every name that already
+fits the text at this token (including the shorter ones longest-first outranked — the direction an
+extensions-only list could not express, since the escape hatch is now shorter than what matched), and
+every name that extends what is applied (the only family that exists when nothing matched and all there
+is is an offer). Candidates come from `sectionNameFits`, the matcher's own boundary test, so Tab can
+never offer a completion that would not actually file. The applied name is forced to index 0, so **Tab**
+(and **↓**) always step away from what is in effect, wrapping at the end.
+
+How much of the span a completion rewrites depends on the direction, and getting it wrong would delete
+words the user typed. Completing to a name that already fits replaces only that name's own length, so
+the surplus stays in the line as title text — `/Deep work planning friday` shortened to *Deep work*
+reads back as `/Deep work planning friday`, with `planning` now part of the title, exactly as it did
+under the old ruling. Completing to a name that does not fit yet is an extension, and there the whole
+token is replaced. Tab also **pins** the chosen id (`matchSectionToken`'s `preferId`, reaching the
+parser as `opts.sectionPick`): in the shortening direction the line still spells out the longer name, so
+only the pin can carry the choice.
 
 **An unmatched name is never auto-created.** Section *order* drives timeline block hue (`sectionHue`),
 so a typo would repaint real work. The parser returns `sectionOffer` instead and quick-add renders a
@@ -67,6 +85,19 @@ taken, and that proof does not survive the commit here, because the section chip
 
 **On a subtask it is a no-op**, consumed quietly: only roots carry `sectionId` and a subtree inherits its
 root's, so stamping the field would persist something nothing ever reads.
+
+## Naming today's date means today (2026-08-24)
+
+chrono's `forwardDate` rolls anything **not strictly after `now`** to its next occurrence. `now` is an
+INSTANT; a written calendar date is a DAY. So `Aug 24` typed on the afternoon of Aug 24 implied midnight,
+compared as already past, and rolled a **whole year**.
+
+After chrono picks its result, the same span is re-read with `forwardDate:false`; if that lands on today,
+today is what the user said. Matching on the span text means this can only ever correct the result chrono
+already chose, and a genuinely past date still rolls forward exactly as before.
+
+This was a live data-loss path, not a cosmetic misread, because it combined with the When line's no-op
+guard — see below.
 
 ## The When line, and the title strip (owner rulings 2026-08-21)
 
@@ -128,6 +159,24 @@ exception, consumed unconditionally — its chip is not on the row, so leaving i
 
 The highlight mirror is unchanged and still matters: it is the live feedback *during* the edit. What
 changed is only what survives the commit.
+
+### The no-op guard is TEXT IDENTITY, not a comparison of parses (2026-08-24)
+
+`applyWhenText` short-circuits when the submitted text is identical to the sentence the task currently
+renders. It previously compared the **parse** of the submitted sentence against the task, which silently
+assumed the When line round-trips — that reading back what the line prints reproduces the task it was
+printed from.
+
+It does not, and the seventh shape (a written start clock with no end plus a budget) was the warning. The
+moment the parser disagreed with the printer, an unedited sentence looked like a real edit and was
+committed. Escape's rung 0 is what made that destructive: it restores the field's focus-time value and
+blurs, and the blur commits — so the **cancel** path re-submitted the line's own sentence. With the
+`forwardDate` bug above, pressing Escape moved the task twelve months into the future and nulled its
+`end`.
+
+Both halves are fixed. The guard should never have depended on a perfect round-trip whatever the parser
+does, and text identity needs no round-trip to hold: it covers every shape the sentence can take,
+including the ones the parser cannot read back at all.
 
 ## The title bar (owner 2026-08-20, Task 16)
 

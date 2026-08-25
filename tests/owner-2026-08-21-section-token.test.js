@@ -9,10 +9,11 @@
 //   AND followed by a letter. That one rule kills `3/4` (a date), `docs/README`, `and/or` and every URL
 //   at once, with no allow-list to maintain.
 //
-//   MATCHING (2026-08-22): multi-word names match greedily but SHORTEST-first. With sections `Deep work`
-//   and `Deep work planning`, longest-first would let the token reach one word further and start
-//   competing with the date parser; shortest-first stops at the first complete section name, and Tab
-//   keeps the longer one a single keystroke away.
+//   MATCHING (2026-08-24, reversing 2026-08-22): multi-word names match greedily, LONGEST-first. The
+//   earlier ruling feared the token reaching a word further and competing with the date parser, but the
+//   mechanics rule that out: matching is prefix-anchored at the `/` and requires a word boundary after
+//   the name, so a longer name can only win where it was typed IN FULL. The shorter name is never
+//   starved — the two orders disagree on exactly one input, and shortest-first got that one wrong.
 //
 // An unmatched name must NOT auto-create a section: section ORDER drives timeline block hue, so a typo
 // would repaint real work. It files under No section and offers creation instead.
@@ -40,29 +41,52 @@ test('section token: `/Work` files the task and leaves the title clean', () => {
   });
 });
 
-test('section token: shortest-first stops at the first complete name, leaving the date alone', () => {
+// THE LOAD-BEARING CASE FOR THE 2026-08-24 REVERSAL. Longest-first was rejected on the theory that it
+// would swallow `planning` here and keep reaching until it hit `friday`. It cannot: `Deep work planning`
+// is not a prefix of `deep work friday`, so the longer name simply does not apply and the matcher falls
+// through to `Deep work`. This test passed under BOTH orders — which is the point. It is the evidence
+// that flipping the comparator costs the shorter name nothing.
+test('longest-first: a longer name that was not typed does not apply, so the shorter one still wins', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
-    // Longest-first would swallow "planning" and keep reaching until it hit `friday`.
     const p = parse(c, '/deep work friday');
-    assert.equal(p.sectionId, 'sec_deep', 'the SHORTER `Deep work` wins over `Deep work planning`');
-    assert.notEqual(p.date, null, 'and `friday` is still there for the date parser');
+    assert.equal(p.sectionId, 'sec_deep', '`Deep work planning` does not prefix-match, so `Deep work` files it');
+    assert.notEqual(p.date, null, 'and `friday` is still there for the date parser, never in reach of the token');
   });
 });
 
-// The consequence of shortest-first, pinned deliberately rather than discovered later: typing the
-// LONGER name in full still resolves to the shorter one, and the extra words stay in the title. That is
-// what "stops at the first complete section name" means, and it is the price the ruling accepted to stop
-// the token reaching a word further and competing with the date parser. Tab is the way out, which is why
-// `sectionCompletions` is part of this feature and not a nicety — see the completion tests below.
-test('section token: shortest-first is greedy-but-stopping, even when the longer name is typed in full', () => {
+// The one input the two orders disagree on, and the reason the ruling was reversed. Typing the longer
+// name IN FULL now files under it. Under shortest-first this filed under `Deep work` and stranded the
+// word `planning` in the title — the user spelled out a section name and was ignored.
+test('longest-first: the longer name typed in full claims the whole token', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
     const p = parse(c, '/deep work planning friday');
-    assert.equal(p.sectionId, 'sec_deep');
-    assert.equal(p.rest, 'planning', 'the unclaimed words stay in the title rather than vanishing');
-    assert.equal(c.completeSectionToken('/deep work planning friday', 1), '/Deep work planning planning friday',
-      'and Tab reaches the longer section — the token span is rewritten, nothing else is');
+    assert.equal(p.sectionId, 'sec_plan', 'the words say `Deep work planning`, so that is where it files');
+    assert.equal(p.rest, '', 'and nothing is stranded in the title');
+    assert.notEqual(p.date, null, '`friday` is still the date — the token stopped at the name');
+  });
+});
+
+// The escape hatch now runs the OTHER way, and this is the case the old completion list could not have
+// served: the alternative reading is SHORTER than what matched, so an extensions-only list would have
+// been empty and Tab a dead key. Shortening must also keep the surplus words rather than deleting text
+// the user typed — the result is byte-for-byte the old shortest-first reading, now chosen rather than
+// imposed.
+test('longest-first: Tab reaches the SHORTER section, and the surplus words survive as title text', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const r = c.sectionCompletions('/deep work planning friday');
+    assert.deepEqual(r.names, ['Deep work planning', 'Deep work'],
+      'index 0 is what is already applied, so Tab steps away from it');
+    const after = c.completeSectionToken('/deep work planning friday', 1);
+    assert.equal(after, '/Deep work planning friday',
+      '`planning` stays in the line as title text instead of being deleted');
+    // Text alone cannot carry the choice: the line still spells out the longer name. preferId does.
+    assert.equal(c.matchSectionToken(after, SECTIONS, 'sec_deep').id, 'sec_deep',
+      'preferId pins the shorter section against the longer name still present in the text');
+    assert.equal(c.matchSectionToken(after, SECTIONS).id, 'sec_plan',
+      'and without the pin it resolves the long way again, which is why Tab must pin');
   });
 });
 
@@ -146,21 +170,21 @@ test('section token: with no sections defined, `/anything` is only an offer', ()
 });
 
 // Tab autocomplete — the half of the shortest-first ruling that keeps the longer names reachable.
-test('sectionCompletions: the longer names sharing the typed prefix, shortest first', () => {
+test('sectionCompletions: the alternative readings of the token, the applied one first', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
     const r = c.sectionCompletions('/deep work friday');
     assert.equal(r.token, '/deep work');
     assert.deepEqual(r.names, ['Deep work', 'Deep work planning'],
-      'the match itself is first, so Tab cycles forward from what is already applied');
+      'the match itself is forced to index 0, so Tab cycles away from what is already applied');
   });
 });
 
-test('sectionCompletions: completing rewrites only the token, keeping the rest of the line', () => {
+test('sectionCompletions: extending rewrites the whole token, keeping the rest of the line', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
     assert.equal(c.completeSectionToken('/deep work friday', 1), '/Deep work planning friday');
-    // Cycling wraps back to the shortest rather than dead-ending.
+    // Cycling wraps rather than dead-ending.
     assert.equal(c.completeSectionToken('/deep work friday', 2), '/Deep work friday');
   });
 });

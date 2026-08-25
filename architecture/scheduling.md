@@ -364,6 +364,38 @@ and the render merge step preserves a split whose shared boundary is a Point.
 Recurrence uses `expandTask` and `rruleToRecur`. Recurring occurrences are derived; changes must preserve
 series semantics and recurrence limit/backoff protections.
 
+### The lead window, and the circle that never reaches forward (owner rulings 2026-08-24)
+
+**How far ahead a repeat reaches:** *you never see more than one period ahead, and never more than
+`RECUR_LEAD_MAX_DAYS` (30) ahead.* `recurPeriodDays` is the single definition of a rule's period —
+`recurStartIndex` divides by it rather than keeping a second per-kind table — and `recurLeadDays` is
+`min(period, cap)`. `occWithinLead` measures from the **start of today**, not from `now`, so the answer
+cannot change part-way through a day and flicker a task off the list at an arbitrary hour.
+
+Daily, weekly and monthly repeats are unaffected: their next occurrence is always inside the window. A
+yearly repeat leaves today's surfaces once its occurrence is settled and returns 30 days before the next
+one. **Nothing is deleted** — the series, its overrides and its Gantt row are untouched; the occurrence
+is simply not yet today's business. The gate sits in `originOf`, in the one branch where a done
+occurrence with a live series would otherwise move the task to *Upcoming*.
+
+**The window also decides supersession, and closing that loop fixed an older bug.** "Last Wednesday's
+standup is superseded by next Wednesday's" is true of a weekly rule and false of a yearly one, so
+`isOverdueBucket` treats a pending occurrence as superseding only when it is inside the window — *near
+enough to supersede* is the same question as *near enough to show*. It also had to stop asking
+`isOverdueToday` for the repeat case: that reads `taskDisp` → `currentOcc`, which reports the occurrence
+to **display** and therefore skips a missed one, so a yearly renewal three days overdue reported next
+year's date and read as on time. `hasMissedOcc` asks the stored occurrences instead. An overdue
+occurrence is never gated by the window — that is the standing tenet, and it outranks the noise
+reduction the window exists for.
+
+**`toggleDone` on a repeat is a toggle, not a ladder.** It acts on the first occurrence **on or after
+today**, completing it or un-completing it. The old behaviour advanced — a second click completed the
+NEXT occurrence, which on a yearly series silently marked one twelve months out as done with no way back
+but undo. The target is deliberately not `currentOcc`: that skips completed occurrences, so reading the
+target from it would walk to next year's the instant this year's was done and hand the fast-forward
+straight back. The catch-up branch (clearing every missed occurrence in one click) is unchanged — acting
+on more than one is what that click means.
+
 ## Overlapping fixed blocks are charged once (owner report, 2026-08-19)
 
 The owner: *“the computation of time that is free does not account for the fact that if there is overlap
