@@ -402,6 +402,34 @@ Two guards are load-bearing:
 - **An unreadable rule is never judged.** `recurPeriodDays` and `occStart` both fall back for an
   unrecognised `kind` and their fallbacks **disagree**, so `recurKindKnown` gates the gate. Treating "I
   could not tell" as "hide it" would make legacy data silently vanish from today.
+  **Trap when writing fixtures:** `occStart`'s fallback is *weekly*, and it is silent. The valid `kind`
+  values are the `RECUR_PRESETS` keys — `day · weekday · week · month · year` — **not** the human labels,
+  so a test seeding `kind:'yearly'` gets a weekly series that passes for the wrong reason. Cost a
+  debugging round on 2026-08-25.
+
+### How far a repeat reaches, and why there are two horizons
+
+Three horizons exist and they answer different questions. Confusing them produced the 2026-08-25 defect
+where a yearly birthday displayed a passed occurrence at 100% with no way back.
+
+| horizon | value | question it answers |
+|---|---|---|
+| `_horizon` | `max(furthest non-recurring task end + 75d, max recur.until)` | how far the **chart** is drawn |
+| `occReach(t)` | `recur.until`, else `today + 366d` | what occurrences the **series** has |
+| `nextPendingOcc` | same as `occReach` | what is **owed next** |
+
+`_horizon` is a rendering fact and must never be the last word on a series: a yearly occurrence is ~362
+days out, so it usually falls outside `_horizon` entirely, and an expansion bounded by it contains only
+occurrences that have already passed. `currentOcc` therefore consults `occReach` before falling back to
+`occs[occs.length-1]`, and `toggleDone` consults it for its target so the circle acts on the occurrence
+the row is displaying rather than becoming a dead control.
+
+`occReach` is deliberately **not** folded into `_horizon`: that would expand every daily repeat to 366
+occurrences into `_occById` on each structural change, to fix a case only yearly rules hit.
+
+Moving the DISPLAY forward hides nothing, and this is the invariant to preserve: `isOverdueBucket`
+reports repeats through `hasMissedOcc`, never through `currentOcc`. Pinned by
+`tests/owner-2026-08-25-yearly-completion.test.js`, whose load-bearing negative is exactly that.
 
 `recurBeyondLeadToday` caches per paint (`_leadGate`, dropped wherever `_occById` is), because
 `nextPendingOcc` expands up to `RECUR_MAX` occurrences and the predicate runs inside per-task-per-day
