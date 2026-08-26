@@ -45,3 +45,6 @@ supabase/.temp/
 # Alpha usage tracker output (block 31). The local sink in tools/static-server.mjs appends session
 # .jsonl files here. It is instrumentation of the owner's own sessions, not project data — never commit it.
 .telemetry/
+
+# Superpowers brainstorming scratch (visual companion mockups)
+.superpowers/

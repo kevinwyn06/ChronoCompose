@@ -5732,7 +5732,12 @@ class Component extends DCLogic {
         idxs.forEach(oi=>{ const o={...(t.recur.overrides[oi]||{})}; if(done){o.pct=100;o.completion=o.completion||Date.now();}else{o.pct=0;o.completion=null;} t.recur.overrides[oi]=o; }); });
       const overdue=occs.filter(o=>o.start<todayStart && this.occPct(tt,o.idx)<100).map(o=>o.idx);
       if(overdue.length){ setDone(overdue,true); return; }
-      const target=occs.find(o=>o.start>=todayStart);
+      /* PP-EXT (owner report 2026-08-25): same wider reach as `currentOcc`, so the circle acts on the
+         occurrence the row is DISPLAYING. Without it a yearly repeat whose next occurrence sits outside
+         `_horizon` had no target at all, and once catch-up had cleared its missed occurrence the circle
+         became a dead control — a click that did nothing, on a row that showed a live date. */
+      let target=occs.find(o=>o.start>=todayStart);
+      if(!target && tt.recur) target=this.occReach(tt).find(o=>o.start>=todayStart);
       if(target) setDone([target.idx], this.occPct(tt,target.idx)<100);
       return; }
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
@@ -5997,12 +6002,39 @@ class Component extends DCLogic {
   }
   /* PP-EXT: the "current" instance of a repeat = the first uncompleted occurrence on/after today. This is what
      the table dates and the first Gantt block reflect; completing it advances to the next (see toggleDone). */
+  /* PP-EXT (owner report 2026-08-25): a repeat's occurrences on the SERIES' own horizon rather than the
+     chart's. `_horizon` is `max(furthest non-recurring task end + 75d, recur.until)`, so a YEARLY
+     occurrence (~362 days out) usually falls outside it and the expansion contains only occurrences that
+     have already passed. Same 366-day reach `nextPendingOcc` has used since 2026-08-24, and for the same
+     reason: how far ahead the CHART is drawn is not a fact about the series.
+     Deliberately NOT folded into `_horizon` itself — that would make every daily repeat expand 366
+     occurrences into `_occById` on each structural change, to fix a case only yearly rules hit. */
+  occReach(t){
+    const B=this.startOfToday();
+    const horizon = (t.recur && t.recur.until!=null) ? t.recur.until : B + 366*this.DAY;
+    return this.expandTask(t, horizon);
+  }
   currentOcc(t){
     const occs=(this._occById&&this._occById[t.id])||this.expandTask(t,this._horizon||t.end);
     const todayStart=this.startOfToday();
-    return occs.find(o=>o.start>=todayStart && this.occPct(t,o.idx)<100)
-        || occs.find(o=>o.start>=todayStart)
-        || occs[occs.length-1] || {idx:0,start:t.start,end:t.end};
+    const hit = occs.find(o=>o.start>=todayStart && this.occPct(t,o.idx)<100)
+             || occs.find(o=>o.start>=todayStart);
+    if(hit) return hit;
+    /* PP-EXT (owner ruling 2026-08-25): *"If it's not in the expansion horizon then it should not be both
+       completed and shown at the same time altogether."* Falling straight through to `occs[last]` showed
+       a PASSED occurrence — and once the catch-up branch of `toggleDone` had marked it done, the row read
+       as a completed task with a date three days behind it and no way back. Reaching wider first is the
+       whole fix; it is display-side, and `toggleDone`'s catch-up is untouched.
+       Nothing is hidden by moving the display forward: `isOverdueBucket` reports repeats through
+       `hasMissedOcc`, never through `currentOcc`, precisely so the two cannot be confused. */
+    if(t.recur){
+      const wide=this.occReach(t);
+      const far = wide.find(o=>o.start>=todayStart && this.occPct(t,o.idx)<100)
+               || wide.find(o=>o.start>=todayStart);
+      if(far) return far;
+    }
+    /* A BOUNDED series with nothing left ahead genuinely has only its past to show. */
+    return occs[occs.length-1] || {idx:0,start:t.start,end:t.end};
   }
   currentOccIdx(t){ return this.currentOcc(t).idx; }
   mostRecentOccIdx(t){
