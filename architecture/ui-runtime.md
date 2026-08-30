@@ -845,3 +845,104 @@ where the arrow still says which number feeds which because a card has no column
 strip (`CAP_STRIP_H` and the reserved height with it); the Today view's active-task banner, Pomodoro bar
 and music dock (Focus keeps the panel and the dock, and the pomo state machine is untouched); the
 alternating hour band; and the `+15 min` button, replaced by a box that SETS today's tracked minutes.
+
+## The filter bar (2026-08-25 redesign)
+
+The Phase 7/C3 bar carried thirteen controls — five smart chips, four priority dots behind a
+`Filters ▾` popover, a Sort select plus a direction chip, a Group select, and a field/contains pair.
+Owner ruling: *"active today and startable and overdue and running are not selectors I would ever click
+on. Get rid of the sort dropdown. The grouping shouldn't be a dropdown. I want a search bar where while
+typing it gives a preview and when hitting enter it generates a filter view."*
+
+The bar is now one row: a search field taking the leftover width, a **Horizon** segmented control, the
+one surviving `Unplanned` chip, a **Group** segmented control (`Section | Incl` — `none` is deleted),
+`+ Section`, `Clear all`, then the untouched `leading` slot (List/Selection toggle and the six view
+tabs). Horizon and Group share the segmented idiom on purpose: both answer "pick exactly one of N".
+
+### Two parallel systems, never both authoritative
+
+The chip/horizon/group path keeps the existing `state.chips` / `state.colFilters` / `state.groupBy`
+plumbing. Search gets its own pure `(text) → AST` parser and `(task, AST) → bool` evaluator.
+`filterTasks` stays the single entry point and dispatches to **exactly one** of the two.
+
+### The search grammar
+
+| Token | Means |
+|---|---|
+| bare words | substring over name **and** description |
+| `"two words"` | phrase |
+| `/section` | section name, prefix-matched |
+| `@tag` | label |
+| `p1` … `p4` | priority |
+| `by:` `before:` `after:` `due:` `start:` | dates, through `parseDateText` |
+| `calendar:` | source calendar name |
+| `is:unplanned\|done\|running\|overdue\|recurring\|milestone` | the retired smart chips |
+| `-` prefix on any token | negation |
+
+**Same-type tokens OR; different types AND.** `@work @home` is "either tag"; `@work p1` is "both".
+Negation produces a *separate* group, so `@work -@home` reads "tagged work AND not tagged home" rather
+than an OR over a mixed bag. Dates route through `parseDateText` — the same parser quick-add and the
+When line use — so the language cannot drift from them and needs no date code of its own. Nothing
+throws: an unrecognised token degrades to free text.
+
+`is:unplanned` delegates to `matchChip(t,'unplanned',{})`, so the one surviving chip and its search
+spelling cannot disagree. The placeholder **is** the grammar; there is no help popover by design.
+
+### Invocation and preview
+
+`s` opens and focuses the field, under the same guard as `q` (`isEditingTarget` excludes every editing
+target, contentEditable included, plus ctrl/meta and an open detail panel). `/` is deliberately left
+free. Typing shows a match count via `searchPreviewCount`, computed off `state.tasks` and **never**
+through `visibleTasks` — the sheet must not move while the user is still typing. Enter applies; Escape
+clears and blurs.
+
+### Suspension is read-time, and writes nothing
+
+Owner ruling: *"When search is active all other filters/sorts are saved and overridden. They will be
+recovered when exiting the search view."* Implemented as **read-time suspension**, not
+snapshot-and-rewrite. `state.horizon`, `chips`, `colFilters`, `groupBy` and `sort` are never touched
+while a search runs; every reader asks `searchActive()` / `effectiveSort()` / `effectiveGroupBy()`
+instead. "Restored exactly" is therefore **the absence of a write** — it cannot drift, cannot
+half-apply, and cannot strand the user mid-search if the tab dies. It is also what keeps the two systems
+from ever both being authoritative. While a search runs the horizon and group controls are visibly
+**parked** (dimmed, `pointerEvents:none`) rather than removed: the user must be able to see what is
+coming back.
+
+### The horizon slider
+
+`horizonMatch(t, B, days)` = the task's span reaches into `[B, B+days]` **or** `t.included === true`
+(owner: *"Include if a task has any overlap with the window filter, or if the user has included it."*).
+Two consequences fall out of sharing the span derivation with `onListNow` rather than restating it:
+
+- a **dateless task passes every horizon** for free — `ghostSpan` anchors it at today, so it reaches any
+  window starting today. That holds the standing tenet (the laziest path never silently drops a task)
+  with no special case to keep in sync. Note the premise correction: a dateless task is not "always
+  included today"; it is the ghost span, not inclusion, that carries it through.
+- an explicitly included task always survives, whatever its dates say.
+
+The **near edge is deliberately open**: a span entirely in the past still matches, because overdue work
+must never leave the surface. Repeats are answered from the recurrence rule — `occReach` expands once on
+the series' horizon and asks whether any occurrence starts at or before the far edge — never by scanning
+days, so a 1y horizon does not cost 365 packs. Clicking the **active** notch clears the horizon, which
+is what keeps it one control instead of seven.
+
+### The `check` column is the priority column
+
+Owner: *"Make the first column the priority column. There's no instance in which we'd want to sort
+completed/uncompleted anyways."* This adds **no column** — `check` already *was* the priority readout
+(`taskDoneCircle` fills its circle with `PCOL[t.priority]`, and right-click cycles priority); it lacked
+only a header and a sort key. It stays `lock:true` (not hideable, reorderable or selectable), so
+sortability had to come apart from `lock`: `sortKeyOf(k)` resolves a column's sort key (`check` →
+`priority`), and both the header and the column context menu route through it so the two cannot
+disagree. A locked-but-sortable header gets a plain `onClick` rather than reaching `headPointerDown`,
+which owns reorder-drag and ctrl-click selection — neither of which a locked column allows.
+
+### Prefs migration
+
+`migrateFilterPrefs(pf)` is pure over the raw prefs object: retired chip keys are dropped (`unplanned`
+survives), `groupBy:'none'` folds to `'section'`, a saved sort naming `tags`/`calendar` is cleared (both
+stay *filterable* via `@tag` / `calendar:`, but neither has a column and the Sort select is gone), and
+`horizon` is validated against `HORIZONS` so a hand-edited pref cannot produce a phantom window.
+`colFilters` is deliberately untouched — `colFilters.priority` is still a supported spec, simply no
+longer authored by a chip.
+

@@ -90,24 +90,24 @@ test('numeric range filter: priority/planned min & max are inclusive', () => {
   assert.ok(!c.matchColFilter(p1,'planned',{min:60}));
 });
 
-test('priority set filter: matches membership; togglePriority toggles P-chips (multi-select)', () => {
+/* PP-EXT (owner 2026-08-25, filter-bar redesign): `togglePriority` is DELETED with the "Filters ▾"
+   popover's P1–P4 chips. The colFilters.priority SPEC it authored is deliberately still supported — the
+   prefs migration preserves a stored one and the `check` column's context menu still writes it — so this
+   test keeps proving the spec and its mutator, and drops only the retired chip helper. */
+test('priority set filter: matches membership; setColFilter still authors the spec', () => {
   const c = make();
-  const p1=T(c,{priority:1}), p2=T(c,{priority:2}), p4=T(c,{priority:4});
+  const p1=T(c,{priority:1}), p2=T(c,{priority:2});
   // set-membership on the num column
   assert.ok(c.matchColFilter(p1,'priority',{set:[1,3]}));
   assert.ok(!c.matchColFilter(p2,'priority',{set:[1,3]}));
   assert.ok(c.filterActive({set:[1]}));
   assert.ok(!c.filterActive({set:[]}));
-  // togglePriority adds, then multi-selects, then removes — clearing the spec when empty
+  assert.equal(typeof c.togglePriority, 'undefined', 'the P1–P4 chip mutator is gone with its chips');
   const pset=()=>Array.from(c.state.colFilters.priority.set); // cross-realm array → this realm's prototype
   c.state.colFilters = {};
-  c.togglePriority(1);
-  assert.deepEqual(pset(), [1]);
-  c.togglePriority(4);
+  c.setColFilter('priority', {set:[1,4]});
   assert.deepEqual(pset(), [1,4]);
-  c.togglePriority(1);
-  assert.deepEqual(pset(), [4]);
-  c.togglePriority(4);
+  c.setColFilter('priority', {set:[]});
   assert.equal(c.state.colFilters.priority, undefined); // empty set drops the whole spec
 });
 
@@ -134,14 +134,17 @@ test('filterTasks ANDs active column filters and is inert when none are set', ()
 // ---------------------------------------------------------------------------
 // Smart chips — matchChip
 // ---------------------------------------------------------------------------
-test('startable chip: true only when every dependency is 100% complete', () => {
+/* PP-EXT (owner 2026-08-25): the four retired chips — *"active today and startable and overdue and
+   running are not selectors I would ever click on."* `matchChip` knows only `unplanned` now, and an
+   unknown chip key falls through to its permissive default rather than filtering by a deleted rule. */
+test('the four retired chips are gone from matchChip and from SMART_CHIPS', () => {
   const c = make();
   const done=T(c,{id:'d',pct:100}), open=T(c,{id:'o',pct:40});
   const byId={d:done,o:open};
-  assert.ok(c.matchChip(T(c,{deps:[]}), 'startable', byId));
-  assert.ok(c.matchChip(T(c,{deps:['d']}), 'startable', byId));
-  assert.ok(!c.matchChip(T(c,{deps:['o']}), 'startable', byId));
-  assert.ok(!c.matchChip(T(c,{deps:['d','o']}), 'startable', byId));
+  assert.deepEqual(Array.from(c.SMART_CHIPS()).map(x=>x.k), ['unplanned'], 'Unplanned is the only surviving chip');
+  for (const k of ['activeToday','startable','overdue','running']) {
+    assert.ok(c.matchChip(T(c,{deps:['o']}), k, byId), k+' no longer filters anything');
+  }
 });
 
 test('unplanned chip: planned==0, not complete, not a milestone', () => {
@@ -152,16 +155,18 @@ test('unplanned chip: planned==0, not complete, not a milestone', () => {
   assert.ok(!c.matchChip(T(c,{planned:0,type:'Milestone'}), 'unplanned', {}));
 });
 
-test('overdue chip: past due and under 100%; running chip reflects the timer map', () => {
+/* PP-EXT (owner 2026-08-25): overdue and running survive their chips as `is:` SEARCH tokens, which is
+   where an occasional need for them belongs. Same rules, asserted through their new spelling. */
+test('is:overdue is past due and under 100%; is:running reflects the timer map', () => {
   const c = make();
   const late=T(c,{start:Date.now()-3*DAY,end:Date.now()-DAY,pct:20,allDay:false});
   const future=T(c,{start:Date.now()+DAY,end:Date.now()+2*DAY,pct:0});
-  assert.ok(c.matchChip(late,'overdue',{}));
-  assert.ok(!c.matchChip(future,'overdue',{}));
-  assert.ok(!c.matchChip(T(c,{end:Date.now()-DAY,pct:100}),'overdue',{}));
+  assert.ok(c.searchIsMatch(late,'overdue'));
+  assert.ok(!c.searchIsMatch(future,'overdue'));
+  assert.ok(!c.searchIsMatch(T(c,{end:Date.now()-DAY,pct:100}),'overdue'));
   const run=T(c,{id:'r1'}); c.state.running = { r1:{startedAt:Date.now()-1000, beat:Date.now()} };
-  assert.ok(c.matchChip(run,'running',{}));
-  assert.ok(!c.matchChip(T(c,{id:'r2'}),'running',{}));
+  assert.ok(c.searchIsMatch(run,'running'));
+  assert.ok(!c.searchIsMatch(T(c,{id:'r2'}),'running'));
 });
 
 // ---------------------------------------------------------------------------

@@ -206,3 +206,34 @@ The browser holds only a short-lived access token in memory. The refresh token i
 notifications are content-free prompts to pull; they do not send calendar contents through the webhook.
 
 For OAuth QA, follow the account/origin restrictions in `AGENTS.md` and never reload mid-session.
+
+### Per-calendar import lookahead (2026-08-25)
+
+Owner ask: *"Make a toggle for calendars making them short term input with a config for how long into the
+future it looks (e.g. 1 month) or else birthdays and holidays will pile up and completely saturate the
+planning page."*
+
+The toggle and the length are **per calendar**, stored as `gcal.lookahead[calendarId] = {shortTerm, len}`
+where `len` is one of `1w · 1m · 3m · 6m · 1y · all`. `calLookaheadDays(cid)` resolves that to a day count,
+or `null` for unlimited — which is the answer for an unconfigured calendar, for `shortTerm:false`, and for
+`len:'all'`. **The default is unlimited, so nothing changes until a calendar is actually made short-term.**
+A birthday calendar can be capped at a month while a work calendar stays unrestricted.
+
+`gcal.lookahead` is persisted by `saveGcal` and re-read by `loadGcal`. Both mattered: `saveGcal` writes a
+**whitelist** of keys rather than the whole object, so a key added to only one side would work for a session
+and silently forget itself on reload.
+
+Two places consume it, and they cover new and existing events respectively:
+
+- `gcalImport` builds **`timeMax` per calendar** (`farFor(cid)`) instead of one global `g.window` bound. The
+  global window remains the fallback for any calendar without its own setting.
+- `pruneOutOfWindow(tasks, cid, farMs)` runs in **both** apply branches (the silent clone and the explicit
+  commit), dropping rows already stored beyond a now-shortened window. Without it, turning a calendar
+  short-term would only affect future imports and the existing pile-up would stay.
+
+The prune requires an `eventId` and matches on `calendarId`, so a locally created task can never be removed
+by a calendar's window, and one calendar's setting never touches another's rows. It writes **no tombstone**,
+which is deliberate: a pruned event must re-import on its own once it comes into range.
+
+Distinct from the filter bar's horizon slider, which shares the goal and none of the code: the **slider
+hides** far-future work that exists; **this stops it existing**. See `architecture/ui-runtime.md`.

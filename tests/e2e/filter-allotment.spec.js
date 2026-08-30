@@ -24,7 +24,10 @@ const settings = {
   minChunk: 30, breakMin: 0,
 };
 
-/* Three tasks, three priorities, so the P1 chip keeps exactly one row and hides two. */
+/* Three tasks, three priorities. The P1 quick-filter chip that used to drive this spec was DELETED with
+   the "Filters ▾" popover in the 2026-08-25 filter-bar redesign, so the filter is applied through a
+   surviving control instead. What the spec is ABOUT is unchanged: a real click on a real filter, reaching
+   the real render path, must not re-divide the day's pool. */
 const tasks = [
   task('f-a', 'Alpha', { start: '0d', end: '+1d', priority: 1, planned: 120 }),
   task('f-b', 'Beta', { start: '0d', end: '+1d', priority: 2, planned: 120 }),
@@ -39,12 +42,15 @@ test('a sheet filter does not change "Allotted today"', async ({ page }) => {
   const wasAlpha = before['f-a'];
   expect(wasAlpha, 'Alpha holds a real slice of the pool').toBeGreaterThan(0);
 
-  /* Apply a real filter: the P1 quick-filter chip, which lives behind the filter bar's
-     "Filters ▾" popover since the C3 demotion. */
-  await page.locator('[title^="More filters"]').first().click();
-  await page.locator('[title="Filter to P1"]').first().click();
-  await expect(page.locator('[data-task-id="f-b"]'), 'the filter really hid the P2 row').toHaveCount(0);
-  await expect(page.locator('[data-task-id="f-a"]'), 'the P1 row survived').toHaveCount(1);
+  /* Apply a real filter through the redesigned bar: `s` opens the search field, and a query that names
+     one task hides the other two. Same shape of proof as the retired P1 chip — a trusted click/keystroke
+     on the real control, filtering the real sheet. */
+  await page.keyboard.press('s');
+  await expect(page.locator('[data-pp-search="1"]')).toBeFocused();
+  await page.keyboard.type('Alpha');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('[data-task-id="f-b"]'), 'the filter really hid the Beta row').toHaveCount(0);
+  await expect(page.locator('[data-task-id="f-a"]'), 'the Alpha row survived').toHaveCount(1);
 
   const after = await allottedByTask(page);
   expect(after['f-a'],

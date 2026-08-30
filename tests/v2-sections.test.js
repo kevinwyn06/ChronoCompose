@@ -339,7 +339,10 @@ test('V2.6 inline rename commits a trimmed name and ignores an empty one', () =>
   assert.equal(c.state.sections.find(s => s.id === 's1').name, 'Deep work', 'blank is refused, old name kept');
 });
 
-test('V2.6 Group by: None yields one flat, header-less band containing every task', () => {
+/* PP-EXT (owner 2026-08-25, filter-bar redesign): Group by: None is DELETED as an option — the Group
+   control is a two-notch segmented control now, Section | Incl. The old flat-band assertion is replaced
+   by its successor: 'none' can no longer be reached, and a stored one degrades to 'section'. */
+test('V2.6 Group by: None is retired — it folds back to Section', () => {
   const c = make();
   c.state.sections = secs(c);
   const tasks = [
@@ -351,11 +354,12 @@ test('V2.6 Group by: None yields one flat, header-less band containing every tas
   /* s1 (has 'a'), s2 (declared, empty), No section (has 'b') */
   assert.equal(c.sectionProjection(tasks).length, 3, 'grouped: a band per section plus No section');
 
+  c.setGroupBy('none');
+  assert.equal(c.state.groupBy, 'section', 'the mutator refuses none');
+  assert.equal(c.migrateFilterPrefs({ groupBy:'none' }).groupBy, 'section', 'a stored none is migrated away');
+  /* Even if 'none' were forced into state by hand, no flat band is produced any more. */
   c.state.groupBy = 'none';
-  const flat = c.sectionProjection(tasks);
-  assert.equal(flat.length, 1);
-  assert.equal(flat[0].flat, true, 'the flag both panes read to skip TAG_SECTION_H in lock-step');
-  assert.deepEqual(flat[0].tasks.map(t => t.id), ['a', 'b']);
+  assert.equal(c.sectionProjection(tasks).length, 3, 'no flat, header-less band survives');
 });
 
 /* ---- V2.6b: drag. Sections were reorderable only by ▲▼, and a task could only change section through the

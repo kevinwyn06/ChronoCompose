@@ -689,6 +689,7 @@ class Component extends DCLogic {
        (product-vision §10.1 / ROADMAP V0). Only when there's no saved pf.mainView; a returning user's choice wins. */
     const ppMainView = (pf.mainView==='calendar') ? 'month' : (pf.mainView || 'dashboard');
     const ppViewSplit = Object.assign({cal:78, agenda:78}, pf.viewSplit||{});
+    const fmig=this.migrateFilterPrefs(pf); /* PP-EXT (owner 2026-08-25): filter-bar redesign prefs migration */
     this.state = { tasks:seed, dayW:42, selectedIds:[], hoverId:null,
       splitPct: ppViewSplit[this.splitKeyFor(ppMainView)], viewSplit:ppViewSplit, /* PP-EXT */
       detailId:null, menu:null,
@@ -705,7 +706,9 @@ class Component extends DCLogic {
       pomo:this.loadPomo(), /* PP-EXT Phase 10: active pomodoro session {taskId,phase,phaseStart,cycle} or null (pp-pomo) */
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
       sections:this.loadSections(), /* PP-EXT V2.6: pp-sections container entity (see tasksBySection) */
-      groupBy: (pf.groupBy==='none'||pf.groupBy==='inclusion')?pf.groupBy:'section', /* PP-EXT V2.6 + V2.9 §6: 'section' | 'inclusion' | 'none' — 'none' renders one flat list, no headers; 'inclusion' splits Included/Excluded (persisted in pp-prefs) */
+      groupBy: fmig.groupBy, /* PP-EXT V2.6 + V2.9 §6, narrowed 2026-08-25: 'section' | 'inclusion' ('none' deleted) */
+      horizon: fmig.horizon, /* PP-EXT (owner 2026-08-25): null | 1w|2w|1m|3m|6m|1y — the lookahead slider, persisted in pp-prefs */
+      searchText:'', searchQuery:null, searchOpen:false, /* PP-EXT (owner 2026-08-25): draft text, APPLIED query (null = no search), field mounted. UI-only, NOT persisted — a reload leaves no search running, and the suspended filters were never overwritten to begin with. */
       collapsedSections: pf.collapsedSections||{}, /* PP-EXT V2.6: section id → 1 when collapsed (view pref, persisted) */
       secEdit:null, /* PP-EXT V2.6: id of the section header being renamed inline — UI-only, not persisted */
       journal:this.loadJournal(), journalDay:null, /* PP-EXT Phase 9: pp-journal {ymd:{text,updatedAt}}; journalDay=null → today */
@@ -720,12 +723,11 @@ class Component extends DCLogic {
       journalPromptsEdit:false,
       journalCollapse:{done:true,actuals:true,planning:false}, /* PP-EXT C2/Phase D: right-rail collapse state for Done Today/Actuals/Needs Planning — UI-only, not persisted. Needs Planning starts expanded per Phase D brief. */
       zoomMoreOpen:false, /* PP-EXT C3: toolbar zoom-presets overflow ("More ▾") open/closed — UI-only, not persisted */
-      filterMoreOpen:false, /* PP-EXT C3: filter-bar "Filters ▾" popover (priority + tag/calendar search) open/closed — UI-only, not persisted */
       collapsed:pf.collapsed||{}, /* PP-EXT: subtask collapse state (view pref, persisted in pp-prefs) */
       descOpen:pf.descOpen||{}, /* PP-EXT: task ids whose inline description panel is expanded (persisted in pp-prefs) */
       /* PP-EXT Phase 7: sort/filter view state (persisted in pp-prefs; render-time only — never mutates pp-tasks order).
          sort={key,dir}|null (null=manual order); colFilters={[key]:spec}; chips=[] active smart-chip keys. */
-      sort:pf.sort||null, colFilters:pf.colFilters||{}, chips:Array.isArray(pf.chips)?pf.chips:[],
+      sort:fmig.sort, colFilters:pf.colFilters||{}, chips:fmig.chips,
       spentScope: pf.spentScope==='life' ? 'life' : 'today', /* PP-EXT: Spent-cell scope — 'today' (per-day ledger) or 'life' (lifetime total); persisted in pp-prefs */
       /* PP-EXT Phase D: Dashboard's fixed full-screen mode. PP-EXT V5 (block 27a): the enum is back to
          overview|focus|review — 'Plan' was a tab for one release and is now two surfaces of Overview's left
@@ -820,10 +822,13 @@ class Component extends DCLogic {
   saveSettings(patch){ const s=Object.assign({}, this.state.settings, patch); this.setState({settings:s}); try{ this.lsSet('pp-settings', JSON.stringify(s)); }catch(e){} }
   loadGcal(){ const cfg=(window.PP_CONFIG&&window.PP_CONFIG.googleClientId)||''; /* PP-EXT: Client ID from config.js by default */
     try{ const saved=JSON.parse(this.lsGet('pp-gcal')||'{}');
-      return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg)}); }
-    catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30}; } }
+      return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{}}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg),lookahead:(saved.lookahead||{})}); }
+    catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{}}; } }
+  /* PP-EXT (owner 2026-08-25): `saveGcal` persists a WHITELIST, not the whole object, so `lookahead` had
+     to be added in BOTH directions or a calendar's short-term setting would survive only until reload. */
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
     try{ this.lsSet('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
+      lookahead:g.lookahead||{}, /* PP-EXT (owner 2026-08-25): per-calendar import lookahead */
       ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
   /* PP-EXT B2: Supabase sync UI state. connected/session are NEVER persisted (rule 5 — re-auth on reload,
      same tradeoff as the gcal token); only the last-used email is remembered to pre-fill the sign-in field.
@@ -1465,7 +1470,13 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-17, Chain 6 block 45): Start and End return as ordinary columns. Their
          compact two-line cells carry date plus an explicit clock, and hand off to the existing picker.
          Their compact two-line cells ellipsize rather than wrap. */
-      {k:'check',w:50,lock:true},{k:'name',w:180,l:'Task'},
+      /* PP-EXT (owner ruling 2026-08-25): *"Make the first column the priority column. There's no instance
+         in which we'd want to sort completed/uncompleted anyways."* This is NOT a new column and does not
+         breach the no-new-columns rule — `check` already IS the priority readout: `taskDoneCircle` fills
+         its circle with `d.pcol = PCOL[t.priority]`, and right-click cycles priority. All it lacked was a
+         header and a sort key. It stays `lock:true`: not hideable, not reorderable, not selectable.
+         `sortValue('priority')` already exists and is unchanged (1 = highest, so ascending shows P1 first). */
+      {k:'check',w:50,lock:true,l:'!',sortKey:'priority'},{k:'name',w:180,l:'Task'},
       {k:'start',w:70,l:'Start'},{k:'end',w:70,l:'End'},
       /* PP-EXT (owner 2026-08-20, Task 27): two columns, not one cell with an arrow in it. `planned`
          keeps its key so every saved colW/colHidden/colOrder still names the column it always named;
@@ -1862,6 +1873,11 @@ class Component extends DCLogic {
       /* PP-EXT: "q" opens the centered quick-add popup (was: focus the always-on quick-add bar, now removed);
          renderQuickAddPopup's input ref-callback focuses itself on mount. */
       if(k==='q'){ e.preventDefault(); this.trackAction('quickadd.open',{ via:'key' }); /* PP-EXT (31) */ this.setState({quickOpen:true}); return; }
+      /* PP-EXT (owner 2026-08-25): "s" opens and focuses the filter bar's search field. Safe as a bare
+         letter for exactly the reason q/a/u/n are: the guard above already excludes every editing target,
+         contentEditable included, plus ctrl/meta and an open detail panel. `/` is deliberately left free. */
+      if(k==='s'){ e.preventDefault(); this._searchFocus=true; this.trackAction('search.open',{ via:'key' }); /* PP-EXT (31) */
+        this.setState({searchOpen:true}); return; }
       if(e.key==='a'){ e.preventDefault(); this.addTask('bottom'); return; }
       if(e.key==='A'){ e.preventDefault(); this.addTask('top'); return; }
       if(k==='u'){ e.preventDefault(); this.undo(); return; }
@@ -3851,8 +3867,9 @@ class Component extends DCLogic {
              Object.assign({},exc,{collapsed:collapsedOf(exc.id,true)}) ];
   }
   sectionProjection(tasks){
-    if((this.state.groupBy||'section')==='none') return [{id:null,name:null,flat:true,collapsed:false,tasks:(tasks||[]).slice()}];
-    if(this.state.groupBy==='inclusion') return this.inclusionProjection(tasks); /* PP-EXT V2.9 §6 */
+    /* PP-EXT (owner 2026-08-25): the groupBy:'none' flat projection is DELETED with the option. Every
+       stored 'none' resolves to 'section' in migrateFilterPrefs, so nothing reaches here with it. */
+    if(this.effectiveGroupBy()==='inclusion') return this.inclusionProjection(tasks); /* PP-EXT V2.9 §6 */
     /* `collapsed` is stamped HERE, once, so the sheet, the Gantt, and the flattened _visTasks list all read
        the same field. Collapse must remove rows from _visTasks too, not just from the painted output:
        _yTop is indexed by that list and rowAtY asserts the two lengths match (see rowAtY), so hiding rows
@@ -3977,9 +3994,37 @@ class Component extends DCLogic {
      `incl`, so it sorts on the RESOLVED value — grouping every reserved task together is the question a
      user sorting this column is asking, and whether the answer was typed or derived is not part of it. */
   SORT_KEYS(){ return ['name','incl','start','end','dur','planned','spent','predicted','pct','exact','priority','tags','calendar']; }
-  SMART_CHIPS(){ return [
-    {k:'activeToday', l:'Active today'}, {k:'startable', l:'Startable'}, {k:'unplanned', l:'Unplanned'},
-    {k:'overdue', l:'Overdue'}, {k:'running', l:'Running'} ]; }
+  /* PP-EXT (owner 2026-08-25, filter-bar redesign): the horizon slider's six notches, in order, as
+     {k,l,days}. `null` (no notch) means no horizon filter at all. Days are calendar days added to
+     today's midnight; months are approximated by 30/91/183 and a year by 365 — the slider is a coarse
+     "how far ahead am I looking" control, not a calendar computation. */
+  HORIZONS(){ return [ {k:'1w',l:'1w',days:7}, {k:'2w',l:'2w',days:14}, {k:'1m',l:'1m',days:30},
+    {k:'3m',l:'3m',days:91}, {k:'6m',l:'6m',days:183}, {k:'1y',l:'1y',days:365} ]; }
+  horizonDays(k){ const e=this.HORIZONS().find(x=>x.k===k); return e?e.days:null; }
+  /* PP-EXT (owner 2026-08-25): pp-prefs migration for the filter-bar redesign. Pure over the raw prefs
+     object so it is unit-testable and so the constructor stays a list of assignments.
+       • the four retired smart chips are unknown keys now — dropped, Unplanned kept
+       • groupBy 'none' was deleted as an option — folds to 'section'
+       • a saved sort naming `tags`/`calendar` is unreachable now that the Sort select is gone and neither
+         has a column, so it is cleared rather than left silently in effect
+       • horizon is validated against HORIZONS so a hand-edited pref cannot produce a phantom window
+     colFilters is deliberately untouched: colFilters.priority is still a supported spec, it is simply no
+     longer authored by a chip. */
+  migrateFilterPrefs(pf){
+    pf=pf||{};
+    const keep=this.SMART_CHIPS().map(c=>c.k);
+    const chips=(Array.isArray(pf.chips)?pf.chips:[]).filter(k=>keep.indexOf(k)>=0);
+    const groupBy=(pf.groupBy==='inclusion')?'inclusion':'section';
+    const s=pf.sort;
+    const sort=(s&&s.key&&this.SORT_KEYS().indexOf(s.key)>=0&&s.key!=='tags'&&s.key!=='calendar')?s:null;
+    const horizon=this.HORIZONS().some(x=>x.k===pf.horizon)?pf.horizon:null;
+    return {chips, groupBy, sort, horizon};
+  }
+  /* PP-EXT (owner 2026-08-25): four of the five smart chips are DELETED — *"active today and startable
+     and overdue and running are not selectors I would ever click on."* They survive as `is:` search
+     tokens (`searchIsMatch`), which is where an occasional need for them belongs.
+     `unplanned` STAYS: it answers a question no date can — which tasks have no time budgeted. */
+  SMART_CHIPS(){ return [ {k:'unplanned', l:'Unplanned'} ]; }
   colType(k){ /* type drives the comparator + the filter widget */
     if(k==='name'||k==='tags'||k==='calendar') return 'text';
     if(k==='start'||k==='end') return 'date';
@@ -4056,26 +4101,86 @@ class Component extends DCLogic {
     if(f.set&&f.set.length && f.set.indexOf(v)<0) return false;
     if(f.min!=null && v<f.min) return false; if(f.max!=null && v>f.max) return false; return true;
   }
+  /* PP-EXT (owner 2026-08-25): the horizon slider's match rule. Owner ruling: *"Include if a task has
+     any overlap with the window filter, or if the user has included it."*
+
+         horizonMatch(t, B, days) = spanOf(t, B) reaches into [B, B+days]  ||  t.included === true
+
+     The span derivation is SHARED with `onListNow` rather than restated, and two consequences fall out
+     for free because of that:
+       • a DATELESS task passes every horizon — `ghostSpan` anchors it at today, so it reaches any window
+         starting today. That is the standing tenet (the laziest path never silently drops a task) held
+         with no special case to keep in sync. Note the premise correction the spec records: a dateless
+         task is not "always included today" — `onListNow` returns `t.included===true` for it. It is the
+         GHOST SPAN, not inclusion, that carries it through the horizon.
+       • an explicitly pressed task always survives, whatever its dates say.
+     The NEAR edge is deliberately open: a span entirely in the past still matches, because overdue work
+     must never leave the surface (the same rule `isOverdueBucket` holds, restated so the two agree).
+
+     REPEATS are answered from the rule, never by scanning days: `occReach` expands once on the SERIES'
+     horizon and asks whether any occurrence starts at or before the far edge. A 1y horizon must not cost
+     365 packs — "the day the packer will actually place it" is the truest reading of *scheduled* and was
+     rejected for exactly that reason (`buildDayTimeline` packs one day at a time).
+     PURE over (task, B, days) → unit-tested. */
+  horizonMatch(t, B, days){
+    if(!t) return false;
+    if(t.included===true) return true;
+    const far=B+days*this.DAY;
+    if(t.recur && this.isScheduled(t)) return this.occReach(t).some(o=>o.start<=far);
+    const win=this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, B);
+    if(!win || win.start==null) return true; /* no derivable span → never hidden */
+    return win.start<=far;
+  }
   matchChip(t, chip, byId){
     switch(chip){
-      case 'activeToday': return this.isActiveToday(t);
-      case 'startable':   return (t.deps||[]).every(id=>{ const d=byId[id]; return !d || (+d.pct||0)>=100; });
-      case 'unplanned':   return (+t.planned||0)===0 && (+t.pct||0)<100 && t.type!=='Milestone'; /* needs planning (feeds Phase 9) */
-      case 'overdue':     return (+t.pct||0)<100 && this.dueMsOf(t, this.startOfToday()) < Date.now();
-      case 'running':     return this.isRunning(t.id);
+      /* PP-EXT (owner 2026-08-25): activeToday / startable / overdue / running are DELETED with their
+         chips. They live on as `is:` search tokens — see `searchIsMatch`. */
+      case 'unplanned': return (+t.planned||0)===0 && (+t.pct||0)<100 && t.type!=='Milestone'; /* needs planning (feeds Phase 9) */
       default: return true;
     }
   }
-  hasFilters(){ const cf=this.state.colFilters||{}; return (this.state.chips||[]).length>0 || this.SORT_KEYS().some(k=>this.filterActive(cf[k])); }
+  hasFilters(){ const cf=this.state.colFilters||{};
+    if(this.searchActive()) return true; /* PP-EXT (owner 2026-08-25): a running search is itself the filter */
+    return !!this.state.horizon || (this.state.chips||[]).length>0 || this.SORT_KEYS().some(k=>this.filterActive(cf[k])); }
+  /* PP-EXT (owner ruling 2026-08-25): *"When search is active all other filters/sorts are saved and
+     overridden. They will be recovered when exiting the search view."*
+
+     Implemented as READ-TIME suspension rather than snapshot-and-rewrite. `state.horizon`, `chips`,
+     `colFilters`, `groupBy` and `sort` are never touched while a search runs, so "restored exactly" is
+     not a restore at all — it is the absence of a write, which cannot drift, cannot half-apply, and
+     cannot strand the user in a wrong state if the tab dies mid-search. Everything that READS one of the
+     five asks here instead. This is also what keeps decision 1's two systems from ever both being
+     authoritative, and it is why `filterTasks` never has to compose an AST with the chip state. */
+  searchActive(){ return this.state.searchQuery!=null; }
+  effectiveSort(){ return this.searchActive()?null:this.state.sort; }
+  effectiveGroupBy(){ return this.searchActive()?'section':(this.state.groupBy||'section'); }
+  setSearch(text){ const s=(''+(text||'')).trim();
+    if(!s) return this.clearSearch();
+    this.trackAction('filter.search',{ len:s.length }); /* PP-EXT (31) — length only, never the query text */
+    this.setState({searchText:s, searchQuery:s}); }
+  clearSearch(){ this.setState({searchText:'', searchQuery:null, searchOpen:false}); }
+  /* The live preview's count. Deliberately computed off `state.tasks` and NEVER through visibleTasks:
+     the sheet must not move while the user is still typing — preview, then apply. */
+  searchPreviewCount(text){
+    const ast=this.parseSearchQuery(text);
+    if(!ast.groups.length) return null;
+    return this.state.tasks.filter(t=>!t.archivedAt && this.searchMatch(t, ast)).length;
+  }
   filterActive(f){ if(!f) return false;
     if(f.contains) return true; if(f.val!=null) return true; if(f.min!=null||f.max!=null) return true;
     if(f.set&&f.set.length) return true; /* PP-EXT Phase 7: set-membership filter (priority P1–P4 chips) */
     return false; }
   /* Apply active column filters + smart chips (AND) to a flat list. Pure over (list, byId, state). */
   filterTasks(list, byId){
+    if(this.searchActive()){ /* PP-EXT (owner 2026-08-25): the search is the ONLY thing filtering */
+      const ast=this.parseSearchQuery(this.state.searchQuery);
+      return list.filter(t=>this.searchMatch(t, ast));
+    }
     const cf=this.state.colFilters||{}; const chips=this.state.chips||[];
     if(!this.hasFilters()) return list;
+    const hz=this.state.horizon, hdays=hz?this.horizonDays(hz):null, B=this.startOfToday();
     return list.filter(t=>{
+      if(hdays!=null && !this.horizonMatch(t, B, hdays)) return false; /* PP-EXT (owner 2026-08-25) */
       for(const k of this.SORT_KEYS()){ if(this.filterActive(cf[k]) && !this.matchColFilter(t,k,cf[k])) return false; }
       for(const c of chips){ if(!this.matchChip(t,c,byId)) return false; }
       return true;
@@ -4091,6 +4196,10 @@ class Component extends DCLogic {
     return this.setSort(null);
   }
   sortArrow(key){ const s=this.state.sort; if(!s||s.key!==key) return ''; return s.dir==='desc'?'▼':'▲'; }
+  /* PP-EXT (owner 2026-08-25): a column's SORT key, which is its own key unless `colDefs` redirects it.
+     Only `check` does, to `priority` — the header and the column context menu both resolve through here so
+     the two can never disagree about what a click on that header sorts. */
+  sortKeyOf(k){ const c=this.colDefs().find(d=>d.k===k); return (c&&c.sortKey)||k; }
   /* Column-filter mutators. Each writes a NEW colFilters object so renderVals' cache guard re-derives the
      visible list; an empty spec is dropped so hasFilters()/the funnel indicator stay accurate. */
   setColFilter(key, patch){
@@ -4101,18 +4210,18 @@ class Component extends DCLogic {
     this.setState({colFilters:cf}); this.savePrefs({colFilters:cf});
   }
   clearColFilter(key){ const cf=Object.assign({}, this.state.colFilters||{}); delete cf[key]; this.setState({colFilters:cf}); this.savePrefs({colFilters:cf}); }
-  toggleChip(k){ const chips=(this.state.chips||[]).slice(); const i=chips.indexOf(k); if(i>=0) chips.splice(i,1); else chips.push(k); this.trackAction('filter.chip',{ chip:k, on:i<0 }); /* PP-EXT (31) */ this.setState({chips}); this.savePrefs({chips}); }
-  /* PP-EXT Phase 7: priority quick-filter — toggles membership of P`p` in colFilters.priority.set (multi-select).
-     Reuses the column-filter funnel so Clear-all + the visible-list cache pick it up automatically. */
-  togglePriority(p){
-    const cf=Object.assign({}, this.state.colFilters||{});
-    const cur=Object.assign({}, cf.priority||{});
-    const set=(cur.set||[]).slice(); const i=set.indexOf(p);
-    if(i>=0) set.splice(i,1); else set.push(p);
-    if(set.length) cur.set=set; else delete cur.set;
-    if(this.filterActive(cur)) cf.priority=cur; else delete cf.priority;
-    this.setState({colFilters:cf}); this.savePrefs({colFilters:cf});
+  /* PP-EXT (owner 2026-08-25): clicking the ACTIVE notch clears the horizon back to null — the slider has
+     no separate off switch, which is what keeps it one control instead of seven. Passing null clears
+     unconditionally (used by Clear all). */
+  setHorizon(k){
+    const h=(k==null||this.state.horizon===k)?null:(this.HORIZONS().some(x=>x.k===k)?k:null);
+    this.trackAction('filter.horizon',{ horizon:h }); /* PP-EXT (31) */
+    this.setState({horizon:h}); this.savePrefs({horizon:h});
   }
+  toggleChip(k){ const chips=(this.state.chips||[]).slice(); const i=chips.indexOf(k); if(i>=0) chips.splice(i,1); else chips.push(k); this.trackAction('filter.chip',{ chip:k, on:i<0 }); /* PP-EXT (31) */ this.setState({chips}); this.savePrefs({chips}); }
+  /* PP-EXT (owner 2026-08-25): `togglePriority` is DELETED with the "Filters ▾" popover's P1–P4 chips.
+     A `colFilters.priority` spec is still a supported filter (the migration deliberately preserves any
+     stored one, and the `check` column's context menu still authors it) — it simply has no chip. */
   clearAllFilters(){ this.setState({colFilters:{}, chips:[]}); this.savePrefs({colFilters:{}, chips:[]}); }
   /* ==== /PP-EXT Phase 7 core ==== */
   visibleTasks(){
@@ -4121,7 +4230,7 @@ class Component extends DCLogic {
     const {byId}=this.buildKids(ts);
     const col=this.state.collapsed||{};
     const anyCol=ts.some(t=>t.parentId!=null && byId[t.parentId] && this.isHiddenByCollapse(t,byId)); /* PP-EXT: collapsed subtrees hide */
-    const anyFilter=this.hasFilters(); const sort=this.state.sort; /* PP-EXT Phase 7 */
+    const anyFilter=this.hasFilters(); const sort=this.effectiveSort(); /* PP-EXT Phase 7; PP-EXT (owner 2026-08-25): a running search suspends the sort */
     if(!anyArch && !anyCol && !anyFilter && !(sort&&sort.key)) return ts; /* keep identity stable when nothing is hidden/sorted */
     let out=ts.filter(t=>{
       if(anyArch && t.archivedAt) return false;
@@ -4499,7 +4608,7 @@ class Component extends DCLogic {
     changed += this.stripSectionTags(list, sections);
     return {sections, changed};
   }
-  setGroupBy(mode){ const m=(mode==='none'||mode==='inclusion')?mode:'section'; /* PP-EXT V2.9 §6 */
+  setGroupBy(mode){ const m=(mode==='inclusion')?'inclusion':'section'; /* PP-EXT V2.9 §6; 'none' deleted 2026-08-25 */
     this.savePrefs({groupBy:m}); this.setState({groupBy:m}); }
   /* Create-then-edit: a new section appears immediately with its name field focused, rather than blocking
      on a modal prompt. Nothing is "pending" — the section exists the moment you ask for it, and renaming is
@@ -6807,10 +6916,10 @@ class Component extends DCLogic {
          among the siblings it already lives with. Moving a row into another section and then nesting it
          there is two gestures now, deliberately: each one says one thing.
          `projectRowDrop` is unchanged and stays pure — this is about which intent we hand it. */
-      const bandNow=(this.state.groupBy==='inclusion')
+      const bandNow=(this.effectiveGroupBy()==='inclusion')
         ? (res.sectionId===this.INCL_BAND_IN() ? 'included' : 'excluded')
         : (res.sectionId===undefined ? undefined : res.sectionId);
-      const bandWas=(this.state.groupBy==='inclusion') ? rd.origInclusion : rd.origSectionId;
+      const bandWas=(this.effectiveGroupBy()==='inclusion') ? rd.origInclusion : rd.origSectionId;
       const crossBand = res.sectionPos!=null && bandNow!==undefined && bandNow!==bandWas;
       const steps=(!crossBand && Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
       const vis=this._visTasks||this.state.tasks;
@@ -6822,7 +6931,7 @@ class Component extends DCLogic {
       /* PP-EXT V2.9 §6: under Group by: Inclusion the bands are not sections, so the SAME resolved band
          writes `included` instead of `sectionId`. Dragging a row across the divider is therefore the same
          gesture as dragging it into a section, on a surface the user already knows. */
-      const inclMode=(this.state.groupBy==='inclusion');
+      const inclMode=(this.effectiveGroupBy()==='inclusion');
       const dropSectionId = (hit && !inclMode) ? hit.id : undefined;
       const dropInclusion = (hit && inclMode) ? (hit.id===this.INCL_BAND_IN()?'included':'excluded') : undefined;
       const secChanged = dropSectionId!==undefined && dropSectionId!==rd.origSectionId;
@@ -7441,6 +7550,123 @@ class Component extends DCLogic {
     if(!span) return src;
     return (src.slice(0,span.start)+src.slice(span.end)).replace(/\s+/g,' ').trim();
   }
+  /* PP-EXT (owner 2026-08-25): the search bar's grammar. PURE (text in, AST out) so the whole language is
+     a unit-test table, and deliberately NOT compiled into `colFilters` — that flat
+     {contains,val,min,max,set} shape cannot express negation, cross-field OR, or free text over name AND
+     description, so approach C would have been this parser plus special cases beside it.
+
+     Repeated tokens of the SAME type OR; tokens of DIFFERENT types AND (owner-adopted 2026-08-25).
+     Negation is a `-` prefix and produces a SEPARATE group, so `@work -@home` reads "tagged work AND not
+     tagged home" rather than an OR over a mixed bag.
+
+     Dates route through `parseDateText` — the same parser the title bar and the When line run — so
+     `by:friday`, `after:2w` and `by:"next monday"` need no new date code and cannot drift from quick-add.
+     Nothing here throws: an unrecognised token degrades to free text, which is the honest reading of
+     something the language does not know.
+
+     `/section` claims only the token after the slash. Matching a MULTI-WORD section name is the
+     evaluator's job (prefix, against the real section list) — that is what keeps this method pure over
+     text alone, with no workspace state reachable from it. */
+  SEARCH_IS(){ return ['unplanned','done','running','overdue','recurring','milestone']; }
+  SEARCH_DATE_CUES(){ return ['by','before','after','due','start']; }
+  parseSearchQuery(text){
+    const out={groups:[]};
+    const src=(''+(text||'')).trim();
+    if(!src) return out;
+    /* tokenise: a quoted phrase survives whole, with an optional leading `-` and an optional `cue:` prefix */
+    const toks=[]; const re=/(-?)(?:([a-z]+):)?"([^"]*)"|(\S+)/gi; let m;
+    while((m=re.exec(src))){
+      if(m[3]!=null) toks.push({neg:m[1]==='-', cue:(m[2]||'').toLowerCase(), raw:m[3], quoted:true});
+      else { let r=m[4]; const neg=r[0]==='-'&&r.length>1; if(neg) r=r.slice(1);
+        toks.push({neg, cue:'', raw:r, quoted:false}); }
+    }
+    const push=(type,neg,val)=>{ let g=out.groups.find(x=>x.type===type&&x.neg===neg);
+      if(!g){ g={type,neg,values:[]}; out.groups.push(g); } g.values.push(val); };
+    const isVals=this.SEARCH_IS(), cues=this.SEARCH_DATE_CUES();
+    toks.forEach(tk=>{
+      const r=tk.raw; if(!r) return;
+      const low=r.toLowerCase();
+      if(tk.cue && cues.indexOf(tk.cue)>=0){
+        const ms=this.searchDateMs(r);
+        if(ms!=null) push('date',tk.neg,{cue:tk.cue,ms}); else push('text',tk.neg,low);
+        return;
+      }
+      if(!tk.quoted){
+        const cm=/^([a-z]+):(.+)$/i.exec(r);
+        if(cm){ const cue=cm[1].toLowerCase(), rest=cm[2];
+          if(cue==='is'){ if(isVals.indexOf(rest.toLowerCase())>=0) push('is',tk.neg,rest.toLowerCase()); return; }
+          if(cue==='calendar'){ push('calendar',tk.neg,rest.toLowerCase()); return; }
+          if(cues.indexOf(cue)>=0){
+            const ms=this.searchDateMs(rest);
+            if(ms!=null) push('date',tk.neg,{cue,ms}); else push('text',tk.neg,low);
+            return;
+          }
+        }
+        if(r[0]==='@' && r.length>1){ push('tag',tk.neg,r.slice(1).toLowerCase()); return; }
+        if(r[0]==='/' && r.length>1){ push('section',tk.neg,r.slice(1).toLowerCase()); return; }
+        if(/^p[1-4]$/i.test(r)){ push('priority',tk.neg,+r[1]); return; }
+      }
+      push('text',tk.neg,low);
+    });
+    return out;
+  }
+  /* PP-EXT (owner 2026-08-25): one date token, through the app's own NL parser. Returns midnight-of-day
+     epoch ms, or null when the text carries no date at all (which the caller degrades to free text). */
+  searchDateMs(s){
+    let p=null; try{ p=this.parseDateText(''+s); }catch(e){ p=null; }
+    return (p && p.date!=null) ? this.startOfDay(p.date) : null;
+  }
+  /* PP-EXT (owner 2026-08-25): AST evaluation. Groups AND; values inside a group OR; a `neg` group
+     inverts the whole group (none of its values may match). The AST is pure text; only this reads the
+     workspace (sections, calendar names, the running-timer set). */
+  searchMatch(t, ast){
+    if(!t || !ast || !ast.groups || !ast.groups.length) return true;
+    const B=this.startOfToday();
+    const secName=(id)=>{ const s=(this.state.sections||[]).find(x=>x.id===id); return s?(''+(s.name||'')).toLowerCase():''; };
+    const plain=(html)=>(''+(html||'')).replace(/<[^>]*>/g,' ').toLowerCase();
+    let hay=null; const text=()=>{ if(hay==null) hay=((t.name||'')+' '+plain(t.desc)).toLowerCase(); return hay; };
+    const one=(g,v)=>{
+      switch(g.type){
+        case 'text':     return text().includes(v);
+        case 'tag':      return (t.labels||[]).some(l=>(''+l).toLowerCase().startsWith(v));
+        case 'section':  return secName(t.sectionId).startsWith(v);
+        case 'calendar': return (this.calNameOf(t)||'').toLowerCase().includes(v);
+        case 'priority': return (+t.priority||4)===v;
+        case 'is':       return this.searchIsMatch(t, v);
+        case 'date':     return this.searchDateMatch(t, v, B);
+        default:         return false;
+      }
+    };
+    return ast.groups.every(g=>{ const any=g.values.some(v=>one(g,v)); return g.neg?!any:any; });
+  }
+  /* PP-EXT (owner 2026-08-25): the retired smart chips, reachable as `is:` tokens. `unplanned` delegates
+     to `matchChip` on purpose, so the one surviving chip and its search spelling cannot disagree. */
+  searchIsMatch(t, v){
+    switch(v){
+      case 'unplanned': return this.matchChip(t,'unplanned',{});
+      case 'done':      return (+t.pct||0)>=100;
+      case 'running':   return this.isRunning(t.id);
+      case 'overdue':   return (+t.pct||0)<100 && this.dueMsOf(t, this.startOfToday())<Date.now();
+      case 'recurring': return !!t.recur;
+      case 'milestone': return this.isMilestone(t);
+      default: return false;
+    }
+  }
+  /* PP-EXT (owner 2026-08-25): one date clause. `by`/`before` bound the DUE edge; `after`/`start` bound
+     the START edge; `due`/`start` with an exact day mean that day. A task with no date on the edge a cue
+     asks about does not match it — the horizon slider, not search, is the control that keeps dateless
+     work visible, and a typed date question deserves a literal answer. */
+  searchDateMatch(t, v, B){
+    const due=this.dueMsOf(t, B), st=t.start;
+    switch(v.cue){
+      case 'by':     return due!=null && this.startOfDay(due)<=v.ms;
+      case 'before': return due!=null && this.startOfDay(due)<v.ms;
+      case 'after':  return st!=null && this.startOfDay(st)>=v.ms;
+      case 'due':    return due!=null && this.startOfDay(due)===v.ms;
+      case 'start':  return st!=null && this.startOfDay(st)===v.ms;
+      default: return false;
+    }
+  }
   /* `opts.sectionPick` is a hand-chosen section id from the Tab completer; see `matchSectionToken`. */
   parseDateText(text, baseMs, opts){
     const now = baseMs!=null ? new Date(baseMs) : new Date();
@@ -7984,10 +8210,12 @@ class Component extends DCLogic {
           the group mode. Without these keys a rename/reorder/delete/collapse leaves a stale _visSections and
           the headers keep painting the old names. All three are replaced by reference in their mutators. */
        || this._visSecs!==this.state.sections || this._visSecCol!==this.state.collapsedSections
-       || this._visGroupBy!==this.state.groupBy){
+       || this._visGroupBy!==this.state.groupBy
+       || this._visHorizon!==this.state.horizon || this._visSearchQ!==this.state.searchQuery){ /* PP-EXT (owner 2026-08-25) */
       this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
       this._visSecs=this.state.sections; this._visSecCol=this.state.collapsedSections; this._visGroupBy=this.state.groupBy; /* PP-EXT V2.6 */
+      this._visHorizon=this.state.horizon; this._visSearchQ=this.state.searchQuery; /* PP-EXT (owner 2026-08-25) */
       const visible=this.visibleTasks();
       /* PP-EXT V2.3: section grouping is a render projection only. The persisted task array keeps manual/tree
          order; sheet and Gantt consume the same flattened projection so every task row still shares one Y. */
@@ -10447,9 +10675,11 @@ class Component extends DCLogic {
        authoritative even when its PATCH drains before the response reaches mergeCalendarEvents. */
     const importFp={}; this.state.tasks.forEach(t=>{ if(t.eventId) importFp[t.id]=this.syncFp(t); });
     const timeMin=new Date().toISOString();
-    const tmax=new Date(Date.now()+(g.window||30)*this.DAY).toISOString();
+    /* PP-EXT (owner 2026-08-25): timeMax is now PER CALENDAR \u2014 a short-term calendar's own window,
+       otherwise the global `g.window` fallback that has always applied. */
+    const farFor=cid=>{ const d=this.calLookaheadDays(cid); return Date.now()+((d!=null?d:(g.window||30))*this.DAY); };
     const calById={}; (g.calendars||[]).forEach(c=>calById[c.id]=c);
-    const evUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin='+encodeURIComponent(timeMin)+'&timeMax='+encodeURIComponent(tmax);
+    const evUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin='+encodeURIComponent(timeMin)+'&timeMax='+encodeURIComponent(new Date(farFor(cid)).toISOString());
     if(!opts.silent) this.gcalMsg('Importing…');
     const gone=[]; /* PP-EXT: selected calendars that 404/410 — removed from Google or access revoked; skip them instead of failing the whole sync */
     Promise.all(ids.map(cid=>this.gcalFetch(evUrl(cid)).then(d=>({cid,items:d.items||[]}))
@@ -10484,14 +10714,19 @@ class Component extends DCLogic {
         const before=JSON.stringify(this.state.tasks);
         const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
         const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb,pending);
-        const removed=this.pruneDeletedEvents(clone,results,liveIds,verifiedMissing,preserve);
+        let removed=this.pruneDeletedEvents(clone,results,liveIds,verifiedMissing,preserve);
+        /* PP-EXT (owner 2026-08-25): drop anything ALREADY stored beyond a now-shortened window. This is
+           what makes turning a calendar short-term take effect on existing imports, not only new ones. */
+        liveIds.forEach(cid=>{ if(this.calLookaheadDays(cid)!=null) removed+=this.pruneOutOfWindow(clone, cid, farFor(cid)); });
         if(JSON.stringify(clone)!==before){
           this.commit(tasks=>{ tasks.length=0; clone.forEach(t=>tasks.push(t)); });
           if(r.added||removed) this.gcalMsg('Auto-synced: +'+r.added+' new, −'+removed+' removed.');
         }
       } else {
         let r={added:0,updated:0}, removed=0;
-        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb,pending); removed=this.pruneDeletedEvents(tasks,results,liveIds,verifiedMissing,preserve); });
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb,pending); removed=this.pruneDeletedEvents(tasks,results,liveIds,verifiedMissing,preserve);
+          /* PP-EXT (owner 2026-08-25): same out-of-window prune as the silent branch. */
+          liveIds.forEach(cid=>{ if(this.calLookaheadDays(cid)!=null) removed+=this.pruneOutOfWindow(tasks, cid, farFor(cid)); }); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
       }
       } finally { this._gcalApplying=false; } /* PP-EXT */
@@ -10507,6 +10742,42 @@ class Component extends DCLogic {
      PP-EXT (owner 2026-08-14): this used to also strip the calendar's `@tag`. There is no such tag any
      more, and the same reasoning as `gcalReconcileLinks` applies — a 404 from Google is not evidence about
      what the user's labels mean, so the labels are left exactly as the user left them. */
+  /* PP-EXT (owner ask 2026-08-25): *"Make a toggle for calendars making them short term input with a
+     config for how long into the future it looks (e.g. 1 month) or else birthdays and holidays will pile
+     up and completely saturate the planning page."*
+
+     PER-CALENDAR, both the toggle and the length: a birthday calendar gets a month while a work calendar
+     stays unlimited. The default for a calendar nobody has configured is UNLIMITED, so this changes
+     nothing at all until the owner turns a calendar short-term.
+
+     Pruning is IMPORT-side, not render-side, and that is the whole point: an event beyond the window
+     never reaches the store, so it cannot saturate the planner, the Selection grid, or a sync payload.
+     It shares a GOAL with the horizon slider and no code \u2014 the slider HIDES far-future work; this stops it
+     existing. No tombstone is written, so an event re-imports the moment it comes into range. */
+  CAL_LOOKAHEADS(){ return [ {k:'1w',l:'1 week',days:7}, {k:'1m',l:'1 month',days:30},
+    {k:'3m',l:'3 months',days:91}, {k:'6m',l:'6 months',days:183}, {k:'1y',l:'1 year',days:365},
+    {k:'all',l:'Unlimited',days:null} ]; }
+  calLookaheadDays(cid){
+    const cfg=((this.state.gcal||{}).lookahead||{})[cid];
+    if(!cfg || !cfg.shortTerm) return null;
+    const e=this.CAL_LOOKAHEADS().find(x=>x.k===cfg.len);
+    return e?e.days:null;
+  }
+  setCalLookahead(cid, patch){
+    const la=Object.assign({}, (this.state.gcal||{}).lookahead||{});
+    la[cid]=Object.assign({shortTerm:false, len:'1m'}, la[cid]||{}, patch);
+    this.saveGcal({lookahead:la});
+  }
+  /* Mutates `tasks` in place (a commit body hands it the draft array); returns the removal count.
+     `eventId` is required, so a task the user created locally can never be pruned by a calendar's window. */
+  pruneOutOfWindow(tasks, cid, farMs){
+    let n=0;
+    for(let i=tasks.length-1;i>=0;i--){ const t=tasks[i];
+      if(t.calendarId!==cid || !t.eventId) continue;
+      if(t.start!=null && t.start>farMs){ tasks.splice(i,1); n++; }
+    }
+    return n;
+  }
   gcalDropGone(gone,calById){
     if(!gone||!gone.length) return;
     const goneSet={};
@@ -10763,10 +11034,23 @@ class Component extends DCLogic {
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
         h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import now')),
       (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
-        g.calendars.map(c=>h('label',{key:c.id,style:{display:'flex',alignItems:'center',gap:'7px',padding:'3px 0',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
-          h('input',{type:'checkbox',checked:!!(g.selected&&g.selected[c.id]),onChange:()=>this.toggleCalSel(c.id)}),
-          h('span',{style:{width:'9px',height:'9px',borderRadius:'2px',background:c.color||'#888',flex:'none'}}),
-          h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},c.summary)))) : null,
+        g.calendars.map(c=>{ const cfg=((g.lookahead||{})[c.id])||{};
+          return h('div',{key:c.id,style:{padding:'3px 0'}},
+            h('label',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
+              h('input',{type:'checkbox',checked:!!(g.selected&&g.selected[c.id]),onChange:()=>this.toggleCalSel(c.id)}),
+              h('span',{style:{width:'9px',height:'9px',borderRadius:'2px',background:c.color||'#888',flex:'none'}}),
+              h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},c.summary)),
+            /* PP-EXT (owner 2026-08-25): per-calendar lookahead. Off = unlimited, which is the default and
+               the pre-existing behaviour, so nothing changes for a calendar nobody configures. */
+            h('label',{'data-pp-cal-lookahead':c.id,
+              style:{display:'flex',alignItems:'center',gap:'6px',padding:'2px 0 2px 24px',fontSize:'11px',color:'var(--text-mut2)',cursor:'pointer'}},
+              h('input',{type:'checkbox',checked:!!cfg.shortTerm,onChange:e=>{ this.setCalLookahead(c.id,{shortTerm:e.target.checked}); this.gcalSyncSoon(); }}),
+              'Short term \u2014 only import the next',
+              h('select',{value:cfg.len||'1m',disabled:!cfg.shortTerm,
+                onChange:e=>{ this.setCalLookahead(c.id,{len:e.target.value}); this.gcalSyncSoon(); },
+                style:{fontSize:'11px',background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'6px',padding:'1px 4px',opacity:cfg.shortTerm?1:0.5}},
+                ...this.CAL_LOOKAHEADS().map(o=>h('option',{key:o.k,value:o.k},o.l)))));
+        })) : null,
       g.msg? h('div',{style:{fontSize:'11.5px',color:'var(--text-mut2)',padding:'6px 0'}}, g.msg) : null,
       /* PP-EXT B3b: push status. Losing push is degraded-not-broken (the poll still imports), so it's a
          plain status line here rather than the red error banner below. */
@@ -14146,16 +14430,25 @@ class Component extends DCLogic {
       const dragKeys=reord?((selCols.includes(reord.fromK)&&selCols.length>1)?selCols:[reord.fromK]):[];
       const isDragSrc=reord&&dragKeys.includes(c.k);
       const isOver=reord&&reord.overK===c.k&&!dragKeys.includes(c.k);
+      /* PP-EXT (owner 2026-08-25): sortability is resolved from `sortKey`, not from `lock`. `check` is a
+         LOCKED column that nonetheless sorts (on `priority`), so the two questions had to come apart.
+         A locked-but-sortable header gets a plain onClick — it must not reach `headPointerDown`, which
+         owns reorder-drag and ctrl-click column selection, neither of which a locked column allows. */
+      const sk=c.sortKey||c.k;
+      const sortable=this.SORT_KEYS().indexOf(sk)>=0;
+      const lockSort=!!(c.lock&&c.sortKey&&sortable);
       return h('div',{key:c.k,'data-colk':c.k,
         onMouseDown:c.lock?null:(e=>this.headPointerDown(e,c.k)),
+        onClick:lockSort?(e=>{ e.preventDefault(); this.cycleSort(sk); }):null,
         onContextMenu:e=>this.colCtx(e,c.k),
         /* PP-EXT V0.1: prefix the full column label so a narrow (ellipsis-truncated) header — "D…", "PLANN…",
            lone "S/today" — is always fully readable on hover (product-vision §10.3 / ROADMAP V0). */
-        title:c.lock?'':(c.l?c.l+' — ':'')+'Click to sort · Ctrl-click to select · drag to reorder · right-click to filter/hide',
+        title:lockSort?'Priority — click to sort (P1 first, then reversed, then back to manual order)'
+             :(c.lock?'':(c.l?c.l+' — ':'')+'Click to sort · Ctrl-click to select · drag to reorder · right-click to filter/hide'),
         style:{flex:'0 0 '+c.w+'px',minWidth:0,padding:'0 9px',display:'flex',alignItems:'center',overflow:'hidden',
           fontSize:'11px',fontWeight:600,color:selected?'var(--text)':'var(--text-mut)',letterSpacing:'0.3px',textTransform:'uppercase',
           borderRight:'1px solid var(--col-border)',height:'100%',position:'relative',
-          cursor:c.lock?'default':'grab',userSelect:'none',opacity:isDragSrc?0.4:1,
+          cursor:lockSort?'pointer':(c.lock?'default':'grab'),userSelect:'none',opacity:isDragSrc?0.4:1,
           background:selected?'var(--sel)':(isOver?'var(--hover)':'transparent'),
           /* PP-EXT B4: bypassed the --dur-* tokens — route through --dur-fast so reduced-motion zeroes it too. */
           boxShadow:isOver?'inset 2px 0 0 '+this._accent:'none',transition:'background var(--dur-fast) var(--ease-standard)'}},
@@ -14168,7 +14461,7 @@ class Component extends DCLogic {
           this.state.spentScope==='life'?'life':'today'):null,
         /* PP-EXT Phase 7: sort + filter indicators — DISPLAY ONLY (pointer-events:none so the header body owns the
            click that cycles the sort). ↕ = sortable/unsorted, ▲/▼ = active sort dir; the accent dot = active filter. */
-        c.lock?null:(()=>{ const ar=this.sortArrow(c.k); const on=!!ar; const filt=this.filterActive((this.state.colFilters||{})[c.k]);
+        (c.lock&&!lockSort)?null:(()=>{ const ar=this.sortArrow(sk); const on=!!ar; const filt=this.filterActive((this.state.colFilters||{})[sk]);
           return h('span',{key:'ind',style:{marginLeft:'4px',display:'inline-flex',alignItems:'center',gap:'3px',pointerEvents:'none'}},
             h('span',{style:{fontSize:'9px',lineHeight:1,color:on?this._accent:'var(--text-faint)',opacity:on?1:0.4}}, ar||'↕'),
             filt?h('span',{title:'Filtered',style:{width:'6px',height:'6px',borderRadius:'50%',background:this._accent}}):null); })(),
@@ -14340,104 +14633,96 @@ class Component extends DCLogic {
       isNone?null:btn('del','✕','Delete section (its tasks move to No section)',()=>this.deleteSection(sec.id),{color:'var(--danger-strong)'})
     );
   }
-  /* PP-EXT Phase 7: always-visible filter bar spanning the FULL board width (above both panes, so sheet rows stay
-     aligned with the Gantt bars). Smart chips toggle; active column-filter pills clear on click; Clear-all also
-     drops the sort. This is the discoverable filter surface — no new columns, per the owner's decision. */
+  /* PP-EXT (owner 2026-08-25, filter-bar redesign): one row. Search takes the leftover width; everything
+     else is fixed and flush. Two systems on purpose (spec decision 1) — the horizon/chip/group row is the
+     RAPID path (fixed, frequent, one click, no typing), the search field is the EXPRESSIVE path. They are
+     never both authoritative: `searchActive()` suspends the rest at READ time, so nothing is overwritten
+     and "restore" is the absence of a write.
+     Horizon and Group are BOTH segmented controls, sharing one idiom for "pick exactly one of N" — that
+     is what makes Section/Incl read as a single grouped control rather than two loose pills.
+     The search placeholder IS the grammar. There is no help popover and no `?` affordance by design: the
+     empty state is the discoverability mechanism.
+     The bar still spans the FULL board width (above both panes, so sheet rows stay aligned with the Gantt
+     bars) and the optional `leading` slot is still pushed flush right — see renderDashOverview. */
   renderFilterBar(leading){
     const h=React.createElement;
     const byKcol={}; this.colDefs().forEach(c=>byKcol[c.k]=c);
     const chips=this.state.chips||[]; const cf=this.state.colFilters||{};
-    const prioSet=(cf.priority&&cf.priority.set)||[]; /* PP-EXT Phase 7: shown as P1–P4 chips, so exclude from the generic pills */
-    const filtCols=this.SORT_KEYS().filter(k=>this.filterActive(cf[k]) && !(k==='priority'&&prioSet.length));
-    const anyActive=this.hasFilters()||(this.state.sort&&this.state.sort.key);
+    const searching=this.searchActive();
+    const filtCols=this.SORT_KEYS().filter(k=>this.filterActive(cf[k]));
+    const effSort=this.effectiveSort();
+    const anyActive=this.hasFilters()||!!(effSort&&effSort.key);
     /* PP-EXT B0: pp-chip base class supplies the shared chip shape/transition; per-chip inline
        style still overrides color/border for the active-vs-accent state (dynamic, not tokenizable). */
     const mkChip=(key,label,on,onClick,title,extra)=>h('span',{key,onClick,title,className:'pp-chip',
       style:Object.assign({cursor:'pointer',userSelect:'none',fontWeight:600,padding:'3px 10px',borderRadius:'11px',
         border:'1px solid '+(on?this._accent:'var(--divider)'),color:on?'var(--on-accent)':'var(--text-mut2)',
         background:on?this._accent:'var(--chip-bg)',whiteSpace:'nowrap'},extra||{})},label);
-    /* PP-EXT Phase 7: a priority chip is a filled dot + label; active state uses the priority's own colour. */
-    /* PP-EXT B3: priority pill migrated onto B0 spacing/radius/type tokens + hover transition (dynamic
-       priority color still per-instance, not tokenizable). */
-    const mkPrio=(p)=>{ const on=prioSet.indexOf(p)>=0; const col=this.PCOL[p];
-      return h('span',{key:'pr-'+p, onClick:()=>this.togglePriority(p), title:'Filter to '+this.PNAME[p],
-        style:{cursor:'pointer',userSelect:'none',display:'inline-flex',alignItems:'center',gap:'var(--sp-0)',fontSize:'var(--fs-1)',fontWeight:600,
-          padding:'3px var(--sp-1)',borderRadius:'var(--r-pill)',whiteSpace:'nowrap',transition:'background var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard)',
-          border:'1px solid '+(on?col:'var(--divider)'),color:on?'var(--on-accent)':'var(--text-mut2)',background:on?col:'var(--chip-bg)'}},
-        h('span',{style:{width:'8px',height:'8px',borderRadius:'50%',background:on?'var(--on-accent)':col,display:'inline-block'}}), this.PNAME[p]); };
-    /* PP-EXT Phase 7: priority SORT chip — priority isn't a sheet column (no-new-columns), so expose its sort here
-       next to the P1–P4 filter chips. Cycles asc (P1 first) → desc (P4 first) → off; reuses cycleSort/sortArrow. */
-    const pSort=this.state.sort, pSortOn=!!(pSort&&pSort.key==='priority'), pSortArr=this.sortArrow('priority');
-    const mkPrioSort=()=>mkChip('psort', 'Sort '+(pSortOn?pSortArr:'↕'), pSortOn, ()=>this.cycleSort('priority'),
-      'Sort by priority (P1 first → P4 first → off)');
-    /* PP-EXT Phase 7: "Sort/Filter by…" control for the meta-keys with no sheet column (tags/calendar — the columns
-       stay header-click sortable). A native Sort-by select drives the same state.sort as headers/chips; a
-       field-select + text box filters Tags or Calendar (colFilters[key].contains). No-new-columns per the owner. */
+
+    /* One segmented control: a bordered strip of notches, exactly one of which can be active. While a
+       search runs it is PARKED, not removed — the user has to be able to see what is coming back. */
+    const seg=(name,items,activeKey,onPick,title)=>h('div',{key:'seg-'+name,'data-pp-seg':name,title,
+      style:{display:'inline-flex',alignItems:'center',border:'1px solid var(--divider)',borderRadius:'var(--r-pill)',
+        overflow:'hidden',background:'var(--chip-bg)',opacity:searching?0.45:1,pointerEvents:searching?'none':'auto'}},
+      ...items.map((it,i)=>{ const on=it.k===activeKey;
+        return h('span',{key:it.k,'data-seg-key':it.k,'data-active':on?'1':null,onClick:()=>onPick(it.k),
+          style:{cursor:'pointer',userSelect:'none',fontSize:'var(--fs-1)',fontWeight:600,padding:'3px 9px',
+            minWidth:'24px',textAlign:'center',whiteSpace:'nowrap',
+            borderLeft:i?'1px solid var(--divider)':'none',
+            transition:'background var(--dur-fast) var(--ease-standard)',
+            color:on?'var(--on-accent)':'var(--text-mut2)',background:on?this._accent:'transparent'}}, it.l); }));
+
+    const horizonSeg=seg('horizon', this.HORIZONS(), this.state.horizon, k=>this.setHorizon(k),
+      'How far ahead you are looking — a task shows if it reaches into the window, or if you included it. Click the active notch to clear.');
+    const groupBy=this.effectiveGroupBy();
+    const groupSeg=seg('group', [{k:'section',l:'Section'},{k:'inclusion',l:'Incl'}], groupBy, k=>this.setGroupBy(k),
+      'Group by — Section shows headers; Incl splits today’s list above/below a divider (drag a row across it to include or exclude)');
+
+    /* Search: preview while typing (the sheet does NOT change), Enter applies, ✕ clears. */
+    const draft=this.state.searchText||'';
+    const dirty=!!draft.trim() && draft.trim()!==(this.state.searchQuery||'');
+    const previewN=dirty?this.searchPreviewCount(draft):null;
+    const searchInp=h('input',{key:'search','data-pp-search':'1',type:'text',value:draft,
+      ref:el=>{ this._searchEl=el; if(el && this._searchFocus){ this._searchFocus=false; el.focus(); el.select(); } },
+      placeholder:'/section  @tag  p1  by:friday  after:1w  -exclude  "phrase"',
+      onChange:e=>this.setState({searchText:e.target.value}),
+      onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.setSearch(e.target.value); }
+                     else if(e.key==='Escape'){ e.preventDefault(); const el=e.target; this.clearSearch(); el.blur(); } },
+      style:{flex:'1 1 220px',minWidth:'160px',fontSize:'11.5px',color:'var(--text-2)',background:'var(--chip-bg)',
+        border:'1px solid '+(searching?this._accent:'var(--divider)'),borderRadius:'9px',padding:'3px 8px'}});
+    const searchWrap=h('div',{key:'searchwrap',style:{position:'relative',flex:'1 1 220px',display:'flex',alignItems:'center',gap:'5px',minWidth:'160px'}},
+      h('span',{key:'ic',style:{fontSize:'11px',color:'var(--text-faint2)'}},'🔍'),
+      searchInp,
+      searching?h('span',{key:'x',onClick:()=>this.clearSearch(),title:'Clear the search and restore your filters',
+        style:{cursor:'pointer',fontSize:'12px',color:'var(--text-mut2)',padding:'0 4px'}},'✕'):null,
+      previewN!=null?h('div',{key:'prev','data-pp-search-preview':'1',
+        style:{position:'absolute',top:'26px',left:'18px',zIndex:20,fontSize:'11px',color:'var(--text-mut2)',
+          background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'8px',padding:'3px 8px',
+          boxShadow:'0 6px 18px rgba(0,0,0,0.18)',whiteSpace:'nowrap'}},
+        previewN+' match'+(previewN===1?'':'es')+' · Enter to filter'):null);
+
+    const addSecBtn=(groupBy==='section'&&!searching)?mkChip('addsec','+ Section',false,()=>this.newSectionInline(),'Create a new section (opens named for editing)'):null;
     const keyLabel=k=>(byKcol[k]&&byKcol[k].l)||({tags:'Tags',calendar:'Calendar',priority:'Priority'}[k])||k;
-    const selSty={fontSize:'11px',fontWeight:600,color:'var(--text-mut2)',background:'var(--chip-bg)',
-      border:'1px solid var(--divider)',borderRadius:'8px',padding:'3px 6px',cursor:'pointer',maxWidth:'128px'};
-    const sortKey=(this.state.sort&&this.state.sort.key)||'';
-    const sortSel=h('select',{key:'sortsel',value:sortKey,title:'Sort by — siblings sort within each parent; Manual restores the drag order',
-      onChange:e=>this.setSort(e.target.value||null,'asc'),style:selSty},
-      h('option',{key:'',value:''},'Sort: Manual'),
-      ...this.SORT_KEYS().map(k=>h('option',{key:k,value:k},'Sort: '+keyLabel(k))));
-    /* PP-EXT V2.6: Group by — Section (headers) or None (one flat list). Sits next to Sort because it is
-       the same kind of control: a projection over the same task array, persisted per workspace in pp-prefs. */
-    const groupBy=this.state.groupBy||'section';
-    const groupSel=h('select',{key:'groupsel',value:groupBy,
-      title:'Group by — Section shows headers; Inclusion splits today’s list above/below a divider (drag a row across it to include or exclude); None gives one flat list',
-      onChange:e=>this.setGroupBy(e.target.value),style:selSty},
-      h('option',{key:'section',value:'section'},'Group: Section'),
-      h('option',{key:'inclusion',value:'inclusion'},'Group: Inclusion'), /* PP-EXT V2.9 §6 */
-      h('option',{key:'none',value:'none'},'Group: None'));
-    const addSecBtn=groupBy==='section'?mkChip('addsec','+ Section',false,()=>this.newSectionInline(),'Create a new section (opens named for editing)'):null;
-    const sortDir=sortKey?mkChip('sortdir',(this.sortArrow(sortKey)||'▲'),true,
-      ()=>this.setSort(sortKey,this.state.sort.dir==='asc'?'desc':'asc'),'Toggle ascending / descending'):null;
-    const findField=this.state.findField||'tags';
-    const findSel=h('select',{key:'findsel',value:findField,title:'Which field to filter',
-      onChange:e=>this.setState({findField:e.target.value}),style:selSty},
-      h('option',{key:'tags',value:'tags'},'Tag'), h('option',{key:'calendar',value:'calendar'},'Calendar'));
-    const findInp=h('input',{key:'findinp-'+findField+'-'+((cf[findField]&&cf[findField].contains)||''),type:'text',
-      placeholder:'contains…',defaultValue:(cf[findField]&&cf[findField].contains)||'',
-      onBlur:e=>this.setColFilter(findField,{contains:e.target.value.trim()}),
-      onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
-      style:{fontSize:'11px',color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'8px',padding:'3px 7px',width:'92px'}});
-    /* PP-EXT C3: filter-bar demotion (qa-polish-plan Phase C item 2) — the bar used to put all ~13 controls
-       (5 smart pills, 4 priority dots, sort control+dropdown, tag/calendar dropdown+contains box) at full
-       prominence in one row. Priority dots + the tag/contains find control are lower-frequency, so they move
-       into a "Filters" popover; nothing is removed, and an active state there (a priority chip on, or a find
-       value typed) is surfaced with a dot on the popover trigger so it's discoverable, not hidden. */
-    const findVal=(cf[findField]&&cf[findField].contains)||'';
-    const moreOpen=!!this.state.filterMoreOpen;
-    const moreActive=prioSet.length>0 || !!findVal;
-    const morePop=moreOpen?h('div',{key:'morepop',onMouseLeave:()=>this.setState({filterMoreOpen:false}),
-        style:{position:'absolute',top:'32px',left:0,zIndex:20,display:'flex',flexDirection:'column',gap:'8px',
-          background:'var(--menu-bg)',border:'1px solid var(--divider)',borderRadius:'9px',padding:'10px',
-          boxShadow:'0 6px 18px rgba(0,0,0,0.18)',minWidth:'220px'}},
-        h('div',{style:{display:'flex',flexWrap:'wrap',gap:'6px'}}, ...[1,2,3,4].map(mkPrio), mkPrioSort()),
-        h('div',{style:{display:'flex',alignItems:'center',gap:'6px'}}, findSel, findInp))
-      :null;
-    const moreBtn=h('div',{key:'more',style:{position:'relative'}},
-      h('span',{onClick:()=>this.setState({filterMoreOpen:!moreOpen}),className:'pp-chip',title:'More filters: priority (P1–P4), tag/calendar search',
-        style:{cursor:'pointer',userSelect:'none',fontWeight:600,padding:'3px 10px',borderRadius:'11px',display:'inline-flex',alignItems:'center',gap:'5px',
-          border:'1px solid '+((moreOpen||moreActive)?this._accent:'var(--divider)'),
-          color:(moreOpen||moreActive)?'var(--on-accent)':'var(--text-mut2)',
-          background:(moreOpen||moreActive)?this._accent:'var(--chip-bg)'}}, 'Filters ▾'),
-      morePop);
-    return h('div',{style:{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',padding:'6px 12px',flex:'none',position:'relative',
+    const sep=(key)=>h('span',{key,style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}});
+    const lbl=(key,txt)=>h('span',{key,style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)'}},txt);
+
+    /* PP-EXT (owner 2026-08-25): `data-pp-filterbar` is the e2e hook for the BAR ITSELF. e2e has to be
+       able to say "no <select> survives in the bar" without catching the Settings drawer's legitimate
+       selects, and the bar had no addressable identity of its own before this. */
+    return h('div',{'data-pp-filterbar':'1',
+      style:{display:'flex',alignItems:'center',gap:'6px',flexWrap:'wrap',padding:'6px 12px',flex:'none',position:'relative',
         borderBottom:'1px solid var(--top-border)',background:'var(--top-bg)'}},
-      /* PP-EXT: filter/sort controls sit flush left; the optional leading slot (gantt/4-day/week/month/
-         schedule/today view selector on Overview, the left-pane surface selector) is pushed flush right
-         at the end of the bar — see renderDashOverview / renderDashPlan. */
-      h('span',{key:'lbl',style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)',marginRight:'2px'}},'Filter'),
-      ...this.SMART_CHIPS().map(c=>mkChip('sc-'+c.k, c.l, chips.includes(c.k), ()=>this.toggleChip(c.k), 'Show only: '+c.l)),
-      h('span',{key:'psep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
-      moreBtn,
-      h('span',{key:'sfsep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}}),
-      sortSel, sortDir, groupSel, addSecBtn,
-      ...filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear')),
+      searchWrap,
+      sep('s1'), lbl('hlbl','Horizon'), horizonSeg,
+      sep('s2'),
+      ...this.SMART_CHIPS().map(c=>mkChip('sc-'+c.k, c.l, chips.includes(c.k), ()=>this.toggleChip(c.k), 'Show only: '+c.l,
+        searching?{opacity:0.45,pointerEvents:'none'}:null)),
+      sep('s3'), lbl('glbl','Group'), groupSeg, addSecBtn,
+      ...(searching?[]:filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear'))),
       anyActive
-        ? mkChip('clr','Clear all', false, ()=>{ this.clearAllFilters(); this.setSort(null); }, 'Clear all filters and sorting',
+        ? mkChip('clr','Clear all', false,
+            ()=>{ this.clearSearch(); this.clearAllFilters(); this.setHorizon(null); this.setSort(null); },
+            'Clear all filters and sorting',
             leading?{background:'transparent',border:'1px solid var(--divider)'}:{marginLeft:'auto',background:'transparent',border:'1px solid var(--divider)'})
         : null,
       leading?h('span',{key:'lsep',style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px 0 auto'}}):null,
@@ -14483,7 +14768,7 @@ class Component extends DCLogic {
      pointer-events:none so it never intercepts the drag it is describing. */
   renderSectionDropBand(){
     const rd=this.state.rowDrag; if(!rd || !this.rowDragMoved) return null;
-    const band=this.sectionDropBand(this._secLayout, rd, this.state.groupBy==='inclusion');
+    const band=this.sectionDropBand(this._secLayout, rd, this.effectiveGroupBy()==='inclusion');
     if(!band) return null;
     const h=React.createElement; const acc=this._accent;
     return h('div',{key:'ppdropband','data-drop-band':String(band.id==null?'':band.id),
@@ -15292,8 +15577,9 @@ class Component extends DCLogic {
     const divider=h('div',{style:{height:'1px',background:'var(--menu-hover)',margin:'5px 0'}});
     const items=[];
     /* PP-EXT Phase 7: sort actions for a single sortable column (asc/desc + clear = restore manual order) */
-    if(keys.length===1 && this.SORT_KEYS().indexOf(keys[0])>=0){
-      const sk=keys[0]; const s=this.state.sort; const cur=(s&&s.key===sk)?s.dir:null;
+    if(keys.length===1 && this.SORT_KEYS().indexOf(this.sortKeyOf(keys[0]))>=0){
+      const sk=this.sortKeyOf(keys[0]); /* PP-EXT (owner 2026-08-25): `check` resolves to `priority` */
+      const s=this.state.sort; const cur=(s&&s.key===sk)?s.dir:null;
       items.push(row(cur==='asc'?'●':'▲','Sort ascending',()=>{ this.setSort(sk,'asc'); this.setState({colMenu:null}); }));
       items.push(row(cur==='desc'?'●':'▼','Sort descending',()=>{ this.setSort(sk,'desc'); this.setState({colMenu:null}); }));
       if(cur) items.push(row('↺','Clear sort (manual order)',()=>{ this.setSort(null); this.setState({colMenu:null}); }));
@@ -15301,8 +15587,9 @@ class Component extends DCLogic {
     }
     /* PP-EXT Phase 7: per-column filter widget (single sortable column). colType() picks the input shape;
        matchColFilter() consumes the spec. Typing stays inside the menu (inputs stopPropagation the mousedown). */
-    if(keys.length===1 && this.SORT_KEYS().indexOf(keys[0])>=0){
-      const fk=keys[0]; const ftype=this.colType(fk); const f=(this.state.colFilters||{})[fk]||{};
+    if(keys.length===1 && this.SORT_KEYS().indexOf(this.sortKeyOf(keys[0]))>=0){
+      const fk=this.sortKeyOf(keys[0]); /* PP-EXT (owner 2026-08-25): `check` filters on `priority` */
+      const ftype=this.colType(fk); const f=(this.state.colFilters||{})[fk]||{};
       const inp=(props)=>h('input',Object.assign({onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
         style:{width:'100%',boxSizing:'border-box',background:'var(--input-bg)',border:'1px solid var(--divider)',
           borderRadius:'6px',padding:'5px 7px',fontSize:'12px',color:'var(--text)',outline:'none'}},props));
@@ -15356,7 +15643,7 @@ class Component extends DCLogic {
     const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
     /* PP-EXT V2.6: the section block adds up to ~210px (label + divider + the 168px scroll cap), so the
        vertical clamp has to grow with it or the menu runs off the bottom on a short viewport. */
-    const grouped=(this.state.groupBy||'section')==='section';
+    const grouped=this.effectiveGroupBy()==='section';
     const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-(grouped?590:380)));
     /* ● when every selected task's subtree ROOT already sits in this section, ○ otherwise. */
     const rootSecOf=id=>{ const r=this.state.tasks.find(x=>x.id===this.sectionRootId(this.state.tasks,id)); return r?(r.sectionId||null):null; };
@@ -15390,9 +15677,9 @@ class Component extends DCLogic {
          in the row menu next to the other whole-task operations. Assignment resolves to the subtree root
          (setTaskSectionMulti), matching how tasksBySection groups. Hidden under Group by: None, where
          sections aren't on screen to move things between. */
-      (this.state.groupBy||'section')==='section' ? divider : null,
-      (this.state.groupBy||'section')==='section' ? label('Section') : null,
-      (this.state.groupBy||'section')==='section' ? h('div',{style:{maxHeight:'168px',overflowY:'auto'}},
+      this.effectiveGroupBy()==='section' ? divider : null,
+      this.effectiveGroupBy()==='section' ? label('Section') : null,
+      this.effectiveGroupBy()==='section' ? h('div',{style:{maxHeight:'168px',overflowY:'auto'}},
         ...this.sectionsInOrder().map(s=>h('div',{key:'sec-'+s.id},
           row([ic(secMarkOf(s.id)),h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},s.name)],
             ()=>this.setTaskSectionMulti(ids,s.id)))),
