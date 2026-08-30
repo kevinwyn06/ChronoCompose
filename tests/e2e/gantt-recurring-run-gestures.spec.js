@@ -6,8 +6,15 @@ test.use({ timezoneId: 'America/Vancouver' });
 async function bootRun(page) {
   await bootSurface(page, { view: 'gantt' }, { tasks: [
     task('run', 'Three-day run', {
-      start: '+6d', end: '+7d', allDay: true,
-      recur: { kind: 'day', n: 1, label: 'Daily', until: '+8d', overrides: {}, shifts: [] },
+      /* The run must be VISIBLE in the Gantt's scroll viewport, not merely present in its content: the
+         chart scrolls (scrollWidth ~2226 against a ~690px viewport), and a bar past the right edge still
+         reports a boundingBox — one that lies outside the browser window. At +6d..+8d the last
+         occurrence sat at viewport x~1299, so `page.mouse` pushed its right edge into dead space and the
+         resize previewed zero. Whether it landed there depended on today's weekday, which is why this
+         spec passed on 08-27 and failed on 08-30. Near-today offsets are on screen under every weekday
+         alignment; `expectDragOnScreen` fails loudly if that ever stops holding. */
+      start: '+2d', end: '+3d', allDay: true,
+      recur: { kind: 'day', n: 1, label: 'Daily', until: '+4d', overrides: {}, shifts: [] },
     }),
   ] });
   const bar = page.locator('[data-gantt-bar-id="run"]').first();
@@ -21,6 +28,18 @@ async function bootRun(page) {
   return { bar, dates };
 }
 
+/* An off-screen drag and a broken drag both read as "the bar did not move", so assert the precondition
+   separately: both ends of the gesture must land inside the Gantt's visible scroll rect. A bar scrolled
+   past that rect still reports a boundingBox, so the box alone proves nothing about reachability. */
+async function expectDragOnScreen(page, x, direction, day, surface) {
+  const view = await page.locator('[data-gantt-scroll]').boundingBox();
+  const why = `the ${surface} drag target is outside the Gantt's visible scroll rect — move the fixture nearer today, or scroll it into view; do not loosen the assertion`;
+  expect(x, why).toBeGreaterThan(view.x);
+  expect(x, why).toBeLessThan(view.x + view.width);
+  expect(x + direction * day, why).toBeGreaterThan(view.x);
+  expect(x + direction * day, why).toBeLessThan(view.x + view.width);
+}
+
 async function dragOneDay(page, bar, surface, direction, scope = 'This run') {
   const before = await bar.boundingBox();
   const columns = Number(await bar.getAttribute('data-gantt-columns'));
@@ -30,6 +49,7 @@ async function dragOneDay(page, bar, surface, direction, scope = 'This run') {
     : bar.locator(`[data-gantt-edge="${surface}"]`).first();
   const box = await target.boundingBox();
   const x = box.x + box.width / 2, y = box.y + box.height / 2;
+  await expectDragOnScreen(page, x, direction, day, surface);
   await page.mouse.move(x, y);
   await page.mouse.down();
   await page.mouse.move(x + direction * day, y, { steps: 12 });
