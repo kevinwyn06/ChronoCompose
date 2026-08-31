@@ -237,3 +237,44 @@ which is deliberate: a pruned event must re-import on its own once it comes into
 
 Distinct from the filter bar's horizon slider, which shares the goal and none of the code: the **slider
 hides** far-future work that exists; **this stops it existing**. See `architecture/ui-runtime.md`.
+
+### The calendar picker: paging, and the calendars Google will not enumerate (2026-08-30)
+
+Owner report: *"the birthday calendar is missing, and I think some other ones are too. I suspect it might
+have been merged into personal or something."* Nothing merges calendars — `gcalListCalendars` maps the
+`calendarList` items straight to picker rows. Two independent defects produced the symptom.
+
+**Google does not return the Birthdays calendar from `calendarList` — at all.** Measured live against
+`qa@example.com` on 2026-08-30: the bare call returned **3** entries, and
+`?showHidden=true&maxResults=250` returned the **same 3**, every one of them `hidden:false`. Yet
+`GET /calendars/addressbook%23contacts%40group.v.calendar.google.com` answered **200** with summary
+`Birthdays`, and its `events` endpoint answered 200. **Sidebar visibility in Google Calendar is not
+`calendarList` membership.** That is why the calendar is plainly not hidden in Google and still never
+reached the picker: the picker is built purely from `calendarList`, so such a calendar could never be
+ticked no matter what the user did on Google's side.
+
+`GCAL_UNLISTED_CALS` names those ids (today: the Birthdays calendar). After the list returns,
+`gcalAppendUnlisted` probes each id that the list did not already carry and appends the ones this account
+can actually read. Each probe is caught independently — an id this account cannot read, or one Google
+retires, must degrade to *"not offered in the picker"* and never to a failed calendar list. An id the list
+already carried is not probed at all, so if Google ever starts enumerating Birthdays this costs nothing and
+cannot produce a duplicate row. `calendars.get` carries no `backgroundColor` (that field lives on the
+`calendarList` resource), so these rows fall through to the picker's existing `#888` swatch default.
+
+**`showHidden` is deliberately not sent.** Every calendar on the tested account reports `hidden:false`, so
+it would buy nothing, and it would start surfacing calendars the user removed from their Google list on
+purpose. `hidden:true` is Google's *"hide from my list"*, which is a different setting from the sidebar
+checkbox (`selected`) — conflating the two is what made `showHidden` look like the fix.
+
+**`gcalListCalendarPages` follows `nextPageToken`.** The old call sent no parameters, so it took Google's
+100-entry default and dropped everything past page one with no error and no way for the user to tell.
+`GCAL_CAL_PAGE` is 250, Google's per-page cap.
+
+**The picker's `maxHeight` was 140px.** That was sized for one-line rows; the per-calendar *Short term*
+control added 2026-08-25 took each entry to ~44px, so the box clipped at ~3.2 calendars and hid the rest
+behind a scroll with no affordance — measured live, `clientHeight 139` against `scrollHeight 178` at only
+**three** calendars. It is 360px now, ~8 rows before scrolling. This, not any merge, is what "some other
+ones are missing too" was.
+
+Still open: `gcalDropGone` unchecks a calendar that 404/410s with no user-facing notice, so a calendar can
+stop importing silently. Unproven on the owner's account, and untouched here.

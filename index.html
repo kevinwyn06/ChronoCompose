@@ -383,6 +383,20 @@ class Component extends DCLogic {
        being only what it started as: the reserved summary that `gcalEnsureCalendar` adopts and that
        `calNameOf` can name offline. */
     this.GCAL_OWN_CAL_NAME = 'ChronoCompose';
+    /* PP-EXT (owner 2026-08-30): calendarList paging + the calendars Google refuses to enumerate.
+       Verified live against the QA account on 2026-08-30: `calendarList` returned 3 entries and returned
+       the SAME 3 with `showHidden=true&maxResults=250`, yet `GET /calendars/addressbook%23contacts%40
+       group.v.calendar.google.com` answered 200 with summary "Birthdays" and its events endpoint
+       answered 200. So Google shows Birthdays in its own sidebar without ever listing it here —
+       sidebar visibility is NOT calendarList membership, which is why "it isn't hidden" and it still
+       never reached the picker. The picker is built purely from calendarList, so such a calendar can
+       never be ticked no matter what the user does in Google. Probe these ids directly and append the
+       ones this account can actually read.
+       `showHidden` is deliberately NOT sent: every calendar on the tested account reports
+       `hidden:false`, so it would buy nothing and would start surfacing calendars the user removed
+       from their Google list on purpose. */
+    this.GCAL_CAL_PAGE = 250;                  // Google's per-page cap (the API defaults to only 100)
+    this.GCAL_UNLISTED_CALS = ['addressbook#contacts@group.v.calendar.google.com']; // Birthdays
     /* PP-EXT B1: offline-first Supabase sync — same shape as the gcal queue above (see computeSyncOps). */
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
@@ -9233,9 +9247,37 @@ class Component extends DCLogic {
     needsReauth:(e&&e.status===401)?true:s.gcal.needsReauth})})); }
   gcalClearError(){ if(this.state.gcal.lastError||this.state.gcal.needsReauth)
     this.setState(s=>({gcal:Object.assign({},s.gcal,{lastError:null,needsReauth:false})})); }
+  /* PP-EXT (owner 2026-08-30): walk EVERY page of calendarList. The old call sent no parameters at
+     all, so it took Google's 100-entry default and never followed `nextPageToken` — anything past the
+     first page was dropped with no error and no way for the user to tell. */
+  gcalListCalendarPages(){
+    const base='https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults='+this.GCAL_CAL_PAGE;
+    const step=(tok,acc)=>this.gcalFetch(base+(tok?('&pageToken='+encodeURIComponent(tok)):''))
+      .then(d=>{ const items=acc.concat((d&&d.items)||[]);
+        return (d&&d.nextPageToken)? step(d.nextPageToken, items) : items; });
+    return step(null,[]);
+  }
+  /* PP-EXT (owner 2026-08-30): append the calendars Google serves but will not enumerate (see
+     GCAL_UNLISTED_CALS). Each probe is independently caught: an id this account cannot read — or a
+     calendar Google retires outright — must degrade to "not offered in the picker", never to a failed
+     calendar list. A probe is skipped entirely when calendarList already carried the id, so if Google
+     ever starts listing Birthdays this quietly costs nothing and produces no duplicate row.
+     `calendars.get` has no `backgroundColor` (that lives on the calendarList resource), so these rows
+     fall through to the picker's existing '#888' swatch default. */
+  gcalAppendUnlisted(cals){
+    const have={}; (cals||[]).forEach(c=>{ if(c&&c.id) have[c.id]=1; });
+    const want=(this.GCAL_UNLISTED_CALS||[]).filter(id=>!have[id]);
+    if(!want.length) return Promise.resolve(cals);
+    return Promise.all(want.map(id=>
+      this.gcalFetch('https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(id))
+        .then(d=>(d&&d.id)?{id:d.id,summary:d.summary,color:d.backgroundColor}:null)
+        .catch(()=>null)))
+      .then(extra=>cals.concat(extra.filter(Boolean)));
+  }
   gcalListCalendars(){
-    this.gcalFetch('https://www.googleapis.com/calendar/v3/users/me/calendarList')
-      .then(d=>{ const cals=(d.items||[]).map(c=>({id:c.id,summary:c.summary,color:c.backgroundColor}));
+    this.gcalListCalendarPages()
+      .then(items=>this.gcalAppendUnlisted(items.map(c=>({id:c.id,summary:c.summary,color:c.backgroundColor}))))
+      .then(cals=>{
         this.setState(s=>({gcal:Object.assign({},s.gcal,{calendars:cals,msg:cals.length+' calendars loaded'})}));
         if(cals.length) this.gcalReconcileLinks(cals); /* PP-EXT: a fresh list is authoritative — unlink tasks whose calendar is gone */
         if(cals.length) this.sweepCalendarTags(cals); /* PP-EXT (owner 2026-08-14): completes `no-calendar-tags` — see below */ })
@@ -11115,7 +11157,12 @@ class Component extends DCLogic {
             n? 'Send '+n+' un-synced task'+(n>1?'s':'')+' to a "ChronoCompose" calendar.' : 'All dated tasks are already on Google.')); })(),
       h('div',{style:{display:'flex',gap:'7px',padding:'8px 0'}},
         h('button',{className:'pp-tbtn',onClick:()=>this.gcalImport(),disabled:!g.connected,style:g.connected?null:{opacity:0.5}},'Import now')),
-      (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'140px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
+      /* PP-EXT (owner 2026-08-30): 140px was sized for one-line calendar rows. The per-calendar
+         "Short term" control added 2026-08-25 took each entry to ~44px, so the box clipped at ~3.2
+         calendars and silently hid the rest behind a scroll with no affordance — measured live on
+         2026-08-30: clientHeight 139 vs scrollHeight 178 at only THREE calendars. That is what read
+         as "my other calendars are missing". 360px shows ~8 before scrolling. */
+      (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'360px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
         g.calendars.map(c=>{ const cfg=((g.lookahead||{})[c.id])||{};
           return h('div',{key:c.id,style:{padding:'3px 0'}},
             h('label',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
