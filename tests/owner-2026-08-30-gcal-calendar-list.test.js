@@ -90,3 +90,66 @@ test('gcalListCalendars: Birthdays reaches gcal.calendars end to end', async () 
   assert.strictEqual(ids(c.state.gcal.calendars), ['me@x.com', BIRTHDAYS].join(','));
   assert.strictEqual(c.state.gcal.msg, '2 calendars loaded');
 });
+
+// ---------------------------------------------------------------------------------------------
+// Follow-up review 2026-08-31. Appending an unlisted calendar gave `gcal.calendars` a member whose
+// presence depends on a probe that catches EVERY error — while `gcalReconcileLinks` still treated
+// that same list as authoritative. The two together silently destroyed links.
+
+test('gcalReconcileLinks: an unlisted calendar is never "gone", even absent from the list', async () => {
+  const c = make();
+  c.state.gcal = Object.assign({}, c.state.gcal, { calendars:[], selected:{} });
+  c.state.tasks = [{ id:'t1', title:"test's birthday", calendarId:BIRTHDAYS, eventId:'E1', labels:[] }];
+  // calendarList answers normally; the Birthdays probe fails transiently (503, not 404).
+  stub(c, [
+    ['/calendars/',  Object.assign(new Error('backendError'), { status:503 })],
+    ['calendarList', { items:[cal('me@x.com','me@x.com')] }],
+  ]);
+  c.gcalListCalendars();
+  for(let i=0;i<6;i++) await new Promise(r=>setImmediate(r));
+  assert.strictEqual(ids(c.state.gcal.calendars), ['me@x.com'].join(','), 'a failed probe still drops the row');
+  assert.strictEqual(c.state.tasks[0].calendarId, BIRTHDAYS, 'but the task link must survive');
+  assert.strictEqual(c.state.tasks[0].eventId, 'E1');
+});
+
+test('gcalReconcileLinks: a genuinely removed calendar is still unlinked', async () => {
+  const c = make();
+  c.state.gcal = Object.assign({}, c.state.gcal, { calendars:[], selected:{} });
+  c.state.tasks = [{ id:'t1', title:'old', calendarId:'gone@x.com', eventId:'E1', labels:[] }];
+  stub(c, [
+    ['/calendars/',  { id:BIRTHDAYS, summary:'Birthdays' }],
+    ['calendarList', { items:[cal('me@x.com','me@x.com')] }],
+  ]);
+  c.gcalListCalendars();
+  for(let i=0;i<6;i++) await new Promise(r=>setImmediate(r));
+  assert.strictEqual(c.state.tasks[0].calendarId, null, 'the exemption must not blanket-disable reconcile');
+  assert.strictEqual(c.state.tasks[0].eventId, null);
+});
+
+test('gcalListCalendarPages: a repeated nextPageToken terminates instead of looping forever', async () => {
+  const c = make();
+  const seen = [];
+  // Every page hands back the SAME token — the shape that would otherwise never terminate.
+  c.gcalFetch = (url)=>{ seen.push(url); return Promise.resolve({ items:[cal('a'+seen.length,'A')], nextPageToken:'same' }); };
+  const items = await c.gcalListCalendarPages();
+  assert.strictEqual(seen.length, 2, 'first page, then the token once — never again');
+  assert.strictEqual(ids(items), ['a1','a2'].join(','));
+});
+
+// Offering Birthdays in the picker means an imported task can be edited locally, and Birthdays events
+// are READ-ONLY in Google. The handoff for #168 left that path untested. It must not jam the queue.
+test('a read-only calendar rejecting a PATCH drops the op instead of jamming the queue', async () => {
+  const c = make();
+  let q = [{ op:'patch', taskId:'t1', eventId:'E1', calendarId:BIRTHDAYS,
+             body:{ summary:'renamed' }, queueVersion:c.GCAL_QUEUE_VERSION }];
+  c.loadQueue = () => q; c.saveQueue = (x) => { q = x; };
+  c.saveTasks = () => {};
+  c._token = 'tok';
+  let calls = 0;
+  c.gcalFetch = () => { calls++; return Promise.reject(Object.assign(new Error('forbiddenForNonOrganizer'), { status:403 })); };
+  c.gcalFlushQueue();
+  for(let i=0;i<8;i++) await new Promise(r=>setImmediate(r));
+  assert.strictEqual(calls, 1, 'a permanent 403 is not retried');
+  assert.strictEqual(q.length, 0, 'the op is dropped, so it cannot block every later write');
+  assert.strictEqual(c._gcalFlushing, false, 'and the flush lock is released');
+});

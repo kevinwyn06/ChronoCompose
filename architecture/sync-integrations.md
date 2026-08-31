@@ -278,3 +278,27 @@ ones are missing too" was.
 
 Still open: `gcalDropGone` unchecks a calendar that 404/410s with no user-facing notice, so a calendar can
 stop importing silently. Unproven on the owner's account, and untouched here.
+
+#### Invariant: an appended unlisted calendar is not evidence for `gcalReconcileLinks` (2026-08-31)
+
+`gcalAppendUnlisted` and `gcalReconcileLinks` read the same array with opposite assumptions, and the
+combination destroyed data until this was fixed. The probe **must** catch every error — a retired or
+unreadable id may not fail the whole calendar list — so a plain 503 silently drops the Birthdays row.
+`gcalReconcileLinks` then saw a list it believes is authoritative, missing that calendar, and cleared
+`calendarId`/`eventId` on every task imported from it. Nothing restores the link on the next successful
+list, and a re-import creates a duplicate instead.
+
+So `GCAL_UNLISTED_CALS` ids are **always known** to `gcalReconcileLinks`. Absence from `calendarList` is
+what defines these calendars; it can never also be the signal that one has gone away. The evidence that a
+calendar is really gone is a 404/410 from its *events* endpoint during an import, and `gcalDropGone`
+already acts on exactly that. The general rule for anything new here: only a list that could in principle
+contain an id may be used to conclude that id is missing.
+
+`gcalListCalendarPages` also stops when Google hands back a `nextPageToken` it has already used. Nothing
+in the API promises tokens strictly advance, and the recursion has no other terminator — a repeated token
+refetches the same page forever and the returned promise never settles.
+
+Editing a task imported from a read-only calendar (Birthdays is one) queues a PATCH that Google answers
+403. `gcalFlushQueue` treats 400/403/404 as permanent and drops the op without retrying, so the queue
+cannot jam; a local *delete* still sticks, because the tombstone is cleared only on a successful DELETE.
+A local title/time edit, though, is simply lost at the next pull — see `tasks.md`.

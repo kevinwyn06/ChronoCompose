@@ -9252,9 +9252,15 @@ class Component extends DCLogic {
      first page was dropped with no error and no way for the user to tell. */
   gcalListCalendarPages(){
     const base='https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults='+this.GCAL_CAL_PAGE;
+    /* PP-EXT (owner 2026-08-31): `seen` breaks the loop if Google ever echoes a token we already used.
+       Nothing in the API promises a token strictly advances, and the recursion has no other terminator:
+       a repeated token would refetch the same page forever, hanging the returned promise and growing
+       `acc` without bound. Stopping returns what we have, which is strictly better than not returning. */
+    const seen={};
     const step=(tok,acc)=>this.gcalFetch(base+(tok?('&pageToken='+encodeURIComponent(tok)):''))
-      .then(d=>{ const items=acc.concat((d&&d.items)||[]);
-        return (d&&d.nextPageToken)? step(d.nextPageToken, items) : items; });
+      .then(d=>{ const items=acc.concat((d&&d.items)||[]); const nxt=d&&d.nextPageToken;
+        if(!nxt || seen[nxt]) return items;
+        seen[nxt]=1; return step(nxt, items); });
     return step(null,[]);
   }
   /* PP-EXT (owner 2026-08-30): append the calendars Google serves but will not enumerate (see
@@ -9295,6 +9301,15 @@ class Component extends DCLogic {
   gcalReconcileLinks(cals){
     const known={}; (cals||[]).forEach(c=>{ if(c&&c.id) known[c.id]=1; });
     const cc=this.state.gcal&&this.state.gcal.ccCalId; if(cc) known[cc]=1; /* our own calendar counts as known */
+    /* PP-EXT (owner 2026-08-31): GCAL_UNLISTED_CALS are known by definition — `calendarList` never
+       returns them, so their presence in `cals` depends entirely on `gcalAppendUnlisted`'s probe, and
+       that probe catches EVERY error (it must: a dead id may not fail the whole list). Without this
+       line a transient 503 on the Birthdays probe makes the list look authoritative-and-missing, and
+       every imported birthday task is permanently unlinked — the link is not restored by the next
+       successful list, and a re-import then duplicates the task. Absence of an id Google refuses to
+       enumerate is not evidence the calendar is gone; only a 404/410 from its events endpoint is, and
+       `gcalDropGone` already handles that. */
+    (this.GCAL_UNLISTED_CALS||[]).forEach(id=>{ known[id]=1; });
     if(!this.state.tasks.some(t=>t.calendarId && !known[t.calendarId])) return 0;
     let n=0; const wasApplying=this._gcalApplying; this._gcalApplying=true; /* local unlink — never diff a DELETE back to a calendar that no longer exists */
     try{ this.commit(tasks=>{ tasks.forEach(t=>{ if(t.calendarId && !known[t.calendarId]){
