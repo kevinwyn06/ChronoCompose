@@ -117,8 +117,26 @@ test('a cancelled or undated event produces no record', () => {
 test('merging replaces only the calendars this import touched', () => {
   const c = comp();
   const existing = [ { cid:'cal-p', eid:'old' }, { cid:'cal-x', eid:'keep' } ];
-  const out = c.mergeCalEvents(existing, [ { cid:'cal-p', eid:'new' } ], ['cal-p']);
-  assert.deepEqual(out.map(e => e.eid), ['keep','new']);
+  const out = c.mergeCalEvents(existing, [ { cid:'cal-p', eid:'new' } ], ['cal-p'], { 'cal-p':1, 'cal-x':1 });
+  assert.deepEqual(Array.from(out, e => e.eid), ['keep','new']);
+});
+
+/* A display event has no task row, so unticking its calendar would otherwise leave the user no way to
+   get rid of it — it would render forever. Tasks deliberately survive a deselect (they may carry local
+   edits); there is nothing local to preserve here, and these rebuild from Google on the next import. */
+test('a deselected calendar’s display events are dropped', () => {
+  const c = comp();
+  const existing = [ { cid:'cal-p', eid:'a' }, { cid:'cal-gone', eid:'b' } ];
+  const out = c.mergeCalEvents(existing, [], [], { 'cal-p':1 });
+  assert.deepEqual(Array.from(out, e => e.cid), ['cal-p']);
+});
+
+/* Absence from ONE import is not evidence — the same rule pruneDeletedEvents follows for tasks. */
+test('a still-selected calendar this import could not reach keeps its events', () => {
+  const c = comp();
+  const existing = [ { cid:'cal-unreached', eid:'a' } ];
+  const out = c.mergeCalEvents(existing, [], ['cal-p'], { 'cal-p':1, 'cal-unreached':1 });
+  assert.deepEqual(Array.from(out, e => e.eid), ['a']);
 });
 
 test('the store round-trips through localStorage', () => {

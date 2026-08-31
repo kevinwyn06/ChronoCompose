@@ -8329,7 +8329,14 @@ class Component extends DCLogic {
           the headers keep painting the old names. All three are replaced by reference in their mutators. */
        || this._visSecs!==this.state.sections || this._visSecCol!==this.state.collapsedSections
        || this._visGroupBy!==this.state.groupBy
-       || this._visHorizon!==this.state.horizon || this._visSearchQ!==this.state.searchQuery){ /* PP-EXT (owner 2026-08-25) */
+       || this._visHorizon!==this.state.horizon || this._visSearchQ!==this.state.searchQuery /* PP-EXT (owner 2026-08-25) */
+       /* PP-EXT (owner 2026-08-31): display-only calendar events live OUTSIDE `state.tasks`, so none of
+          the keys above changes when an import adds one. Without this key an import that touched no task
+          — which is the ordinary case once the birthdays are already display-only — left `_calTasks`
+          holding the previous projection and the events never appeared until an unrelated edit
+          invalidated the cache. `calEventTasks()` is memoized on the raw stored string, so comparing the
+          returned array's identity is cheap and is exactly "did the display events change". */
+       || this._visCalEv!==this.calEventTasks()){
       this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
       this._visSecs=this.state.sections; this._visSecCol=this.state.collapsedSections; this._visGroupBy=this.state.groupBy; /* PP-EXT V2.6 */
@@ -8351,7 +8358,7 @@ class Component extends DCLogic {
          the outbound gcal diff cannot see them. This is the whole "not stored as a task" promise, in
          one line: the views that map over tasks get them; every path that mutates or syncs does not. */
       const filtered = this.hasFilters() ? this.filterTasks(this.state.tasks, kb.byId) : this.state.tasks;
-      const disp = this.calEventTasks();
+      const disp = this.calEventTasks(); this._visCalEv = disp;
       this._calTasks = disp.length ? filtered.concat(disp) : filtered;
     }
     const tasks = this._visTasks;
@@ -10893,7 +10900,7 @@ class Component extends DCLogic {
       /* The display store is replaced for the calendars this import actually reached, so a calendar that
          404'd or was never selected keeps whatever it had. Written outside the task commit because these
          are not tasks and must not enter the undo history. */
-      this.saveCalEvents(this.mergeCalEvents(this.loadCalEvents(), displayEvents, liveIds));
+      this.saveCalEvents(this.mergeCalEvents(this.loadCalEvents(), displayEvents, liveIds, g.selected||{}));
       if(opts.silent){
         /* apply on a clone; only commit if it changed anything (avoids undo/render churn on idle polls) */
         const before=JSON.stringify(this.state.tasks);
@@ -10987,13 +10994,35 @@ class Component extends DCLogic {
      TASK cannot do this (see pruneOutOfWindow and tasks.md). */
   loadCalEvents(){ try{ const v=JSON.parse(this.lsGet('pp-calevents')||'{}')||{};
       return Array.isArray(v.items)?v.items:[]; }catch(e){ return []; } }
-  saveCalEvents(items){ try{ this.lsSet('pp-calevents', JSON.stringify({items:items||[], updatedAt:Date.now()})); }catch(e){}
-    this._calEventTasks=null; this._calEventsRef=null; /* PP-EXT: drop the pseudo-task memo */ }
-  /* PURE: fold this import's display events for `cids` into the stored set. Events for calendars that were
-     NOT part of this import are kept untouched — an import of one calendar must never clear another's. */
-  mergeCalEvents(existing, fresh, cids){
+  /* PP-EXT (owner 2026-08-31): a display-event write must REPAINT. These do not live in `state.tasks`, so
+     nothing else in the render path can notice them — and the ordinary case (birthdays already demoted,
+     so the import changes no task) commits nothing, meaning without this the events would sit in storage
+     unseen until an unrelated edit happened to invalidate the view cache. Compared before writing so an
+     idle poll that re-imports identical events still costs no render. */
+  saveCalEvents(items){
+    const next=JSON.stringify({items:items||[], updatedAt:0}); /* updatedAt zeroed: a timestamp is not a change */
+    const prevRaw=this.lsGet('pp-calevents')||'';
+    let prev=''; try{ const p=JSON.parse(prevRaw)||{}; prev=JSON.stringify({items:p.items||[], updatedAt:0}); }catch(e){ prev=''; }
+    try{ this.lsSet('pp-calevents', JSON.stringify({items:items||[], updatedAt:Date.now()})); }catch(e){}
+    this._calEventTasks=null; this._calEventsRaw=null; /* PP-EXT: drop the pseudo-task memo */
+    if(prev!==next && this.forceUpdate && this._mounted!==false) try{ this.forceUpdate(); }catch(e){}
+  }
+  /* PURE: fold this import's display events into the stored set.
+     `cids` = the calendars this import actually reached, whose events are REPLACED wholesale.
+     `selected` = every currently ticked calendar; anything else is DROPPED.
+
+     That second argument is load-bearing. A display event has no task row, so unticking its calendar
+     leaves the user no way to get rid of it — it would simply render forever. Tasks behave differently
+     on purpose (deselecting keeps them, because they may carry local edits), but there is nothing local
+     to preserve here and the events rebuild from Google on the next import.
+
+     A calendar that is still selected but was NOT reached this run (a 404/410 in `gone`, or a transient
+     failure) keeps what it had: absence from this import is not evidence its events are gone — the same
+     rule `pruneDeletedEvents` follows. */
+  mergeCalEvents(existing, fresh, cids, selected){
     const touched={}; (cids||[]).forEach(c=>touched[c]=1);
-    const kept=(existing||[]).filter(e=>e && !touched[e.cid]);
+    const keep = selected ? (c=>!!selected[c]) : (()=>true);
+    const kept=(existing||[]).filter(e=>e && !touched[e.cid] && keep(e.cid));
     return kept.concat(fresh||[]);
   }
   /* Build one stored display-event record from a Google event. Returns null for anything undated. */
@@ -11012,16 +11041,19 @@ class Component extends DCLogic {
      put into `state.tasks`, which is what keeps them out of scheduling, sync, and the outbound gcal diff.
      The `ce:` id prefix makes an accidental leak into a task path obvious rather than silent. */
   calEventTasks(){
+    /* Memoized on the RAW stored string: this is called from the render path, so re-parsing and
+       re-normalizing on every frame would be pure waste — and a stable array identity is what lets the
+       view cache above use "did this array change" as its invalidation key. */
+    const raw=this.lsGet('pp-calevents')||'';
+    if(this._calEventTasks && this._calEventsRaw===raw) return this._calEventTasks;
+    this._calEventsRaw=raw;
     const items=this.loadCalEvents();
-    if(this._calEventTasks && this._calEventsRef===items.length && this._calEventsSig===this._calEventsSigOf(items)) return this._calEventTasks;
-    this._calEventsRef=items.length; this._calEventsSig=this._calEventsSigOf(items);
     this._calEventTasks=items.map(e=>this.normalizeTask({id:this.CAL_EVENT_ID_PREFIX+e.cid+'|'+e.eid,
       name:e.name, type:'Proportional', start:e.start, end:e.end, allDay:!!e.allDay,
       priority:4, deps:[], pct:0, planned:null, spent:0, labels:[], recur:null, completion:null,
       calendarId:e.cid, eventId:e.eid, displayOnly:true, blocking:false}));
     return this._calEventTasks;
   }
-  _calEventsSigOf(items){ let s=''; (items||[]).forEach(e=>{ s+=e.eid+':'+e.start+';'; }); return s; }
   isDisplayEvent(t){ return !!(t && t.displayOnly); }
   /* The display events overlapping one day, in start order. Used by the day-grid headers, which have no
      task list to hang them off — the timeline body is the auto-scheduler's output and these are never

@@ -1,0 +1,230 @@
+/* PP-EXT (owner 2026-08-31): the display-only tier driven through the REAL `gcalImport`, not through its
+   pieces. The first round of tests for this feature covered the classifier, the store and the prune in
+   isolation and all passed while the feature did not visibly work — so these drive the whole pull with a
+   stubbed `gcalFetch` and assert on what the user actually ends up with.
+
+   Event JSON below mirrors the shapes measured live on the owner's account 2026-08-31:
+     · a primary-calendar birthday  — eventType "birthday", transparency "transparent", RECURRING
+     · a contacts-calendar birthday — eventType absent, transparency absent (i.e. Busy), non-recurring
+     · a real meeting               — eventType absent, Busy, timed
+   The asymmetry between the first two is the whole reason the classifier has two levels. */
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { make } = require('./_load.js');
+
+const PRIMARY = 'owner@example.com';
+const BIRTHDAYS = 'addressbook#contacts@group.v.calendar.google.com';
+const DAY = 86400000;
+
+function ymd(ms){ const d=new Date(ms); const p=n=>String(n).padStart(2,'0');
+  return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+
+/* A yearly birthday on the PRIMARY calendar, as Google returns its expanded instance. */
+function primaryBirthday(c, name, dayMs, masterId){
+  return { id:'inst_'+masterId, recurringEventId:masterId, summary:name,
+    eventType:'birthday', transparency:'transparent',
+    start:{ date:ymd(dayMs) }, end:{ date:ymd(dayMs+DAY) } };
+}
+/* Its master, fetched by gcalImport for the RRULE. */
+function primaryBirthdayMaster(name, masterId){
+  return { id:masterId, summary:name, eventType:'birthday', transparency:'transparent',
+    recurrence:['RRULE:FREQ=YEARLY'], start:{ date:'2007-06-30' }, end:{ date:'2007-07-01' } };
+}
+/* The contacts Birthdays calendar serves each year as its OWN non-recurring event, and — measured —
+   reports neither eventType nor transparency. */
+function contactsBirthday(name, dayMs, id){
+  return { id, summary:name, start:{ date:ymd(dayMs) }, end:{ date:ymd(dayMs+DAY) } };
+}
+function meeting(id, name, startMs, endMs){
+  return { id, summary:name, start:{ dateTime:new Date(startMs).toISOString() },
+    end:{ dateTime:new Date(endMs).toISOString() } };
+}
+
+/* Wire a component to a fixed set of events per calendar and run one import to completion. */
+function harness(byCal, masters){
+  const c = make();
+  Object.assign(c.state.gcal, {
+    selected:{ [PRIMARY]:true, [BIRTHDAYS]:true },
+    calendars:[{id:PRIMARY,summary:'Personal'},{id:BIRTHDAYS,summary:'Birthdays'}],
+    window:365, lookahead:{}, tier:{},
+  });
+  c._token = 'token';
+  c.saveCalEvents([]);
+  c.gcalFetch = (url) => {
+    /* an events.list call */
+    const m = /calendars\/([^/]+)\/events\?/.exec(url);
+    if(m){ const cid = decodeURIComponent(m[1]); return Promise.resolve({ items: byCal[cid] || [] }); }
+    /* a by-id lookup: either a recurring master or gcalVerifyMissing probing a linked event */
+    const g = /calendars\/([^/]+)\/events\/([^?]+)/.exec(url);
+    if(g){ const id = decodeURIComponent(g[2]);
+      if(masters && masters[id]) return Promise.resolve(masters[id]);
+      return Promise.reject(Object.assign(new Error('404'), { status:404 })); }
+    return Promise.resolve({});
+  };
+  return c;
+}
+async function settle(){ for(let i=0;i<8;i++) await new Promise(r=>setImmediate(r)); }
+
+const B = () => { const d=new Date(); d.setHours(0,0,0,0); return d.getTime(); };
+
+/* ---- the whole pull ------------------------------------------------------- */
+
+test('an import files birthdays as display events and the meeting as a task', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Morgan Diaz's birthday", day, 'mstr1'),
+                 meeting('mtg1', 'Standup', day+3600000, day+5400000) ],
+    [BIRTHDAYS]: [ contactsBirthday("Morgan Diaz's birthday", day, '2026_BIRTHDAY_aaa') ],
+  }, { mstr1: primaryBirthdayMaster("Morgan Diaz's birthday", 'mstr1') });
+
+  c.gcalImport({});
+  await settle();
+
+  /* Array.from: the component runs in a VM sandbox, so its arrays are a different realm's Array and
+     deepEqual compares prototypes. Every list assertion in this file copies into a host array first. */
+  assert.deepEqual(Array.from(c.state.tasks, t=>t.name), ['Standup'], 'only the meeting became a task');
+  assert.deepEqual(Array.from(c.loadCalEvents(), e=>e.name).sort(),
+    ["Morgan Diaz's birthday","Morgan Diaz's birthday"],
+    'both Google copies are stored as display events');
+});
+
+/* THE owner-visible symptom: one person, two calendars, previously two task rows. */
+test('the duplicate pair produces zero task rows', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Morgan Diaz's birthday", day, 'mstr1') ],
+    [BIRTHDAYS]: [ contactsBirthday("Morgan Diaz's birthday", day, '2026_BIRTHDAY_aaa') ],
+  }, { mstr1: primaryBirthdayMaster("Morgan Diaz's birthday", 'mstr1') });
+
+  c.gcalImport({});
+  await settle();
+  assert.equal(c.state.tasks.length, 0);
+});
+
+/* The retroactive half: a workspace that already imported the birthday as a task. */
+test('an already-imported birthday task is removed by the next import', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Riley's birthday", day, 'mstr2') ],
+    [BIRTHDAYS]: [],
+  }, { mstr2: primaryBirthdayMaster("Riley's birthday", 'mstr2') });
+  /* linked on the MASTER id, which is what a recurring import stores */
+  c.state.tasks = [ c.normalizeTask({ id:'old', name:"Riley's birthday",
+    calendarId:PRIMARY, eventId:'mstr2', start:day, end:day+DAY, allDay:true }) ];
+
+  c.gcalImport({});
+  await settle();
+
+  assert.equal(c.state.tasks.length, 0, 'the stale task row is gone');
+  assert.equal(c.loadCalEvents().length, 1, 'and it is now a display event');
+});
+
+/* ...and it must not have gone out to Google. A tombstone is what gcalEnqueue writes alongside a real
+   remote DELETE, so its absence is the evidence that the owner's calendar was not touched. */
+test('converting a task to a display event queues nothing and tombstones nothing', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Riley's birthday", day, 'mstr2') ],
+    [BIRTHDAYS]: [],
+  }, { mstr2: primaryBirthdayMaster("Riley's birthday", 'mstr2') });
+  c.state.tasks = [ c.normalizeTask({ id:'old', name:"Riley's birthday",
+    calendarId:PRIMARY, eventId:'mstr2', start:day, end:day+DAY, allDay:true }) ];
+
+  c.gcalImport({});
+  await settle();
+
+  assert.deepEqual(Array.from(Object.keys(c.loadTombstones())), [], 'no tombstone');
+  assert.equal(c.loadQueue().filter(op=>op.op==='delete').length, 0, 'no queued DELETE');
+});
+
+/* The reverse direction — the escape hatch has to actually work. */
+test('setting a calendar to Tasks brings its events back as tasks', async () => {
+  const day = B() + 10*DAY;
+  const mk = () => harness({
+    [PRIMARY]: [],
+    [BIRTHDAYS]: [ contactsBirthday("Casey Park's birthday", day, '2026_BIRTHDAY_bbb') ],
+  }, {});
+
+  const c = mk();
+  c.gcalImport({}); await settle();
+  assert.equal(c.state.tasks.length, 0, 'display by default');
+  assert.equal(c.loadCalEvents().length, 1);
+
+  c.setCalTier(BIRTHDAYS, 'tasks');
+  c.gcalImport({}); await settle();
+  assert.deepEqual(Array.from(c.state.tasks, t=>t.name), ["Casey Park's birthday"], 'now a task');
+  assert.equal(c.loadCalEvents().length, 0, 'and no longer a display event');
+});
+
+/* An explicit `display` tier on a work calendar must demote Busy events too. */
+test('an explicit display tier demotes ordinary busy events', async () => {
+  const day = B() + 2*DAY;
+  const c = harness({ [PRIMARY]: [ meeting('mtg1','Standup', day+3600000, day+5400000) ], [BIRTHDAYS]: [] }, {});
+  c.setCalTier(PRIMARY, 'display');
+  c.gcalImport({}); await settle();
+  assert.equal(c.state.tasks.length, 0);
+  assert.deepEqual(Array.from(c.loadCalEvents(), e=>e.name), ['Standup']);
+});
+
+/* One calendar's import must never clear another's stored display events. */
+test('an import of one calendar leaves the other calendar’s display events intact', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Riley's birthday", day, 'mstr2') ],
+    [BIRTHDAYS]: [ contactsBirthday("Casey Park's birthday", day, '2026_BIRTHDAY_bbb') ],
+  }, { mstr2: primaryBirthdayMaster("Riley's birthday", 'mstr2') });
+
+  c.gcalImport({}); await settle();
+  assert.equal(c.loadCalEvents().length, 2);
+
+  /* Now deselect Birthdays and re-import: only PRIMARY is refreshed, and Birthdays' stored events
+     are dropped because that calendar is no longer selected — but PRIMARY's must survive. */
+  c.state.gcal.selected = { [PRIMARY]: true };
+  c.gcalImport({}); await settle();
+  assert.deepEqual(Array.from(c.loadCalEvents(), e=>e.cid), [PRIMARY]);
+});
+
+/* ---- the render projection, which is where the first round actually broke ---- */
+
+/* `_calTasks` is rebuilt behind a cache whose keys are all task-state identities. A display event lives
+   OUTSIDE `state.tasks`, so an import that changes no task changes none of those keys — and the events
+   stayed invisible. This is the regression guard for that. */
+test('display events reach the calendar projection even when no task changed', async () => {
+  const day = B() + 10*DAY;
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [ contactsBirthday('Party', day, 'ev-party') ] }, {});
+
+  /* Prime the view cache the way a first render would, with no display events stored yet. */
+  c.renderVals();
+  const before = (c._calTasks||[]).length;
+
+  c.gcalImport({}); await settle();
+  c.renderVals();
+
+  assert.equal(c.state.tasks.length, 0, 'no task changed — the cache keys are all identical');
+  assert.equal(c._calTasks.length, before + 1, 'and the projection still picked the event up');
+  assert.ok(c._calTasks.some(t=>t.displayOnly && t.name==='Party'));
+});
+
+test('the pseudo-task array identity is stable while the store is unchanged', () => {
+  const c = make();
+  c.saveCalEvents([{ cid:'c', eid:'e', name:'X', start:1, end:2, allDay:true }]);
+  assert.equal(c.calEventTasks(), c.calEventTasks(), 'memoized, so the cache key above is meaningful');
+});
+
+test('the pseudo-task array identity changes when the store changes', () => {
+  const c = make();
+  c.saveCalEvents([{ cid:'c', eid:'e', name:'X', start:1, end:2, allDay:true }]);
+  const a = c.calEventTasks();
+  c.saveCalEvents([{ cid:'c', eid:'e2', name:'Y', start:1, end:2, allDay:true }]);
+  assert.notEqual(c.calEventTasks(), a);
+});
+
+/* A repaint is the other half: nothing else in the render path can notice a pp-calevents write. */
+test('a display-event write repaints, and an identical rewrite does not', () => {
+  const c = make();
+  let paints = 0; c.forceUpdate = () => { paints++; };
+  c.saveCalEvents([{ cid:'c', eid:'e', name:'X', start:1, end:2, allDay:true }]);
+  assert.equal(paints, 1, 'a change repaints');
+  c.saveCalEvents([{ cid:'c', eid:'e', name:'X', start:1, end:2, allDay:true }]);
+  assert.equal(paints, 1, 'an idle poll re-storing identical events does not');
+});

@@ -270,6 +270,37 @@ The picker's `maxHeight` went 360px → **540px** with the tier row, which is a 
 That is the same clipping defect 360px was raised to fix the day before; it is re-sized *with* the row
 rather than after the next report.
 
+#### Three defects the first round missed (2026-08-31)
+
+Owner report on the shipped feature: *"from what I saw I don't think it's working."* The first round's
+tests covered the classifier, the store and the prune **in isolation**, all passed, and the feature still
+did not work — which is the lesson worth keeping: unit-testing the pieces of a pull says nothing about
+the pull. The follow-up drives the real `gcalImport` end to end with a stubbed `gcalFetch`
+(`tests/display-only-import.test.js`), and that is what found these.
+
+- **The view cache never invalidated.** `_calTasks` is rebuilt behind a gate whose keys are all
+  task-state identities (`state.tasks`, sort, filters, sections, horizon…). A display event lives
+  *outside* `state.tasks`, so an import that changed no task changed none of those keys — and once the
+  birthdays are display-only, changing no task is the ordinary case. The events sat in storage, correctly
+  classified and stored, and never reached a view until some unrelated edit happened to invalidate the
+  cache. `calEventTasks()` is now memoized on the raw stored string, and its array identity is a cache
+  key. This is the one the owner actually saw.
+- **A write did not repaint.** `saveCalEvents` is not `setState`, and nothing else in the render path can
+  observe `pp-calevents`, so even a correctly invalidated cache would not have been re-read until the
+  next unrelated render. It now calls `forceUpdate` — but only when the stored items actually differ, so
+  an idle poll re-storing identical events still costs nothing.
+- **A deselected calendar's events were immortal.** `mergeCalEvents` replaced the calendars an import
+  reached and kept everything else, so unticking a calendar left its display events rendering forever
+  with no row to delete. It now also drops any calendar absent from `gcal.selected`. Tasks deliberately
+  behave the other way (a deselect keeps them, because they may carry local edits); there is nothing
+  local to preserve in a display event, and it rebuilds from Google on the next import. A calendar that
+  is still selected but was not *reached* this run keeps what it had — absence from one import is not
+  evidence, the same rule `pruneDeletedEvents` follows.
+
+Verified in a real browser on an isolated origin (a second static server port, anonymous workspace, so
+the owner's account was never touched): month-view chips and the day-grid band both render, the Gantt
+sheet shows only the task, and `pp-tasks` contains no birthday.
+
 #### The window test on a recurring series asks the occurrences, not the anchor (2026-08-31)
 
 `pruneOutOfWindow` compared `t.start > farMs`. A recurring import stores the **master's** start, which
