@@ -1,6 +1,6 @@
 {
   "name": "life-planner",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "description": "Gantt + daily-timeline planner (replaces the old GAS/Sheets time tracker).",
   "scripts": {
