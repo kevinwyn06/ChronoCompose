@@ -228,3 +228,39 @@ test('a display-event write repaints, and an identical rewrite does not', () => 
   c.saveCalEvents([{ cid:'c', eid:'e', name:'X', start:1, end:2, allDay:true }]);
   assert.equal(paints, 1, 'an idle poll re-storing identical events does not');
 });
+
+/* ---- reclassification is not limited to the import window ------------------- */
+
+/* PP-EXT (owner 2026-08-31): owner report — with a 30-day window every birthday became display-only
+   EXCEPT "Alex Rivera's birthday", whose occurrence had just passed. A yearly series whose next
+   occurrence is 11 months out appears in NO events.list until then, so `displayKeys` (built only from
+   fetched events) could never contain it and the row stayed a task. The by-id probe that already runs
+   for exactly these rows now classifies them. */
+test('a linked row whose event is outside the window is still reclassified', async () => {
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [] },
+    { mstr9: primaryBirthdayMaster("Alex Rivera's birthday", 'mstr9') });
+  const lastYear = B() - 9*DAY;
+  c.state.tasks = [ c.normalizeTask({ id:'alex', name:"Alex Rivera's birthday",
+    calendarId:PRIMARY, eventId:'mstr9', start:lastYear, end:lastYear+DAY, allDay:true,
+    recur:{kind:'year', n:1} }) ];
+
+  c.gcalImport({}); await settle();
+
+  assert.equal(c.state.tasks.length, 0, 'the row is gone even though no events.list returned it');
+  /* and it is NOT stored as a display event: nothing in the window means nothing to draw */
+  assert.equal(c.loadCalEvents().length, 0);
+  assert.deepEqual(Array.from(Object.keys(c.loadTombstones())), [], 'still a local splice, not a delete');
+  assert.equal(c.loadQueue().filter(op=>op.op==='delete').length, 0);
+});
+
+/* The control: the same out-of-window probe must NOT prune an ordinary event. Only a 404/410/cancelled
+   may do that, and only the classifier may demote — an out-of-window meeting is neither. */
+test('an out-of-window row whose event is an ordinary meeting survives', async () => {
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [] },
+    { mtgX: meeting('mtgX', 'Quarterly review', B()+300*DAY, B()+300*DAY+3600000) });
+  c.state.tasks = [ c.normalizeTask({ id:'q', name:'Quarterly review',
+    calendarId:PRIMARY, eventId:'mtgX', start:B()+300*DAY, end:B()+300*DAY+3600000 }) ];
+
+  c.gcalImport({}); await settle();
+  assert.deepEqual(Array.from(c.state.tasks, t=>t.name), ['Quarterly review']);
+});

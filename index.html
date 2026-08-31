@@ -10821,7 +10821,16 @@ class Component extends DCLogic {
   }
   /* A bounded events.list response proves only what is inside its time window. An absent linked event
      gets an authoritative by-id lookup; only 404/410 or an explicit cancelled resource permits pruning.
-     Transient lookup failures retain the local task and can be retried by the next normal poll. */
+     Transient lookup failures retain the local task and can be retried by the next normal poll.
+
+     PP-EXT (owner 2026-08-31): returns `{missing, display}`. The display half exists because the
+     reclassification in `gcalImport` can only judge events the import actually FETCHED, and the fetch is
+     a window. Owner report: with a 30-day window, "Alex Rivera's birthday" stayed a task row while every
+     other birthday became display-only — her occurrence had just passed, so her series is absent from
+     every events.list until next August and `displayKeys` could never contain her. A row like that would
+     stay a task for a year. This probe is already making the authoritative by-id call for exactly those
+     rows (that is what it is FOR), and the resource it throws away carries `eventType`/`transparency` —
+     the same two fields the classifier reads. So classify it here rather than fetching it twice. */
   gcalVerifyMissing(tasks, results, selectedIds, preserveEventIds){
     const live={}; (selectedIds||[]).forEach(cid=>live[cid]=new Set());
     (results||[]).forEach(({cid,items})=>{ if(!live[cid]) live[cid]=new Set();
@@ -10830,11 +10839,15 @@ class Component extends DCLogic {
       if(!t.archivedAt && t.calendarId && t.eventId && live[t.calendarId] && !live[t.calendarId].has(t.eventId)
           && !(preserveEventIds&&preserveEventIds.has(key))) candidates[key]={cid:t.calendarId,eid:t.eventId}; });
     const base='https://www.googleapis.com/calendar/v3/calendars/';
+    const missing=[], display=[];
     return Promise.all(Object.keys(candidates).map(key=>{ const x=candidates[key];
       return this.gcalFetch(base+encodeURIComponent(x.cid)+'/events/'+encodeURIComponent(x.eid))
-        .then(ev=>(ev&&ev.status==='cancelled')?key:null)
-        .catch(e=>(e&&(e.status===404||e.status===410))?key:null); }))
-      .then(keys=>new Set(keys.filter(Boolean)));
+        .then(ev=>{
+          if(ev && ev.status==='cancelled'){ missing.push(key); return; }
+          /* A live event that classifies as display-only is not missing — it stops being a task. */
+          if(ev && this.gcalEventIsDisplay(ev, this.calTier(x.cid))) display.push(key); })
+        .catch(e=>{ if(e && (e.status===404||e.status===410)) missing.push(key); }); }))
+      .then(()=>({missing:new Set(missing), display:new Set(display)}));
   }
   /* opts.silent → background auto-sync: no "Importing…" spinner, and only commits (touches undo history)
      when the calendar data actually changed, so idle polling doesn't churn state. */
@@ -10872,9 +10885,9 @@ class Component extends DCLogic {
       const preserve=new Set(opts.preserveEventIds||[]);
       const liveIds=ids.filter(id=>gone.indexOf(id)<0);
       return this.gcalVerifyMissing(this.state.tasks,results,liveIds,preserve)
-        .then(verifiedMissing=>({results,masters,verifiedMissing}));
+        .then(v=>({results,masters,verifiedMissing:v.missing,verifiedDisplay:v.display}));
     })
-    .then(({results,masters,verifiedMissing})=>{
+    .then(({results,masters,verifiedMissing,verifiedDisplay})=>{
       const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
       /* PP-EXT: all three "whose copy wins" guards live in gcalPendingFor — see it for why. */
       const pending=this.gcalPendingFor(importFp, opts.justWrittenTaskIds);
@@ -10895,6 +10908,10 @@ class Component extends DCLogic {
             displayKeys.add(this.gcalKey(cid, ev.recurringEventId||ev.id));
           } else keep.push(ev); });
         taskResults.push({cid, items:keep}); });
+      /* PP-EXT (owner 2026-08-31): plus the rows whose event lies OUTSIDE this import's window and was
+         classified by the by-id probe above — see gcalVerifyMissing. Without this an already-imported
+         task is only ever reclassified during the weeks its event happens to fall inside the window. */
+      (verifiedDisplay||new Set()).forEach(k=>displayKeys.add(k));
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
       /* The display store is replaced for the calendars this import actually reached, so a calendar that

@@ -412,3 +412,22 @@ Editing a task imported from a read-only calendar (Birthdays is one) queues a PA
 403. `gcalFlushQueue` treats 400/403/404 as permanent and drops the op without retrying, so the queue
 cannot jam; a local *delete* still sticks, because the tombstone is cleared only on a successful DELETE.
 A local title/time edit, though, is simply lost at the next pull — see `tasks.md`.
+#### A fourth: reclassification was limited to the import window (2026-08-31)
+
+Owner report, after the three above were fixed: *"Why is Alex Rivera's birthday still shown as a row?"* —
+one survivor, every other birthday correctly demoted. Her birthday had fallen nine days earlier, and with
+a 30-day window her yearly series appears in **no** `events.list` response until the following August.
+
+`displayKeys` was built only from events an import fetched, so a row whose event lies outside the window
+could not be reclassified — it would have stayed a task for eleven months, and the same holds for any
+already-imported row on a short window. Note this is *not* the `pruneOutOfWindow` path: that runs only for
+calendars explicitly marked short-term, and her calendar was not one.
+
+The fix costs no extra request. `gcalVerifyMissing` already makes an authoritative by-id lookup for
+exactly these rows — a linked task absent from a bounded response is precisely its candidate set — and the
+resource it fetched carried `eventType` and `transparency`, the two fields the classifier reads, before
+discarding everything but the cancelled check. It now returns `{missing, display}` and `gcalImport` unions
+the display half into `displayKeys`. The prune stays a local splice: no tombstone, no queued DELETE.
+
+The demoted row is deliberately **not** written to `pp-calevents`. An event outside the window has nothing
+to draw in any view, and inventing a record for it would put a date on screen that no import refreshes.
