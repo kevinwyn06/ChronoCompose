@@ -397,6 +397,26 @@ class Component extends DCLogic {
        from their Google list on purpose. */
     this.GCAL_CAL_PAGE = 250;                  // Google's per-page cap (the API defaults to only 100)
     this.GCAL_UNLISTED_CALS = ['addressbook#contacts@group.v.calendar.google.com']; // Birthdays
+    /* PP-EXT (owner 2026-08-31): the DISPLAY-ONLY tier. Some calendar events are information, not work —
+       a birthday, a holiday, an out-of-office band. Imported as tasks they saturate the planner and, when
+       the same person's birthday reaches Google twice (the contacts Birthdays calendar AND a hand-made
+       yearly event on the primary), they duplicate with no shared id for the merge to match on.
+       Measured on the owner's account 2026-08-31: 17 of 19 birthday events on the primary calendar are
+       also on the Birthdays calendar, so ticking Birthdays would have produced 17 double rows.
+
+       Google already labels these. `eventType` is authoritative where it is set, and `transparency`
+       ("shows me as Free") is the user's own answer to "does this consume my time" — which is the same
+       question as "is this a task". On that account those two signals classify every event correctly.
+
+       `fromGmail` is deliberately NOT here even though such events are usually transparent: a Gmail-derived
+       appointment (a dentist booking) is real work the owner has to be somewhere for. */
+    this.GCAL_DISPLAY_EVENT_TYPES = ['birthday','workingLocation','outOfOffice'];
+    /* Calendars whose entire purpose is reference data, so `auto` resolves to display-only for them
+       before any event-level signal is read. The contacts Birthdays calendar reports its events as plain
+       `default`/`opaque` (measured — the eventType lives on the PRIMARY calendar's copies, not on these),
+       so without this the event-level classifier alone would not catch it. */
+    this.GCAL_DISPLAY_DEFAULT_CALS = ['addressbook#contacts@group.v.calendar.google.com'];
+    this.CAL_EVENT_ID_PREFIX = 'ce:';          // pseudo-task id namespace; never collides with a real task id
     /* PP-EXT B1: offline-first Supabase sync — same shape as the gcal queue above (see computeSyncOps). */
     this.SYNC_FLUSH_DEBOUNCE_MS = 2500;        // coalesce per-keystroke commits into one backend write
     this.SYNC_OP_MAX_TRIES = 3;                // transient-failure retries before an op is dropped (B2)
@@ -836,13 +856,15 @@ class Component extends DCLogic {
   saveSettings(patch){ const s=Object.assign({}, this.state.settings, patch); this.setState({settings:s}); try{ this.lsSet('pp-settings', JSON.stringify(s)); }catch(e){} }
   loadGcal(){ const cfg=(window.PP_CONFIG&&window.PP_CONFIG.googleClientId)||''; /* PP-EXT: Client ID from config.js by default */
     try{ const saved=JSON.parse(this.lsGet('pp-gcal')||'{}');
-      return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{}}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg),lookahead:(saved.lookahead||{})}); }
-    catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{}}; } }
+      return Object.assign({clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{},tier:{}}, saved, {connected:false,calendars:[],clientId:(saved.clientId||cfg),lookahead:(saved.lookahead||{}),tier:(saved.tier||{})}); }
+    catch(e){ return {clientId:cfg,connected:false,calendars:[],selected:{},window:30,lookahead:{},tier:{}}; } }
   /* PP-EXT (owner 2026-08-25): `saveGcal` persists a WHITELIST, not the whole object, so `lookahead` had
-     to be added in BOTH directions or a calendar's short-term setting would survive only until reload. */
+     to be added in BOTH directions or a calendar's short-term setting would survive only until reload.
+     PP-EXT (owner 2026-08-31): `tier` is the second key to learn that lesson — see calTier. */
   saveGcal(patch){ const g=Object.assign({}, this.state.gcal, patch); this.setState({gcal:g});
     try{ this.lsSet('pp-gcal', JSON.stringify({clientId:g.clientId, selected:g.selected, window:g.window,
       lookahead:g.lookahead||{}, /* PP-EXT (owner 2026-08-25): per-calendar import lookahead */
+      tier:g.tier||{}, /* PP-EXT (owner 2026-08-31): per-calendar auto|tasks|display tier */
       ccCalId:g.ccCalId||null /* PP-EXT: the dedicated "ChronoCompose" calendar (two-way insert target) */})); }catch(e){} }
   /* PP-EXT B2: Supabase sync UI state. connected/session are NEVER persisted (rule 5 — re-auth on reload,
      same tradeoff as the gcal token); only the last-used email is remembered to pre-fill the sign-in field.
@@ -1144,7 +1166,7 @@ class Component extends DCLogic {
   /* PP-EXT: whole-app JSON backup — until a backend exists, localStorage is the ONLY copy of the data.
      collectBackup/applyBackup are pure vs localStorage (unit-testable); export/import wrap them with DOM I/O.
      Non-JSON stores (pp-theme holds a bare string) round-trip via a {__raw} wrapper. */
-  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections','pp-scratch','pp-journal-prompts']; /* pp-habits/pp-journal: Phase 9; pp-sections: V2.6 (SYNCED as of migration 0012, 2026-08-15 — it stays in the backup because a backup is a whole-workspace snapshot, not a list of unsynced stores); pp-scratch: V3.1, pp-journal-prompts: V3.2 (still local-only, so backup is their ONLY portability) */ }
+  BACKUP_KEYS(){ return ['pp-tasks','pp-run','pp-settings','pp-gcal','pp-prefs','pp-theme','pp-migrations','pp-habits','pp-journal','pp-sections','pp-scratch','pp-journal-prompts','pp-calevents']; /* pp-calevents: the display-only tier (2026-08-31) — local-only and rebuilt by the next import, so backup is convenience rather than the only copy. pp-habits/pp-journal: Phase 9; pp-sections: V2.6 (SYNCED as of migration 0012, 2026-08-15 — it stays in the backup because a backup is a whole-workspace snapshot, not a list of unsynced stores); pp-scratch: V3.1, pp-journal-prompts: V3.2 (still local-only, so backup is their ONLY portability) */ }
   collectBackup(){ const data={};
     this.BACKUP_KEYS().forEach(k=>{ const v=this.lsGet(k); if(v==null) return; /* PP-EXT: active-workspace scoped (pp-theme stays global) */
       try{ data[k]=JSON.parse(v); }catch(e){ data[k]={__raw:v}; } });
@@ -8323,7 +8345,14 @@ class Component extends DCLogic {
       this.state.tasks.forEach(t=>{ this._depth[t.id]=this.depthOf(t.id, kb.byId); });
       /* PP-EXT Phase 7: filter-only list (column filters + smart chips, but NOT collapse/sort — those are sheet-only)
          feeding the calendar-view chips + hover-glow so an active filter thins the calendars like it thins the sheet. */
-      this._calTasks = this.hasFilters() ? this.filterTasks(this.state.tasks, kb.byId) : this.state.tasks;
+      /* PP-EXT (owner 2026-08-31): display-only calendar events join the CALENDAR list and nothing else.
+         They are appended AFTER filtering — a filter expresses which of your tasks to work on, and these
+         are not tasks — and they never touch `state.tasks`, so scheduling, the sheet, Supabase sync and
+         the outbound gcal diff cannot see them. This is the whole "not stored as a task" promise, in
+         one line: the views that map over tasks get them; every path that mutates or syncs does not. */
+      const filtered = this.hasFilters() ? this.filterTasks(this.state.tasks, kb.byId) : this.state.tasks;
+      const disp = this.calEventTasks();
+      this._calTasks = disp.length ? filtered.concat(disp) : filtered;
     }
     const tasks = this._visTasks;
     /* PP-EXT: the structural caches (CPM, slack, recurrence expansion, timeline range) depend only on the task
@@ -10846,14 +10875,34 @@ class Component extends DCLogic {
       const protectedIds={}; pending.forEach(op=>{ if(op&&op.taskId!=null) protectedIds[op.taskId]=1; });
       this.state.tasks.forEach(t=>{ if(t.eventId && t.calendarId && protectedIds[t.id]) preserve.add(t.calendarId+'|'+t.eventId); });
       const liveIds=ids.filter(id=>gone.indexOf(id)<0); /* PP-EXT: never prune tasks of a calendar we couldn't reach — that empty result isn't proof the events were deleted */
+      /* PP-EXT (owner 2026-08-31): split each calendar's events into the two tiers BEFORE the merge.
+         `results` itself is left whole and still feeds gcalVerifyMissing/pruneDeletedEvents above and
+         below, because a display event IS live on Google — filtering it out of the liveness evidence
+         would make the absence look like a deletion. Only `taskResults` reaches mergeCalendarEvents. */
+      const displayEvents=[], displayKeys=new Set(); const taskResults=[];
+      results.forEach(({cid,items})=>{ const tier=this.calTier(cid); const keep=[];
+        (items||[]).forEach(ev=>{
+          if(this.gcalEventIsDisplay(ev, tier)){
+            const rec=this.calEventFrom(cid, ev); if(rec) displayEvents.push(rec);
+            /* Key on the recurring MASTER where there is one: that is the id the task row carries. */
+            displayKeys.add(this.gcalKey(cid, ev.recurringEventId||ev.id));
+          } else keep.push(ev); });
+        taskResults.push({cid, items:keep}); });
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
+      /* The display store is replaced for the calendars this import actually reached, so a calendar that
+         404'd or was never selected keeps whatever it had. Written outside the task commit because these
+         are not tasks and must not enter the undo history. */
+      this.saveCalEvents(this.mergeCalEvents(this.loadCalEvents(), displayEvents, liveIds));
       if(opts.silent){
         /* apply on a clone; only commit if it changed anything (avoids undo/render churn on idle polls) */
         const before=JSON.stringify(this.state.tasks);
         const clone=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
-        const r=this.mergeCalendarEvents(clone,results,masters,calById,tomb,pending);
+        const r=this.mergeCalendarEvents(clone,taskResults,masters,calById,tomb,pending);
         let removed=this.pruneDeletedEvents(clone,results,liveIds,verifiedMissing,preserve);
+        /* PP-EXT (owner 2026-08-31): a row whose event is now display-only stops being a task. Local
+           splice only — see pruneDisplayTasks; the Google event is untouched. */
+        removed+=this.pruneDisplayTasks(clone, displayKeys);
         /* PP-EXT (owner 2026-08-25): drop anything ALREADY stored beyond a now-shortened window. This is
            what makes turning a calendar short-term take effect on existing imports, not only new ones. */
         liveIds.forEach(cid=>{ if(this.calLookaheadDays(cid)!=null) removed+=this.pruneOutOfWindow(clone, cid, farFor(cid)); });
@@ -10863,7 +10912,8 @@ class Component extends DCLogic {
         }
       } else {
         let r={added:0,updated:0}, removed=0;
-        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,results,masters,calById,tomb,pending); removed=this.pruneDeletedEvents(tasks,results,liveIds,verifiedMissing,preserve);
+        this.commit(tasks=>{ r=this.mergeCalendarEvents(tasks,taskResults,masters,calById,tomb,pending); removed=this.pruneDeletedEvents(tasks,results,liveIds,verifiedMissing,preserve);
+          removed+=this.pruneDisplayTasks(tasks, displayKeys); /* PP-EXT (owner 2026-08-31) */
           /* PP-EXT (owner 2026-08-25): same out-of-window prune as the silent branch. */
           liveIds.forEach(cid=>{ if(this.calLookaheadDays(cid)!=null) removed+=this.pruneOutOfWindow(tasks, cid, farFor(cid)); }); });
         this.gcalMsg('Imported: +'+r.added+' new, '+r.updated+' updated, −'+removed+' removed.');
@@ -10902,6 +10952,102 @@ class Component extends DCLogic {
     const e=this.CAL_LOOKAHEADS().find(x=>x.k===cfg.len);
     return e?e.days:null;
   }
+  /* ==== PP-EXT (owner 2026-08-31): the display-only tier ==== */
+  /* Three states, and `auto` is the default because the whole point is that the owner configures nothing.
+     `tasks` and `display` are explicit overrides that skip event-level classification entirely — `tasks`
+     also protects a work calendar whose events happen to be marked Free from ever being demoted. */
+  CAL_TIERS(){ return [ {k:'auto',l:'Auto'}, {k:'tasks',l:'Tasks'}, {k:'display',l:'Display only'} ]; }
+  calTier(cid){
+    const t=((this.state.gcal||{}).tier||{})[cid];
+    if(t==='tasks'||t==='display'||t==='auto') return t;
+    return (this.GCAL_DISPLAY_DEFAULT_CALS||[]).indexOf(cid)>=0 ? 'display' : 'auto';
+  }
+  setCalTier(cid, tier){
+    const m=Object.assign({}, (this.state.gcal||{}).tier||{}); m[cid]=tier; this.saveGcal({tier:m});
+  }
+  /* PURE: is this Google event information rather than work? `tier` is the calendar's resolved tier, so
+     the two explicit tiers short-circuit and only `auto` consults the event.
+     Order matters: eventType is checked before transparency so an explicitly-Busy birthday is still
+     display-only, and `fromGmail` is exempted from the transparency rule alone (see GCAL_DISPLAY_EVENT_TYPES). */
+  gcalEventIsDisplay(ev, tier){
+    if(tier==='display') return true;
+    if(tier==='tasks') return false;
+    if(!ev) return false;
+    const et=ev.eventType||'default';
+    if((this.GCAL_DISPLAY_EVENT_TYPES||[]).indexOf(et)>=0) return true;
+    if(et==='fromGmail') return false;
+    return ev.transparency==='transparent';
+  }
+  /* Display events are NOT tasks and never enter `pp-tasks`. They live in their own local-only store, so
+     they cannot be scheduled, cannot reach `gcalEnqueue` (and therefore can never delete a Google event),
+     cannot be pushed to Supabase, and cannot collide with the task de-duplication machinery.
+     Occurrences are stored FLAT, exactly as `singleEvents=true` expanded them inside the import window —
+     no recurrence rule is kept. That is what makes the per-calendar Short term setting work on them for
+     free: the window is `timeMax`, so a shortened window simply stops producing occurrences. A recurring
+     TASK cannot do this (see pruneOutOfWindow and tasks.md). */
+  loadCalEvents(){ try{ const v=JSON.parse(this.lsGet('pp-calevents')||'{}')||{};
+      return Array.isArray(v.items)?v.items:[]; }catch(e){ return []; } }
+  saveCalEvents(items){ try{ this.lsSet('pp-calevents', JSON.stringify({items:items||[], updatedAt:Date.now()})); }catch(e){}
+    this._calEventTasks=null; this._calEventsRef=null; /* PP-EXT: drop the pseudo-task memo */ }
+  /* PURE: fold this import's display events for `cids` into the stored set. Events for calendars that were
+     NOT part of this import are kept untouched — an import of one calendar must never clear another's. */
+  mergeCalEvents(existing, fresh, cids){
+    const touched={}; (cids||[]).forEach(c=>touched[c]=1);
+    const kept=(existing||[]).filter(e=>e && !touched[e.cid]);
+    return kept.concat(fresh||[]);
+  }
+  /* Build one stored display-event record from a Google event. Returns null for anything undated. */
+  calEventFrom(cid, ev){
+    if(!ev || !ev.id || ev.status==='cancelled') return null;
+    const allDay=!!(ev.start && ev.start.date && !ev.start.dateTime);
+    const st=ev.start&&(ev.start.dateTime||ev.start.date); if(!st) return null;
+    const en=ev.end&&(ev.end.dateTime||ev.end.date);
+    const start=allDay?this.parseYMD(st):new Date(st).getTime();
+    let end=en?(allDay?this.parseYMD(en):new Date(en).getTime()):start;
+    if(allDay && end<=start) end=start+this.DAY;
+    return {cid, eid:ev.id, name:ev.summary||'(untitled)', start:Math.round(start), end:Math.round(end), allDay};
+  }
+  /* Render-side projection: display events as READ-ONLY pseudo-tasks, so the calendar views that already
+     map over tasks show them with no new render path. They are built fresh from the store and are never
+     put into `state.tasks`, which is what keeps them out of scheduling, sync, and the outbound gcal diff.
+     The `ce:` id prefix makes an accidental leak into a task path obvious rather than silent. */
+  calEventTasks(){
+    const items=this.loadCalEvents();
+    if(this._calEventTasks && this._calEventsRef===items.length && this._calEventsSig===this._calEventsSigOf(items)) return this._calEventTasks;
+    this._calEventsRef=items.length; this._calEventsSig=this._calEventsSigOf(items);
+    this._calEventTasks=items.map(e=>this.normalizeTask({id:this.CAL_EVENT_ID_PREFIX+e.cid+'|'+e.eid,
+      name:e.name, type:'Proportional', start:e.start, end:e.end, allDay:!!e.allDay,
+      priority:4, deps:[], pct:0, planned:null, spent:0, labels:[], recur:null, completion:null,
+      calendarId:e.cid, eventId:e.eid, displayOnly:true, blocking:false}));
+    return this._calEventTasks;
+  }
+  _calEventsSigOf(items){ let s=''; (items||[]).forEach(e=>{ s+=e.eid+':'+e.start+';'; }); return s; }
+  isDisplayEvent(t){ return !!(t && t.displayOnly); }
+  /* The display events overlapping one day, in start order. Used by the day-grid headers, which have no
+     task list to hang them off — the timeline body is the auto-scheduler's output and these are never
+     scheduled, so the header is the only honest place for them. */
+  calEventsOnDay(dayStart){
+    const dayEnd=dayStart+this.DAY;
+    return this.calEventTasks().filter(t=>(t.end>t.start)
+      ? (t.start<dayEnd && t.end>dayStart)
+      : (t.start>=dayStart && t.start<dayEnd)).sort((a,b)=>a.start-b.start);
+  }
+  /* Mutates `tasks`; returns the removal count. A task row whose event has just been classified
+     display-only is no longer a task, so it goes — LOCALLY. No tombstone and no `gcalEnqueue`: the Google
+     event is fine and is not being deleted. This is the same "splice, never enqueue" contract that
+     `pruneDeletedEvents` and `collapseEventDuplicates` already hold, and it is what converts an existing
+     workspace without a one-time migration — the next import reclassifies and the rows leave by themselves.
+     It runs in both directions: flip a calendar back to `Tasks` and the events re-import as tasks. */
+  pruneDisplayTasks(tasks, displayKeys){
+    if(!displayKeys || !displayKeys.size) return 0;
+    const removedIds=new Set(); let n=0;
+    for(let i=tasks.length-1;i>=0;i--){ const t=tasks[i];
+      if(t.archivedAt || !t.eventId || !t.calendarId) continue;
+      if(displayKeys.has(this.gcalKey(t.calendarId, t.eventId))){ removedIds.add(t.id); tasks.splice(i,1); n++; } }
+    if(n) tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!removedIds.has(this.depId(d))); });
+    return n;
+  }
+  /* ==== /PP-EXT: the display-only tier ==== */
   setCalLookahead(cid, patch){
     const la=Object.assign({}, (this.state.gcal||{}).lookahead||{});
     la[cid]=Object.assign({shortTerm:false, len:'1m'}, la[cid]||{}, patch);
@@ -10909,11 +11055,27 @@ class Component extends DCLogic {
   }
   /* Mutates `tasks` in place (a commit body hands it the draft array); returns the removal count.
      `eventId` is required, so a task the user created locally can never be pruned by a calendar's window. */
+  /* PP-EXT (owner 2026-08-31): a RECURRING import is anchored at its master's start, which for a yearly
+     birthday is the BIRTH YEAR. `t.start > farMs` is therefore false forever — a 2007 anchor is not in
+     the future — so every recurring event on a short-term calendar was permanently immune to the window
+     while non-recurring ones pruned correctly. That asymmetry is why the owner's hand-made yearly
+     birthdays ignored Short term and the contacts Birthdays calendar (one non-recurring event per year)
+     obeyed it. The question a window asks is "does this series reach into my window at all", so ask the
+     OCCURRENCES. `expandTask` starts at `recurStartIndex` (today − 2 days) and is bounded by RECUR_MAX,
+     so this costs a handful of occurrences even for a twenty-year-old anchor. */
   pruneOutOfWindow(tasks, cid, farMs){
     let n=0;
     for(let i=tasks.length-1;i>=0;i--){ const t=tasks[i];
       if(t.calendarId!==cid || !t.eventId) continue;
-      if(t.start!=null && t.start>farMs){ tasks.splice(i,1); n++; }
+      if(t.start==null) continue;
+      /* The occurrence must OVERLAP [now, farMs], not merely exist. `expandTask` starts at
+         `recurStartIndex`, which is an estimate and can undershoot into the past, so a series whose next
+         real occurrence is far beyond the window still yields expired occurrences — testing
+         `start <= farMs` alone would keep every recurring row forever, which is the bug being fixed. */
+      if(t.recur){ const now=Date.now();
+        if(this.expandTask(t, farMs).some(o=>o.start<=farMs && (o.end!=null?o.end:o.start)>=now)) continue;
+        tasks.splice(i,1); n++; continue; }
+      if(t.start>farMs){ tasks.splice(i,1); n++; }
     }
     return n;
   }
@@ -11177,13 +11339,27 @@ class Component extends DCLogic {
          calendars and silently hid the rest behind a scroll with no affordance — measured live on
          2026-08-30: clientHeight 139 vs scrollHeight 178 at only THREE calendars. That is what read
          as "my other calendars are missing". 360px shows ~8 before scrolling. */
-      (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'360px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
+      /* PP-EXT (owner 2026-08-31): the tier row added a THIRD line per calendar (~22px), so 360px would
+         clip at ~5.5 rows — the same defect 360px was raised to fix on 2026-08-30. Re-sized with the row,
+         not after the next report. */
+      (g.calendars&&g.calendars.length)? h('div',{style:{maxHeight:'540px',overflow:'auto',border:'1px solid var(--divider)',borderRadius:'8px',padding:'6px 8px',marginTop:'4px'}},
         g.calendars.map(c=>{ const cfg=((g.lookahead||{})[c.id])||{};
           return h('div',{key:c.id,style:{padding:'3px 0'}},
             h('label',{style:{display:'flex',alignItems:'center',gap:'7px',fontSize:'12px',color:'var(--text-2)',cursor:'pointer'}},
               h('input',{type:'checkbox',checked:!!(g.selected&&g.selected[c.id]),onChange:()=>this.toggleCalSel(c.id)}),
               h('span',{style:{width:'9px',height:'9px',borderRadius:'2px',background:c.color||'#888',flex:'none'}}),
               h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},c.summary)),
+            /* PP-EXT (owner 2026-08-31): per-calendar tier. `Auto` classifies each event from Google's own
+               `eventType` / busy-free signal, so the common case needs no configuration at all; the two
+               explicit values are the escape hatch for a whole calendar at once. */
+            h('label',{'data-pp-cal-tier':c.id,
+              style:{display:'flex',alignItems:'center',gap:'6px',padding:'2px 0 2px 24px',fontSize:'11px',color:'var(--text-mut2)',cursor:'pointer'}},
+              'Import as',
+              h('select',{value:this.calTier(c.id),
+                onChange:e=>{ this.setCalTier(c.id,e.target.value); this.gcalSyncSoon(); },
+                style:{fontSize:'11px',background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'6px',padding:'1px 4px'}},
+                ...this.CAL_TIERS().map(o=>h('option',{key:o.k,value:o.k},o.l))),
+              h('span',{style:{opacity:0.75}}, this.calTier(c.id)==='auto'?'— birthdays and Free events show without becoming tasks':'')),
             /* PP-EXT (owner 2026-08-25): per-calendar lookahead. Off = unlimited, which is the default and
                the pre-existing behaviour, so nothing changes for a calendar nobody configures. */
             h('label',{'data-pp-cal-lookahead':c.id,
@@ -12790,6 +12966,17 @@ class Component extends DCLogic {
         /* PP-EXT (V4.1): the month is shown on the first column and wherever a month turns over, so a
            week that straddles a boundary still says which month each half is in. */
         (i===0||lab.dom===1)?h('span',{style:{opacity:0.7,fontWeight:600,fontSize:'10px'}},lab.mon):null);
+      /* PP-EXT (owner 2026-08-31): display-only events for this day, as a band UNDER the header. The
+         column body below is the auto-scheduler's output and these are deliberately never scheduled, so
+         without this a birthday would be invisible in every day-grid view. Non-interactive by design. */
+      const info=this.calEventsOnDay(B);
+      const infoBand=info.length? h('div',{key:'info','data-pp-calinfo':String(B),
+        style:{flex:'none',display:'flex',flexDirection:'column',gap:'1px',padding:'2px 4px',pointerEvents:'none',
+          borderBottom:'1px solid var(--row-border-gantt)',background:'var(--chip-bg)'}},
+        ...info.slice(0,2).map((t,k)=>h('div',{key:'i'+k,title:t.name,
+          style:{fontSize:'9.5px',lineHeight:'12px',fontStyle:'italic',color:'var(--text-mut2)',
+            whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name)),
+        info.length>2? h('div',{key:'imore',style:{fontSize:'9px',color:'var(--text-faint2)'}},'+'+(info.length-2)) : null) : null;
       /* PP-EXT (V4.1): weekend columns are tinted and today's column is accent-washed, so the week reads
          as a calendar rather than N identical fields. `data-tl-col` is the machine hook the e2e layer uses
          to assert that a block landed in the right DAY's column and not a neighbour's. */
@@ -12801,7 +12988,7 @@ class Component extends DCLogic {
            light, so Sat/Sun read as weekend in both themes. */
         background:isToday?'rgba(245,181,54,0.07)':(weekend?'var(--tl-weekend)':'transparent'),
         borderRight:i<days.length-1?'1px solid var(--row-border-gantt)':'none'}},
-        hdr,
+        hdr, infoBand,
         h('div',{style:{flex:'none',minWidth:0}}, this.renderDayColumn(B, {showLabels:false, availH}))); });
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       header||null,
@@ -13163,7 +13350,13 @@ class Component extends DCLogic {
       const unl = unsched.length? h('div',{style:{margin:'4px 12px',fontSize:'11px',color:'var(--warn)'}},
         '⚠ Unscheduled: '+unsched.map(c=>c.title+' ('+this.fmtDur(c.durationMin)+')').join(', ')) : null;
       const empty = (!timed.length && !unsched.length && !hoverEls.length && !pointEls.length)? h('div',{style:{margin:'4px 12px 8px',fontSize:'11px',color:'var(--text-mut2)'}},'Nothing scheduled') : null;
-      return h('div',{key:'sd'+di,style:{flex:'none',paddingBottom:'6px'}}, divider, ...hoverEls, ...items, unl, empty); });
+      /* PP-EXT (owner 2026-08-31): display-only events sit directly under the day divider — the agenda
+         below is built from buildDayTimeline, which never schedules them, so this is the only place in
+         this view they can appear. Non-interactive: there is nothing to open or drag. */
+      const infoEls=this.calEventsOnDay(B).map((t,k)=>h('div',{key:'si'+k,'data-sched-calinfo':String(B),
+        style:{fontSize:'10.5px',fontStyle:'italic',color:'var(--text-mut2)',padding:'1px 12px',pointerEvents:'none',
+          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, t.name));
+      return h('div',{key:'sd'+di,style:{flex:'none',paddingBottom:'6px'}}, divider, ...infoEls, ...hoverEls, ...items, unl, empty); });
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}},
       h('div',{style:{padding:'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none',fontSize:'14px',fontWeight:700,color:'var(--text-strong)'}},'Schedule · next 7 days'),
       h('div',{style:{flex:1,minHeight:0,overflow:'auto'}}, ...sections));
@@ -13239,7 +13432,11 @@ class Component extends DCLogic {
     const MON=['January','February','March','April','May','June','July','August','September','October','November','December'];
     const todayStart=this.startOfDay(this.state.nowTick||Date.now());
     const hoverId=this.state.hoverId;
+    /* PP-EXT (owner 2026-08-31): the chip lookup spans tasks AND display-only calendar events, because
+       `tasksByDayMap` below reads `_calTasks`, which carries both. Without this a birthday would be
+       counted in the day's total and then render as nothing. */
     const byId={}; this.state.tasks.forEach(t=>byId[t.id]=t);
+    this.calEventTasks().forEach(t=>byId[t.id]=t);
     const arrow=(glyph,delta)=>h('div',{className:'pp-iconbtn',onClick:()=>this.shiftMonth(delta),title:delta<0?'Previous month':'Next month'},glyph);
     const header=h('div',{style:{display:'flex',alignItems:'center',gap:'6px',padding:compact?'5px 8px':'8px 12px',borderBottom:'1px solid var(--top-border)',flex:'none'}},
       arrow('‹',-1),
@@ -13253,6 +13450,14 @@ class Component extends DCLogic {
        PP-EXT Track B: `isToday` mutes an opted-out task's chip ONLY on today's cell — opt-out is a
        today-only concept, so the same task's chips on other days it occupies stay normal. */
     const chip=(id, isToday)=>{ const t=byId[id]; if(!t) return null;
+      /* PP-EXT (owner 2026-08-31): a display-only event is reference information — no priority dot (it
+         has no priority), no inclusion glyph (it is never on a list), and a lighter ground so it reads
+         as context behind the day's real work rather than another thing to do. */
+      if(this.isDisplayEvent(t)) return h('div',{key:'ch'+id,
+          style:{display:'flex',alignItems:'center',gap:'4px',fontSize:compact?'9px':'11px',lineHeight:compact?'12px':'15px',pointerEvents:'none',
+            padding:compact?'0 3px':'1px 4px',borderRadius:'4px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
+            background:'transparent',border:'1px solid var(--divider)',color:'var(--text-mut2)',fontStyle:'italic'}},
+        h('span',{style:{overflow:'hidden',textOverflow:'ellipsis'}},t.name));
       const optedOut = isToday && !this.isMilestone(t) && this.isOptedOut(t);
       return h('div',{key:'ch'+id,
           style:{display:'flex',alignItems:'center',gap:'4px',fontSize:compact?'9px':'11px',lineHeight:compact?'12px':'15px',pointerEvents:'none',
@@ -13265,7 +13470,13 @@ class Component extends DCLogic {
     const MAXCHIPS=compact?1:4;
     const dayMap=this.tasksByDayMap(cells.map(c=>c.dayStart)); /* PP-EXT (V0.3): one expandTask per task, not per cell */
     const cellEls=cells.map((c,i)=>{
-      const ids=dayMap[c.dayStart]; const n=ids.length;
+      /* PP-EXT (owner 2026-08-31): the day's COUNT badge and its "N tasks" tooltip stay a count of tasks —
+         a birthday is not work owed and must not inflate the number the owner reads a month by. Real
+         tasks are also ordered first, so display events can never crowd a task out of the visible chips. */
+      const all=dayMap[c.dayStart];
+      const isDisp=id=>!!(byId[id]&&byId[id].displayOnly);
+      const real=all.filter(id=>!isDisp(id)), info=all.filter(isDisp);
+      const ids=real.concat(info); const n=real.length;
       const isToday=c.dayStart===todayStart;
       const glow=hoverId!=null && ids.includes(hoverId); /* hovering a task → its whole day cell glows */
       const isHoverDay=this.state.hoverDay===c.dayStart; /* this cell is the one being hovered */
@@ -13284,7 +13495,9 @@ class Component extends DCLogic {
             color:isToday?'var(--on-accent)':'var(--text-2)',background:isToday?this._accent:'transparent',
             borderRadius:'50%',minWidth:compact?'14px':'18px',height:compact?'14px':'18px',lineHeight:compact?'14px':'18px',textAlign:'center',padding:isToday?'0 1px':'0'}}, c.dom)),
         ...shown.map(id=>chip(id, c.dayStart===todayStart)),
-        n>MAXCHIPS?h('div',{key:'more',style:{fontSize:compact?'8.5px':'10px',fontWeight:600,color:'var(--text-mut2)',padding:compact?'0 2px':'0 4px'}},'+'+(n-MAXCHIPS)):null); });
+        /* PP-EXT (owner 2026-08-31): the overflow marker counts CHIPS (`ids`), not just tasks (`n`) —
+           it describes what did not fit, and a hidden birthday did not fit either. */
+        ids.length>MAXCHIPS?h('div',{key:'more',style:{fontSize:compact?'8.5px':'10px',fontWeight:600,color:'var(--text-mut2)',padding:compact?'0 2px':'0 4px'}},'+'+(ids.length-MAXCHIPS)):null); });
     const grid=h('div',{style:{flex:1,minHeight:0,display:'grid',gridTemplateColumns:'repeat(7,1fr)',gridTemplateRows:'repeat(6,1fr)',
       borderTop:'1px solid var(--row-border-gantt)',borderLeft:'1px solid var(--row-border-gantt)',overflow:'auto'}}, ...cellEls);
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header, dowRow, grid);

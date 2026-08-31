@@ -66,3 +66,47 @@ test('the per-calendar lookahead round-trips through the gcal store', () => {
   assert.equal(stored.lookahead['cal-w'].shortTerm, true);
   assert.equal(stored.lookahead['cal-w'].len, '3m');
 });
+
+/* PP-EXT (owner 2026-08-31): a recurring import stores the MASTER's start — the birth year for a yearly
+   birthday — so the old `t.start > farMs` test could never be true and every recurring event on a
+   short-term calendar was permanently immune to the window. The window asks whether the series reaches
+   into it, which is a question about occurrences, not about the anchor. */
+
+/* Anchor a yearly series exactly `years` before the day `offsetDays` from today, so its next occurrence
+   lands on a known day rather than wherever 18 arithmetic years of drift happens to put it. */
+function yearlyAnchoredAt(c, offsetDays, years){
+  const d = new Date(c.startOfToday());
+  d.setDate(d.getDate() + offsetDays);
+  d.setFullYear(d.getFullYear() - years);
+  return d.getTime();
+}
+
+test('a recurring series with an occurrence inside the window is kept', () => {
+  const c = comp();
+  const far = c.startOfToday() + 30*DAY;
+  const anchor = yearlyAnchoredAt(c, 10, 18); /* next occurrence: 10 days out */
+  const tasks = [ c.normalizeTask({ id:'bd', name:"Riley's birthday", calendarId:'cal-b', eventId:'e1',
+    start:anchor, end:anchor + DAY, recur:{ kind:'year', n:1 } }) ];
+  assert.equal(c.pruneOutOfWindow(tasks, 'cal-b', far), 0);
+  assert.equal(tasks.length, 1, 'an occurrence falls inside the window, so the series stays');
+});
+
+test('a recurring series whose next occurrence is beyond the window is pruned', () => {
+  const c = comp();
+  const far = c.startOfToday() + 7*DAY; /* a one-week window */
+  const anchor = yearlyAnchoredAt(c, 180, 18); /* next occurrence: ~6 months out */
+  const tasks = [ c.normalizeTask({ id:'bd', name:"Riley's birthday", calendarId:'cal-b', eventId:'e1',
+    start:anchor, end:anchor + DAY, recur:{ kind:'year', n:1 } }) ];
+  assert.equal(c.pruneOutOfWindow(tasks, 'cal-b', far), 1);
+  assert.equal(tasks.length, 0, 'no occurrence reaches the week, so it leaves');
+});
+
+test('the anchor itself is never what decides a recurring series', () => {
+  /* The regression guard: the old code compared `t.start` (the master anchor) against farMs directly,
+     so a decade-old anchor with a weekly repeat was pruned by nothing and kept by accident. */
+  const c = comp();
+  const B = c.startOfToday(), far = B + 30*DAY;
+  const tasks = [ c.normalizeTask({ id:'wk', name:'Weekly', calendarId:'cal-b', eventId:'e1',
+    start:B - 3640*DAY, end:B - 3640*DAY + 3600000, recur:{ kind:'week', n:1 } }) ];
+  assert.equal(c.pruneOutOfWindow(tasks, 'cal-b', far), 0);
+});

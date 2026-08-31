@@ -46,6 +46,10 @@ async function seed(page, data = {}) {
        suppressors below are re-stamped on EVERY load regardless: they are not journey state, and the
        morning-summary modal keys off the day it is currently being read on. */
     once: !!data.seedOnce,
+    /* PP-EXT (owner 2026-08-31): display-only calendar events. They are NOT tasks and live in their own
+       store, so they cannot be expressed through `tasks` — which is precisely the property under test.
+       Same relative `+Nd` date syntax as everything else. */
+    calEvents: data.calEvents || null,
   };
   await page.addInitScript(([d, midnightExpr]) => {
     const midnight = eval(midnightExpr);
@@ -106,6 +110,11 @@ async function seed(page, data = {}) {
           r[id] = { startedAt, beat: now };
         });
         localStorage.setItem('pp-run', JSON.stringify(r));
+      }
+      if (d.calEvents) {
+        localStorage.setItem('pp-calevents', JSON.stringify({
+          items: d.calEvents.map(resolve), updatedAt: Date.now(),
+        }));
       }
       if (d.once) localStorage.setItem('e2e-seeded', '1');
     }

@@ -207,6 +207,85 @@ notifications are content-free prompts to pull; they do not send calendar conten
 
 For OAuth QA, follow the account/origin restrictions in `AGENTS.md` and never reload mid-session.
 
+### The display-only tier (2026-08-31)
+
+Owner ask: *"birthdays should be migrated"*, then *"This should be in no calendar except the 'birthday'
+calendar. it should also respond to the short term import"*, and — on the design — *"we need to make it
+smooth to use. Not all events in personal will be display only. And I really don't want display only to be
+a per-task toggle the user needs to go through."*
+
+**The problem, measured live on the owner's account 2026-08-31.** The primary calendar carries 19
+birthday events (18 yearly-recurring); **17 of them are also on the contacts Birthdays calendar**. They
+are two genuinely distinct Google events per person with no shared id, so no merge key exists and
+`mergeCalendarEvents` could never collapse them — ticking Birthdays would simply have produced 17 double
+rows. Only `Sam's Birthday` and `Quinn's birthday` exist on the primary alone.
+
+**Google already labels these, and the labels are asymmetric.** The *primary* copies carry
+`eventType:"birthday"`; the *Birthdays calendar's own* copies come back as plain `default`/`opaque`. A
+rule built on either signal alone therefore misses half the duplicates. Two mechanisms compose:
+
+- **Event level** — `gcalEventIsDisplay(ev, tier)`. Display when `eventType` is in
+  `GCAL_DISPLAY_EVENT_TYPES` (`birthday`, `workingLocation`, `outOfOffice`), or when
+  `transparency === 'transparent'`. `eventType` is tested first, so an explicitly-Busy birthday is still
+  a birthday. **`fromGmail` is exempt from the transparency rule** (owner call): a Gmail-derived
+  appointment is real work even though Google marks such events Free.
+- **Calendar level** — `calTier(cid)` returns `auto` | `tasks` | `display`. `auto` is the default and
+  runs the event classifier; the two explicit values skip it entirely, so `tasks` also protects a work
+  calendar whose events happen to be marked Free. `GCAL_DISPLAY_DEFAULT_CALS` makes `auto` resolve to
+  `display` for the contacts Birthdays calendar, which is what covers the un-labelled half above.
+
+Busy/free doing most of the work is not a coincidence. Across the owner's whole account every real task
+is `opaque` and every informational event is `transparent`; *"does this consume my time"* is the same
+question as *"is this a task"*, and the user already answered it in Google.
+
+**A display event is not a task, and that is the entire safety argument.** It never enters `pp-tasks`.
+It therefore cannot be scheduled, cannot be pushed to Supabase, cannot reach `gcalEnqueue` — and so can
+never issue a remote `DELETE` against the owner's Google Calendar — and cannot collide with the
+de-duplication machinery. It lives in `pp-calevents` (`{items, updatedAt}`, local-only, in
+`BACKUP_KEYS`), and `calEventTasks()` projects it to read-only pseudo-tasks under the `ce:` id prefix.
+Those are appended to **`_calTasks` only** — after filtering, because a filter says which of your *tasks*
+to work on — so the calendar views that already map over tasks render them and every mutating or syncing
+path stays blind to them.
+
+**Occurrences are stored FLAT**, exactly as `singleEvents=true` expanded them inside the import window;
+no recurrence rule is kept. That is what makes the per-calendar Short term setting apply to them for
+free — the window *is* `timeMax`, so shortening it simply stops producing occurrences.
+
+**Conversion needs no one-time migration.** `pruneDisplayTasks` removes a task row whose event has just
+been classified display-only, locally, with no tombstone and no `gcalEnqueue` — the same "splice, never
+enqueue" contract `pruneDeletedEvents` and `collapseEventDuplicates` hold. The next import reclassifies
+and the stale rows leave by themselves, in **both** directions: flip a calendar back to `Tasks` and the
+events re-import as ordinary tasks.
+
+`results` is deliberately **not** filtered before `gcalVerifyMissing` / `pruneDeletedEvents`. A display
+event is live on Google, and removing it from the liveness evidence would make its absence read as a
+deletion. Only `taskResults` reaches `mergeCalendarEvents`.
+
+Render surfaces: month-view chips (italic, no priority dot, and **excluded from the day's task count** —
+a birthday is not work owed), a `data-pp-calinfo` band under each day-grid column header, and a line
+under each Schedule-view day divider. The day-grid body and the Schedule agenda are `buildDayTimeline`'s
+output, which never schedules these, so a header band is the only honest place they can appear there.
+
+The picker's `maxHeight` went 360px → **540px** with the tier row, which is a third line per calendar.
+That is the same clipping defect 360px was raised to fix the day before; it is re-sized *with* the row
+rather than after the next report.
+
+#### The window test on a recurring series asks the occurrences, not the anchor (2026-08-31)
+
+`pruneOutOfWindow` compared `t.start > farMs`. A recurring import stores the **master's** start, which
+for a yearly birthday is the birth year — so the test was false forever and **every recurring event on a
+short-term calendar was permanently immune to the window**, while non-recurring ones pruned correctly.
+That asymmetry is precisely why the owner's hand-made yearly birthdays ignored Short term and the
+contacts Birthdays calendar (one non-recurring event per year) obeyed it.
+
+It now asks whether the series has an occurrence **overlapping `[now, farMs]`**. The overlap test matters
+as much as the switch to occurrences: `expandTask` starts at `recurStartIndex`, an estimate that can
+undershoot into the past, so testing `start <= farMs` alone would keep every recurring row forever —
+trading one direction of the bug for the other. Cost is bounded by `recurStartIndex` (today − 2 days) and
+`RECUR_MAX`, so a twenty-year-old anchor still expands a handful of occurrences.
+
+This is a general defect, not a birthday one: it affected any recurring event on any short-term calendar.
+
 ### Per-calendar import lookahead (2026-08-25)
 
 Owner ask: *"Make a toggle for calendars making them short term input with a config for how long into the

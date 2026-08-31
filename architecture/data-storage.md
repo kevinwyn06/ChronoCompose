@@ -41,7 +41,15 @@ The app is local/offline first. `wsKey(base)` returns a bare key for the anonymo
 
 Scoped keys: `pp-tasks`, `pp-sections`, `pp-settings`, `pp-prefs`, `pp-gcal`, `pp-run`, `pp-pomo`,
 `pp-notify`, `pp-migrations`, `pp-mig-routines`, `pp-habits`, `pp-journal`, `pp-scratch`,
-`pp-journal-prompts`, sync queues, and tombstones.
+`pp-journal-prompts`, `pp-calevents`, sync queues, and tombstones.
+
+`pp-calevents` (2026-08-31) holds **display-only calendar events** — `{items:[{cid,eid,name,start,end,
+allDay}], updatedAt}`. These are deliberately *not* tasks and never appear in `pp-tasks`: that is what
+keeps them out of scheduling, Supabase sync, and `gcalEnqueue` (a row in that path can issue a real
+remote `DELETE`). Occurrences are stored flat as the import window expanded them, with no recurrence
+rule, so the per-calendar Short term window applies to them for free. Local-only, rebuilt by the next
+import, and in `BACKUP_KEYS` for convenience rather than as its only copy. See
+`architecture/sync-integrations.md` → "The display-only tier".
 
 **Four settings were deleted on 2026-08-19**: `lunchStart`, `lunchEnd`, `dinnerStart`, `dinnerEnd`.
 Meals are tasks now (see `architecture/scheduling.md`, “Routines replace the hardcoded meals”). Unknown
