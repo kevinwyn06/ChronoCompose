@@ -7569,62 +7569,143 @@ class Component extends DCLogic {
      text alone, with no workspace state reachable from it. */
   SEARCH_IS(){ return ['unplanned','done','running','overdue','recurring','milestone']; }
   SEARCH_DATE_CUES(){ return ['by','before','after','due','start']; }
-  parseSearchQuery(text){
-    const out={groups:[]};
-    const src=(''+(text||'')).trim();
-    if(!src) return out;
-    /* tokenise: a quoted phrase survives whole, with an optional leading `-` and an optional `cue:` prefix */
-    const toks=[]; const re=/(-?)(?:([a-z]+):)?"([^"]*)"|(\S+)/gi; let m;
+  /* PP-EXT (owner 2026-08-30): the lexer. One pass, emitting either a TERM — exactly the shape the group
+     collector below already consumed — or a STRUCTURAL token: '(', ')', 'AND', 'OR'.
+     Uppercase-only operators are an owner ruling, not an accident: `and`/`or` in any other case stay free
+     text, so `buy milk and eggs` needs no quoting and nothing anyone types today changes meaning.
+     Parens are ALWAYS their own token outside quotes — `[^\s()]+` refuses to swallow them — because
+     otherwise `(@work OR @home)` dies on the close paren glued to `@home`, which is the most natural way
+     the feature would ever be typed. The accepted cost is that a LITERAL parenthesis must be quoted. */
+  searchTokens(text){
+    const out=[]; const src=(''+(text||'')).trim(); if(!src) return out;
+    const re=/(-?)(?:([a-z]+):)?"([^"]*)"|(-?)([()])|([^\s()]+)/gi; let m;
     while((m=re.exec(src))){
-      if(m[3]!=null) toks.push({neg:m[1]==='-', cue:(m[2]||'').toLowerCase(), raw:m[3], quoted:true});
-      else { let r=m[4]; const neg=r[0]==='-'&&r.length>1; if(neg) r=r.slice(1);
-        toks.push({neg, cue:'', raw:r, quoted:false}); }
+      if(m[3]!=null){ out.push({k:'term', neg:m[1]==='-', cue:(m[2]||'').toLowerCase(), raw:m[3], quoted:true}); continue; }
+      if(m[5]){ out.push({k:m[5], neg:m[4]==='-'}); continue; }
+      let r=m[6]; if(r==null) continue;
+      if(r==='AND'||r==='OR'){ out.push({k:r, neg:false}); continue; }
+      const neg=r[0]==='-'&&r.length>1; if(neg) r=r.slice(1);
+      out.push({k:'term', neg, cue:'', raw:r, quoted:false});
     }
-    const push=(type,neg,val)=>{ let g=out.groups.find(x=>x.type===type&&x.neg===neg);
-      if(!g){ g={type,neg,values:[]}; out.groups.push(g); } g.values.push(val); };
-    const isVals=this.SEARCH_IS(), cues=this.SEARCH_DATE_CUES();
-    toks.forEach(tk=>{
-      const r=tk.raw; if(!r) return;
-      const low=r.toLowerCase();
-      if(tk.cue && cues.indexOf(tk.cue)>=0){
-        const ms=this.searchDateMs(r);
-        if(ms!=null) push('date',tk.neg,{cue:tk.cue,ms}); else push('text',tk.neg,low);
-        return;
-      }
-      if(!tk.quoted){
-        const cm=/^([a-z]+):(.+)$/i.exec(r);
-        if(cm){ const cue=cm[1].toLowerCase(), rest=cm[2];
-          if(cue==='is'){ if(isVals.indexOf(rest.toLowerCase())>=0) push('is',tk.neg,rest.toLowerCase()); return; }
-          if(cue==='calendar'){ push('calendar',tk.neg,rest.toLowerCase()); return; }
-          if(cues.indexOf(cue)>=0){
-            const ms=this.searchDateMs(rest);
-            if(ms!=null) push('date',tk.neg,{cue,ms}); else push('text',tk.neg,low);
-            return;
-          }
-        }
-        if(r[0]==='@' && r.length>1){ push('tag',tk.neg,r.slice(1).toLowerCase()); return; }
-        if(r[0]==='/' && r.length>1){ push('section',tk.neg,r.slice(1).toLowerCase()); return; }
-        if(/^p[1-4]$/i.test(r)){ push('priority',tk.neg,+r[1]); return; }
-      }
-      push('text',tk.neg,low);
-    });
     return out;
   }
+  /* /PP-EXT */
+  /* PP-EXT (owner 2026-08-30): recursive descent, adjacency > AND > OR.
+     `default` is the compatibility hinge: an operator-free query is ONE default node whose `groups` is
+     what this method returned before operators existed, built by the same collector, and the root still
+     exposes `.groups` in that case. That is what makes "the default path is unchanged" an assertion the
+     18 pre-existing tests prove, rather than a claim. A query WITH an operator exposes no root `.groups`
+     — there is no honest flat list for it, and inventing one would be a second source of truth. */
+  parseSearchQuery(text){
+    const st={toks:this.searchTokens(text), i:0, depth:0};
+    const node=this.parseSearchOr(st) || {op:'default', groups:[]};
+    const out={node};
+    if(node.op==='default') out.groups=node.groups;
+    return out;
+  }
+  parseSearchOr(st){
+    const nodes=[]; nodes.push(this.parseSearchAnd(st));
+    while(st.toks[st.i] && st.toks[st.i].k==='OR'){ st.i++; nodes.push(this.parseSearchAnd(st)); }
+    const kept=nodes.filter(n=>n);            /* a dangling OR simply has no operand to contribute */
+    if(!kept.length) return null;
+    return kept.length===1?kept[0]:{op:'or', nodes:kept};
+  }
+  parseSearchAnd(st){
+    const nodes=[]; nodes.push(this.parseSearchRun(st));
+    while(st.toks[st.i] && st.toks[st.i].k==='AND'){ st.i++; nodes.push(this.parseSearchRun(st)); }
+    const kept=nodes.filter(n=>n);
+    if(!kept.length) return null;
+    return kept.length===1?kept[0]:{op:'and', nodes:kept};
+  }
+  /* A RUN is bare adjacency — today's whole language. Its terms collect into one default node by the
+     original rule (same type ORs, different types AND, a negated token forms its own inverted group);
+     a parenthesised sub-expression sitting in the run ANDs with it, which is the same cross-type rule
+     one level up. */
+  parseSearchRun(st){
+    const groups=[]; const nodes=[];
+    const push=(type,neg,val)=>{ let g=groups.find(x=>x.type===type&&x.neg===neg);
+      if(!g){ g={type,neg,values:[]}; groups.push(g); } g.values.push(val); };
+    for(;;){
+      const tk=st.toks[st.i];
+      if(!tk || tk.k==='AND' || tk.k==='OR') break;
+      if(tk.k===')'){
+        if(st.depth>0) break;                 /* the caller's group ends here */
+        st.i++; push('text',false,')'); continue;   /* a ')' with no '(' is free text — the house rule */
+      }
+      if(tk.k==='('){
+        st.i++; st.depth++;
+        const inner=this.parseSearchOr(st);
+        st.depth--;
+        if(st.toks[st.i] && st.toks[st.i].k===')') st.i++;  /* absent = unclosed, which closes here */
+        if(inner) nodes.push(tk.neg?{op:'not', node:inner}:inner);
+        continue;
+      }
+      st.i++; this.searchTerm(tk, push);
+    }
+    const all=(groups.length?[{op:'default', groups}]:[]).concat(nodes);
+    if(!all.length) return null;
+    return all.length===1?all[0]:{op:'and', nodes:all};
+  }
+  /* One token to one group value. MOVED VERBATIM from the old `toks.forEach` body: the leaf language —
+     cues, `is:`, `calendar:`, `@`, `/`, pN, dates, and the degrade-to-free-text fallback — is exactly
+     what it was, and this plan changes only how leaves are COMBINED. */
+  searchTerm(tk, push){
+    const r=tk.raw; if(!r) return;
+    const low=r.toLowerCase();
+    const isVals=this.SEARCH_IS(), cues=this.SEARCH_DATE_CUES();
+    if(tk.cue && cues.indexOf(tk.cue)>=0){
+      const ms=this.searchDateMs(r);
+      if(ms!=null) push('date',tk.neg,{cue:tk.cue,ms}); else push('text',tk.neg,low);
+      return;
+    }
+    if(!tk.quoted){
+      const cm=/^([a-z]+):(.+)$/i.exec(r);
+      if(cm){ const cue=cm[1].toLowerCase(), rest=cm[2];
+        if(cue==='is'){ if(isVals.indexOf(rest.toLowerCase())>=0) push('is',tk.neg,rest.toLowerCase()); return; }
+        if(cue==='calendar'){ push('calendar',tk.neg,rest.toLowerCase()); return; }
+        if(cues.indexOf(cue)>=0){
+          const ms=this.searchDateMs(rest);
+          if(ms!=null) push('date',tk.neg,{cue,ms}); else push('text',tk.neg,low);
+          return;
+        }
+      }
+      if(r[0]==='@' && r.length>1){ push('tag',tk.neg,r.slice(1).toLowerCase()); return; }
+      if(r[0]==='/' && r.length>1){ push('section',tk.neg,r.slice(1).toLowerCase()); return; }
+      if(/^p[1-4]$/i.test(r)){ push('priority',tk.neg,+r[1]); return; }
+    }
+    push('text',tk.neg,low);
+  }
+  /* /PP-EXT */
   /* PP-EXT (owner 2026-08-25): one date token, through the app's own NL parser. Returns midnight-of-day
      epoch ms, or null when the text carries no date at all (which the caller degrades to free text). */
   searchDateMs(s){
     let p=null; try{ p=this.parseDateText(''+s); }catch(e){ p=null; }
     return (p && p.date!=null) ? this.startOfDay(p.date) : null;
   }
-  /* PP-EXT (owner 2026-08-25): AST evaluation. Groups AND; values inside a group OR; a `neg` group
-     inverts the whole group (none of its values may match). The AST is pure text; only this reads the
-     workspace (sections, calendar names, the running-timer set). */
+  /* PP-EXT (owner 2026-08-30): evaluation is a walk. `default` runs the ORIGINAL every-over-some, so the
+     rule that survived the redesign is still the rule; and/or/not merely combine those answers. `ctx`
+     carries the per-CALL constants and the per-TASK haystack memo, so a ten-leaf tree still lowercases
+     the name and description once. `one`, `searchIsMatch` and `searchDateMatch` are untouched: they
+     already answer one clause about one task, which is exactly what a leaf needs. */
   searchMatch(t, ast){
-    if(!t || !ast || !ast.groups || !ast.groups.length) return true;
-    const B=this.startOfToday();
+    const node = ast && (ast.node || (ast.groups ? {op:'default', groups:ast.groups} : null));
+    if(!t || !node) return true;
+    return this.searchEval(t, node, {B:this.startOfToday(), hay:null});
+  }
+  searchEval(t, node, ctx){
+    if(!node) return true;
+    switch(node.op){
+      case 'and': return node.nodes.every(n=>this.searchEval(t,n,ctx));
+      case 'or':  return node.nodes.some(n=>this.searchEval(t,n,ctx));
+      case 'not': return !this.searchEval(t, node.node, ctx);
+      default:    return this.searchDefaultMatch(t, node.groups, ctx);
+    }
+  }
+  searchDefaultMatch(t, groups, ctx){
+    if(!groups || !groups.length) return true;
     const secName=(id)=>{ const s=(this.state.sections||[]).find(x=>x.id===id); return s?(''+(s.name||'')).toLowerCase():''; };
     const plain=(html)=>(''+(html||'')).replace(/<[^>]*>/g,' ').toLowerCase();
-    let hay=null; const text=()=>{ if(hay==null) hay=((t.name||'')+' '+plain(t.desc)).toLowerCase(); return hay; };
+    const text=()=>{ if(ctx.hay==null) ctx.hay=((t.name||'')+' '+plain(t.desc)).toLowerCase(); return ctx.hay; };
     const one=(g,v)=>{
       switch(g.type){
         case 'text':     return text().includes(v);
@@ -7633,12 +7714,13 @@ class Component extends DCLogic {
         case 'calendar': return (this.calNameOf(t)||'').toLowerCase().includes(v);
         case 'priority': return (+t.priority||4)===v;
         case 'is':       return this.searchIsMatch(t, v);
-        case 'date':     return this.searchDateMatch(t, v, B);
+        case 'date':     return this.searchDateMatch(t, v, ctx.B);
         default:         return false;
       }
     };
-    return ast.groups.every(g=>{ const any=g.values.some(v=>one(g,v)); return g.neg?!any:any; });
+    return groups.every(g=>{ const any=g.values.some(v=>one(g,v)); return g.neg?!any:any; });
   }
+  /* /PP-EXT */
   /* PP-EXT (owner 2026-08-25): the retired smart chips, reachable as `is:` tokens. `unplanned` delegates
      to `matchChip` on purpose, so the one surviving chip and its search spelling cannot disagree. */
   searchIsMatch(t, v){
@@ -14684,7 +14766,7 @@ class Component extends DCLogic {
     const previewN=dirty?this.searchPreviewCount(draft):null;
     const searchInp=h('input',{key:'search','data-pp-search':'1',type:'text',value:draft,
       ref:el=>{ this._searchEl=el; if(el && this._searchFocus){ this._searchFocus=false; el.focus(); el.select(); } },
-      placeholder:'/section  @tag  p1  by:friday  after:1w  -exclude  "phrase"',
+      placeholder:'/section  @tag  p1  by:friday  AND/OR  -exclude  "phrase"', /* PP-EXT (owner 2026-08-30) */
       onChange:e=>this.setState({searchText:e.target.value}),
       onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.setSearch(e.target.value); }
                      else if(e.key==='Escape'){ e.preventDefault(); const el=e.target; this.clearSearch(); el.blur(); } },

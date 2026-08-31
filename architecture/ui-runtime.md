@@ -878,12 +878,34 @@ plumbing. Search gets its own pure `(text) → AST` parser and `(task, AST) → 
 | `calendar:` | source calendar name |
 | `is:unplanned\|done\|running\|overdue\|recurring\|milestone` | the retired smart chips |
 | `-` prefix on any token | negation |
+| `AND` / `OR` (uppercase only) | explicit combination — overrides the default below |
+| `(` … `)` | grouping |
+| `-(` … `)` | negate a whole group |
 
 **Same-type tokens OR; different types AND.** `@work @home` is "either tag"; `@work p1` is "both".
 Negation produces a *separate* group, so `@work -@home` reads "tagged work AND not tagged home" rather
 than an OR over a mixed bag. Dates route through `parseDateText` — the same parser quick-add and the
 When line use — so the language cannot drift from them and needs no date code of its own. Nothing
 throws: an unrecognised token degrades to free text.
+
+**Explicit operators (2026-08-30).** `AND` and `OR` are operators **only in uppercase**; `and`/`or` in any
+other case are free text, so nothing anyone typed before they existed changed meaning. Precedence is
+**adjacency > AND > OR**: a run of bare adjacent tokens is scored by the default rule above and an
+operator joins the runs around it, so `@work @home AND p1` is `(work OR home) AND p1`. Parentheses
+regroup, and a leading `-` negates a whole group — `-(p1 AND @work)` excludes tasks that are BOTH, which
+`-p1 -@work` (excludes EITHER) cannot say.
+
+The parse is three layers, all pure: `searchTokens` (lexer) → `parseSearchQuery` (recursive descent,
+`parseSearchOr`/`parseSearchAnd`/`parseSearchRun`, leaves classified by `searchTerm`) → `searchEval`.
+The AST has four node kinds: `{op:'default',groups}` — today's flat structure, unchanged, and the reason
+an operator-free query still exposes `.groups` at the root — plus `and`, `or` and `not`.
+
+Outside quotes, `(` and `)` are **always** their own tokens, so `(@work OR @home)` parses with the close
+paren glued to `@home`. Accepted cost: a literal parenthesis must be quoted (`"("`).
+
+Malformed input repairs rather than throwing, because the bar previews on every keystroke: a dangling or
+leading operator is dropped, an unclosed `(` closes at end of line, a `)` with no `(` degrades to free
+text, and `()` contributes nothing.
 
 `is:unplanned` delegates to `matchChip(t,'unplanned',{})`, so the one surviving chip and its search
 spelling cannot disagree. The placeholder **is** the grammar; there is no help popover by design.
