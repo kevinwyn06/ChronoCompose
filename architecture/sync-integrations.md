@@ -431,3 +431,19 @@ the display half into `displayKeys`. The prune stays a local splice: no tombston
 
 The demoted row is deliberately **not** written to `pp-calevents`. An event outside the window has nothing
 to draw in any view, and inventing a record for it would put a date on screen that no import refreshes.
+#### Display events are series, not dates (2026-08-31)
+
+Owner, on the fix above: *"her birthday should still be treated as a birthday."* Demoting the task row was
+right; letting the birthday cease to exist was not. The first store held one record per fetched
+*occurrence*, which was wrong twice: N occurrences of a series inside the window drew N chips, and the
+event vanished the instant the window moved past it.
+
+A stored display event now carries the master's `recur`, anchored at the master's own start, so one record
+covers every year. `calEventTasks` passes that rule through to the pseudo-task, which means the month grid
+and the day-header glow expand it for free — both already go through `expandTask` via `tasksOnDay` /
+`tasksByDayMap`. `calEventsOnDay` (the day-grid band and the Schedule list) had to be switched from a raw
+start/end compare to the same expansion, or a yearly series would only ever have matched its anchor year.
+
+Consequence worth stating plainly: a display event no longer depends on the import window at all. The
+window governs which events are *discovered*; once one is stored as a series it renders on every date its
+rule produces, however far ahead the user navigates.

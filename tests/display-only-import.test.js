@@ -247,8 +247,13 @@ test('a linked row whose event is outside the window is still reclassified', asy
   c.gcalImport({}); await settle();
 
   assert.equal(c.state.tasks.length, 0, 'the row is gone even though no events.list returned it');
-  /* and it is NOT stored as a display event: nothing in the window means nothing to draw */
-  assert.equal(c.loadCalEvents().length, 0);
+  /* …and it is still a birthday. Owner: "her birthday should still be treated as a birthday." Demoting a
+     task must not delete the fact — the probe fetched the whole master, so it is stored WITH its yearly
+     rule and renders on its own dates, window or no window. */
+  const [rec] = Array.from(c.loadCalEvents());
+  assert.equal(rec.name, "Alex Rivera's birthday");
+  assert.equal(rec.recur && rec.recur.kind, 'year', 'stored as a yearly series, not a single date');
+  assert.equal(rec.eid, 'mstr9', 'anchored on the master, so one record covers every year');
   assert.deepEqual(Array.from(Object.keys(c.loadTombstones())), [], 'still a local splice, not a delete');
   assert.equal(c.loadQueue().filter(op=>op.op==='delete').length, 0);
 });
@@ -263,4 +268,40 @@ test('an out-of-window row whose event is an ordinary meeting survives', async (
 
   c.gcalImport({}); await settle();
   assert.deepEqual(Array.from(c.state.tasks, t=>t.name), ['Quarterly review']);
+});
+
+/* PP-EXT (owner 2026-08-31): "her birthday should still be treated as a birthday." A yearly series is a
+   standing fact, not a row that is true for the thirty days the import window happens to cover, so the
+   stored record carries the master's rule and the projection expands it on demand. */
+test('a recurring display event renders on a future occurrence, far outside the window', async () => {
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [] },
+    { mstr9: primaryBirthdayMaster("Alex Rivera's birthday", 'mstr9') });
+  const past = B() - 9*DAY;
+  c.state.tasks = [ c.normalizeTask({ id:'alex', name:"Alex Rivera's birthday",
+    calendarId:PRIMARY, eventId:'mstr9', start:past, end:past+DAY, allDay:true,
+    recur:{kind:'year', n:1} }) ];
+  c.gcalImport({}); await settle();
+
+  /* The master is anchored at 2007-06-30 (see primaryBirthdayMaster), so the next 30 June is the day to
+     look at — comfortably outside any import window, and the exact case that used to render nothing. */
+  const now = new Date(); const y = (now.getMonth() > 5) ? now.getFullYear()+1 : now.getFullYear();
+  const day = new Date(y, 5, 30).setHours(0,0,0,0);
+  assert.deepEqual(Array.from(c.calEventsOnDay(day), t=>t.name), ["Alex Rivera's birthday"],
+    'the day band finds it by expanding the rule');
+  assert.ok(c.tasksOnDay(day, c.calEventTasks()).length === 1,
+    'and so does the month grid, which shares tasksOnDay');
+});
+
+/* Storing occurrences rather than the series drew one chip per occurrence. One series = one record. */
+test('many occurrences of one series collapse to a single stored record', async () => {
+  const d1 = B() + 3*DAY, d2 = B() + 10*DAY;
+  const c = harness({
+    [PRIMARY]: [ primaryBirthday(null, "Riley's birthday", d1, 'mstr2'),
+                 primaryBirthday(null, "Riley's birthday", d2, 'mstr2') ],
+    [BIRTHDAYS]: [],
+  }, { mstr2: primaryBirthdayMaster("Riley's birthday", 'mstr2') });
+
+  c.gcalImport({}); await settle();
+  assert.equal(c.loadCalEvents().length, 1, 'one series, one record');
+  assert.equal(c.loadCalEvents()[0].recur.kind, 'year');
 });

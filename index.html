@@ -10839,15 +10839,16 @@ class Component extends DCLogic {
       if(!t.archivedAt && t.calendarId && t.eventId && live[t.calendarId] && !live[t.calendarId].has(t.eventId)
           && !(preserveEventIds&&preserveEventIds.has(key))) candidates[key]={cid:t.calendarId,eid:t.eventId}; });
     const base='https://www.googleapis.com/calendar/v3/calendars/';
-    const missing=[], display=[];
+    const missing=[], display=new Map();
     return Promise.all(Object.keys(candidates).map(key=>{ const x=candidates[key];
       return this.gcalFetch(base+encodeURIComponent(x.cid)+'/events/'+encodeURIComponent(x.eid))
         .then(ev=>{
           if(ev && ev.status==='cancelled'){ missing.push(key); return; }
-          /* A live event that classifies as display-only is not missing — it stops being a task. */
-          if(ev && this.gcalEventIsDisplay(ev, this.calTier(x.cid))) display.push(key); })
+          /* A live event that classifies as display-only is not missing — it stops being a task. The
+             whole resource is carried back so the import can store it without fetching it again. */
+          if(ev && this.gcalEventIsDisplay(ev, this.calTier(x.cid))) display.set(key, {cid:x.cid, ev}); })
         .catch(e=>{ if(e && (e.status===404||e.status===410)) missing.push(key); }); }))
-      .then(()=>({missing:new Set(missing), display:new Set(display)}));
+      .then(()=>({missing:new Set(missing), display}));
   }
   /* opts.silent → background auto-sync: no "Importing…" spinner, and only commits (touches undo history)
      when the calendar data actually changed, so idle polling doesn't churn state. */
@@ -10899,19 +10900,28 @@ class Component extends DCLogic {
          `results` itself is left whole and still feeds gcalVerifyMissing/pruneDeletedEvents above and
          below, because a display event IS live on Google — filtering it out of the liveness evidence
          would make the absence look like a deletion. Only `taskResults` reaches mergeCalendarEvents. */
-      const displayEvents=[], displayKeys=new Set(); const taskResults=[];
+      const displayEvents=[], displayKeys=new Set(), displaySeen=new Set(); const taskResults=[];
       results.forEach(({cid,items})=>{ const tier=this.calTier(cid); const keep=[];
         (items||[]).forEach(ev=>{
           if(this.gcalEventIsDisplay(ev, tier)){
-            const rec=this.calEventFrom(cid, ev); if(rec) displayEvents.push(rec);
             /* Key on the recurring MASTER where there is one: that is the id the task row carries. */
-            displayKeys.add(this.gcalKey(cid, ev.recurringEventId||ev.id));
+            const key=this.gcalKey(cid, ev.recurringEventId||ev.id);
+            displayKeys.add(key);
+            /* …and store the series ONCE, from its master, so N occurrences are not N records. */
+            if(!displaySeen.has(key)){ displaySeen.add(key);
+              const rec=this.calEventFrom(cid, ev,
+                ev.recurringEventId?masters[cid+'|'+ev.recurringEventId]:null);
+              if(rec) displayEvents.push(rec); }
           } else keep.push(ev); });
         taskResults.push({cid, items:keep}); });
       /* PP-EXT (owner 2026-08-31): plus the rows whose event lies OUTSIDE this import's window and was
          classified by the by-id probe above — see gcalVerifyMissing. Without this an already-imported
-         task is only ever reclassified during the weeks its event happens to fall inside the window. */
-      (verifiedDisplay||new Set()).forEach(k=>displayKeys.add(k));
+         task is only ever reclassified during the weeks its event happens to fall inside the window.
+         The probe fetched the whole resource, so these are stored like any other display event; a
+         recurring one then renders on its own dates without ever having been inside the window. */
+      (verifiedDisplay||new Map()).forEach((v,k)=>{ displayKeys.add(k);
+        if(displaySeen.has(k)) return; displaySeen.add(k);
+        const rec=this.calEventFrom(v.cid, v.ev, v.ev); if(rec) displayEvents.push(rec); });
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
       /* The display store is replaced for the calendars this import actually reached, so a calendar that
@@ -11042,16 +11052,28 @@ class Component extends DCLogic {
     const kept=(existing||[]).filter(e=>e && !touched[e.cid] && keep(e.cid));
     return kept.concat(fresh||[]);
   }
-  /* Build one stored display-event record from a Google event. Returns null for anything undated. */
-  calEventFrom(cid, ev){
+  /* Build one stored display-event record from a Google event. Returns null for anything undated.
+     PP-EXT (owner 2026-08-31): a RECURRING series collapses to ONE record anchored at its master and
+     carrying the master's rule, exactly as an imported task does. Storing bare occurrences instead was
+     wrong twice over: it drew one chip per occurrence inside the window, and it made the event cease to
+     exist the moment the window moved past it — which is how a birthday whose date had just passed
+     disappeared from the app altogether. A birthday is a standing yearly fact, not a row that is true for
+     thirty days. Recur means the projection expands it on demand, so it renders at any date the user
+     navigates to, however far outside the import window that is. */
+  calEventFrom(cid, ev, master){
     if(!ev || !ev.id || ev.status==='cancelled') return null;
-    const allDay=!!(ev.start && ev.start.date && !ev.start.dateTime);
-    const st=ev.start&&(ev.start.dateTime||ev.start.date); if(!st) return null;
-    const en=ev.end&&(ev.end.dateTime||ev.end.date);
+    const hasRule=x=>!!(x && x.recurrence && x.recurrence.length);
+    const m=hasRule(master)?master:(hasRule(ev)?ev:null);
+    const recur=m?this.rruleToRecur(m.recurrence):null;
+    const src=recur?m:ev; /* anchor at the master only when we could actually read its rule */
+    const allDay=!!(src.start && src.start.date && !src.start.dateTime);
+    const st=src.start&&(src.start.dateTime||src.start.date); if(!st) return null;
+    const en=src.end&&(src.end.dateTime||src.end.date);
     const start=allDay?this.parseYMD(st):new Date(st).getTime();
     let end=en?(allDay?this.parseYMD(en):new Date(en).getTime()):start;
     if(allDay && end<=start) end=start+this.DAY;
-    return {cid, eid:ev.id, name:ev.summary||'(untitled)', start:Math.round(start), end:Math.round(end), allDay};
+    return {cid, eid:src.id, name:src.summary||ev.summary||'(untitled)',
+      start:Math.round(start), end:Math.round(end), allDay, recur};
   }
   /* Render-side projection: display events as READ-ONLY pseudo-tasks, so the calendar views that already
      map over tasks show them with no new render path. They are built fresh from the store and are never
@@ -11067,7 +11089,7 @@ class Component extends DCLogic {
     const items=this.loadCalEvents();
     this._calEventTasks=items.map(e=>this.normalizeTask({id:this.CAL_EVENT_ID_PREFIX+e.cid+'|'+e.eid,
       name:e.name, type:'Proportional', start:e.start, end:e.end, allDay:!!e.allDay,
-      priority:4, deps:[], pct:0, planned:null, spent:0, labels:[], recur:null, completion:null,
+      priority:4, deps:[], pct:0, planned:null, spent:0, labels:[], recur:e.recur||null, completion:null,
       calendarId:e.cid, eventId:e.eid, displayOnly:true, blocking:false}));
     return this._calEventTasks;
   }
@@ -11075,11 +11097,14 @@ class Component extends DCLogic {
   /* The display events overlapping one day, in start order. Used by the day-grid headers, which have no
      task list to hang them off — the timeline body is the auto-scheduler's output and these are never
      scheduled, so the header is the only honest place for them. */
+  /* PP-EXT (owner 2026-08-31): expands recurrence, like tasksOnDay — a yearly birthday is stored once,
+     anchored at its master, so a raw start/end compare would only ever match its anchor year. */
   calEventsOnDay(dayStart){
     const dayEnd=dayStart+this.DAY;
-    return this.calEventTasks().filter(t=>(t.end>t.start)
-      ? (t.start<dayEnd && t.end>dayStart)
-      : (t.start>=dayStart && t.start<dayEnd)).sort((a,b)=>a.start-b.start);
+    const hits=t=>this.expandTask(t, dayEnd).some(o=>(o.end>o.start)
+      ? (o.start<dayEnd && o.end>dayStart)
+      : (o.start>=dayStart && o.start<dayEnd));
+    return this.calEventTasks().filter(hits).sort((a,b)=>a.start-b.start);
   }
   /* Mutates `tasks`; returns the removal count. A task row whose event has just been classified
      display-only is no longer a task, so it goes — LOCALLY. No tombstone and no `gcalEnqueue`: the Google
