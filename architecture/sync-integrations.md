@@ -429,8 +429,9 @@ resource it fetched carried `eventType` and `transparency`, the two fields the c
 discarding everything but the cancelled check. It now returns `{missing, display}` and `gcalImport` unions
 the display half into `displayKeys`. The prune stays a local splice: no tombstone, no queued DELETE.
 
-The demoted row is deliberately **not** written to `pp-calevents`. An event outside the window has nothing
-to draw in any view, and inventing a record for it would put a date on screen that no import refreshes.
+*(Superseded the same day: the demoted row was at first deliberately **not** written to `pp-calevents`, on
+the reasoning that an out-of-window event has nothing to draw. The owner rejected that — demoting a task
+must not delete the fact — so the probed resource is now carried back and stored. See the next section.)*
 #### Display events are series, not dates (2026-08-31)
 
 Owner, on the fix above: *"her birthday should still be treated as a birthday."* Demoting the task row was
@@ -447,3 +448,36 @@ start/end compare to the same expansion, or a yearly series would only ever have
 Consequence worth stating plainly: a display event no longer depends on the import window at all. The
 window governs which events are *discovered*; once one is stored as a series it renders on every date its
 rule produces, however far ahead the user navigates.
+#### Display events get their own unbounded discovery pass (2026-08-31)
+
+Owner: *"Why do I not see birthdays say in 2028? Now that they don't occupy a row we should import all
+occurrences."* Storing the rule (above) made a *discovered* birthday render forever, but discovery itself
+was still the task pull: `singleEvents=true`, `timeMin=now`, `timeMax=now+window`. A birthday eleven months
+out therefore appeared in no response at all — there was nothing to store, let alone expand. The only
+reason Alex Rivera's showed up was that a stale task row existed for the by-id probe to find.
+
+`gcalImport` now issues a **second request per calendar**, for the display tier only:
+
+```
+events?singleEvents=false&maxResults=250&timeMin=<now>          (no timeMax)
+```
+
+`singleEvents=false` returns series **masters** with their `RRULE` instead of expanded instances, and an
+endless yearly rule matches any `timeMin` — so one request finds every birthday on a calendar whatever the
+date of its next occurrence. Skipped for calendars pinned to the `tasks` tier, which by definition produce
+no display events. A failure is swallowed per calendar and the windowed pass stores what it saw, exactly
+as before.
+
+Two consequences that needed handling:
+
+- **The contacts Birthdays calendar carries no `RRULE`.** It states each person's birthday as a separate
+  non-recurring event per year, with no `eventType` either. `gcalIsAnnual` therefore treats *anything* on
+  that calendar — plus any explicit `eventType:'birthday'` — as annual, and `calEventFrom` synthesises
+  `{kind:'year', n:1}`. Declared sources only; a title is never used to guess.
+- **Which means the same person now arrives once per year.** Those ids carry the year (`2026_BIRTHDAY_x`,
+  `2027_BIRTHDAY_x`), so N copies would have become N overlapping yearly series stacking N chips on one
+  day. `gcalSeriesKey` strips the leading year from an annual event's id, and the import keeps one record
+  per series: a candidate with a rule beats one without, and among equals the earlier anchor wins.
+
+The per-calendar **Short term** window no longer constrains this tier in any way. That is deliberate — a
+lookahead states how far ahead *work* is planned, and a birthday is not work.

@@ -10869,6 +10869,20 @@ class Component extends DCLogic {
     const farFor=cid=>{ const d=this.calLookaheadDays(cid); return Date.now()+((d!=null?d:(g.window||30))*this.DAY); };
     const calById={}; (g.calendars||[]).forEach(c=>calById[c.id]=c);
     const evUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=true&orderBy=startTime&maxResults=250&timeMin='+encodeURIComponent(timeMin)+'&timeMax='+encodeURIComponent(new Date(farFor(cid)).toISOString());
+    /* PP-EXT (owner 2026-08-31): a SECOND, unbounded pass, for display events only.
+       The pass above asks `singleEvents=true` between now and the window's end, so it can only ever
+       discover what happens inside the window — which is right for tasks (a task is work owed soon) and
+       wrong for a birthday, a standing yearly fact the user should see in 2028 as readily as next week.
+       `singleEvents=false` returns the SERIES MASTER with its RRULE instead of expanded instances, and
+       an endless yearly rule matches any `timeMin`, so one request per calendar discovers every birthday
+       on it regardless of when the next occurrence falls. No `timeMax`: the window deliberately does not
+       apply to this tier. Skipped for `tasks` calendars, which by definition yield no display events. */
+    const dispUrl=cid=>'https://www.googleapis.com/calendar/v3/calendars/'+encodeURIComponent(cid)+'/events?singleEvents=false&maxResults=250&timeMin='+encodeURIComponent(timeMin);
+    const dispByCid={};
+    /* Failures are swallowed per calendar: a display pass that 404s or times out must not fail the task
+       import, and the partition below falls back to that calendar's windowed items. */
+    const dispPass=Promise.all(ids.filter(cid=>this.calTier(cid)!=='tasks').map(cid=>
+      this.gcalFetch(dispUrl(cid)).then(d=>{ dispByCid[cid]=d.items||[]; }).catch(()=>{})));
     if(!opts.silent) this.gcalMsg('Importing…');
     const gone=[]; /* PP-EXT: selected calendars that 404/410 — removed from Google or access revoked; skip them instead of failing the whole sync */
     Promise.all(ids.map(cid=>this.gcalFetch(evUrl(cid)).then(d=>({cid,items:d.items||[]}))
@@ -10888,6 +10902,7 @@ class Component extends DCLogic {
       return this.gcalVerifyMissing(this.state.tasks,results,liveIds,preserve)
         .then(v=>({results,masters,verifiedMissing:v.missing,verifiedDisplay:v.display}));
     })
+    .then(x=>dispPass.then(()=>x)) /* PP-EXT: the unbounded display pass joins here */
     .then(({results,masters,verifiedMissing,verifiedDisplay})=>{
       const tomb=this.loadTombstones(); /* PP-EXT: don't resurrect locally-deleted tasks */
       /* PP-EXT: all three "whose copy wins" guards live in gcalPendingFor — see it for why. */
@@ -10900,28 +10915,42 @@ class Component extends DCLogic {
          `results` itself is left whole and still feeds gcalVerifyMissing/pruneDeletedEvents above and
          below, because a display event IS live on Google — filtering it out of the liveness evidence
          would make the absence look like a deletion. Only `taskResults` reaches mergeCalendarEvents. */
-      const displayEvents=[], displayKeys=new Set(), displaySeen=new Set(); const taskResults=[];
+      const displayKeys=new Set(); const taskResults=[];
+      /* One stored record per SERIES, keyed by `gcalSeriesKey`. Two passes can offer the same series
+         (the windowed instance and the unbounded master), and the contacts calendar offers the same
+         person once per year, so the map keeps the best candidate rather than the first: a record that
+         carries a recurrence rule beats one that does not, and among equals the earlier anchor wins —
+         that anchor is the date every later occurrence is projected from. */
+      const bySeries=new Map();
+      const putDisplay=(cid, ev, master)=>{
+        const rec=this.calEventFrom(cid, ev, master); if(!rec) return;
+        const k=cid+'|'+this.gcalSeriesKey(cid, ev); const cur=bySeries.get(k);
+        if(cur && !(( rec.recur && !cur.recur) || (!!rec.recur===!!cur.recur && rec.start<cur.start))) return;
+        bySeries.set(k, rec); };
       results.forEach(({cid,items})=>{ const tier=this.calTier(cid); const keep=[];
         (items||[]).forEach(ev=>{
           if(this.gcalEventIsDisplay(ev, tier)){
             /* Key on the recurring MASTER where there is one: that is the id the task row carries. */
-            const key=this.gcalKey(cid, ev.recurringEventId||ev.id);
-            displayKeys.add(key);
-            /* …and store the series ONCE, from its master, so N occurrences are not N records. */
-            if(!displaySeen.has(key)){ displaySeen.add(key);
-              const rec=this.calEventFrom(cid, ev,
-                ev.recurringEventId?masters[cid+'|'+ev.recurringEventId]:null);
-              if(rec) displayEvents.push(rec); }
+            displayKeys.add(this.gcalKey(cid, ev.recurringEventId||ev.id));
+            /* Store from the windowed pass only when the unbounded one could not be reached for this
+               calendar — otherwise it would contribute a window-shaped duplicate of the same series. */
+            if(!dispByCid[cid]) putDisplay(cid, ev, ev.recurringEventId?masters[cid+'|'+ev.recurringEventId]:null);
           } else keep.push(ev); });
         taskResults.push({cid, items:keep}); });
+      /* …and the unbounded pass, which is where far-future occurrences actually come from. Its entries
+         are masters, so each one already carries its own rule. */
+      Object.keys(dispByCid).forEach(cid=>{ const tier=this.calTier(cid);
+        (dispByCid[cid]||[]).forEach(ev=>{
+          if(!ev || ev.status==='cancelled' || !this.gcalEventIsDisplay(ev, tier)) return;
+          displayKeys.add(this.gcalKey(cid, ev.recurringEventId||ev.id));
+          putDisplay(cid, ev, ev.recurringEventId?masters[cid+'|'+ev.recurringEventId]:ev); }); });
       /* PP-EXT (owner 2026-08-31): plus the rows whose event lies OUTSIDE this import's window and was
          classified by the by-id probe above — see gcalVerifyMissing. Without this an already-imported
          task is only ever reclassified during the weeks its event happens to fall inside the window.
          The probe fetched the whole resource, so these are stored like any other display event; a
          recurring one then renders on its own dates without ever having been inside the window. */
-      (verifiedDisplay||new Map()).forEach((v,k)=>{ displayKeys.add(k);
-        if(displaySeen.has(k)) return; displaySeen.add(k);
-        const rec=this.calEventFrom(v.cid, v.ev, v.ev); if(rec) displayEvents.push(rec); });
+      (verifiedDisplay||new Map()).forEach((v,k)=>{ displayKeys.add(k); putDisplay(v.cid, v.ev, v.ev); });
+      const displayEvents=Array.from(bySeries.values());
       this._gcalApplying=true; /* PP-EXT: an import commit is Google writing to us — never diff it back out */
       try{
       /* The display store is replaced for the calendars this import actually reached, so a calendar that
@@ -11012,13 +11041,31 @@ class Component extends DCLogic {
     if(et==='fromGmail') return false;
     return ev.transparency==='transparent';
   }
+  /* PURE: the identity of the SERIES an event belongs to, for de-duplicating the display store.
+     Normally that is its master id (or its own, when it does not recur). The exception is the contacts
+     Birthdays calendar, which serves each person's birthday as a separate NON-recurring event per year
+     whose id carries that year — `2026_BIRTHDAY_x`, `2027_BIRTHDAY_x`. Once discovery stopped being
+     window-bounded those copies all arrive at once, and since each is given a yearly rule below they
+     would draw one chip per copy on the same day. Stripping the year folds them into one series. */
+  /* PURE: is this event a standing ANNUAL fact that Google may have written without a rule? Two sources
+     qualify and neither is guessed from a title: an explicit `eventType:'birthday'`, and anything on the
+     contacts address-book calendar, whose entire content is birthdays and anniversaries and which —
+     measured on the owner's account — reports no eventType at all. */
+  gcalIsAnnual(cid, ev){
+    if(!ev) return false;
+    if(ev.eventType==='birthday') return true;
+    return (this.GCAL_DISPLAY_DEFAULT_CALS||[]).indexOf(cid)>=0;
+  }
+  gcalSeriesKey(cid, ev){ const id=String((ev&&(ev.recurringEventId||ev.id))||'');
+    return (this.gcalIsAnnual(cid, ev) && !(ev.recurrence&&ev.recurrence.length))
+      ? id.replace(/^\d{4}_/,'') : id; }
   /* Display events are NOT tasks and never enter `pp-tasks`. They live in their own local-only store, so
      they cannot be scheduled, cannot reach `gcalEnqueue` (and therefore can never delete a Google event),
      cannot be pushed to Supabase, and cannot collide with the task de-duplication machinery.
-     Occurrences are stored FLAT, exactly as `singleEvents=true` expanded them inside the import window —
-     no recurrence rule is kept. That is what makes the per-calendar Short term setting work on them for
-     free: the window is `timeMax`, so a shortened window simply stops producing occurrences. A recurring
-     TASK cannot do this (see pruneOutOfWindow and tasks.md). */
+     A series is stored ONCE, anchored at its master and carrying its rule, and the projection expands it
+     on demand — so the import window governs only what is DISCOVERED, never how long it remains true.
+     The per-calendar Short term setting therefore does not apply to this tier: it is a statement about
+     how far ahead work is planned, and a birthday is not work. */
   loadCalEvents(){ try{ const v=JSON.parse(this.lsGet('pp-calevents')||'{}')||{};
       return Array.isArray(v.items)?v.items:[]; }catch(e){ return []; } }
   /* PP-EXT (owner 2026-08-31): a display-event write must REPAINT. These do not live in `state.tasks`, so
@@ -11064,8 +11111,13 @@ class Component extends DCLogic {
     if(!ev || !ev.id || ev.status==='cancelled') return null;
     const hasRule=x=>!!(x && x.recurrence && x.recurrence.length);
     const m=hasRule(master)?master:(hasRule(ev)?ev:null);
-    const recur=m?this.rruleToRecur(m.recurrence):null;
-    const src=recur?m:ev; /* anchor at the master only when we could actually read its rule */
+    let recur=m?this.rruleToRecur(m.recurrence):null;
+    /* PP-EXT (owner 2026-08-31): a birthday IS annual, whether or not Google wrote it a rule. The
+       contacts calendar states each year separately and carries no RRULE at all, so without this its
+       birthdays would still exist for exactly one year — the thing the owner asked to stop happening.
+       See `gcalIsAnnual`: declared sources only, never inferred from a title. */
+    if(!recur && this.gcalIsAnnual(cid, ev)) recur={kind:'year', n:1};
+    const src=(recur&&m)?m:ev; /* anchor at the master only when we could actually read its rule */
     const allDay=!!(src.start && src.start.date && !src.start.dateTime);
     const st=src.start&&(src.start.dateTime||src.start.date); if(!st) return null;
     const en=src.end&&(src.end.dateTime||src.end.date);

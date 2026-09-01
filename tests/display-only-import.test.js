@@ -41,7 +41,10 @@ function meeting(id, name, startMs, endMs){
 }
 
 /* Wire a component to a fixed set of events per calendar and run one import to completion. */
-function harness(byCal, masters){
+/* `unbounded` = what the display pass (`singleEvents=false`, no timeMax) returns per calendar, i.e. the
+   series MASTERS. Omit it and both passes see the same list, which is what every test written before the
+   pass existed assumes. */
+function harness(byCal, masters, unbounded){
   const c = make();
   Object.assign(c.state.gcal, {
     selected:{ [PRIMARY]:true, [BIRTHDAYS]:true },
@@ -50,10 +53,15 @@ function harness(byCal, masters){
   });
   c._token = 'token';
   c.saveCalEvents([]);
+  const fetched = { window:[], display:[] }; c._fetched = fetched;
   c.gcalFetch = (url) => {
     /* an events.list call */
     const m = /calendars\/([^/]+)\/events\?/.exec(url);
-    if(m){ const cid = decodeURIComponent(m[1]); return Promise.resolve({ items: byCal[cid] || [] }); }
+    if(m){ const cid = decodeURIComponent(m[1]);
+      const isDisplayPass = /singleEvents=false/.test(url);
+      if(isDisplayPass) fetched.display.push(cid); else fetched.window.push(cid);
+      const src = (isDisplayPass && unbounded) ? unbounded[cid] : byCal[cid];
+      return Promise.resolve({ items: src || [] }); }
     /* a by-id lookup: either a recurring master or gcalVerifyMissing probing a linked event */
     const g = /calendars\/([^/]+)\/events\/([^?]+)/.exec(url);
     if(g){ const id = decodeURIComponent(g[2]);
@@ -304,4 +312,85 @@ test('many occurrences of one series collapse to a single stored record', async 
   c.gcalImport({}); await settle();
   assert.equal(c.loadCalEvents().length, 1, 'one series, one record');
   assert.equal(c.loadCalEvents()[0].recur.kind, 'year');
+});
+
+/* ---- discovery is no longer window-bounded --------------------------------- */
+
+/* PP-EXT (owner 2026-08-31): "Why do I not see birthdays say in 2028? Now that they don't occupy a row
+   we should import all occurrences." The windowed pass can only ever discover what falls inside the
+   window, so a birthday eleven months out was never fetched at all — nothing to expand. The display pass
+   asks `singleEvents=false`, which returns the MASTER of an endless yearly series whatever the date of
+   its next occurrence. */
+test('a birthday whose next occurrence is far outside the window is still discovered', async () => {
+  const c = harness(
+    { [PRIMARY]: [], [BIRTHDAYS]: [] },                                   /* the window returns nothing */
+    {},
+    { [PRIMARY]: [ primaryBirthdayMaster("Alex Rivera's birthday", 'mstr9') ], [BIRTHDAYS]: [] });
+
+  c.gcalImport({}); await settle();
+
+  const recs = Array.from(c.loadCalEvents());
+  assert.deepEqual(recs.map(r=>r.name), ["Alex Rivera's birthday"],
+    'discovered without any occurrence inside the window, and without a task row to probe from');
+  assert.equal(recs[0].recur.kind, 'year');
+  /* 2007-06-30 anchor + yearly ⇒ it must render on 30 June 2028, the owner’s actual question. */
+  const day = new Date(2028, 5, 30).setHours(0,0,0,0);
+  assert.deepEqual(Array.from(c.calEventsOnDay(day), t=>t.name), ["Alex Rivera's birthday"]);
+});
+
+/* The contacts calendar carries no RRULE at all — each year is its own event. A birthday is annual by
+   definition, so the record is given a yearly rule rather than expiring after one year. */
+test('a contacts birthday without an RRULE is stored as an annual series', async () => {
+  const day = B() + 5*DAY;
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [ contactsBirthday("Jordan Lee's birthday", day, '2026_BIRTHDAY_jc') ] });
+
+  c.gcalImport({}); await settle();
+
+  const [rec] = Array.from(c.loadCalEvents());
+  assert.equal(rec.name, "Jordan Lee's birthday");
+  assert.equal(rec.recur && rec.recur.kind, 'year', 'annual, though Google sent no rule');
+  const twoYears = new Date(new Date(day).getFullYear()+2, new Date(day).getMonth(), new Date(day).getDate()).setHours(0,0,0,0);
+  assert.deepEqual(Array.from(c.calEventsOnDay(twoYears), t=>t.name), ["Jordan Lee's birthday"]);
+});
+
+/* …and once discovery is unbounded, that same person arrives once per year, each copy a distinct event
+   whose id carries the year. Given a yearly rule each, they would stack N chips on one day. */
+test('the per-year copies of one contacts birthday collapse to a single record', async () => {
+  const day = B() + 5*DAY;
+  const y = new Date(day).getFullYear(), mo = new Date(day).getMonth(), dom = new Date(day).getDate();
+  const at = yr => new Date(yr, mo, dom).setHours(0,0,0,0);
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [] }, {}, { [PRIMARY]: [], [BIRTHDAYS]: [
+    contactsBirthday("Jordan Lee's birthday", at(y),   y+'_BIRTHDAY_jc'),
+    contactsBirthday("Jordan Lee's birthday", at(y+1), (y+1)+'_BIRTHDAY_jc'),
+    contactsBirthday("Jordan Lee's birthday", at(y+2), (y+2)+'_BIRTHDAY_jc') ] });
+
+  c.gcalImport({}); await settle();
+
+  assert.equal(Array.from(c.loadCalEvents()).length, 1, 'one person, one series, one record');
+  assert.equal(c.calEventsOnDay(at(y+1)).length, 1, 'and one chip on the day, not three');
+});
+
+/* A `tasks` calendar yields no display events by definition, so it must not pay for a second request. */
+test('the display pass is skipped for a calendar pinned to the tasks tier', async () => {
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [] });
+  c.state.gcal.tier = { [PRIMARY]:'tasks' };
+
+  c.gcalImport({}); await settle();
+
+  assert.deepEqual(c._fetched.display, [BIRTHDAYS], 'only the calendar that can produce display events');
+  assert.equal(c._fetched.window.length, 2, 'both are still pulled for tasks');
+});
+
+/* A display pass that fails must not cost the calendar its events: the windowed pass still stores what
+   it saw, exactly as it did before the second pass existed. */
+test('a failed display pass falls back to the windowed events', async () => {
+  const day = B() + 4*DAY;
+  const c = harness({ [PRIMARY]: [], [BIRTHDAYS]: [ contactsBirthday("Avery's birthday", day, '2026_BIRTHDAY_ada') ] });
+  const inner = c.gcalFetch;
+  c.gcalFetch = url => /singleEvents=false/.test(url)
+    ? Promise.reject(Object.assign(new Error('boom'), { status:500 })) : inner(url);
+
+  c.gcalImport({}); await settle();
+
+  assert.deepEqual(Array.from(c.loadCalEvents(), r=>r.name), ["Avery's birthday"]);
 });
