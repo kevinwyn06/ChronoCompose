@@ -11138,12 +11138,37 @@ class Component extends DCLogic {
     const raw=this.lsGet('pp-calevents')||'';
     if(this._calEventTasks && this._calEventsRaw===raw) return this._calEventTasks;
     this._calEventsRaw=raw;
-    const items=this.loadCalEvents();
+    const items=this.dedupeAnnualDisplay(this.loadCalEvents());
     this._calEventTasks=items.map(e=>this.normalizeTask({id:this.CAL_EVENT_ID_PREFIX+e.cid+'|'+e.eid,
       name:e.name, type:'Proportional', start:e.start, end:e.end, allDay:!!e.allDay,
       priority:4, deps:[], pct:0, planned:null, spent:0, labels:[], recur:e.recur||null, completion:null,
       calendarId:e.cid, eventId:e.eid, displayOnly:true, blocking:false}));
     return this._calEventTasks;
+  }
+  /* PURE, PP-EXT (owner 2026-08-31): fold cross-calendar copies of the same annual fact into one chip.
+     Google publishes a contact's birthday on the address-book calendar AND — measured on this account —
+     keeps its own `eventType:'birthday'` copy on the primary calendar. Those are different calendars with
+     different event ids and no field linking them, so nothing upstream in the import can tell they are the
+     same fact; the owner just sees the same name twice on the same day. De-duplicating here rather than at
+     import time is deliberate: it is a presentation problem, the store keeps BOTH records so unticking
+     either calendar still removes exactly what that calendar owns, and it stays right even when one
+     calendar fails to import and its old events are carried forward.
+     Matching is narrow on purpose — YEARLY events only, same normalized title, same month and day. Two
+     genuinely distinct meetings that happen to share a name are never folded, because neither is annual. */
+  dedupeAnnualDisplay(items){
+    const at=new Map(); const out=[]; let folded=false; const key=x=>String(x.cid)+'|'+String(x.eid);
+    (items||[]).forEach(e=>{
+      if(!e) return;
+      if(!(e.recur && e.recur.kind==='year')){ out.push(e); return; }
+      const d=new Date(e.start);
+      const k=String(e.name||'').trim().toLowerCase().replace(/\s+/g,' ')+'|'+d.getMonth()+'|'+d.getDate();
+      const i=at.get(k);
+      if(i===undefined){ at.set(k, out.length); out.push(e); return; }
+      folded=true;
+      /* A stable winner, so the surviving chip does not hop between calendars (and colours) per import. */
+      if(key(e)<key(out[i])) out[i]=e; });
+    /* Nothing to fold — the overwhelmingly common case — hands back the very array it was given. */
+    return folded?out:(items||out);
   }
   isDisplayEvent(t){ return !!(t && t.displayOnly); }
   /* The display events overlapping one day, in start order. Used by the day-grid headers, which have no

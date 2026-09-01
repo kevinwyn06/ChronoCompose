@@ -481,3 +481,25 @@ Two consequences that needed handling:
 
 The per-calendar **Short term** window no longer constrains this tier in any way. That is deliberate — a
 lookahead states how far ahead *work* is planned, and a birthday is not work.
+
+#### One person, one chip: folding cross-calendar copies (2026-08-31)
+
+Owner, immediately after the pass above landed: *"the issue is the duplicate birthdays is so confusing."*
+
+Google keeps a contact's birthday in **two** places — on the address-book calendar, and as its own
+`eventType:'birthday'` copy on the primary calendar. Different calendar, different event id, no field
+linking them, so nothing in the import can tell they are the same fact and both are stored. Widening
+`gcalSeriesKey` across calendars would be wrong: series identity is per-calendar, and the store is also
+what makes unticking a calendar remove exactly what that calendar owns.
+
+`dedupeAnnualDisplay` folds them on the way to the screen instead, inside `calEventTasks`:
+
+- **Only annual events** (`recur.kind === 'year'`) are candidates. Two ordinary meetings sharing a name on
+  one day are two meetings and both still draw.
+- Matched on **normalized title + month + day** — not the raw start, because the primary master is anchored
+  at the *birth* year while the contacts copy sits in the current one.
+- The survivor is the lowest `cid|eid`, so the visible chip does not hop between calendars, and colours,
+  from import to import.
+- **The store keeps both records.** This is a presentation fold: untick the winning calendar and the other
+  copy takes over. It also stays correct when one calendar fails to import and its old events carry
+  forward, which a fold at import time would not.

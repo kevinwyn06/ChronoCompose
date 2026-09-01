@@ -394,3 +394,78 @@ test('a failed display pass falls back to the windowed events', async () => {
 
   assert.deepEqual(Array.from(c.loadCalEvents(), r=>r.name), ["Avery's birthday"]);
 });
+
+/* ---- one person, one chip, however many calendars carry them ---------------- */
+
+/* The owner's complaint: "the duplicate birthdays is so confusing". Google keeps the SAME contact's
+   birthday on the address-book calendar and as its own copy on the primary calendar. Nothing in the two
+   events links them — different calendar, different id — so both are stored and the fold happens on the
+   way to the screen.
+   June 30 is not arbitrary: `primaryBirthdayMaster` anchors at the BIRTH date, 2007-06-30, which is what
+   the fold has to line up with the contacts calendar's copy of the same day in a different year. Next
+   year's, so the occurrence is ahead of `expandTask`'s start index rather than behind it. */
+const NEXT_JUN30 = () => new Date(new Date().getFullYear()+1, 5, 30).setHours(0,0,0,0);
+function bothCalendars(){
+  const day = NEXT_JUN30();
+  return [day, harness({
+    [PRIMARY]:   [ primaryBirthday(null, "Alex Rivera's birthday", day, 'mstr9') ],
+    [BIRTHDAYS]: [ contactsBirthday("Alex Rivera's birthday", day, '2027_BIRTHDAY_ay') ],
+  }, { mstr9: primaryBirthdayMaster("Alex Rivera's birthday", 'mstr9') })];
+}
+
+test('a birthday carried by both the primary and the contacts calendar draws one chip', async () => {
+  const [day, c] = bothCalendars();
+
+  c.gcalImport({}); await settle();
+
+  assert.equal(Array.from(c.loadCalEvents()).length, 2, 'both records are KEPT in the store');
+  assert.equal(c.calEventsOnDay(day).length, 1, 'but the day shows one chip');
+});
+
+/* Untick the calendar whose copy won and the other must take over, which is only possible because the
+   store kept both. */
+test('folding is presentation only — the loser is still there when the winner leaves', async () => {
+  const [day, c] = bothCalendars();
+
+  c.gcalImport({}); await settle();
+  const winner = c.calEventsOnDay(day)[0].calendarId;
+
+  c.saveCalEvents(Array.from(c.loadCalEvents()).filter(e => e.cid !== winner));
+  const left = c.calEventsOnDay(day);
+  assert.equal(left.length, 1, 'the other calendar still has the birthday');
+  assert.notEqual(left[0].calendarId, winner);
+});
+
+/* The fold must not reach past annual facts: two ordinary events sharing a name on one day are two
+   events, and a birthday on the next day is a different person's. */
+test('the fold touches neither non-annual events nor a different day', () => {
+  const c = make();
+  const jun30 = new Date(2026,5,30).setHours(0,0,0,0);
+  const jul01 = jun30 + DAY;
+  const yr = { kind:'year', n:1 };
+  const items = [
+    { cid:'a', eid:'1', name:'Standup', start:jun30, end:jun30+3600000, allDay:false, recur:null },
+    { cid:'b', eid:'2', name:'Standup', start:jun30, end:jun30+3600000, allDay:false, recur:null },
+    { cid:'a', eid:'3', name:"Avery's birthday", start:jun30, end:jul01, allDay:true, recur:yr },
+    { cid:'b', eid:'4', name:"avery's  BIRTHDAY", start:jun30, end:jul01, allDay:true, recur:yr },
+    { cid:'b', eid:'5', name:"Avery's birthday", start:jul01, end:jul01+DAY, allDay:true, recur:yr },
+  ];
+  assert.deepEqual(Array.from(c.dedupeAnnualDisplay(items), e=>e.eid), ['1','2','3','5'],
+    'both standups survive; the two spellings of one birthday fold; the next day does not');
+});
+
+/* The anchor years differ — a primary master sits at the birth year, the contacts copy at the current
+   one — so the fold compares month and day, never the raw start. */
+test('the fold matches on month and day, not on the anchor year', () => {
+  const c = make();
+  const yr = { kind:'year', n:1 };
+  const born = new Date(2007,5,30).setHours(0,0,0,0);
+  const thisYr = new Date(2026,5,30).setHours(0,0,0,0);
+  const items = [
+    { cid:'z', eid:'m', name:"Alex Rivera's birthday", start:born, end:born+DAY, allDay:true, recur:yr },
+    { cid:'a', eid:'c', name:"Alex Rivera's birthday", start:thisYr, end:thisYr+DAY, allDay:true, recur:yr },
+  ];
+  const out = Array.from(c.dedupeAnnualDisplay(items));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].cid, 'a', 'the winner is stable, chosen by cid|eid rather than by store order');
+});
