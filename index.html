@@ -349,6 +349,7 @@ class Component extends DCLogic {
     /* PP-EXT: shape-driven auto timers — per-occurrence session guards so we don't re-autostart a stopped
        occurrence / re-fire an auto-pause. Keyed by `taskId:occurrenceStartMs`. */
     this._autoDone = {}; this._autoPaused = {};
+    this._autoTickAt = null; /* PP-EXT (owner 2026-09-09): previous auto-timer tick — see autoTimerPlan */
     /* PP-EXT Phase 8: browser notifications. LEAD = how early the clocked-start heads-up fires; GRACE = a
        just-missed trigger won't re-fire on reload/tick if its moment passed more than this ago; SUMMARY_TTL =
        morning-popup auto-dismiss. Fired-once ledger + last morning-summary day persist in pp-notify. */
@@ -705,6 +706,16 @@ class Component extends DCLogic {
        gets its own record. `_undoKind` interleaves the two stacks so Ctrl+Z always undoes the most recent
        action rather than preferring one stack over the other. */
     this._boundsUndo = []; this._boundsRedo = []; this._undoKind = []; this._redoKind = [];
+    /* PP-EXT (owner report 2026-09-09: "deleting section not control z able"). Sections live in their own
+       store (`pp-sections`), outside `state.tasks`, so nothing in the task history could ever restore one
+       — a deleted section was gone for good while Ctrl+Z dutifully restored the `sectionId` of every task
+       it had dissolved, pointing them at a section that no longer existed.
+       A third stack, interleaved by `_undoKind` exactly as the bounds stack is. `deleteSection` is the one
+       action that changes BOTH stores, so its record carries `paired:true` and its undo runs the task
+       branch as well — one Ctrl+Z, one user action. Only the four user-facing mutators record; the sync
+       and seeding paths still call `saveSections` directly and stay out of the history, like every other
+       incoming write. */
+    this._sectionsUndo = []; this._sectionsRedo = [];
     const pf = this.loadPrefs();
     this.ROWH = {compact:30, default:40, comfy:52};
     /* PP-EXT: persisted tasks (pp-tasks) win over the seed; normalize to guarantee new fields exist. */
@@ -1770,10 +1781,19 @@ class Component extends DCLogic {
        action invalidates both redo stacks, exactly as `this.future=[]` already did for tasks. */
     this._pushKind('tasks'); } /* PP-EXT: named cap */
   /* PP-EXT (owner 2026-08-19): kind bookkeeping for the interleaved undo stacks. */
-  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[];
+  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[]; this._sectionsRedo=[];
     /* keep the order log in step with the capped stacks: drop the oldest entry of whichever kind fell off */
     while(this._undoKind.filter(k=>k==='tasks').length>this.history.length){ const i=this._undoKind.indexOf('tasks'); this._undoKind.splice(i,1); }
-    while(this._undoKind.filter(k=>k==='bounds').length>this._boundsUndo.length){ const i=this._undoKind.indexOf('bounds'); this._undoKind.splice(i,1); } }
+    while(this._undoKind.filter(k=>k==='bounds').length>this._boundsUndo.length){ const i=this._undoKind.indexOf('bounds'); this._undoKind.splice(i,1); }
+    while(this._undoKind.filter(k=>k==='sections').length>this._sectionsUndo.length){ const i=this._undoKind.indexOf('sections'); this._undoKind.splice(i,1); } }
+  /* PP-EXT (owner 2026-09-09): record the CURRENT section list before a user-facing section mutation
+     replaces it. `paired` marks the record whose action also wrote the task store, so one Ctrl+Z undoes
+     both halves — see `deleteSection`. Called by the mutator, never by `saveSections` itself: the sync
+     merge and the routine seeding both route through `saveSections` and must not enter the history. */
+  snapshotSections(paired){
+    this._sectionsUndo.push({list:(this.state.sections||[]).slice(), paired:!!paired});
+    if(this._sectionsUndo.length>this.HISTORY_MAX) this._sectionsUndo.shift();
+    this._pushKind('sections'); }
   commit(fn){
     this.snapshot();
     const prev = this.state.tasks; /* PP-EXT: pre-change reference for the outbound gcal diff */
@@ -1795,8 +1815,22 @@ class Component extends DCLogic {
       this._boundsRedo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
       this._redoKind.push('bounds');
       this.saveSettings({dayStart:prev.dayStart, dayEnd:prev.dayEnd}); return; }
+    /* PP-EXT (owner 2026-09-09): a section record. A PAIRED one undoes its task half first, so the redo
+       log ends with 'sections' on top and redo replays the pair in the mirror order. */
+    if(this._undoKind.length && this._undoKind[this._undoKind.length-1]==='sections'){
+      this._undoKind.pop(); const rec=this._sectionsUndo.pop()||{list:[],paired:false};
+      this._sectionsRedo.push({list:(this.state.sections||[]).slice(), paired:rec.paired});
+      if(rec.paired) this._undoTasks();
+      this._redoKind.push('sections');
+      this.saveSections(rec.list); return; }
+    this._undoTasks();
+  }
+  /* PP-EXT (owner 2026-09-09): the task half of `undo`, extracted so a paired section undo can run it
+     without duplicating the two sync funnels. Assumes the caller has already decided it is this stack's
+     turn — it pops `_undoKind` itself only when the top entry is its own. */
+  _undoTasks(){
     if(!this.history.length) return;
-    if(this._undoKind.length) this._undoKind.pop();
+    if(this._undoKind.length && this._undoKind[this._undoKind.length-1]==='tasks') this._undoKind.pop();
     this._redoKind.push('tasks');
     this.future.push(JSON.stringify(this.state.tasks)); if(this.future.length>this.HISTORY_MAX) this.future.shift(); /* PP-EXT: cap both stacks — undo/redo cycling grew `future` unbounded */
     const cur=this.state.tasks; /* PP-EXT */
@@ -1812,8 +1846,18 @@ class Component extends DCLogic {
       this._boundsUndo.push({dayStart:this.state.settings.dayStart, dayEnd:this.state.settings.dayEnd});
       this._undoKind.push('bounds');
       this.saveSettings({dayStart:nx.dayStart, dayEnd:nx.dayEnd}); return; }
+    /* PP-EXT (owner 2026-09-09): mirror of the section branch in `undo`. */
+    if(this._redoKind.length && this._redoKind[this._redoKind.length-1]==='sections'){
+      this._redoKind.pop(); const rec=this._sectionsRedo.pop()||{list:[],paired:false};
+      this._sectionsUndo.push({list:(this.state.sections||[]).slice(), paired:rec.paired});
+      if(rec.paired) this._redoTasks();
+      this._undoKind.push('sections');
+      this.saveSections(rec.list); return; }
+    this._redoTasks();
+  }
+  _redoTasks(){
     if(!this.future.length) return;
-    if(this._redoKind.length) this._redoKind.pop();
+    if(this._redoKind.length && this._redoKind[this._redoKind.length-1]==='tasks') this._redoKind.pop();
     this._undoKind.push('tasks');
     this.history.push(JSON.stringify(this.state.tasks)); if(this.history.length>this.HISTORY_MAX) this.history.shift(); /* PP-EXT: cap both stacks */
     const cur=this.state.tasks; /* PP-EXT */
@@ -3213,15 +3257,27 @@ class Component extends DCLogic {
      appointment now); with `multitask` on it stacks, as it always did. A clocked start
      without an end never auto-starts because it has no defined stop; its notification remains the reminder.
      Decisions are pure (autoTimerPlan) so they're unit-testable; autoTimerTick applies them. */
-  autoTimerPlan(now){ const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
+  /* PP-EXT (owner report 2026-09-09: "sometimes the timer starts on its own after I edit a date for no
+     reason"). It was not "for no reason", and it was not sometimes — the start test was `now >= startMs`,
+     i.e. "the window CONTAINS now", so any edit that moved an appointment onto the current hour started
+     its timer at the very next tick. The clock had arrived at nothing; the data had moved underneath it.
+     An auto-start means "it is now time for this", and that is a CROSSING: the start instant has to lie
+     between the previous tick and this one. `_autoTickAt` is the previous tick, and it is null before the
+     first one — so a reload mid-appointment does not retro-start either, which is the same event class
+     (the app learned about a window that was already open). Auto-PAUSE is untouched: stopping a timer
+     that is already running can only ever be a correction. */
+  autoTimerPlan(now, prevTick){ const prev = prevTick!==undefined ? prevTick : this._autoTickAt;
+    const start=[], pause=[]; (this.state.tasks||[]).forEach(t=>{
       if(this.isMilestone(t)||t.archivedAt) return;
       if(!this.isFixedToday(t)) return;
       const oc=this.occOf(t); const startMs=oc.start; const endMs=oc.end; const key=t.id+':'+startMs;
       const running=this.isRunning(t.id);
       if(running&&now>=endMs){ if(!this._autoPaused[key]) pause.push(t.id); return; }
-      if(now>=startMs&&now<endMs&&!running&&!this._autoDone[key]) start.push(t.id);
+      const crossed = prev!=null && startMs>prev && startMs<=now;
+      if(crossed&&now<endMs&&!running&&!this._autoDone[key]) start.push(t.id);
     }); return {start, pause}; }
   autoTimerTick(){ const now=Date.now(); const plan=this.autoTimerPlan(now);
+    this._autoTickAt=now; /* PP-EXT: the baseline the NEXT tick measures its crossing against */
     plan.start.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
       this._autoDone[id+':'+this.occOf(t).start]=true; this.startTimer(id); });
     plan.pause.forEach(id=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return;
@@ -4438,7 +4494,7 @@ class Component extends DCLogic {
   addSectionTo(sections, name){ const list=(sections||[]).slice();
     const max=list.reduce((m,s)=>Math.max(m,+s.order||0), -1);
     list.push(this.normalizeSection({name:name||'New section', order:max+1})); return list; }
-  addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.saveSections(list);
+  addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.snapshotSections(); this.saveSections(list);
     return list[list.length-1]; }
   /* PP-EXT (owner 2026-08-19): the five routines, as ORDINARY tasks. Owner: "Instead of having lunch and
      dinner be hardcoded options, have breakfast lunch dinner wakeup shutdown routines be default tasks
@@ -4501,7 +4557,7 @@ class Component extends DCLogic {
   }
   /* /PP-EXT */
   renameSection(id, name){ const list=(this.state.sections||[]).map(s=>s.id===id?Object.assign({},s,{name:name||s.name}):s);
-    this.saveSections(list); }
+    this.snapshotSections(); this.saveSections(list); }
   /* Pure: move a section to a new index, renumbering `order` densely so ties can't accumulate. */
   reorderSectionsIn(sections, id, toIndex){
     const list=(sections||[]).slice().sort((a,b)=>((+a.order||0)-(+b.order||0))||String(a.id).localeCompare(String(b.id)));
@@ -4510,11 +4566,17 @@ class Component extends DCLogic {
     list.splice(Math.max(0,Math.min(list.length,toIndex)),0,moved);
     return list.map((s,i)=>Object.assign({},s,{order:i}));
   }
-  reorderSection(id, toIndex){ this.saveSections(this.reorderSectionsIn(this.state.sections, id, toIndex)); }
-  /* Deleting a section DISSOLVES its tasks to No section — it never deletes work. */
+  reorderSection(id, toIndex){ const list=this.reorderSectionsIn(this.state.sections, id, toIndex);
+    this.snapshotSections(); this.saveSections(list); }
+  /* Deleting a section DISSOLVES its tasks to No section — it never deletes work.
+     PP-EXT (owner 2026-09-09): the ONE action that writes both stores, so it is the one paired record.
+     The task commit runs FIRST and the section snapshot goes on top of it, which is what puts 'sections'
+     at the head of `_undoKind` and lets a single Ctrl+Z unwind both halves in the right order. */
   deleteSection(id){
-    this.saveSections((this.state.sections||[]).filter(s=>s.id!==id).map((s,i)=>Object.assign({},s,{order:i})));
+    const next=(this.state.sections||[]).filter(s=>s.id!==id).map((s,i)=>Object.assign({},s,{order:i}));
     this.commit(tasks=>{ tasks.forEach(t=>{ if(t.sectionId===id) t.sectionId=null; }); });
+    this.snapshotSections(true);
+    this.saveSections(next);
   }
   /* Pure: the subtree ROOT of `id`. Assignment must land on the root because tasksBySection groups by the
      root's sectionId — stamping a subtask directly would persist a field that nothing ever reads, and the
@@ -5801,7 +5863,12 @@ class Component extends DCLogic {
       if(!allDone) ids.forEach(id=>this.archiveDone(tasks,id,now)); /* PP-EXT: completed → straight to the Archive page */ }); this.closeMenu(); }
   duplicateMulti(ids){ this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)){ const c={...tasks[i],id:'t'+Math.random().toString(36).slice(2,8),deps:[...(tasks[i].deps||[])],name:tasks[i].name+' copy'}; tasks.splice(i+1,0,c); } } }); this.closeMenu(); }
   deleteMulti(ids){
-    if(ids.length===1){ const t=this.state.tasks.find(x=>x.id===ids[0]); if(t&&t.recur){ this.setState({menu:null}); this.openScope('delete',t.id,this.mostRecentOccIdx(t)); return; } }
+    /* PP-EXT (owner report 2026-09-09: "I edit a daily recurrance by deleting it and it just comes back").
+       The target was `mostRecentOccIdx` — the last occurrence whose start is in the PAST. But the row
+       displays `occOf`, i.e. `currentOcc`: for a 9am daily opened at noon those are different days, so
+       "delete this one" struck this morning's occurrence and left the one on screen untouched. The delete
+       must name the occurrence the user is looking at. */
+    if(ids.length===1){ const t=this.state.tasks.find(x=>x.id===ids[0]); if(t&&t.recur){ this.setState({menu:null}); this.openScope('delete',t.id,this.currentOccIdx(t)); return; } }
     ids=this.expandSubtrees(ids); /* PP-EXT: deleting a parent deletes its subtree */
     this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); } tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!ids.includes(this.depId(d))); }); }); this.setState({selectedIds:[],menu:null,detailId:null});
   }
@@ -5811,10 +5878,19 @@ class Component extends DCLogic {
   applyScope(scope){
     const sp=this.state.scopePrompt; if(!sp) return;
     const {kind,taskId,occIdx,payload}=sp;
+    /* PP-EXT (owner report 2026-09-09): both branches below read `_occById` UNGUARDED, and every other
+       reader in this file guards it (currentOcc, occOnDay, mostRecentOccIdx, toggleDone) for the reason
+       stated there — the memo is built by RENDER, so it does not exist before the first paint and holds
+       nothing for a task the current view filtered out. Unguarded it threw; guarded with a bare `||[]` it
+       would be worse than throwing, because `occIdx` would then fall back to occurrence 0 and the delete
+       would silently strike a long-past occurrence while the visible one stayed put. Fall back to a real
+       expansion instead, on the SERIES' own reach (`occReach`) for the same reason `currentOcc` does. */
+    const occsFor=(id)=>{ const t=this.state.tasks.find(x=>x.id===id); if(!t) return [];
+      return (this._occById&&this._occById[id]) || (t.recur?this.occReach(t):this.expandTask(t,this._horizon||t.end)); };
     if(kind==='date'){
       const delta=payload.deltaMs||0, mode=payload.mode||'move';
       const deltaDays=Math.round(delta/this.DAY), shift=ms=>this.addLocalDays(ms,deltaDays);
-      const occs=this._occById[taskId]||[]; const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0,end:0};
+      const occs=occsFor(taskId); const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0,end:0};
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===taskId); if(!t||!t.recur) return;
         const r=t.recur; r.overrides=r.overrides||{}; r.shifts=r.shifts||[];
         if(scope==='this'){
@@ -5840,7 +5916,7 @@ class Component extends DCLogic {
       });
     } else if(kind==='delete'){
       if(scope==='all'){ this.closeScope(); this.commit(tasks=>{ const i=tasks.findIndex(x=>x.id===taskId); if(i>=0) tasks.splice(i,1); tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>this.depId(d)!==taskId); }); }); this.setState({selectedIds:[],detailId:null}); return; }
-      const occs=this._occById[taskId]||[]; const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0};
+      const occs=occsFor(taskId); const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0};
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===taskId); if(!t||!t.recur) return;
         const r=t.recur; r.overrides=r.overrides||{};
         if(scope==='this'){ r.overrides[occIdx]={...(r.overrides[occIdx]||{}),deleted:true}; }
@@ -8006,7 +8082,23 @@ class Component extends DCLogic {
       else if(durPh){ result.end=result.date+durPh.min*60000; }
       /* PP-EXT: chrono resolved a clock span itself (e.g. "9-10am", "from 2 to 4pm" forms the
          pre-pass range matcher does not claim). */
-      else if(chronoEnd){ result.end=chronoEnd.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
+      else if(chronoEnd){
+        /* PP-EXT (owner report 2026-09-09: *"I wrote 'from sept 9 to sept 12' and it interpreted it as a
+           start date and a 72 hour duration instead of a start date and an end date"*). Two different
+           shapes arrive here. A CLOCK span ("9-10am") is a duration on one day, and measuring it is
+           right. A DAY RANGE ("sept 9 to sept 12") is a WINDOW — turning it into 4320 minutes of
+           duration is a category error, and the shaping block then discarded the end entirely (its
+           `hasSpan` gate requires a typed clock), so the owner was left with a start date and a
+           three-day estimate. The discriminator is the one chrono already gives us: no certain hour,
+           and an end that lands on a LATER calendar day. `dayRange` carries the answer forward because
+           the shaping block below rewrites `result.end` from scratch. */
+        const sameDay = this.startOfDay(chronoEnd.getTime())===this.startOfDay(result.date);
+        if(!clock && !sameDay){
+          /* An all-day end is the EXCLUSIVE next-day midnight, the same convention `setDate` and the
+             gcal all-day import use, so the last day COVERED is the one the user named. */
+          result.end=this.startOfDay(chronoEnd.getTime())+this.DAY; result.dur=null; result.dayRange=true;
+        } else { result.end=chronoEnd.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
+      }
     }
     /* ---- PP-EXT V1.1B: shape the temporal anchors from the found day + cues + clock ----
        The raw `date`/`dur`/`clock` above stay untouched (datePick + the quick-add preview read them);
@@ -8029,10 +8121,18 @@ class Component extends DCLogic {
     const hasClock = result.clock;               // explicit time typed (set at 2464, before the offset pass)
     const spanEnd  = result.end;                 // clock-range / clock+"for" end, if any
     const hasSpan  = hasClock && spanEnd!=null;  // a real clock span → fixed appointment (R3/R9)
+    const dayRangeEnd = result.dayRange ? result.end : null;   /* PP-EXT: survives the rewrite below */
     if(result.mile){                             // RM overrides everything: zero-length midnight marker
       if(result.date!=null){ const d=this.atMidnight(new Date(result.date)).getTime(); result.start=d; result.end=d; }
       else { result.end=null; }
       result.dur=null;
+    } else if(dayRangeEnd!=null && result.date!=null){
+      /* PP-EXT (owner 2026-09-09): an explicit DAY RANGE states both edges itself, so it binds directly
+         and never consults the start/due cue — "from A to B" and "A to B" mean the same window, and there
+         is no missing endpoint for a cue to supply. Both clock flags stay null: no time was typed, so
+         `hasStartTime`/`hasEndTime` keep deriving "untimed" from the midnight boundaries. */
+      result.start=this.startOfDay(result.date); result.end=dayRangeEnd;
+      result.startClock=null; result.endClock=null; result.dur=null;
     } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges clocked
       /* PP-EXT (owner ask 2026-08-25): a DEADLINE cue plus a duration runs BACK from the clock, never
          past it. "write by 9pm for 2h" fell straight into this branch and emitted 9pm → 11pm — a task

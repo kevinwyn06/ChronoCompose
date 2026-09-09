@@ -384,10 +384,15 @@ test('autoTimerPlan: fixed appointments auto-start once and auto-pause; open sha
   c.state.tasks = [e];
   assert.ok(!c.autoTimerPlan(now).start.includes(e.id), 'deadline-only task must not auto-start');
 
-  // Fixed appointment, window open now -> should be planned to start.
+  // Fixed appointment whose start the clock has just CROSSED -> should be planned to start.
+  // (Owner report 2026-09-09: "sometimes the timer starts on its own after I edit a date". A window
+  // that merely CONTAINS now is no longer enough — the start instant has to fall between the previous
+  // tick and this one, or any edit that moves an appointment onto the current hour starts its timer.
+  // See autoTimerPlan and tests/owner-session-2026-09-09.test.js.)
   const b = activeTask(c, { start: now - 60000, end: now + 3600000 });
   c.state.tasks = [b];
   c.state.running = {};
+  c._autoTickAt = now - 120000;   // the previous tick was before the appointment began
   let plan = c.autoTimerPlan(now);
   assert.ok(plan.start.includes(b.id), 'fixed in-window task should auto-start');
   // once its occurrence is marked done, it is not re-started
