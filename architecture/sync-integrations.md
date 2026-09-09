@@ -503,3 +503,15 @@ what makes unticking a calendar remove exactly what that calendar owns.
 - **The store keeps both records.** This is a presentation fold: untick the winning calendar and the other
   copy takes over. It also stays correct when one calendar fails to import and its old events carry
   forward, which a fold at import time would not.
+
+## Dropping a repeat is a STATEMENT, not a silence (owner report 2026-09-09)
+
+`eventBodyOf` used to write `recurrence` only when a local rule existed. Turning recurrence OFF therefore
+sent a PATCH that said nothing about it: Google kept the RRULE, and the next poll or ping imported the
+event back as a series and reinstated the rule — the owner saw the task go non-recurring and revert a few
+seconds later. When `includeRecurrence` is set, an absent rule is now written as `recurrence: []`, which
+is how Google converts a series to a single event.
+
+The “never rewrite RRULE features we do not model” guard is unaffected: it lives in `computeOutboundOps`,
+which is what decides whether `includeRecurrence` is true at all (only when `recurRuleKey` actually
+changed).

@@ -358,6 +358,9 @@ class Component extends DCLogic {
        missed tick from dropping one. */
     this.NOTIFY_GRACE_MS = 5*60000;
     this.SUMMARY_TTL_MS = 12000;
+    /* PP-EXT (owner report 2026-09-09): the earliest LOCAL HOUR the morning summary may be raised.
+       Owner, verbatim: *"Needs to be after 3am or something."* See maybeMorningSummary. */
+    this.SUMMARY_HOUR = 4;
     this._notify = this.loadNotify();
     this.HISTORY_MAX = 200;       // undo/redo depth (applies to BOTH stacks)
     /* PP-EXT: two-way gcal sync (see computeOutboundOps / gcalFlushQueue). */
@@ -3601,9 +3604,15 @@ class Component extends DCLogic {
     this.maybeMorningSummary(now);
   }
   /* Morning summary: once per calendar day, on the first tick of the day, raise the in-app popup. Gated by the
-     toggle; auto-dismisses after SUMMARY_TTL. Persist the day even when toggled off so it stays once-a-day. */
+     toggle; auto-dismisses after SUMMARY_TTL. Persist the day even when toggled off so it stays once-a-day.
+     PP-EXT (owner report 2026-09-09): *"Should not have good morning popup occur a minute after midnight."*
+     A calendar day turns at midnight; a MORNING does not. The day gate alone fired the popup on the first
+     tick after 00:00 for anyone still at their desk. SUMMARY_HOUR is the floor, and the day is NOT marked
+     consumed before it passes — stamping it at 00:01 would swallow the popup for that whole day. */
   maybeMorningSummary(now){ now=now||Date.now(); const day=this.startOfDay(now);
-    if(this._notify.summaryDay===day) return; this._notify.summaryDay=day; this.saveNotify();
+    if(this._notify.summaryDay===day) return;
+    if(new Date(now).getHours() < this.SUMMARY_HOUR) return;
+    this._notify.summaryDay=day; this.saveNotify();
     if(!this.notifyOn('morningSummary')) return;
     const data=this.morningSummaryData(now); this.setState({summary:data});
     clearTimeout(this._summaryT); this._summaryT=setTimeout(()=>this.closeSummary(), this.SUMMARY_TTL_MS); }
@@ -8353,7 +8362,15 @@ class Component extends DCLogic {
     if(durPh) result.dur=durPh.min;
 
     // ---- repeat-until ("until/till/through <date>") ----
-    let um=s.match(/\b(?:until|till|thru|through|up\s+to)\s+(.+?)\s*$/);
+    /* PP-EXT (owner report 2026-09-09): *"I write in the when line 'from A to B' and only A gets
+       stored."* This clause used to fire on ANY text, so "from sept 10 until sept 12" was read as a
+       series end on a task with no series at all: `until sept 12` was masked away, chrono saw only
+       `from sept 10`, and the second date vanished. A repeat-until clause needs a repeat. Gated on a
+       recurrence CUE rather than on `result.recur` because the rule itself is matched below — the cue
+       words are exactly the ones those branches trigger on, so the two cannot disagree. Without a rule,
+       "A until B" falls through to chrono, which reads it as the day range it is. */
+    const recurCue=/\b(?:every|daily|weekly|monthly|yearly|annually|repeats?|recurring)\b/.test(s);
+    let um=recurCue ? s.match(/\b(?:until|till|thru|through|up\s+to)\s+(.+?)\s*$/) : null;
     if(um){ const sub=um[1].trim(); const sp=this.parseDateText(sub, (baseMs!=null?baseMs:Date.now())); if(sp.date!=null){
       /* PP-EXT (owner ruling 2026-09-09): the series end is an EXCLUSIVE instant, the same convention the
          window's `end` uses everywhere else — `expandTask` caps on occurrence STARTS, so storing "until 30
@@ -8433,7 +8450,15 @@ class Component extends DCLogic {
          apples"). chrono happily reads it as 05:00–06:00, so drop those spans — the pre-pass
          parseClockRange already claimed every range that is unambiguously a time. */
       const bareNum=/^\s*\d{1,2}\s*(?:(?:to|till|until|-|–|—)\s*\d{1,2}\s*)?$/;
-      const rs = (eng.parse(s, now, { forwardDate:true })||[]).filter(r=>!bareNum.test(r.text));
+      /* PP-EXT (owner report 2026-09-09, "from A to B"): chrono reads "Sep 1 to Sep 30" as one range but
+         splits the DAY-FIRST spelling — "from 1 Sep to 30 Sep" comes back as "from 1" (a bare hour) plus
+         "30 Sep", so the window collapses to its closing date. Hand chrono the month-first spelling of
+         exactly those spans. The swap is LENGTH-PRESERVING (two tokens either side of one space), so
+         every index chrono reports still addresses the same characters of `s` — which is what lets the
+         `claim`/`mask` machinery below keep operating on the original string. */
+      const sc = s.replace(/\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)([a-z]*)\b/g,
+        (m,d,mon,tail)=>{ const a=mon+tail, b=d; return (a+' '+b).length===m.length ? a+' '+b : m; });
+      const rs = (eng.parse(sc, now, { forwardDate:true })||[]).filter(r=>!bareNum.test(r.text));
       /* Prefer a result chrono is CERTAIN names a day over an earlier vaguer one: "night shift
          tomorrow" yields both "night" (implied today) and "tomorrow" (certain) — rs[0] would pick
          the wrong day. */
@@ -8463,9 +8488,18 @@ class Component extends DCLogic {
            Re-read the SAME span with the roll disabled. If that lands on today, today is what the user
            said; anything genuinely in the past still rolls forward exactly as before. Matched on the
            span text so this can only ever correct the result chrono already chose. */
+        /* PP-EXT (owner report 2026-09-09, "from A to B"): the same correction, one case wider, for a
+           RANGE. "from Sep 1 to Sep 30" typed on Sep 9 names a window that is currently RUNNING, and
+           the roll-forward moved the whole thing to 2027 because its opening day is eight days behind.
+           A window is judged by whether it is over, not by whether it has started: keep the flat reading
+           whenever its CLOSING day is still today or later. A range genuinely in the past (last March)
+           has a past end too and still rolls forward, exactly as before. */
         try{
-          const flat=(eng.parse(s, now, { forwardDate:false })||[]).find(x=>x.text===r0.text);
-          if(flat && this.startOfDay(flat.start.date().getTime())===this.startOfDay(now.getTime())){
+          const flat=(eng.parse(sc, now, { forwardDate:false })||[]).find(x=>x.text===r0.text);
+          const B=this.startOfDay(now.getTime());
+          const flatLive = !!flat && (this.startOfDay(flat.start.date().getTime())===B
+            || (!!flat.end && this.startOfDay(flat.end.date().getTime())>=B));
+          if(flatLive){
             date = new Date(flat.start.date());
             if(flat.end) r0 = flat;   /* keep start and end reading the same occurrence */
           }
@@ -8478,7 +8512,7 @@ class Component extends DCLogic {
         try{ if(r0.end && r0.end.isCertain('hour') && !r0.start.isCertain('hour'))
           chronoEndHour={ h:r0.end.get('hour'), m:r0.end.get('minute')||0 }; }catch(e){}
         dateSpanText = r0.text;
-        dateSpanIndex = Number.isInteger(r0.index) ? r0.index : s.indexOf(r0.text);
+        dateSpanIndex = Number.isInteger(r0.index) ? r0.index : sc.indexOf(r0.text);
         if(dateSpanIndex>=0){
           const temporal={0:r0.text,index:dateSpanIndex};
           const isDay=['day','weekday','month','year'].some(u=>r0.start.isCertain(u));
@@ -8658,7 +8692,14 @@ class Component extends DCLogic {
     result.ambiguous = null; result.candidates = [];
     const anchorDay = result.date!=null ? result.date
       : (result.recur ? this._firstRecurOccurrence(result.recur, now) : null);
-    const hasBlock = (range && result.end!=null) || (durPh && clock);
+    /* PP-EXT (owner report 2026-09-09): *"I write in the when line 'from A to B' and only A gets
+       stored."* A DAY RANGE counts as a block. Without it "sept 10 to sept 12" — no start/due cue in
+       front of it — was flagged ambiguous, and the 'anchor' candidate ({start, end:null}) then
+       overwrote the window the day-range branch above had just bound, throwing B away. There is
+       nothing to disambiguate: a range names both edges itself, which is the same reason that branch
+       never consults the cues. "from A to B" only survived because `from` matched `startCue`, and one
+       preposition should not decide whether the second date is kept. */
+    const hasBlock = (range && result.end!=null) || (durPh && clock) || dayRangeEnd!=null;
     if(anchorDay!=null && !dueCue && !startCue && !hasBlock && !result.mile){
       /* PP-EXT (#68): the 'due' pick must match an explicit deadline cue ("by friday"): a bare day is an
          END-OF-DAY deadline, a real clock ("by 9am") stays the exact instant (R11). Reusing the raw
@@ -10133,7 +10174,17 @@ class Component extends DCLogic {
   eventBodyOf(t, includeRecurrence){
     const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, t.end, !!t.allDay));
     body.description=this.descToText(t.description); /* PP-EXT: push description outbound as plain text (import still never overwrites the local rich copy) */
-    if(includeRecurrence && t.recur){ const r=this.recurToRRule(t.recur, this.seriesEndMs(t)); if(r) body.recurrence=[r]; }
+    /* PP-EXT (owner report 2026-09-09): *"If I change a daily task to not daily, it briefly becomes a
+       non recurring task but in a few seconds reverts to a recurring task."* The old shape wrote
+       `recurrence` only when a LOCAL rule existed, so turning recurrence OFF sent a PATCH that said
+       nothing about it — Google kept the RRULE, and the next poll/ping imported the event back as
+       recurring and reinstated the rule. Dropping a rule is a statement, not a silence: when the caller
+       says the recurrence is in play (`includeRecurrence`, set only when the rule actually CHANGED),
+       an absent rule is written as the empty list, which is how Google converts a series to a single
+       event. The "don't touch RRULE features we don't model" guard is unaffected — it lives in
+       `computeOutboundOps`, which is what decides whether `includeRecurrence` is true at all. */
+    if(includeRecurrence){ const r=t.recur ? this.recurToRRule(t.recur, this.seriesEndMs(t)) : null;
+      body.recurrence = r ? [r] : []; }
     return body;
   }
   /* The sync fingerprint: these fields round-trip outbound (planned/goal/pins stay local; description pushes
@@ -16049,8 +16100,24 @@ class Component extends DCLogic {
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},p.date),
         p.time?h('span',{'data-date-clock':'1',style:{fontSize:'9.5px',color:'var(--text-mut2)',
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},p.time):null); };
-    const startDateCell=dateCell('start',curOcc?curOcc.start:t.start);
-    const endDateCell=dateCell('end',dispEnd);
+    /* PP-EXT (owner report 2026-09-09): *"the clear button on start/end date edit panel does not work,
+       at least on recurring tasks."* `clearDate` always wrote null; what failed was the READBACK. Both
+       cells showed a repeat's current OCCURRENCE — a rule-derived date the Clear could not touch — while
+       the editor they open writes the SERIES WINDOW (its own header says "WHOLE SERIES"), so the press
+       looked like a no-op.
+
+       Each cell now falls back to the window value the editor actually writes, and they do it
+       differently because the two edges are not the same fact:
+
+       · END states the SERIES END outright for a repeat. That is the owner's window ruling in as many
+         words — the End column states the series end, and the next occurrence's due date is the due
+         chip's job (`dueRecurChip` still reads `dispEnd`).
+       · START keeps showing the current occurrence, which is what makes a deleted occurrence visibly
+         move the row on (tests/e2e/owner-session-2026-09-09.spec.js) — but only while there IS an
+         anchor. With `start` cleared the occurrence is derived from nothing and used to render a
+         fabricated date; now the cell says "—", which is the truth. */
+    const startDateCell=dateCell('start',(curOcc && t.start!=null)?curOcc.start:t.start);
+    const endDateCell=dateCell('end',t.recur?t.end:dispEnd);
 
     // ---- distinct milestone row ----
     // PP-EXT (Phase D bugfix): was a flat flex strip with its own fixed-width grip/diamond/seq offsets that

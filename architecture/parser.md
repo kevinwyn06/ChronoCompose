@@ -274,3 +274,27 @@ into R3/R9 and emitted **9pm → 11pm**: a task starting at its own deadline and
 hours. When a `for <dur>` phrase supplied that end and the cue is a deadline, the clock is the END and
 the start is derived backwards. An explicit clock RANGE is untouched — it states both edges itself, so
 there is no missing endpoint to derive and nothing to reverse.
+
+## Day ranges: “from A to B” (owner report 2026-09-09)
+
+A DAY RANGE names both edges itself, so it is never ambiguous and never consults the start/due cue. Three
+things had to hold before that was actually true, and each was its own defect:
+
+- **A day range is a BLOCK.** `hasBlock` counts `dayRangeEnd` alongside a clock range and a clocked
+  duration. Without it, “sept 10 to sept 12” (no `from`) was flagged ambiguous and the “anchor”
+  candidate — `{start, end:null}` — overwrote the window the day-range branch had just bound. “from A
+  to B” only survived because `from` matched `startCue`; one preposition must not decide whether B is
+  kept.
+- **“until” needs a repeat.** The repeat-until clause is gated on a recurrence CUE in the text
+  (`every|daily|weekly|monthly|yearly|annually|repeats|recurring`), matched before the rule branches run
+  so the two cannot disagree. Ungated, it masked “until sept 12” out of a task with no series at all and
+  chrono saw only the opening date.
+- **chrono cannot read a day-first range.** “from 1 Sep to 30 Sep” comes back as “from 1” + “30 Sep”.
+  chrono is handed a month-first rewrite of exactly those spans, and the swap is LENGTH-PRESERVING — two
+  tokens either side of one space — so every index it reports still addresses the same characters of
+  `s`, which is what lets `claim`/`mask` keep operating on the original string.
+
+**Roll-forward and a running window.** The 2026-08-24 “naming today’s date means today” correction covers
+a RANGE too: the flat (no-`forwardDate`) re-read wins whenever its CLOSING day is today or later. “from
+Sep 1 to Sep 30” typed on Sep 9 is a window that is currently RUNNING, not one eight days stale — judging
+it by its opening day sent the whole thing to 2027. A range genuinely over still rolls forward.
