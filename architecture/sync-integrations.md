@@ -515,3 +515,20 @@ is how Google converts a series to a single event.
 The “never rewrite RRULE features we do not model” guard is unaffected: it lives in `computeOutboundOps`,
 which is what decides whether `includeRecurrence` is true at all (only when `recurRuleKey` actually
 changed).
+
+## A repeat pushes ONE OCCURRENCE (owner report 2026-09-09)
+
+Under the series-window model a repeat’s `start`/`end` are the WINDOW; `recur.durMs` is the occurrence.
+Google’s `DTSTART`/`DTEND` on a recurring master mean the opposite: they describe one occurrence, and the
+rule supplies the rest. Handing the window to `timesBodyOf` alongside an RRULE therefore gives *every*
+occurrence the length of the whole series — the owner’s week view was a stack of week-long bands, one per
+day of a daily rule. Read `eventBodyOf`’s `occEnd`, and note the two other places the same boundary bites:
+
+- `mergeCalendarEvents`’ **update** branch assigns `t.start`/`t.end` directly and so bypasses
+  `normalizeTask`, the single funnel that performs the window conversion. It repeats the conversion
+  inline. The **first-import** branch does not need to — it goes through `normalizeTask`.
+- Neither fix can heal an already-mangled calendar, because `computeOutboundOps` only patches a task
+  whose own fingerprint changed. `gcalRepairRepeatOps`, run once via the `gcal-repeat-occurrence-length`
+  flag, is what re-states the corrected body to Google.
+
+`diffOverrideOps` was always correct here: per-occurrence ops carry real occurrence edges.

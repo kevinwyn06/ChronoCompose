@@ -1090,6 +1090,15 @@ class Component extends DCLogic {
            state the owner's "migrate" ruling was choosing against. The sweep itself stays for raw rows
            that reach it without passing through normalize. */
         this.saveTasks(tasks); }
+      /* PP-EXT (owner report 2026-09-09): re-push every Google-linked repeat once, because the old
+         `eventBodyOf` gave each occurrence the length of the whole series window and nothing else would
+         ever correct those events — see `gcalRepairRepeatOps` for why this is a queue write and not a
+         button. Recorded done even when there is nothing to enqueue: the flag means "this build has
+         reconciled this workspace", and a workspace with no linked repeats is already reconciled. */
+      if(!done['gcal-repeat-occurrence-length']){
+        const ops=this.gcalRepairRepeatOps(tasks); done['gcal-repeat-occurrence-length']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done));
+        if(ops.length) this.gcalEnqueue(ops); }
       if(!done['schedule-pins-removed']){ const n=this.migratePins(tasks); done['schedule-pins-removed']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       /* PP-EXT V2.6: seed sections from primary @tags, once, at promotion threshold 2. Guarded like the
@@ -10172,7 +10181,17 @@ class Component extends DCLogic {
       .replace(/[ \t]+\n/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
   }
   eventBodyOf(t, includeRecurrence){
-    const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, t.end, !!t.allDay));
+    /* PP-EXT (owner report 2026-09-09, "what the heck is going on in my google calendar"): a repeat's
+       `t.end` is the SERIES WINDOW's close, NOT an occurrence edge — see `expandTask`. Handing that pair
+       straight to `timesBodyOf` wrote DTSTART=window open, DTEND=window close ALONGSIDE the RRULE, so
+       Google gave every single occurrence the length of the whole window: a daily all-day "Exercise"
+       with a Sep 1 → Oct 20 window became forty-nine stacked seven-week bands, and a daily 7:00–7:30am
+       routine became a band from 7am to the end of the series. One event, not duplicates — which is why
+       nothing looked wrong in the task list.
+       What Google needs is the ANCHOR OCCURRENCE (the rule supplies the rest) and the series end as the
+       RRULE's UNTIL, which is what `seriesEndMs` already gives the line below. */
+    const occEnd = (t.recur && t.start!=null) ? t.start + this.recurDurMs(t) : t.end;
+    const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, occEnd, !!t.allDay));
     body.description=this.descToText(t.description); /* PP-EXT: push description outbound as plain text (import still never overwrites the local rich copy) */
     /* PP-EXT (owner report 2026-09-09): *"If I change a daily task to not daily, it briefly becomes a
        non recurring task but in a few seconds reverts to a recurring task."* The old shape wrote
@@ -11315,6 +11334,23 @@ class Component extends DCLogic {
     this.gcalEnqueue(eligible.map(t=>({op:'insert', taskId:t.id, body:this.eventBodyOf(t, true)})));
     this.gcalMsg('Backfilling '+eligible.length+' task'+(eligible.length>1?'s':'')+' into the ChronoCompose calendar…');
   }
+  /* PP-EXT (owner report 2026-09-09): the repair half of the `eventBodyOf` occurrence-length fix. PURE.
+     The fix alone cannot heal a calendar: `computeOutboundOps` emits a PATCH only when a task's own
+     fingerprint CHANGES, and none of these tasks changed — the wrong body was already accepted by
+     Google, so every mangled series would sit there until its task was next edited. Worse, the 60-second
+     poll would keep re-importing those window-length instances, and `mergeCalendarEvents` would now read
+     the window as the occurrence length and write it onto `recur.durMs`.
+     Enqueuing the PATCHes fixes both: Google gets the corrected body, and a queued patch for a task is
+     exactly what makes `mergeCalendarEvents` treat the local copy as authoritative (`pending` ⇒
+     `keepLocal`) until it drains, so the poll cannot corrupt the rule in the meantime.
+     `gcalBackfill` stays a button because it CREATES events; this creates nothing. It re-states a fact
+     the task already holds, on events ChronoCompose itself wrote and itself broke. */
+  gcalRepairRepeatOps(tasks){
+    return (tasks||[]).filter(t=> t.eventId && t.recur && !t.parentId && !t.archivedAt
+        && !this.isMilestone(t) && this.isScheduled(t))
+      .map(t=>({op:'patch', taskId:t.id, calendarId:t.calendarId, eventId:t.eventId,
+        body:this.eventBodyOf(t, true), queueVersion:this.GCAL_QUEUE_VERSION}));
+  }
   /* Find-or-create the dedicated "ChronoCompose" calendar; id persists in pp-gcal.ccCalId. */
   gcalEnsureCalendar(){
     const g=this.state.gcal;
@@ -11495,6 +11531,15 @@ class Component extends DCLogic {
           if(!keepLocal){ t.name=src.summary||t.name; t.start=start; t.end=end; t.allDay=allDay; }
           /* PP-EXT: planned/goal/description live in local persistent storage — re-import never overwrites them. */
           if(recur && !keepLocal){ recur.overrides=(t.recur&&t.recur.overrides)||{}; recur.shifts=(t.recur&&t.recur.shifts)||[]; t.recur=recur; }
+          /* PP-EXT (owner report 2026-09-09): this branch writes the task's fields DIRECTLY, so unlike the
+             first-import branch below it never passes through `normalizeTask` — and `normalizeTask` is the
+             single funnel that converts an incoming repeat to the SERIES WINDOW shape. Google's DTSTART/
+             DTEND on a recurring master describe ONE OCCURRENCE; `t.end` on a windowed repeat is the
+             series close. Without the same conversion here, every poll of a repeat overwrote its series
+             end with the occurrence's end — a daily 7:00–7:30am series would claim to end at 7:30 on its
+             own anchor day. Same three lines as the migration in `normalizeTask`, for the same reason. */
+          if(recur && !keepLocal){ const until=t.recur.until!=null?t.recur.until:null;
+            t.recur.durMs=Math.max(0, end-start); t.recur.until=null; t.end=until; }
           /* PP-EXT (owner 2026-08-14): `tag` is now '' for EVERY calendar, so nothing is ever pushed; the
              guard stays because the expression is what makes that visible at the site. The re-add half of
              the old churn loop is gone, which is what frees `sectionTagStrippable` to disappear.
