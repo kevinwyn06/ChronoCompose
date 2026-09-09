@@ -113,7 +113,11 @@ test('whenSentence: a repeat reads its rule, chipped `repeats`', () => {
     const w = c.whenSentence(t());
     assert.equal(w.chip, 'repeats');
     assert.match(w.text, /every/i);
-    assert.match(w.text, /until/i, 'the until clause is part of the rule, so it is part of the sentence');
+    // Owner ruling 2026-09-09: the sentence states the RULE, the OCCURRENCE and the WINDOW. With both
+    // window edges known it reads "from A to B"; "until B" is what remains when only the end is set.
+    // The series end is stored exclusively, so it is read back as the day the user named.
+    assert.ok(w.text.includes('9:00am'), 'the occurrence clock, read from the rule and not from the window');
+    assert.ok(w.text.includes('to Wed Sep 30'), 'the window closes on the day the until clause named');
   });
 });
 

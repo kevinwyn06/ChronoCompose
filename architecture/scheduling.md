@@ -33,6 +33,24 @@ priority, urgency, slack, labels, or other task fields without changing scheduli
 
 ## Subtasks on the timeline and the agenda (owner rulings 2026-08-21 / 2026-08-22)
 
+### A parent with no planned time is a CONTAINER (owner ruling 2026-09-09)
+
+The budget model below — parent keeps its own Planned, its allotment is split among its children in
+proportion to theirs, any remainder stays with it — is unchanged **wherever the parent has a figure**.
+
+It had one hole, and it is the shape people actually make: a heading with work under it. Such a parent
+asked the day for nothing (`planned` is 0, so `requestedMinutes` is 0), was allotted nothing, and then
+split that nothing among its children — so an entire family of real work received no time at all, while
+the parent still drew a bar across the chart for it.
+
+`isContainerParent(t, kids)` is true for a non-milestone task that HAS children and no `planned > 0` of
+its own. A container is taken out of the middle: its children enter the day's pool directly on their own
+dates and Planned (`hasBudgetedParent` is what the pool, the break estimate, the family split and the
+packer all ask instead of "does it have a parent"), and the container itself never competes, never
+allots, never packs, and draws no Gantt bar. It stays a row in the sheet, which is the whole of what it
+is for. Derived on every read like `isChore`, so typing or clearing a Planned figure moves the family
+between the two models with no stored state to go stale.
+
 ### The shape: C1 and S1
 
 A family is **ONE block with ONE border**, and its children ride inside it as `kids` lines. This replaced
@@ -364,6 +382,60 @@ and the render merge step preserves a split whose shared boundary is a Point.
 Recurrence uses `expandTask` and `rruleToRecur`. Recurring occurrences are derived; changes must preserve
 series semantics and recurrence limit/backoff protections.
 
+**A repeat's `start`/`end` are the SERIES WINDOW (owner ruling 2026-09-09).** `t.start` is the anchor —
+the first day the rule may produce an occurrence, and the index every override is measured from. `t.end`
+is the last instant it may, and **null means unbounded**. How long ONE occurrence lasts is `recur.durMs`.
+`recur.until` is retired to a legacy INPUT (an imported RRULE, quick-add's "until" clause); `normalizeTask`
+folds it into `t.end`, so stored data holds exactly one series end.
+
+Read it through the accessors, never off the fields — that is what keeps an unconverted row correct:
+
+- `recurDurMs(t)` — the occurrence's length. Falls back to the anchor span for a legacy row; coerces
+  "never stated" to 0, because an expansion needs a number.
+- `seriesEndMs(t)` — the last instant, or null. `setSeriesEnd(t, ms)` writes it back through whichever
+  shape the task is in.
+- `anchorEndMs(t)` — the ANCHOR OCCURRENCE's end: `t.end` for a plain task, `t.start + durMs` for a
+  repeat, and **null** when no length was ever stated. That last case is a repeating Point, which is why
+  this is not the same question as `recurDurMs`.
+
+The trap, and it caught five readers: for a repeat, **`t.end` is not an occurrence edge**. Anything asking
+"does this end carry a clock", "how long is this", "is the end open", or "when did this open" must go
+through `anchorEndMs`/`recurDurMs`. `isPointTask` reading `t.end` made every unbounded repeat a Point —
+and a Point is vetoed off every day but its own, so a daily standup stopped competing for time at all.
+
+`isScheduled` follows from this: a repeat is scheduled once it has an anchor AND a stated length
+(`durMs != null`, zero included — a same-day repeat means a zero-length occurrence on purpose). A length
+that was never stated still reads as a ghost, which is what keeps the half-dated repeat drawable.
+
+Mutators: `setDate` and the date picker on a repeat edit the WINDOW, and only the anchor re-indexes the
+series. The occurrence's length is edited through `setOccDuration` or the When line. Clearing a repeat's
+END unbounds the series; clearing its START is refused.
+
+**Writing a window in text (owner ruling 2026-09-09, second half).** *"The details of each occurrence
+should be stored in the detail panel and be parsed."* `shapeRecurWindow` binds a PARSED rule to this
+model, and it is the last thing `shapeParsedTask` does:
+
+- a typed **clock range** ("daily 9–10am") is one occurrence → it becomes `durMs`, the anchor keeps its
+  clock, and the window is left open;
+- a typed **day range** ("every wednesday from 1 Sep to 30 Sep") is the window itself, and the occurrence
+  is whatever length the text gave, else day-granular;
+- an **`until`** clause is the window's end and nothing else.
+
+`durMs` is written UNCONDITIONALLY, including as 0. That is what stops `normalizeTask`'s legacy
+conversion from firing on fresh input and re-reading a new window as one very long occurrence — the same
+defect arriving through the front door. The shaping is gated on the TEXT having named a rule, because
+`reconcileWhen` deliberately retains a rule the title never mentioned, and re-shaping there would read a
+window the text said nothing about as absent and erase the series end.
+
+A series end is stored as an **exclusive** instant, matching the window's `end` everywhere else:
+`expandTask` caps on occurrence STARTS, so "until 30 Sep" held as 30 Sep 00:00 would drop every
+occurrence on the day the user named.
+
+`whenSentence` prints rule, then window, then occurrence — and the ORDER is a round-trip requirement, not
+a style choice. The clock-range matcher demands whitespace or end-of-string after the closing time, so a
+clock followed by `, from …` is not recognised at all and the time is silently lost. Every shape the line
+prints is asserted to parse back into the task it came from (`tests/repeat-window-parsing.test.js`).
+
 ### The lead window, and the circle that never reaches forward (owner rulings 2026-08-24)
 
 **How far ahead a repeat reaches:** *you never see more than one period ahead, and never more than
@@ -558,6 +630,25 @@ something happens”. `snoozeWakeReason(t, B, now)` gives the owner’s four wak
 a real start arriving, a due date passing, or the last blocking predecessor completing — and asks “is it
 woken”, never “was it woken TODAY”, so a wake missed while the app was closed still fires. A woken task
 reads as `new` (today brought it back), not as inherited work.
+
+**Inclusion follows the dates (owner ruling 2026-09-09).** Two rules, and they are separate.
+
+1. **A direct date edit re-derives.** `setDate`, `clearDate`, the picker and the When line all call
+   `reDeriveInclusion`, which clears a snooze and an `included===true` that has no explicit provenance.
+   `includedExplicit` is the note the owner asked the backend to take, and it is honoured in BOTH
+   directions: a task pressed into today by hand keeps its press across any number of date edits. This is
+   called from MUTATORS only — a gesture that says "this happens then" — never from a render or a sweep.
+2. **The date arriving beats the snooze.** A snooze — dated or indefinite — is cancelled when the task's
+   own window OPENS on a day LATER than the one the snooze was set on. `snoozedAt` records that day, and
+   without it the rule would defeat itself: putting away a task whose window opens today would wake it in
+   the same breath, making the snooze verbs inert on exactly the work people use them on.
+
+`snoozeActive(t, B, now)` is the ONE predicate every surface asks (`isOptedOut`, `inclState`,
+`autoIncludedToday`, `onListNow`). It replaced four hand-rolled copies of "snoozeUntil ahead, or
+snoozeIndef with no wake" — which is how a dated snooze and an open-ended one came to be answered
+differently by different surfaces. The four original wake rungs are unchanged, `hasStartTime` gate
+included: dropping that gate would wake an indefinite snooze on any task whose window merely started at
+some point in the past, which is nearly all of them.
 
 Current invariants:
 

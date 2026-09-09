@@ -34,6 +34,30 @@ Unitless numbers and non-duration units remain ordinary text. The snooze parser 
 form, but any snooze resolving to today is floored forward to tomorrow so a sub-day duration has an
 observable effect.
 
+## URLs are claimed first (owner ask 2026-09-09)
+
+A URL is masked and filed as a **task link** before any other pass looks at the text, and the second
+reason is the load-bearing one. A pasted link belongs with the task rather than in its name; and a URL is
+full of digits, colons and slashes, so chrono read `/2019/03/07/` as a date and a port as a clock. A link
+in a title used to invent a schedule. `normalizeLink` applies the scheme denylist here too, so a
+`javascript:` URL never becomes a stored link, let alone an `href`.
+
+## The repeat window in text (owner ruling 2026-09-09)
+
+`shapeRecurWindow` is the last thing `shapeParsedTask` does, and it re-reads a parsed rule under the
+series-window model (`architecture/scheduling.md`): a clock range is the OCCURRENCE, a day range is the
+WINDOW, an `until` clause is the window's end. `recur.durMs` is written unconditionally so a freshly
+parsed window can never reach `normalizeTask`'s legacy conversion and be re-read as one long occurrence.
+
+Two supporting changes in `parseDateText` itself:
+
+- the **day-range test runs ahead of the duration branch**, so "every wednesday from 1 Sep to 30 Sep for
+  45m" states a window AND an occurrence length instead of letting the duration claim the end;
+- a bare clock stranded beside a rule and a day range is the **occurrence's time of day**
+  (`occClock`) — chrono binds one span at a time and usually swallows the clock into the range's own
+  span, where only its END carries the certain hour. Without this the When line's own sentence for that
+  shape failed to read back as itself and silently dropped the time.
+
 ## `/` is the section identifier (owner rulings 2026-08-21 / 2026-08-22)
 
 `sectionId` is a **one-per-task, exclusive, ordered container** in `pp-sections` — deliberately not a
@@ -120,7 +144,7 @@ outside the block, so it rides the sub-line and is edited by writing a duration 
 | clocked start, no end, with a budget | `Tue 26 Aug, 3:00pm` | the budget (`45m`) |
 | appointment | `Tue 26 Aug, 3:00–4:00pm` | its length (`1h`) |
 | deadline | `by Fri 22 Aug` | `due` |
-| repeat | `every weekday, 9:00am, until 30 Sep` | `repeats` |
+| repeat | `every weekday, from Mon 15 Jun to Wed 30 Sep, 9:00am` | `repeats` |
 
 The fourth row is not in the mockup's six-shape table and was found by building it: a written start clock
 with a budget is neither a Point nor a bare day, and rendering it as a bare day would make re-committing

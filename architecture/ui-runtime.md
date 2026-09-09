@@ -968,3 +968,61 @@ stay *filterable* via `@tag` / `calendar:`, but neither has a column and the Sor
 `colFilters` is deliberately untouched — `colFilters.priority` is still a supported spec, simply no
 longer authored by a chip.
 
+
+## Dependency arrows, and the two link dots (owner reports 2026-09-09)
+
+Three reports about one control, and the first is worth stating precisely because the old code was not
+doing what the report said. *"Arrows start from the middle of a block and point down"* — the line DID
+leave the predecessor's right edge. What made it read as a drop out of the middle was a 13px stub: it
+turned downward before the eye registered a horizontal run at all, right beside the bar it came from.
+
+`arrowPath(sx, sy, tx, ty, lane, rowH)`, `arrowCorridorX` and `arrowLanes`/`arrowFanOffsets` are PURE and
+own the whole geometry (`tests/dep-arrows.test.js`):
+
+- **Forward** (a real gap): out the side, down the CORRIDOR at the midpoint of the gap, then in — so both
+  horizontal runs are visible and roughly equal. Same row and a clear gap is one straight line, no
+  corners drawn where none are needed.
+- **Backward** (the target starts at or before the predecessor's end): out right, across the channel
+  between the two rows, back left, then in. Six segments, which is what makes it read as a detour.
+- **Lanes.** Edges are collected BEFORE they are routed, because sharing a corridor is a fact about the
+  set and not about either edge — the old inline single pass could only ever draw them on top of each
+  other. Parallel legs alternate either side of the true corridor, clamped so a lane never pushes a
+  corridor outside the gap it belongs to.
+- **Fan-out.** Several edges leaving one bar spread across its height, centred, so they do not start on
+  one pixel and read as a single thick line that splits somewhere off to the right.
+
+**Two link dots.** `startLink(e, task, occIdx, dir)` takes a direction: `'succ'` (the historic trailing
+dot — "drag to what comes after") and `'pred'` (the new leading dot — "drag to what must come first"),
+resolved on mouseup by writing the edge the other way round. Both dots sit fully OUTSIDE their edge,
+clear of that side's resize grip, with the small circle drawn inside a `HIT_MIN_PX` box — the C3 rule,
+now applied twice. The 2026-07-26 note that "there is exactly one link handle" is superseded, and the
+objection it recorded (a circle drawn INSIDE the bar) is honoured rather than reversed.
+
+The leading dot also answers the report more directly than as a handle: during a drag from anywhere, the
+end you can aim at is shown on every other bar. The drop always worked — the whole row is the target —
+but nothing on screen said where to let go.
+
+## Subtask rows read as contained (owner report 2026-09-09)
+
+*"Subtask row should be clearly indented."* Two things were wrong and the step size was the smaller.
+`SUBTASK_INDENT_PX` is 20 (was 16 — under one character of the row's own 13px text), and a **guide rule
+per ancestor level** is drawn through the whole row height: whitespace states depth only by comparison
+with the row above, a rule states containment on the row you are looking at. A childless row **reserves
+the collapse caret's column**, without which a leaf one level deeper than a parent started only ~4px
+further right — the missing caret ate most of the step, so the indent was lying.
+
+## Task links (owner ask 2026-09-09)
+
+A task carries an ordered set of `{url, label}` — the pages and apps the work is done in, so starting it
+is one gesture instead of hunting for six tabs. An app is not a second kind of thing: a deep link
+(`obsidian://`, `slack://`) is a URL with another scheme.
+
+The **scheme rule is a safety rule**. These strings become an `href`, so a `javascript:` URL from a bad
+import or a hand-edited backup would be a script that runs when the user clicks their own task. It is
+filtered in `normalizeTask` (everything entering memory), again in `taskLinks` at read time, and again in
+`openTaskLink`. Anything else with a scheme is allowed — an allowlist of apps would be wrong the day
+another one is installed.
+
+The detail panel edits the set; the row chip and the row menu open it. "Open all" is the tab-group
+gesture. Reading or writing the browser's REAL tabs needs an extension (`chrome.tabs`, `chrome.tabGroups`)
+and is out of scope for a web page; this is the store such an extension would read from and write to.

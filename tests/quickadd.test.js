@@ -296,7 +296,10 @@ test('parseDateText: a repeat-until clause is not mistaken for a clock range', (
   const c = make();
   const r = c.parseDateText('pay rent every month until 3 jan', BASE);
   assert.strictEqual(r.recur.kind, 'month');
-  assert.strictEqual(r.until, new Date(2027, 0, 3, 0, 0, 0, 0).getTime());
+  // Owner ruling 2026-09-09: the series end is an EXCLUSIVE instant, matching the window's own `end`
+  // everywhere else. `expandTask` caps on occurrence STARTS, so 3 Jan 00:00 would drop every occurrence
+  // on the day the user named; the last day covered is now the one they wrote.
+  assert.strictEqual(r.until, new Date(2027, 0, 4, 0, 0, 0, 0).getTime());
   assert.strictEqual(r.end, null);
 });
 
@@ -492,7 +495,8 @@ test('3-axis: "every weekday 2-3pm starting next monday until aug 15 @work p1"',
   const r = c.parseDateText('every weekday 2-3pm starting next monday until aug 15 @work p1', BASE);
   shape(r, { start: at(20, 14, 0), end: at(20, 15, 0), startClock: true, endClock: true, dur: 60 });
   assert.strictEqual(r.recur.kind, 'weekday');
-  assert.strictEqual(r.until, new Date(2026, 7, 15, 0, 0, 0, 0).getTime());
+  // Exclusive series end (owner ruling 2026-09-09) — 15 Aug is the last day covered.
+  assert.strictEqual(r.until, new Date(2026, 7, 16, 0, 0, 0, 0).getTime());
   assert.strictEqual(r.priority, 1);
   assert.strictEqual((r.labels || []).join(','), 'work');
 });
@@ -528,7 +532,8 @@ test('3-axis: "review notes every week until 3 jan @study" — floating recurrin
   const r = c.parseDateText('review notes every week until 3 jan @study', BASE);
   shape(r, { start: null, end: null });
   assert.strictEqual(r.recur.kind, 'week');
-  assert.strictEqual(r.until, new Date(2027, 0, 3, 0, 0, 0, 0).getTime());
+  // Exclusive series end — see the repeat-until test above.
+  assert.strictEqual(r.until, new Date(2027, 0, 4, 0, 0, 0, 0).getTime());
   assert.strictEqual((r.labels || []).join(','), 'study');
 });
 

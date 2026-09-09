@@ -32,11 +32,19 @@ test('shapeParsedTask is a pure single binding for quick-add task fields', () =>
   const before = JSON.stringify(parsed);
   const shaped = c.shapeParsedTask(parsed, 'due');
 
+  // Owner ruling 2026-09-09: a parsed repeat is bound to the SERIES-WINDOW model on the way out —
+  // `until` is consumed into the window's `end`, the occurrence length is lifted onto `recur.durMs`
+  // (here from the typed 30-minute duration), and `endClock` is dropped because the window's close is a
+  // day, not a time of day. Writing `durMs` unconditionally is what stops `normalizeTask`'s legacy
+  // conversion from re-reading a fresh window as one long occurrence.
   assert.deepEqual(JSON.parse(JSON.stringify(shaped)), {
-    name: 'Call mom', type: 'Proportional', start: null, end: 20,
-    startClock: null, endClock: false, planned: 30, priority: 2,
+    name: 'Call mom', type: 'Proportional', start: null, end: 99,
+    startClock: null, endClock: null, planned: 30, priority: 2,
     labels: ['@family'],
-    recur: { kind: 'week', n: 1, until: 99, shifts: [], overrides: {} },
+    // Owner ask 2026-09-09: links ride the same single binding as tags — a URL pasted into a title is
+    // filed against the task rather than left in its name.
+    links: [],
+    recur: { kind: 'week', n: 1, until: null, durMs: 30 * 60000, shifts: [], overrides: {} },
     // Owner ruling 2026-08-21: the `/` section token rides the same single binding. Both fields are
     // always present and null when the text named no section — "leave the section alone", which is
     // NOT the same as "move this task to No section".

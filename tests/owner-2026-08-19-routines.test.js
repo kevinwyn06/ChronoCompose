@@ -36,7 +36,10 @@ test('routines: the migration carries a moved lunch', () => {
   c.migrateRoutines();
   const lunch = c.state.tasks.find(t => t.name === 'Lunch');
   assert.equal(new Date(lunch.start).getHours(), 13);
-  assert.equal(Math.round((lunch.end - lunch.start) / 60000), 45, 'a user who moved lunch keeps it');
+  // REVISED 2026-09-09 (a repeat's start/end are the SERIES WINDOW): a daily lunch has no end DATE, so
+  // its 45 minutes live on the rule. `recurDurMs` is the accessor every reader uses.
+  assert.equal(Math.round(c.recurDurMs(lunch) / 60000), 45, 'a user who moved lunch keeps it');
+  assert.equal(lunch.end, null, 'and the series is unbounded, which a daily routine always was');
 });
 
 // The migration carries ONLY what the four settings encoded. Seeding Breakfast into an existing

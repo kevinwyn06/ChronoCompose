@@ -463,6 +463,13 @@ class Component extends DCLogic {
        (the %-done caret has only (rowH−barH)/2 px under the bar), the axis that carries the
        precision — horizontal, along the bar — still gets the full box. See product-vision.md. */
     this.HIT_MIN_PX = 24;            // minimum interactive target (local px, pre-zoom)
+    /* PP-EXT (owner report 2026-09-09: *"subtask row should be clearly indented"*). Two things were
+       wrong, and the step size was the smaller of them. 16px is under one character of the row's own
+       13px text, so a nested row read as very slightly misaligned rather than as contained; and the
+       indent was WHITESPACE ALONE, which states depth only if you compare two rows side by side. The
+       step widens here and `renderRow` draws one guide rule per ancestor level, which is what makes the
+       containment legible in a single row rather than in a comparison. */
+    this.SUBTASK_INDENT_PX = 20;     // horizontal step per nesting level in the task sheet
     /* PP-EXT (owner 2026-08-15): the %-done grab zone moved back ONTO the bar. The caret under the bar
        was a working gesture (tests/e2e/pct-drag.spec.js drags it with real pointer input and it passes)
        that nobody could find: a 24×16 box, invisible until hover, in the 10px gap below the bar. The
@@ -522,6 +529,17 @@ class Component extends DCLogic {
       {k:'year',    label:'Yearly',         recur:{kind:'year',n:1,label:'Yearly'}}
     ];
     this.ROW_NEST_STEP = 24;     // PP-EXT: horizontal px per nesting level while row-dragging (drag right to nest, left to outdent)
+    /* ==== PP-EXT (owner report 2026-09-09): dependency arrow routing ====
+       Owner, verbatim: *"Arrows start from the middle of a block and point down instead of starting from
+       the side, pointing to the side, then zig zagging"*, and *"Dependency arrows overlap"*.
+       The first report is about a 13px stub: the line did leave the bar's right EDGE, but it turned
+       downward almost immediately, so what you saw was a drop out of the bar's middle. The stub widens
+       and the vertical leg moves to the CORRIDOR between the two bars, so the shape reads as
+       out-along-across-along-in. The second is what happens when every edge routes down the same x: they
+       are given lanes, and edges leaving one bar fan out slightly so they do not start on the same pixel. */
+    this.ARROW_STUB_PX = 14;     // horizontal run out of a bar's side before the first turn
+    this.ARROW_LANE_PX = 7;      // spacing between vertical legs that would otherwise share a corridor
+    this.ARROW_FAN_PX  = 4;      // vertical spread of several edges leaving the same bar
     this.ROW_NEST_DEADZONE = 14; // PP-EXT: horizontal px of slop before a row-drag registers ANY nest intent (keeps plain vertical reorder easy)
     /* PP-EXT: the deliberate down-right nudge of the floating row-drag chip, in the OVERLAY'S OWN px
        (the chip is position:fixed inside the zoom wrapper), so the cursor point must reach it through
@@ -925,6 +943,14 @@ class Component extends DCLogic {
          recur override so one field covers both a repeat's occurrence and a plain multi-day window.
          Mirrored (SYNC_FIELDS + supabase migration 0018). Read via isDaySnoozed, never directly. */
       snoozeUntil:null, /* PP-EXT Track B: date-only epoch ms, null = no active snooze. today<snoozeUntil ⇒ temporarily opted out regardless of `included`/window (see isOptedOut). Independent of `included` — see the lifecycle rules on isOptedOut/setIncludedOn/setIncludedOff. */
+      /* PP-EXT (owner ruling 2026-09-09): WHEN the current snooze was set (epoch ms), stamped by every
+         snooze verb and cleared with the snooze. It exists to answer one question the other two fields
+         cannot: has a DAY passed since the user put this away? Owner, verbatim: *"When time passes and
+         today's date triggers an event, snoozed events should become autoincluded again."* Waking on the
+         window opening needs that guard, or snoozing a task whose window opens today would undo itself
+         on the spot — the snooze and its wake trigger firing on the same day. Not in SYNC_FIELDS: it
+         joins the deferred batch with `snoozeUntil`, whose lifetime it shares. */
+      snoozedAt:null,
       blocking:null, /* PP-EXT (10): busy-interval semantics for this task's fixed span. TRI-STATE —
          true = blocking (nothing schedules through it), false = background (a Work-shaped container the
          user deliberately places tasks inside), null = inherit BLOCKING_DEFAULT. Owner decision
@@ -932,6 +958,14 @@ class Component extends DCLogic {
          category and NOT overloaded onto `type`. Mirrored (SYNC_FIELDS + supabase migration 0008) —
          `null` mirrors as null, so no existing row needs a data migration and an untouched task keeps
          today's behaviour exactly. Read via isBlockingTask, never directly. */
+      /* PP-EXT (owner ask 2026-09-09): *"link tasks to browser tab (group) and apps"*. A LIST of
+         `{url, label}`, in the order they were added — one task's working set, so "open them all" restores
+         a tab group rather than a single page. An app is the same thing under a different scheme
+         (`obsidian://`, `slack://`, `zoom://`), which is why there is no second field for it: a deep link
+         IS the link. Read and written only through `taskLinks`/`addTaskLink`/`removeTaskLink`, which own
+         the scheme rules — a stored string is never trusted at render time.
+         Not in SYNC_FIELDS: it joins the deferred batch with `snoozeUntil` and `sectionId`. */
+      links:[],
       archivedAt:null, /* PP-EXT: archived = hidden from views but kept for stats; delete = permanent (+ gcal DELETE) */
       parentId:null, /* PP-EXT: subtasks — id of the parent task (nested, collapsible; see buildKids) */
       sectionId:null, /* PP-EXT V2.6: id into the pp-sections entity; null = the explicit "No section" bucket.
@@ -962,6 +996,12 @@ class Component extends DCLogic {
        predicate, so a junk value (an old row, a bad merge) must normalize to "no days" rather than
        throwing inside `isActiveOn` and taking the whole render with it. */
     if(!Array.isArray(n.snoozeDays)) n.snoozeDays=[];
+    /* PP-EXT (owner ask 2026-09-09): same coerce-do-not-trust rule for `links`, and it carries a SAFETY
+       obligation the others do not: these strings become an `href`. A `javascript:` URL stored by a bad
+       import or a hand-edited backup would be a script that runs on click, so the scheme is filtered HERE,
+       on the way in, as well as at render — one funnel, and nothing downstream has to remember. */
+    n.links = Array.isArray(n.links)
+      ? n.links.map(l=>this.normalizeLink(l)).filter(Boolean) : [];
     /* PP-EXT (owner 2026-08-20): epoch-ms fields are INTEGERS, and this is the one place that guarantees
        it. Owner report: localhost and Vercel showed different tasks on the same account. One task carried
        a fractional `end` (1785437897142.8572); `start`/`end` are `bigint` columns (0001_init.sql:24-25),
@@ -976,6 +1016,18 @@ class Component extends DCLogic {
        NOT applied to `spent`/`predicted`, which are fractional minutes by design — the timer accumulates
        sub-minute time and `syncRowForWrite` is what converts them to integer seconds. */
     this.INT_MS_FIELDS().forEach(k=>{ if(typeof n[k]==='number' && !Number.isInteger(n[k])) n[k]=Math.round(n[k]); });
+    /* PP-EXT (owner ruling 2026-09-09): convert a legacy repeat to the SERIES WINDOW shape — see
+       `expandTask`. This is the single funnel, so a row reaches the window model whether it came from
+       `pp-tasks`, a Supabase pull, or a Google import, and the once-migration below is only the sweep
+       that rewrites what is already stored.
+       Guarded on a real anchor span: a DATELESS repeat has no length to move, and inventing one would
+       turn a ghost into a zero-duration series. Idempotent by construction — `durMs` is non-null
+       afterwards, and that is exactly the test. */
+    if(n.recur && n.recur.durMs==null && n.start!=null && n.end!=null){
+      const until = n.recur.until!=null ? n.recur.until : null;   /* read BEFORE the rule is replaced */
+      n.recur = Object.assign({}, n.recur, { durMs: Math.max(0, n.end-n.start), until:null });
+      n.end = until;   /* the series end, or null for the unbounded series this always was */
+    }
     return n;
   }
   /* PP-EXT (owner 2026-08-20): task fields backed by an integer/bigint Postgres column. Kept beside
@@ -989,6 +1041,22 @@ class Component extends DCLogic {
      stays user-editable afterwards (it is NOT re-cleared on every load). Writing null also makes this cleanup
      order-independent with `planned-null-unset`; neither migration can recreate a deliberate zero. */
   migrateAllDayPlanned(tasks){ let n=0; tasks.forEach(t=>{ if(t.allDay && t.planned!=null){ t.planned=null; n++; } }); return n; }
+  /* PP-EXT (owner ruling 2026-09-09): the one-time sweep to the SERIES WINDOW shape — see `expandTask`.
+     `normalizeTask` already converts every row on the way in, so this exists for the same reason
+     `planned-null-unset` does: without it the new meaning reaches only rows that happen to be rewritten,
+     and a workspace's stored `pp-tasks` keeps the old shape until each task is next edited. Same
+     conversion, same guard, so running both is harmless.
+     The owner chose this direction explicitly over inferring the meaning from the span's length: an
+     implicit rule would have to be re-derived at every call site and would silently change a repeat's
+     behaviour when its dates were edited. */
+  migrateRecurWindow(tasks){ let n=0; (tasks||[]).forEach(t=>{
+    if(!t || !t.recur || t.recur.durMs!=null) return;
+    if(t.start==null || t.end==null) return;    /* a dateless repeat has no length to move */
+    const until = t.recur.until!=null ? t.recur.until : null;
+    t.recur.durMs = Math.max(0, t.end - t.start);
+    t.recur.until = null;
+    t.end = until;
+    n++; }); return n; }
   /* PP-EXT: one-time cleanup for the pin removal. The parser used to stamp a bare day with a 9am
      placeholder and mark it startClock:false; bare days are now plain midnight, so collapse those
      starts and drop the flag back to null (derive). pinStart/pinEnd no longer exist because every
@@ -1008,6 +1076,17 @@ class Component extends DCLogic {
     try{ const done=JSON.parse(this.lsGet('pp-migrations')||'{}')||{};
       if(!done['allday-planned-zero']){ const n=this.migrateAllDayPlanned(tasks); done['allday-planned-zero']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
+      /* PP-EXT (owner 2026-09-09): a repeat's start/end become the SERIES WINDOW; its occurrence length
+         moves onto the rule. See migrateRecurWindow. */
+      if(!done['recur-series-window']){ this.migrateRecurWindow(tasks); done['recur-series-window']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done));
+        /* Saved UNCONDITIONALLY, unlike its neighbours, and the reason is worth stating: `tasks` here has
+           already been through `normalizeTask`, which performs the same conversion — so the sweep finds
+           nothing left to do and returns 0. Gating the write on that count would leave every stored row
+           in the legacy shape until its task happened to be edited, which is exactly the half-migrated
+           state the owner's "migrate" ruling was choosing against. The sweep itself stays for raw rows
+           that reach it without passing through normalize. */
+        this.saveTasks(tasks); }
       if(!done['schedule-pins-removed']){ const n=this.migratePins(tasks); done['schedule-pins-removed']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       /* PP-EXT V2.6: seed sections from primary @tags, once, at promotion threshold 2. Guarded like the
@@ -1157,7 +1236,10 @@ class Component extends DCLogic {
   onListSinceBackfillKey(t, B){
     if(!t || (t.start==null && t.end==null)) return null;
     let open=null;
-    if(t.recur && t.start!=null && t.end!=null){
+    /* PP-EXT (owner 2026-09-09): a repeat needs an ANCHOR to expand from, not an end — an unbounded
+       series has none, and demanding one sent every ordinary daily repeat down the ghost branch, which
+       backfills from the anchor day instead of from the occurrence that actually opened. */
+    if(t.recur && this.isScheduled(t)){
       /* the latest occurrence that has already opened; expandTask is state-free, so this is safe here. */
       const occs=this.expandTask(t, B+this.DAY).filter(o=>o.start!=null && this.startOfDay(o.start)<=B);
       open = occs.length ? occs[occs.length-1].start : null;
@@ -2076,14 +2158,17 @@ class Component extends DCLogic {
          clearing it mean "no dates", so what it omits is a statement rather than a silence.
          Every test below reads the RECONCILED result, not the raw parse: a merge can change a date the
          parse alone did not, and comparing the wrong one would strip the user's words on a no-op. */
-      const rec=this.reconcileWhen(t, shaped, parsed);
+      const rec=this.shapeRecurWindow(this.reconcileWhen(t, shaped, parsed), parsed);
       /* A lone duration now writes an END when the task already carries a clocked start, so the write
          can no longer be gated on the TEXT having named a date. */
       const writesWhen = hasAnchor || parsed.dur!=null;
       const dateChanged = writesWhen && (
         t.start!==rec.start || t.end!==rec.end ||
         ((t.recur&&t.recur.label)||null)!==((rec.recur&&rec.recur.label)||null) ||
-        ((t.recur&&t.recur.until)||null)!==((rec.recur&&rec.recur.until)||null));
+        ((t.recur&&t.recur.until)||null)!==((rec.recur&&rec.recur.until)||null) ||
+        /* PP-EXT (owner ruling 2026-09-09): the occurrence length is part of the date state now, so
+           re-typing a title that only changes it still counts as a date change. */
+        ((t.recur&&t.recur.durMs)!=null?t.recur.durMs:null)!==((rec.recur&&rec.recur.durMs)!=null?rec.recur.durMs:null));
       /* `shaped.name` is the parser's own `rest`: every claimed token already removed, in one place, so
          the strip can never disagree with what was consumed. When nothing moved, only the section token
          goes — it is consumed unconditionally, because its chip is not on the row to prove it landed. */
@@ -2095,10 +2180,19 @@ class Component extends DCLogic {
       if(writesWhen){ t.start=rec.start; t.end=rec.end;
         t.startClock=rec.startClock; t.endClock=rec.endClock; t.recur=rec.recur; }
       if(parsed.dur!=null) t.planned=rec.planned;
-      else if(hasAnchor && t.start!=null){ const span=this.clockSpanMinutes(t,this.startOfDay(t.start));
+      /* PP-EXT (owner ruling 2026-09-09): the ANCHOR occurrence's span. `clockSpanMinutes` measures
+         `t.end - t.start`, which for a repeat is the series window, not a booked block. */
+      else if(hasAnchor && t.start!=null){ const span=t.recur ? this.anchorSpanMinutes(t)
+          : this.clockSpanMinutes(t,this.startOfDay(t.start));
         if(span!=null) t.planned=span; }
       if(shaped.priority!==4 || /\bp[1-4]\b/i.test(raw)) t.priority=shaped.priority;
       if(shaped.labels.length) t.labels=shaped.labels.slice();
+      /* PP-EXT (owner ask 2026-09-09): links ADD rather than replace, on the same principle as the rest
+         of this method — a title that no longer mentions a page is not an instruction to unfile it. */
+      if(shaped.links && shaped.links.length){
+        const have=this.taskLinks(t); const add=shaped.links.filter(l=>!have.some(x=>x.url===l.url));
+        if(add.length) t.links=have.concat(add);
+      }
       if(shaped.type==='Milestone') t.type='Milestone';
     });
   }
@@ -2134,10 +2228,29 @@ class Component extends DCLogic {
     };
     if(t.recur){
       /* The rule, in the words it would be typed in. `label` is the rule's own name, so the sentence and
-         the recurrence menu can never describe the same rule differently. */
+         the recurrence menu can never describe the same rule differently.
+         PP-EXT (owner ruling 2026-09-09): this line is where "the details of each occurrence" live, so it
+         states THREE things and keeps them apart — the rule, how long ONE occurrence is, and the window
+         the series runs in. The clock part is read from `anchorEndMs`, never from `t.end`: `t.end` is the
+         last day the series may fire, and printing it as the occurrence's closing time is precisely the
+         confusion the window model exists to end. Every shape below round-trips through the parser, which
+         is what makes the line an editor rather than a caption. */
       const bits=[String(t.recur.label||'repeats').toLowerCase()];
-      const cp=clockPart(); if(cp) bits.push(cp);
-      if(t.recur.until!=null) bits.push('until '+this.fmtDT(t.recur.until,true));
+      /* The window. An all-day series end is stored as the EXCLUSIVE next midnight, so it is READ as the
+         day it names — the same `-1` the date cells and the deadline branch below apply. */
+      const se=this.seriesEndMs(t);
+      const seTxt=se!=null ? this.fmtDT(this.hasClock(se)?se:se-1, !this.hasClock(se)) : null;
+      if(t.start!=null && seTxt) bits.push('from '+this.fmtDT(t.start,true)+' to '+seTxt);
+      else if(seTxt) bits.push('until '+seTxt);
+      else if(t.start!=null) bits.push('from '+this.fmtDT(t.start,true));
+      /* The occurrence goes LAST, and that is a round-trip requirement rather than a style choice: the
+         clock-range matcher demands whitespace or end-of-string after the closing time, so a clock
+         followed by ", from …" is not recognised at all and the sentence stops reading back as itself. */
+      const occMs=this.recurDurMs(t)||0;
+      if(this.hasStartTime(t)) bits.push(occMs>0
+        ? this.fmtClock(t.start)+'–'+this.fmtClock(this.anchorEndMs(t))
+        : this.fmtClock(t.start));
+      else if(occMs>0) bits.push('for '+this.fmtDurCompact(Math.round(occMs/60000)));
       out.text=bits.join(', '); out.chip='repeats';
     }
     else if(t.start==null && t.end==null){ out.empty=true; return out; }
@@ -2168,7 +2281,11 @@ class Component extends DCLogic {
     }
     /* Owner ruling 8: `Planned` is not repeated outside the When block. It rides here when the sentence
        does not already state a span of its own — an appointment's chip IS its duration. */
-    if(t.planned!=null && this.clockSpanMinutes(t)==null && !this.isPointTask(t)
+    /* PP-EXT (owner ruling 2026-09-09): a repeat's booked span is its OCCURRENCE's, so the test that asks
+       "does the sentence already state a span" has to ask about the occurrence too — `clockSpanMinutes`
+       measures `t.end - t.start`, which for a repeat is the window and answers a different question. */
+    const occSpan = t.recur ? this.anchorSpanMinutes(t) : this.clockSpanMinutes(t);
+    if(t.planned!=null && occSpan==null && !this.isPointTask(t)
        && !(t.end==null && t.start!=null && this.hasStartTime(t)))
       subs.push(this.fmtDurCompact(t.planned)+' planned');
     if(out.moved) subs.push(out.moved+' occurrence'+(out.moved===1?'':'s')+' moved \u00b7 review');
@@ -2216,29 +2333,42 @@ class Component extends DCLogic {
        sentence can take — including the ones the parser cannot read back at all. */
     const shown=String((this.whenSentence(t)||{}).text||'').replace(/\s+/g,' ').trim();
     if(shown && raw===shown) return {ok:true};
-    const ruleOf=r=>r?JSON.stringify({kind:r.kind,n:r.n,days:r.days,label:r.label,until:r.until}):null;
+    /* PP-EXT (owner ruling 2026-09-09): `durMs` joins the rule's identity. Without it, editing ONLY the
+       occurrence length ("daily, for 45m" → "daily, for 90m") compared equal and committed nothing. */
+    const ruleOf=r=>r?JSON.stringify({kind:r.kind,n:r.n,days:r.days,label:r.label,until:r.until,dur:r.durMs}):null;
     const plannedAfter=(p.dur!=null)?shaped.planned:t.planned;
     if(t.start===shaped.start && t.end===shaped.end && t.startClock===shaped.startClock
        && t.endClock===shaped.endClock && ruleOf(t.recur)===ruleOf(shaped.recur)
        && t.planned===plannedAfter) return {ok:true};
     this.commit(tasks=>{ const x=tasks.find(y=>y.id===id); if(!x) return;
-      const prevStart=x.start, prevEnd=x.end, hadRecur=!!x.recur;
+      const prevStart=x.start, hadRecur=!!x.recur;
+      const prevExc = hadRecur ? {overrides:x.recur.overrides||{}, shifts:x.recur.shifts||[]} : null;
       x.start=shaped.start; x.end=shaped.end;
       x.startClock=shaped.startClock; x.endClock=shaped.endClock;
+      /* PP-EXT (owner ruling 2026-09-09): the shaped rule is a FRESH object with empty exceptions, so
+         assigning it wholesale destroyed every completion and shift on the task — and the "keep them
+         unless the anchor moved" rule below was operating on the empty object it had just installed, so
+         it could never preserve anything. Carry them across first; the anchor test then decides. */
       x.recur=shaped.recur;
+      if(x.recur && prevExc){ x.recur.overrides=prevExc.overrides; x.recur.shifts=prevExc.shifts; }
       /* The same rule `setDate` applies, for the same reason: occurrence overrides are indexed from the
          series anchor, so moving an anchor edge to another CALENDAR DAY changes which real occurrence
          every index names, and retaining them would transfer an old completion onto a newly dated one.
          A rule kept across the edit keeps its exceptions only while both anchors stay on their days. */
       if(x.recur && hadRecur){
-        const moved=(prevStart!=null&&x.start!=null&&this.startOfDay(prevStart)!==this.startOfDay(x.start))
-          || (prevEnd!=null&&x.end!=null&&this.startOfDay(prevEnd)!==this.startOfDay(x.end));
+        /* PP-EXT (owner ruling 2026-09-09): only the ANCHOR re-indexes the series, so only the anchor
+           discards exceptions. `end` is the window's close now — moving it admits or drops occurrences
+           without renaming any of them, and throwing away real completions for that is pure loss. Same
+           rule, same reasoning as `setDate`. */
+        const moved=(prevStart!=null&&x.start!=null&&this.startOfDay(prevStart)!==this.startOfDay(x.start));
         if(moved){ x.recur.overrides={}; x.recur.shifts=[]; }
       }
       /* A duration written in the line wins; otherwise a booked intra-day span is the plan, exactly as
          it is on every other date-writing path. */
       if(p.dur!=null) x.planned=shaped.planned;
       else { const span=this.anchorSpanMinutes(x); if(span!=null) x.planned=span; }
+      /* PP-EXT (owner ruling 2026-09-09): the When line writes dates, so it re-derives inclusion too. */
+      this.reDeriveInclusion(x);
     });
     return {ok:true};
   }
@@ -2581,10 +2711,11 @@ class Component extends DCLogic {
     if(this.isActiveTask(t)) return false;
     /* PP-EXT (owner 2026-08-20, Task 19): a day snooze on TODAY reads as opted out, like any other. */
     if(this.isDaySnoozed(t, this.startOfToday())) return true;
-    if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return true;
     /* PP-EXT (owner 2026-08-19): an indefinite snooze opts out with NO date comparison — until one of
-       the four wake triggers fires, at which point it stops opting out and the task returns as `new`. */
-    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
+       the wake triggers fires, at which point it stops opting out and the task returns as `new`.
+       PP-EXT (owner ruling 2026-09-09): both snooze forms go through ONE predicate now, because both are
+       cancelled by the same thing — the day the task itself names arriving. */
+    if(this.snoozeActive(t, this.startOfToday(), Date.now())) return true;
     /* PP-EXT V2.11: the `included===false` ("off") branch is gone — see setIncludedOff. Unpressed work is
        still opted out of today; it simply is no longer barred from ever coming back on its own. */
     /* PP-EXT V5 (F19/F20, block 20): auto-included work is not opted out. Without this clause the band
@@ -2637,7 +2768,7 @@ class Component extends DCLogic {
     if(!t || t.archivedAt || this.isMilestone(t)) return false;
     if(t.included===true) return false;
     const B=this.startOfToday();
-    if(t.snoozeUntil!=null && B<t.snoozeUntil) return false;
+    if(this.snoozeActive(t, B, Date.now())) return false;
     if(!this.hasDate(t)) return false;      /* PP-EXT (owner 2026-08-21): dateless, not one-edged — see hasDate */
     const win=this.todayWindow(t, B);
     if(!win || win.start==null || win.end==null) return false;
@@ -2774,9 +2905,8 @@ class Component extends DCLogic {
     /* PP-EXT (owner 2026-08-20, Task 19): today put away by name is snoozed, like any other snooze —
        this is what files it under the Snoozed bucket rather than leaving it reading as Upcoming. */
     if(this.isDaySnoozed(t, this.startOfToday())) return 'snoozed';
-    if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return 'snoozed';
-    /* PP-EXT (owner 2026-08-19): a dateless snooze reads as snoozed until one of its wake triggers fires. */
-    if(t.snoozeIndef && !this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return 'snoozed';
+    /* PP-EXT (owner 2026-08-19): a snooze reads as snoozed until one of its wake triggers fires. */
+    if(this.snoozeActive(t, this.startOfToday(), Date.now())) return 'snoozed';
     /* PP-EXT V5 (block 20): auto-included work reads as pressed, so `inclBand` files it under
        Included and `isUndecided` stops calling it undecided. One predicate, one answer. */
     return (t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t)) ? 'pressed' : 'unpressed';
@@ -2810,7 +2940,9 @@ class Component extends DCLogic {
   snoozeEndedToday(t){
     /* PP-EXT (owner 2026-08-19): an indefinite snooze that has WOKEN also counts as "today brought it
        back", which is what makes originOf file it as `new` rather than as inherited work. */
-    if(t && t.snoozeIndef && this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
+    /* PP-EXT (owner ruling 2026-09-09): a DATED snooze cut short by its task's own date arriving is
+       "today brought it back" too, which is what files it as `new` rather than as inherited work. */
+    if(t && this.snoozeWakeReason(t, this.startOfToday(), Date.now())) return true;
     if(!t || t.snoozeUntil==null) return false;
     return this.startOfDay(t.snoozeUntil)===this.startOfToday();
   }
@@ -2818,8 +2950,28 @@ class Component extends DCLogic {
      argument, and the question is "is it woken" rather than "was it woken TODAY" — the same reasoning
      that shaped snoozeEndedToday, so a wake missed while the app was closed still fires. PURE. */
   snoozeWakeReason(t, B, now){
-    if(!t || !t.snoozeIndef) return null;
+    if(!t) return null;
+    /* PP-EXT (owner ruling 2026-09-09): THE DATE ARRIVING BEATS THE SNOOZE, and it does so for a DATED
+       snooze as well as an indefinite one. Owner, verbatim: *"When time passes and today's date triggers
+       an event, snoozed events should become autoincluded again."* A snooze is an answer to "not now";
+       the day the work itself names is new information, and the standing tenet is that the laziest path
+       must never silently drop a deadline.
+       The `snoozedAt` guard is what keeps this from being self-defeating: without it, putting away a task
+       whose window opens today would wake it the same instant, and the snooze verbs would do nothing at
+       all on precisely the tasks a person is most likely to use them on. A snooze set today survives
+       today; from tomorrow the window's opening speaks. */
+    const anySnooze = t.snoozeIndef || (t.snoozeUntil!=null && B<t.snoozeUntil);
+    if(anySnooze && t.snoozedAt!=null && this.startOfDay(t.snoozedAt)<B){
+      const win=this.hasDate(t) ? this.todayWindow(t, B) : null;
+      if(win && win.ghostStart!==true && win.start!=null && this.startOfDay(win.start)===B) return 'date';
+    }
+    if(!t.snoozeIndef) return null;   /* a DATED snooze has its own expiry; the rest is for the open one */
     const oc=this.occOnDay(t, B) || this.occOf(t);
+    /* The `hasStartTime` gate STAYS, and the 2026-09-09 'date' reason above is why it can. Dropping it
+       here would wake an indefinite snooze on any task whose window merely started at some point in the
+       past — which is nearly all of them, making the verb inert on exactly the work people snooze. The
+       new reason asks the narrower and more useful question: did the window OPEN today, on a day after
+       the one the snooze was set. */
     if(oc && oc.start!=null && this.startOfDay(oc.start)<=B && this.hasStartTime(t)) return 'start';
     if(t.end!=null && this.dueMsOf(t, B)<now) return 'due';
     const deps=(t.deps||[]);
@@ -2827,6 +2979,43 @@ class Component extends DCLogic {
       if(deps.every(d=>{ const p=byId[this.depId(d)]; return !p || p.pct>=100; })) return 'deps'; }
     return null;
   }
+  /* PP-EXT (owner ruling 2026-09-09): IS THIS TASK SNOOZED RIGHT NOW — the one predicate every surface
+     asks, so a dated snooze and an open-ended one can never be answered differently by two call sites.
+     It replaces four hand-rolled copies of "snoozeUntil in the future, or snoozeIndef with no wake". */
+  snoozeActive(t, B, now){
+    if(!t) return false;
+    const dated = t.snoozeUntil!=null && B<t.snoozeUntil;
+    if(!dated && !t.snoozeIndef) return false;
+    return !this.snoozeWakeReason(t, B, now==null?Date.now():now);
+  }
+  /* ==== PP-EXT (owner ruling 2026-09-09): A DIRECT DATE EDIT RE-DERIVES INCLUSION ====
+     Owner, verbatim: *"I want the vast majority of tasks to be included as their start and end dates
+     state, unless explicitly overridden by the user, in which case the backend should take a note of that
+     and not automatically update inclusion based on date edits. Auto inclusion should update every time
+     dates are edited directly."*
+
+     Inclusion was ALREADY derived from the dates on every read, so the derivation half needed nothing.
+     What did not follow the dates was the two things layered over it:
+
+       • a SNOOZE. "Not until Thursday" is an answer about the dates the task had when it was asked.
+         Re-dating the work is the user restating when it happens, which is newer information than the
+         snooze and supersedes it. Leaving it in place is what made a re-dated task stay invisible with
+         nothing on screen explaining why.
+       • an inherited `included===true` with no explicit provenance, which no longer describes anything
+         the user decided and would otherwise pin the task to today forever.
+
+     `includedExplicit` is the note the owner asked the backend to take, and it is honoured in BOTH
+     directions: a task pressed into today by hand keeps its press across any number of date edits. This
+     is called from the date-writing MUTATORS only (the date cells, the picker, the When line) — a gesture
+     that says "this happens then", never from a render, and never from the automatic passes.
+     Mutates the draft task in place; every caller is already inside a `commit()`. */
+  reDeriveInclusion(t){
+    if(!t) return;
+    if(t.includedExplicit) return;
+    t.included=null;
+    t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null;
+  }
+  /* /PP-EXT */
   /* /PP-EXT */
   /* PURE-ish: WHICH BUCKET a task is in — the five buckets of the Selection view.
      `upcoming` is the FALLBACK BUCKET, not a category (the same role `No section` plays, and for the same
@@ -2856,7 +3045,7 @@ class Component extends DCLogic {
   nextPendingOcc(t){
     if(!t || !t.recur) return null;
     const B=this.startOfToday();
-    const horizon = t.recur.until!=null ? t.recur.until : B + 366*this.DAY;
+    const horizon = this.seriesEndMs(t)!=null ? this.seriesEndMs(t) : B + 366*this.DAY;
     return this.expandTask(t, horizon).find(o=>o.start!=null && o.start>=B && this.occPct(t,o.idx)<100) || null;
   }
   /* PP-EXT (owner 2026-08-20): `null` means NOT ON THE SURFACE AT ALL, and it is a real answer rather
@@ -3084,7 +3273,7 @@ class Component extends DCLogic {
     t.included=null;
     t.includedExplicit=false; }); }
     /* /PP-EXT */
-  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19): an explicit include is the first wake trigger */ } }); }
+  setIncludedOn(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null; /* PP-EXT (owner 2026-08-19): an explicit include is the first wake trigger */ } }); }
   /* ==== PP-EXT (owner 2026-08-20, spec A6): THE CHECKBOX IS THE GESTURE ====
      The asymmetry between the two directions is the whole design, not an inconsistency.
 
@@ -3103,7 +3292,7 @@ class Component extends DCLogic {
      age, which is exactly what the field exists to record. */
   tickOnToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
     t.included=true; t.includedExplicit=true;
-    t.snoozeUntil=null; t.snoozeIndef=false;
+    t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null;
     if(t.onListSince==null) t.onListSince=this.ymdOf(this.startOfToday()); }); }
   untickOnToday(e, id){ if(e && e.stopPropagation) e.stopPropagation(); this.openInclPick(e, id); }
   /* ==== /PP-EXT ==== */
@@ -3116,14 +3305,14 @@ class Component extends DCLogic {
      The pass exists for transitions NOBODY observed, chiefly a window closing at midnight while the app
      was shut. A snooze is observed at the instant it happens, so it is recorded then, exactly as
      `tickOnToday` records an arrival rather than waiting to be noticed. */
-  snoozeIndefinitely(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeIndef=true; t.onListSince=null; } }); }
-  snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeUntil=this.startOfToday()+this.DAY; t.onListSince=null; } }); }
+  snoozeIndefinitely(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeIndef=true; t.snoozedAt=Date.now(); t.onListSince=null; } }); }
+  snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeUntil=this.startOfToday()+this.DAY; t.snoozedAt=Date.now(); t.onListSince=null; } }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
      the draft untouched instead of silently clearing a snooze on a typo. */
   snoozeUntilText(id, text){
     const ms=this.parseSnoozeText(text, this.state.nowTick||Date.now());
     if(ms==null) return false;
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeUntil=ms; t.onListSince=null; } });
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeUntil=ms; t.snoozedAt=Date.now(); t.onListSince=null; } });
     return true;
   }
   /* PP-EXT: inclusive count of days from today to the task's (current-occurrence) due date, ≥1. (No longer used
@@ -3551,8 +3740,23 @@ class Component extends DCLogic {
      disambiguates a deliberate 00:00 from a bare date, which also sits at midnight. */
   hasStartTime(t){ if(t.start==null) return false;
     return t.startClock!=null ? !!t.startClock : this.hasClock(t.start); }
-  hasEndTime(t){ if(t.end==null) return false;
-    return t.endClock!=null ? !!t.endClock : this.hasClock(t.end); }
+  /* PP-EXT (owner ruling 2026-09-09): for a REPEAT, `t.end` is the series window's end, not the end of
+     any occurrence — see `expandTask`. The end this question is about is the ANCHOR OCCURRENCE's, which
+     is `t.start + recurDurMs(t)`. Reading `t.end` here instead would ask whether the series' last day
+     carries a clock, and would answer `false` outright for an unbounded series — collapsing every
+     open-ended repeating appointment into a clockless shape (no Exact derivation, no fixed block, no
+     auto-timer). `endClock` still overrides, because that flag records what the user WROTE. */
+  anchorEndMs(t){ if(!t) return null;
+    if(!t.recur) return t.end;
+    if(t.start==null) return null;
+    /* NULL when nothing states a length — a repeating POINT (`Wake up`) is exactly that shape, and it
+       must keep reading as an open end here or `isPointTask` stops recognising it. `recurDurMs` coerces
+       the same case to 0 because an expansion needs a number; this question needs the distinction. */
+    const d = t.recur.durMs!=null ? t.recur.durMs
+            : (t.end!=null ? Math.max(0, t.end-t.start) : null);
+    return d==null ? null : t.start + d; }
+  hasEndTime(t){ const e=this.anchorEndMs(t); if(e==null) return false;
+    return t.endClock!=null ? !!t.endClock : this.hasClock(e); }
   /* A fixed appointment has a written start clock and a real span that fits one day, on its start day. */
   isFixedOn(t, B){
     if(this.isMilestone(t)) return false;
@@ -3800,7 +4004,12 @@ class Component extends DCLogic {
   isPointTask(t){
     if(!t || this.isMilestone(t)) return false;
     if(!this.hasStartTime(t)) return false;
-    if(t.end!=null) return false;
+    /* PP-EXT (owner ruling 2026-09-09): the open end that makes a Point is the OCCURRENCE's, not the
+       series window's. Reading `t.end` here made every unbounded repeat a Point the moment the window
+       model let `end` be null — and a Point is vetoed off every day but its own, so a daily standup
+       silently stopped competing for time on all of them. `anchorEndMs` is `t.end` for a plain task and
+       the anchor occurrence's end for a repeat, which is the edge this question was always about. */
+    if(this.anchorEndMs(t)!=null) return false;
     return (t.planned||0) <= 0;
   }
   /* PP-EXT V5 (F3): the day a Point belongs to, or null if it is not a Point. Recurrence-aware via
@@ -3866,6 +4075,79 @@ class Component extends DCLogic {
     if(tag && !out.some(x=>this.normalizeTag(x)===tag)) out.push(tag); return out; }
   removeTaskTag(labels, raw){ const tag=this.normalizeTag(raw); if(!tag) return (labels||[]).slice();
     return (labels||[]).filter(x=>this.normalizeTag(x)!==tag); }
+  /* ==== PP-EXT (owner ask 2026-09-09): TASK LINKS — "link tasks to browser tab (group) and apps" ====
+     A task carries the set of pages and apps you open to do it, in the order you added them, so starting
+     the work is one gesture instead of hunting for six tabs. An APP is not a second kind of thing here: a
+     deep link (`obsidian://`, `slack://`, `zoom://`) is a URL with a different scheme, and treating it as
+     one is what keeps this a list rather than two parallel features.
+
+     THE SCHEME RULE IS A SAFETY RULE, not tidiness. These strings become an `href`, so a `javascript:`
+     URL is a script that runs when the user clicks their own task. The denylist is applied in
+     `normalizeTask` (everything entering memory) and again wherever a link is rendered — one funnel plus
+     one guard, because the cost of missing it is arbitrary code execution and the cost of the guard is a
+     string comparison. Anything else with a scheme is allowed: the point is to reach whatever tool the
+     work lives in, and an allowlist of apps would be wrong the day the owner installs another one.
+
+     NOT IN SCOPE, deliberately, and worth stating where the code is: reading or writing the BROWSER's
+     actual tabs and tab groups needs a browser extension (`chrome.tabs`, `chrome.tabGroups`) — a separate
+     artifact with its own manifest and permissions that a web page cannot substitute for. What is here is
+     the half that lives in the app, and the store such an extension would read from and write to. */
+  LINK_DENY_SCHEMES(){ return ['javascript','data','vbscript','blob']; }
+  /* PURE. A raw string (or a stored {url,label}) → {url,label}, or null when it is not a usable link. */
+  normalizeLink(raw){
+    if(raw && typeof raw==='object'){
+      const base=this.normalizeLink(raw.url);
+      if(!base) return null;
+      if(raw.label) base.label=String(raw.label).slice(0,120);
+      return base;
+    }
+    let s=String(raw==null?'':raw).trim();
+    if(!s) return null;
+    const m=s.match(/^([a-z][a-z0-9+.-]*):/i);
+    if(m){ if(this.LINK_DENY_SCHEMES().indexOf(m[1].toLowerCase())>=0) return null; }
+    /* A bare host is what people paste. Anything with no scheme and no dot is a word, not a link. */
+    else if(/^[\w-]+(\.[\w-]+)+([/?#]|$)/.test(s)) s='https://'+s;
+    else return null;
+    return {url:s, label:this.linkLabel(s)};
+  }
+  /* PURE. The short name a link shows: the host for a web page, the scheme for an app deep link. */
+  linkLabel(url){
+    const s=String(url||'');
+    const web=s.match(/^https?:\/\/([^/?#]+)/i);
+    if(web) return web[1].replace(/^www\./i,'');
+    const sch=s.match(/^([a-z][a-z0-9+.-]*):/i);
+    return sch ? sch[1].toLowerCase() : s.slice(0,40);
+  }
+  /* PURE. The task's links, filtered through the scheme rule again at read time. */
+  taskLinks(t){
+    return ((t&&t.links)||[]).map(l=>this.normalizeLink(l)).filter(Boolean);
+  }
+  addTaskLink(id, raw){
+    const link=this.normalizeLink(raw); if(!link) return false;
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      const cur=this.taskLinks(t);
+      if(cur.some(l=>l.url===link.url)) return;      /* one task, one copy of a page */
+      t.links=cur.concat([link]); });
+    return true;
+  }
+  removeTaskLink(id, url){
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+      t.links=this.taskLinks(t).filter(l=>l.url!==url); });
+    return true;
+  }
+  /* Open one link, or the whole set — "the tab group". A popup blocker may stop the second and later
+     windows of a burst, which is a browser policy this cannot and should not defeat; the gesture is a
+     direct click, which is exactly the case browsers allow. */
+  openTaskLink(url){
+    const link=this.normalizeLink(url); if(!link) return false;
+    if(typeof window!=='undefined' && window.open) window.open(link.url,'_blank','noopener,noreferrer');
+    return true;
+  }
+  openTaskLinks(id){
+    const t=(this.state.tasks||[]).find(x=>x.id===id); if(!t) return 0;
+    const ls=this.taskLinks(t); ls.forEach(l=>this.openTaskLink(l.url)); return ls.length;
+  }
+  /* /PP-EXT */
   addLabel(id, raw){ const tag=this.normalizeTag(raw); if(!tag) return false;
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t) t.labels=this.addTaskTag(t.labels,tag); }); return true; }
   removeLabel(id, raw){ const tag=this.normalizeTag(raw); if(!tag) return false;
@@ -3990,6 +4272,38 @@ class Component extends DCLogic {
     tasks.forEach(t=>{ if(t.parentId!=null && byId[t.parentId] && t.parentId!==t.id) (kids[t.parentId]=kids[t.parentId]||[]).push(t.id); });
     return {kids, byId};
   }
+  /* ==== PP-EXT (owner ruling 2026-09-09): A PARENT WITH NO TIME OF ITS OWN IS A CONTAINER ====
+     Owner, verbatim: *"if a parent task doesn't have a time planned, the child tasks should have their
+     planned times treated as top level times"*, and on what it draws: *"parent doesn't display anything —
+     if it has no time of its own it is merely an organizational tool and should not crowd with redundant
+     information"*.
+
+     The budget model this refines is unchanged for a parent that HAS a figure: it keeps its own Planned,
+     its allotment is split among its children proportional to theirs, and the remainder stays with it.
+     That model has one hole, and it is the shape people actually make: a heading with work under it. Such
+     a parent asked the day for nothing (`planned` is 0, so `requestedMinutes` is 0), was allotted nothing,
+     and then split that nothing among its children — so an entire family of real work quietly received no
+     time at all, and the parent still drew a bar across the chart for it.
+
+     A container is therefore taken out of the middle. Its children compete in the day's pool directly, on
+     their own dates and their own Planned, exactly as if they were top-level; the container itself never
+     competes, never allots, and never draws. It remains a row in the sheet, which is the whole of what it
+     is for. PURE given `kids`; falls back to the render memo when called from a render. */
+  isContainerParent(t, kids){
+    if(!t || t.archivedAt || this.isMilestone(t)) return false;
+    const k = kids || this._kids || {};
+    const mine = k[t.id];
+    if(!mine || !mine.length) return false;
+    return !(+t.planned > 0);
+  }
+  /* Does this task's time come from a parent's budget? Only a BUDGETED parent hands time down; the child
+     of a container is top-level for every scheduling purpose. Asked of the immediate parent, which is what
+     "treated as top level" means — a container does not become a budget by having one above it. */
+  hasBudgetedParent(t, kb){
+    const p = (t && t.parentId!=null) ? kb.byId[t.parentId] : null;
+    return !!p && !this.isContainerParent(p, kb.kids);
+  }
+  /* /PP-EXT */
   depthOf(id, byId){
     let d=0, t=byId[id]; const seen={};
     while(t && t.parentId!=null && byId[t.parentId] && !seen[t.id]){ seen[t.id]=1; d++; t=byId[t.parentId]; }
@@ -4396,8 +4710,7 @@ class Component extends DCLogic {
   onListNow(t, B, now){
     if(!t || t.archivedAt) return false;
     if(this.isDaySnoozed(t, B)) return false;   /* PP-EXT (Task 19) */
-    if(t.snoozeUntil!=null && B<t.snoozeUntil) return false;
-    if(t.snoozeIndef && !this.snoozeWakeReason(t, B, now)) return false;
+    if(this.snoozeActive(t, B, now)) return false;
     /* A DATELESS task is on the list only once someone has actually put it there. `ghostSpan` anchors a
        dateless span at today, so a pure window test would call EVERY undated task a new arrival every
        day, and New would fill with work nothing surfaced — the same trap the old `startsToday` note
@@ -5422,7 +5735,10 @@ class Component extends DCLogic {
        `planned` semantics are UNCHANGED and deliberate over-subscription is still a feature — a task that
        is not finished asks the day for its whole figure exactly as before. Un-completing is symmetric for
        free: `doneOn` is derived, never stored, so clearing pct restores the demand on the next render. */
-    const cand=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id] && !(t.parentId!=null && kb.byId[t.parentId]));
+    /* PP-EXT (owner ruling 2026-09-09): a CONTAINER never competes and its children compete directly —
+       see isContainerParent. Every other family behaves exactly as before. */
+    const cand=tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B) && !map[t.id]
+      && !this.hasBudgetedParent(t, kb) && !this.isContainerParent(t, kb.kids));
     const fin=cand.filter(t=>this.doneOn(t, B));
     const acts=cand.filter(t=>!this.doneOn(t, B));
     /* /PP-EXT */
@@ -5446,7 +5762,7 @@ class Component extends DCLogic {
     /* The families the break estimate counts: everything still competing, plus everything a whole
        drag-pin has just moved out of the competition. Constant across a pin, which is the point. */
     const brkFams=acts.length + tasks.filter(t=>this.isActiveOn(t, B) && !this.isPointOn(t, B)
-      && !(t.parentId!=null && kb.byId[t.parentId]) && !this.doneOn(t, B)
+      && !this.hasBudgetedParent(t, kb) && !this.isContainerParent(t, kb.kids) && !this.doneOn(t, B)
       && !this.isFixedOn(t, B) && this.hasFullDragPinToday(t, B)).length;
     const kc=this.keepClearToday(B, tasks); /* PP-EXT: same dividers buildDayTimeline uses; zero-width ⇒ pool unchanged, kept for lockstep */
     const di=this.dayIntervals(B, this.packStart(B), fixed, kc);
@@ -5533,7 +5849,8 @@ class Component extends DCLogic {
         distribute(cid); });
       pm.allotted=Math.max(0, A-given); pm.computed=pm.allotted; /* parent keeps the remainder */
     };
-    tasks.forEach(t=>{ if(!(t.parentId!=null && kb.byId[t.parentId]) && kb.kids[t.id]) distribute(t.id); });
+    /* A container has no allotment to split, and its children were already served by the pool. */
+    tasks.forEach(t=>{ if(!this.hasBudgetedParent(t, kb) && !this.isContainerParent(t, kb.kids) && kb.kids[t.id]) distribute(t.id); });
     /* PP-EXT (04): record each partly-pinned task's fixed slice AFTER distribute, so it applies equally to
        a top-level task (share from the seam) and to a subtask (share from its parent). `allotted` stays the
        day total — never below the pinned minutes, or the rendered blocks would exceed the allotment. */
@@ -5609,9 +5926,13 @@ class Component extends DCLogic {
      the same two `clockSpanMinutes` applies. PURE. */
   anchorSpanMinutes(t){
     if(!t || !this.hasStartTime(t) || !this.hasEndTime(t)) return null;
-    if(t.start==null || t.end==null || t.end<=t.start) return null;
-    if(t.end-t.start > this.DAY) return null;
-    return Math.round((t.end-t.start)/60000);
+    /* PP-EXT (owner 2026-09-09): the ANCHOR OCCURRENCE's span. For a repeat that is `recurDurMs`, not
+       `t.end - t.start` — the latter is now the series WINDOW, and reading it here would write the whole
+       window's length into `planned` the moment a repeating appointment's clock was edited. */
+    const en=this.anchorEndMs(t);
+    if(t.start==null || en==null || en<=t.start) return null;
+    if(en-t.start > this.DAY) return null;
+    return Math.round((en-t.start)/60000);
   }
   /* /PP-EXT */
   /* PP-EXT (21): the capacity readout — "how much have I said yes to, against how much time exists".
@@ -5909,9 +6230,12 @@ class Component extends DCLogic {
           if(mode==='move'){ r.shifts.push({from:occIdx,days:deltaDays}); }
           else { let s=cur.start,en=cur.end; if(mode==='start')s=Math.min(this.addLocalDays(en,-1),shift(s)); else en=Math.max(this.addLocalDays(s,1),shift(en)); r.overrides[occIdx]={...(r.overrides[occIdx]||{}),start:s,end:en}; }
         } else {
-          if(mode==='move'){ t.start=shift(t.start); t.end=shift(t.end); }
-          else if(mode==='start'){ t.start=Math.min(this.addLocalDays(t.end,-1),shift(t.start)); }
-          else { t.end=Math.max(this.addLocalDays(t.start,1),shift(t.end)); }
+          /* PP-EXT (owner ruling 2026-09-09): "All occurrences" moves the SERIES WINDOW. Its end may be
+             null (an unbounded series), which is not a date to shift and not a bound to clamp against —
+             shifting it would produce NaN and clamping the anchor against it would invent one. */
+          if(mode==='move'){ t.start=shift(t.start); if(t.end!=null) t.end=shift(t.end); }
+          else if(mode==='start'){ t.start = t.end!=null ? Math.min(this.addLocalDays(t.end,-1),shift(t.start)) : shift(t.start); }
+          else if(t.end!=null){ t.end=Math.max(this.addLocalDays(t.start,1),shift(t.end)); }
         }
       });
     } else if(kind==='delete'){
@@ -5920,7 +6244,7 @@ class Component extends DCLogic {
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===taskId); if(!t||!t.recur) return;
         const r=t.recur; r.overrides=r.overrides||{};
         if(scope==='this'){ r.overrides[occIdx]={...(r.overrides[occIdx]||{}),deleted:true}; }
-        else if(scope==='subsequent'){ r.until=cur.start-1; }
+        else if(scope==='subsequent'){ this.setSeriesEnd(t, cur.start-1); }
       });
     }
     this.closeScope();
@@ -5982,8 +6306,18 @@ class Component extends DCLogic {
     const cur = t.recur ? this.occPct(t,this.currentOccIdx(t)) : (t.pct||0);
     this.setPct(id, cur + dir*this.PCT_STEP); }
   removeDep(toId,fromId){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===toId); if(t) t.deps=(t.deps||[]).filter(d=>this.depId(d)!==fromId); }); }
-  isScheduled(t){ return t.start!=null && t.end!=null; }
-  clearDate(id,key){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; if(key==='completion'){ t.completion=null; } else { t[key]=null; } }); }
+  /* PP-EXT (owner 2026-09-09): a REPEAT's end is the series end, and an unbounded series genuinely has
+     none — so a repeat is scheduled once it has an anchor. Without this every open-ended repeat would
+     fall into the dateless-ghost path the moment the window model took `t.end` for its own. A non-repeat
+     still needs both edges: for it, `end` is the work's own end and its absence really is missing data. */
+  isScheduled(t){
+    if(!t || t.start==null) return false;
+    /* `durMs != null`, not `> 0`: a ZERO-length occurrence is a real, stated shape — a same-day repeat
+       (start === end) has always meant one, and `effBarEnd` draws it as a full day on purpose. The case
+       that must stay a ghost is a repeat whose length was never stated at all, which is `null`. */
+    if(t.recur) return t.end!=null || t.recur.durMs!=null;
+    return t.end!=null; }
+  clearDate(id,key){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return; if(key==='completion'){ t.completion=null; } else { t[key]=null; this.reDeriveInclusion(t); /* PP-EXT (owner ruling 2026-09-09) */ } }); }
   /* PP-EXT: set a start/end instant. Counterpart to clearDate — until this existed, dates could only be
      cleared, never edited (they arrived via quick-add parsing or gcal import only). Keeps the window
      ordered: dragging one edge past the other carries the other edge with it rather than inverting
@@ -6012,6 +6346,18 @@ class Component extends DCLogic {
          plan: the span is still the plan on every path — a start edit simply no longer changes the span.
          The anchorSpanMinutes line at the end of this method therefore yields the unchanged duration for
          free, and `planned` is never written twice. */
+      /* PP-EXT (owner ruling 2026-09-09): for a REPEAT these two edges are the SERIES WINDOW, and the
+         occurrence's own length lives on the rule (`recur.durMs`). So:
+           - moving the anchor start does NOT drag `end`: the occurrence keeps its length for free,
+             because the length is no longer expressed as `end - start`;
+           - `end` is the last day the series may fire, so it is never "the other end of a booked span"
+             and none of the duration-preserving or all-day re-encoding below applies to it;
+           - the occurrence's length is edited through `setOccDuration`, not by dragging this edge.
+         The window still may not invert, which is the one clamp a repeat keeps. */
+      if(t.recur){
+        if(key==='start' && t.end!=null && t.end<t.start) t.end=null;   /* the window would be empty */
+        if(key==='end' && t.start!=null && ms!=null && ms<t.start) t.start=ms;
+      } else {
       if(key==='start' && prevStart!=null && t.end!=null && wasAppt){
         t.end += (ms - prevStart);
       }
@@ -6027,11 +6373,16 @@ class Component extends DCLogic {
         const maxStart = t.allDay ? ms-this.DAY : ms;
         if(t.start>maxStart) t.start=maxStart;
       }
+      }
       /* PP-EXT (owner 2026-08-21): occurrence overrides are indexed from the series anchor. Moving an
          anchor edge to another CALENDAR DAY changes which real occurrence every index names; retaining
          overrides would transfer an old completion (including its history reservation) onto the newly
          dated occurrence. Clock-only edits stay on the same occurrence and deliberately keep progress. */
-      if(t.recur && prevEdge!=null && t[key]!=null && this.startOfDay(prevEdge)!==this.startOfDay(t[key])){
+      if(t.recur && key==='start' && prevEdge!=null && t[key]!=null && this.startOfDay(prevEdge)!==this.startOfDay(t[key])){
+        /* PP-EXT (owner 2026-09-09): only the ANCHOR re-indexes the series. Closing or extending the
+           window end removes or admits occurrences without renaming any of them, so an override written
+           against occurrence 7 still means occurrence 7 — throwing them away there would discard real
+           completions for nothing. */
         t.recur.overrides={}; t.recur.shifts=[];
       }
       /* PP-EXT (owner 2026-08-17): a clock edit always makes the booked intra-day span the plan.
@@ -6040,9 +6391,24 @@ class Component extends DCLogic {
       const span=this.anchorSpanMinutes(t);
       if(span!=null) t.planned=span;
       /* /PP-EXT */
+      /* PP-EXT (owner ruling 2026-09-09): a direct date edit re-derives inclusion — see reDeriveInclusion. */
+      this.reDeriveInclusion(t);
     });
   }
 
+  /* PP-EXT (owner ruling 2026-09-09): how long ONE occurrence of a repeat lasts — the control the
+     window model needs, because the End column now states the series end instead. Minutes in, `durMs`
+     out, and `planned` follows the booked span exactly as a clock edit does on a plain task (the
+     2026-08-17 rule: the booked span is the plan). A non-repeat has no such field; its occurrence
+     length IS `end - start`, so this is a no-op there rather than a second way to say the same thing. */
+  setOccDuration(id, minutes){
+    const min=Math.max(0, Math.round(+minutes||0));
+    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t||!t.recur) return;
+      t.recur=Object.assign({}, t.recur, { durMs: min*60000 });
+      const span=this.anchorSpanMinutes(t);
+      if(span!=null) t.planned=span;
+    });
+  }
   dependsOn(a,b,byId){ // does a transitively depend on b (predecessor chain)
     const seen={}; const stack=[a];
     while(stack.length){ const cur=stack.pop(); if(cur===b) return true; if(seen[cur])continue; seen[cur]=1;
@@ -6203,10 +6569,51 @@ class Component extends DCLogic {
     const est=((floor-start)/this.DAY)/this.recurPeriodDays(r);
     return Math.max(0, Math.floor(est)-this.RECUR_BACKOFF);
   }
+  /* ==== PP-EXT (owner ruling 2026-09-09): A REPEAT'S start AND end ARE THE SERIES WINDOW ====
+     Owner, verbatim: *"the start and end times should be the recurrence start and end times. The details
+     of each occurrence should be stored in the detail panel and be parsed. So something like 'from A to B
+     every wednesday and every other thursday' should have A and B be the start and end columns and be the
+     recurrence start and end, and occurrences would be on wednesday and every other thursday."*
+
+     The old model read `t.end - t.start` as one OCCURRENCE's length and bounded the series with
+     `recur.until` — a field the repeat picker always wrote as `null`, that no control could set, and that
+     only quick-add's "until 30 Sep" and an imported RRULE ever filled. A task dated Sep 1 → Sep 30 and
+     then set to Daily therefore became a thirty-day bar starting every day, forever: the owner's
+     "repeating tasks ... instead extend indefinitely".
+
+       t.start      the anchor — the first day the rule may produce an occurrence
+       t.end        the last instant it may. NULL means unbounded, which is why `isScheduled` stops
+                    demanding an end from a repeat: an open-ended series is not a dateless ghost.
+       recur.durMs  how long ONE occurrence lasts.
+
+     `recur.until` survives as a legacy INPUT only (Google's RRULE, quick-add's "until" clause).
+     `normalizeTask` folds it into `t.end` on the way in, so stored data has exactly one series end and
+     nothing downstream has to ask which field is authoritative. The two accessors below are what every
+     reader uses, which is also what lets an unmigrated task keep behaving correctly. */
+  /* PURE. The occurrence length. Legacy fallback: the anchor span, which is what it used to mean. */
+  recurDurMs(t){
+    if(!t||!t.recur) return null;
+    if(t.recur.durMs!=null) return Math.max(0, t.recur.durMs);
+    return (t.start!=null && t.end!=null) ? Math.max(0, t.end-t.start) : 0;
+  }
+  /* PURE. The last instant the series may produce an occurrence, or null for unbounded. A MIGRATED rule
+     (durMs set) states it as `t.end`; a legacy one still states it as `recur.until`. */
+  seriesEndMs(t){
+    if(!t||!t.recur) return null;
+    if(t.recur.durMs!=null) return t.end!=null ? t.end : null;
+    return t.recur.until!=null ? t.recur.until : null;
+  }
+  /* Write the series end back through whichever shape the task is in, so a mutator never has to know. */
+  setSeriesEnd(t, ms){
+    if(!t||!t.recur) return;
+    if(t.recur.durMs!=null) t.end = ms;
+    else t.recur.until = ms;
+  }
   expandTask(t, horizon){
     if(!t.recur) return [{idx:0,start:t.start,end:t.end,occ:false}];
-    const r=t.recur, dur=Math.max(0,t.end-t.start), ov=r.overrides||{}, shifts=r.shifts||[];
-    const cap = r.until!=null ? Math.min(r.until, horizon) : horizon;
+    const r=t.recur, dur=this.recurDurMs(t), ov=r.overrides||{}, shifts=r.shifts||[];
+    const sEnd=this.seriesEndMs(t);
+    const cap = sEnd!=null ? Math.min(sEnd, horizon) : horizon;
     const i0 = this.recurStartIndex(t.start, r, this.startOfToday()-2*this.DAY); /* PP-EXT: skip far-past occs */
     const out=[];
     for(let i=i0;i<i0+this.RECUR_MAX;i++){
@@ -6232,7 +6639,8 @@ class Component extends DCLogic {
      occurrences into `_occById` on each structural change, to fix a case only yearly rules hit. */
   occReach(t){
     const B=this.startOfToday();
-    const horizon = (t.recur && t.recur.until!=null) ? t.recur.until : B + 366*this.DAY;
+    const sEnd = this.seriesEndMs(t);
+    const horizon = sEnd!=null ? sEnd : B + 366*this.DAY;
     return this.expandTask(t, horizon);
   }
   currentOcc(t){
@@ -6612,12 +7020,16 @@ class Component extends DCLogic {
     return Math.max(0,Math.min(100,Math.round(raw/this.PCT_STEP)*this.PCT_STEP));
   }
   /* /PP-EXT */
-  startLink(e,task,occIdx){
+  /* PP-EXT (owner report 2026-09-09): `dir` — 'succ' (the historic behaviour: drag from a bar's TRAILING
+     dot onto whatever this task must come before) or 'pred' (drag from a bar's LEADING dot onto whatever
+     must come first). Owner: *"No circle in front of a task to drag dependency arrows to."* Both dots
+     write the same edge through the same `tryAddDep`; only which end is fixed differs. */
+  startLink(e,task,occIdx,dir){
     if(e.button!==0) return; /* PP-EXT (2026-08-12): primary button only — same guard as startBarDrag */
     e.preventDefault(); e.stopPropagation();
     const r=this.bodyEl.getBoundingClientRect();
     const lp=this.linkPt(e.clientX, e.clientY, r); /* PP-EXT (V1.2 round4 fix): local px — see linkPt */
-    this.linkState={fromId:task.id, fromOcc:(task.recur?occIdx:null), x:lp.x, y:lp.y};
+    this.linkState={fromId:task.id, fromOcc:(task.recur?occIdx:null), dir:(dir==='pred'?'pred':'succ'), x:lp.x, y:lp.y};
     this.forceUpdate();
   }
   /* PP-EXT (2026-08-12): primary button only — same guard as startBarDrag. A non-primary press here
@@ -6851,7 +7263,7 @@ class Component extends DCLogic {
       if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         const on=(inclusion==='included');
         tasks.forEach(t=>{ if(!roots.has(t.id)) return;
-          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; /* PP-EXT (owner 2026-08-19) */ }
+          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null; /* PP-EXT (owner 2026-08-19) */ }
           /* PP-EXT (owner 2026-08-20): mirrors setIncludedOff, INCLUDING the removal of its auto-snooze
              tail. Missing this would leave the drag and the popover disagreeing about what "move this
              out of today" means — which is the drift the two paths were deliberately paired to avoid. */
@@ -7208,7 +7620,13 @@ class Component extends DCLogic {
     if(this.linkState){
       const idx=this.rowAtY(e.clientY);
       const vis=this._visTasks||this.state.tasks; /* PP-EXT: rows are the visible list */
-      if(idx!=null && vis[idx]){ this.tryAddDep(this.linkState.fromId, this.linkState.fromOcc, vis[idx].id); }
+      /* PP-EXT (owner report 2026-09-09): a 'pred' drag means "the task I dropped on comes FIRST", so the
+         edge is written the other way round. The dropped task's occurrence is unknown from a row hit, so
+         the link is to the whole series — which is what `tryAddDep` reads a null occurrence as. */
+      if(idx!=null && vis[idx]){
+        if(this.linkState.dir==='pred') this.tryAddDep(vis[idx].id, null, this.linkState.fromId);
+        else this.tryAddDep(this.linkState.fromId, this.linkState.fromOcc, vis[idx].id);
+      }
       this.linkState=null; this.forceUpdate();
     }
     if(this.splitDrag){ this.splitDrag=false;
@@ -7877,12 +8295,32 @@ class Component extends DCLogic {
     /* PP-EXT: `end`/`dur` carry a parsed clock range or "for <dur>"; `clock` records whether an explicit
        time was written (a bare date defaults to 9am and must NOT be treated as a real clock commitment). */
     const result = {date:null, end:null, dur:null, clock:false, recur:null, priority:null, labels:[], until:null, rest:text,
+      /* PP-EXT (owner ruling 2026-09-09): the exclusive close of a resolved DAY RANGE, recorded even when
+         a clock range also claimed `end`. Read only by `shapeRecurWindow`. */
+      windowEnd:null, dayRange:false,
+      /* PP-EXT (owner ask 2026-09-09): URLs claimed out of the text — see the URL pass below. */
+      links:[],
       /* PP-EXT (owner ruling 2026-08-21): the section `/` files into, and — when the name matched nothing
          — the name it would have to CREATE, which the parser deliberately refuses to do itself. */
       sectionId:null, sectionOffer:null};
     /* PP-EXT: the MONTHS()/WD() name tables the old hand-rolled date branches indexed are no longer
        read here — chrono owns month/weekday recognition now. Both accessors survive for other callers. */
     const eat=(re)=>claim(s.match(re),null);
+
+    /* PP-EXT (owner ask 2026-09-09): URLs are claimed FIRST, before anything else looks at the text.
+       Two reasons, and the second is the load-bearing one. A pasted link is a link — quick-adding
+       "review the deck https://docs.example.com/d/123" should file the page with the task rather than
+       leave it sitting in the title. And a URL is full of digits, colons and slashes: chrono reads
+       "/2026/01/" as a date and a port number as a clock, so a link in a title used to invent a
+       schedule. Masking it here removes a whole class of misparse. */
+    const urlRe=/\b[a-z][a-z0-9+.-]*:\/\/\S+|\bwww\.[^\s]+/gi;
+    let ux; const urlMatches=[];
+    while((ux=urlRe.exec(s))) urlMatches.push(ux);
+    for(const m of urlMatches){
+      const link=this.normalizeLink(m[0].replace(/[.,;:)\]]+$/,''));
+      if(link) result.links.push(link);
+      mark('link', m.index, m.index+m[0].length); mask(m.index, m.index+m[0].length);
+    }
 
     // priority pN / !!N
     let pm=eat(/\b!?p([1-4])\b/);
@@ -7917,7 +8355,11 @@ class Component extends DCLogic {
     // ---- repeat-until ("until/till/through <date>") ----
     let um=s.match(/\b(?:until|till|thru|through|up\s+to)\s+(.+?)\s*$/);
     if(um){ const sub=um[1].trim(); const sp=this.parseDateText(sub, (baseMs!=null?baseMs:Date.now())); if(sp.date!=null){
-      result.until=sp.date;
+      /* PP-EXT (owner ruling 2026-09-09): the series end is an EXCLUSIVE instant, the same convention the
+         window's `end` uses everywhere else — `expandTask` caps on occurrence STARTS, so storing "until 30
+         Sep" as 30 Sep 00:00 would drop every occurrence on the day the user named. A clock the user
+         actually typed is kept verbatim; only a bare day is pushed to the next midnight. */
+      result.until = sp.clock ? sp.date : (this.startOfDay(sp.date)+this.DAY);
       const txt=um[0].trim(), leading=um[0].indexOf(txt);
       claim({0:txt,index:um.index+leading},'until');
     } }
@@ -7961,7 +8403,7 @@ class Component extends DCLogic {
        roll-forward). This replaces the hand-rolled today/weekday/numeric-date/relative-offset/
        bare-clock branches, whose substring matching invented dates out of ordinary words
        ("call friends" → Friday, "monitor server" → Monday) — the corruption bug class. */
-    let clock=null, date=null, chronoEnd=null, dateSpanText=null, dateSpanIndex=-1, softHour=null;
+    let clock=null, date=null, chronoEnd=null, dateSpanText=null, dateSpanIndex=-1, softHour=null, chronoEndHour=null;
     const eng = (typeof window!=='undefined' && window.chrono) ? window.chrono
               : (typeof chrono!=='undefined' ? chrono : null);
     if(range){ clock={h:range.sh,m:range.sm}; } /* PP-EXT: a range already carries the start clock */
@@ -8029,6 +8471,12 @@ class Component extends DCLogic {
           }
         }catch(e){}
         if(r0.end) chronoEnd = r0.end.date();
+        /* PP-EXT (owner ruling 2026-09-09): "from 15 Jun to 30 Sep, 9:00am" is ONE chrono span whose
+           certain hour lands on the END. For a plain task that reading is right; for a rule with a day
+           range the hour is the occurrence's time of day, and the window's close is still a whole day.
+           Recorded here because `r0` is the only place the certainty is visible. */
+        try{ if(r0.end && r0.end.isCertain('hour') && !r0.start.isCertain('hour'))
+          chronoEndHour={ h:r0.end.get('hour'), m:r0.end.get('minute')||0 }; }catch(e){}
         dateSpanText = r0.text;
         dateSpanIndex = Number.isInteger(r0.index) ? r0.index : s.indexOf(r0.text);
         if(dateSpanIndex>=0){
@@ -8072,17 +8520,43 @@ class Component extends DCLogic {
        containing `day`/`week`/`month`/`hour`, so `plan my day today` anchored at the current instant and
        became a keep-clear Point reserving no minutes while `plan today` scheduled normally. That is the
        same whole-string mis-binding the `dueCue` guard above already fixed once. */
-    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else date.setHours(0,0,0,0); result.date=date.getTime(); }
+    /* PP-EXT (owner ruling 2026-09-09): a bare clock left over beside a RULE and a DAY RANGE is the
+       occurrence's time of day. chrono binds one span at a time, so in "every weekday, from 15 Jun to 30
+       Sep, 9:00am" it claims the range and leaves the clock stranded — the sentence the When line prints
+       for exactly this shape then failed to read back as itself, silently dropping the time. Narrow on
+       purpose: it needs a rule, a real multi-day range, and no clock chrono already resolved. */
+    const occClock=(()=>{
+      if(!result.recur || clock || !chronoEnd || date==null) return null;
+      if(this.startOfDay(chronoEnd.getTime())===this.startOfDay(date.getTime())) return null;
+      const cm=s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+      if(cm){ let hh=parseInt(cm[1],10)%12; if(cm[3]==='pm') hh+=12;
+        claim(cm,'time');
+        return {h:hh, m:cm[2]?parseInt(cm[2],10):0}; }
+      /* chrono usually swallows the clock into the RANGE's own span, where only the end carries it. */
+      return chronoEndHour;
+    })();
+    if(date){ if(clock) date.setHours(clock.h,clock.m,0,0); else if(occClock) date.setHours(occClock.h,occClock.m,0,0); else if(softHour) date.setHours(softHour.h,softHour.m,0,0); else date.setHours(0,0,0,0); result.date=date.getTime(); }
     /* PP-EXT: resolve the end instant once the start is known. A range that ends at/before its start
        crosses midnight ("23:00-01:00") and rolls to the next day. */
     if(result.date!=null){
+      /* PP-EXT (owner 2026-09-09, second pass): the DAY-RANGE test is hoisted ABOVE the `durPh` branch.
+         "every wednesday from 1 Sep to 30 Sep for 45m" states a window AND an occurrence length, and the
+         old ordering let the duration claim the end — so the window silently became a 45-minute one and
+         the series ran on forever. A duration and a window are different facts about the same task and
+         both survive now; `dur` is only discarded when the range is the ONLY thing that was typed. */
+      /* `windowEnd` is the day range's exclusive close, and it is recorded whenever chrono resolved an end
+         on a LATER calendar day — including alongside a typed clock, which the branch chain below cannot
+         express because a clock range claims `end` for the occurrence. Only the repeat shaping reads it
+         (`shapeRecurWindow`), so a plain task's behaviour is byte-identical; for a rule it is what lets
+         "every wednesday from 1 Sep to 30 Sep, 9–10am" state a window AND an occurrence at once. */
+      const chronoLaterDay = !!chronoEnd
+        && this.startOfDay(chronoEnd.getTime())!==this.startOfDay(result.date);
+      if(chronoLaterDay) result.windowEnd = this.startOfDay(chronoEnd.getTime())+this.DAY;
+      const chronoDayRange = chronoLaterDay && !clock;
       if(range){ const e=new Date(result.date); e.setHours(range.eh,range.em,0,0);
         if(e.getTime()<=result.date) e.setDate(e.getDate()+1);
         result.end=e.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
-      else if(durPh){ result.end=result.date+durPh.min*60000; }
-      /* PP-EXT: chrono resolved a clock span itself (e.g. "9-10am", "from 2 to 4pm" forms the
-         pre-pass range matcher does not claim). */
-      else if(chronoEnd){
+      else if(chronoDayRange){
         /* PP-EXT (owner report 2026-09-09: *"I wrote 'from sept 9 to sept 12' and it interpreted it as a
            start date and a 72 hour duration instead of a start date and an end date"*). Two different
            shapes arrive here. A CLOCK span ("9-10am") is a duration on one day, and measuring it is
@@ -8091,14 +8565,16 @@ class Component extends DCLogic {
            `hasSpan` gate requires a typed clock), so the owner was left with a start date and a
            three-day estimate. The discriminator is the one chrono already gives us: no certain hour,
            and an end that lands on a LATER calendar day. `dayRange` carries the answer forward because
-           the shaping block below rewrites `result.end` from scratch. */
-        const sameDay = this.startOfDay(chronoEnd.getTime())===this.startOfDay(result.date);
-        if(!clock && !sameDay){
-          /* An all-day end is the EXCLUSIVE next-day midnight, the same convention `setDate` and the
-             gcal all-day import use, so the last day COVERED is the one the user named. */
-          result.end=this.startOfDay(chronoEnd.getTime())+this.DAY; result.dur=null; result.dayRange=true;
-        } else { result.end=chronoEnd.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
+           the shaping block below rewrites `result.end` from scratch.
+           An all-day end is the EXCLUSIVE next-day midnight, the same convention `setDate` and the gcal
+           all-day import use, so the last day COVERED is the one the user named. */
+        result.end=result.windowEnd; result.dayRange=true;
+        if(!durPh) result.dur=null;   /* a typed "for 45m" is an occurrence length, not the window */
       }
+      else if(durPh){ result.end=result.date+durPh.min*60000; }
+      /* PP-EXT: chrono resolved a clock span itself (e.g. "9-10am", "from 2 to 4pm" forms the
+         pre-pass range matcher does not claim). */
+      else if(chronoEnd){ result.end=chronoEnd.getTime(); result.dur=Math.round((result.end-result.date)/60000); }
     }
     /* ---- PP-EXT V1.1B: shape the temporal anchors from the found day + cues + clock ----
        The raw `date`/`dur`/`clock` above stay untouched (datePick + the quick-add preview read them);
@@ -8131,8 +8607,13 @@ class Component extends DCLogic {
          and never consults the start/due cue — "from A to B" and "A to B" mean the same window, and there
          is no missing endpoint for a cue to supply. Both clock flags stay null: no time was typed, so
          `hasStartTime`/`hasEndTime` keep deriving "untimed" from the midnight boundaries. */
-      result.start=this.startOfDay(result.date); result.end=dayRangeEnd;
-      result.startClock=null; result.endClock=null; result.dur=null;
+      /* PP-EXT (owner ruling 2026-09-09): an occurrence clock beside a day range keeps the anchor's time
+         of day — the window is still made of days, but the rule fires AT that hour. Without a clock the
+         edges stay on their midnight boundaries so `hasStartTime`/`hasEndTime` keep deriving "untimed". */
+      result.start=occClock!=null ? result.date : this.startOfDay(result.date);
+      result.end=dayRangeEnd;
+      result.startClock=occClock!=null ? true : null; result.endClock=null;
+      if(!durPh) result.dur=null;   /* PP-EXT: "…from 1 Sep to 30 Sep for 45m" keeps its 45 minutes */
     } else if(hasSpan){                          // R3 / R9 — fixed clock block, both edges clocked
       /* PP-EXT (owner ask 2026-08-25): a DEADLINE cue plus a duration runs BACK from the clock, never
          past it. "write by 9pm for 2h" fell straight into this branch and emitted 9pm → 11pm — a task
@@ -8291,6 +8772,8 @@ class Component extends DCLogic {
     const out={name,type:p.mile?'Milestone':'Proportional',start:p.start,end:p.end,
       startClock:p.startClock,endClock:p.endClock,planned:p.dur==null?null:p.dur,
       priority:p.priority||4,labels:(p.labels||[]).slice(),recur,
+      /* PP-EXT (owner ask 2026-09-09): links ride the same single binding as tags. */
+      links:(p.links||[]).slice(),
       /* PP-EXT (owner ruling 2026-08-21): one field, never a list — `/` is exclusive assignment. Null
          means "the text named no section", which callers must read as "leave it alone", NOT as
          "move this task to No section". */
@@ -8307,6 +8790,43 @@ class Component extends DCLogic {
     const rec=this.reconcileWhen(null,out,p);
     out.start=rec.start; out.end=rec.end; out.startClock=rec.startClock; out.endClock=rec.endClock;
     out.planned=rec.planned;
+    return this.shapeRecurWindow(out, p);
+  }
+  /* PP-EXT (owner ruling 2026-09-09): bind a PARSED repeat to the series-window model. PURE.
+     Owner, verbatim: *"'from A to B every wednesday and every other thursday' should have A and B be the
+     start and end columns and be the recurrence start and end, and occurrences would be on wednesday and
+     every other thursday."*
+
+     Everything above this point still shapes the two edges as ONE dated span, which is the right reading
+     for a non-repeating task and the wrong one for a rule. Here they are re-read as the series window and
+     the occurrence length is lifted onto `recur.durMs`:
+
+       • a typed CLOCK RANGE ("daily 9–10am") is one occurrence, so the span becomes `durMs` and the
+         window is left open — the anchor keeps its clock, the end goes back to null;
+       • a typed DAY RANGE ("every wednesday from 1 Sep to 30 Sep") is the window itself, and the
+         occurrence is whatever length the text gave, else day-granular;
+       • an `until` clause is the window's end and nothing else.
+
+     `durMs` is written UNCONDITIONALLY, including as 0. That is what stops `normalizeTask`'s legacy
+     conversion from firing on freshly parsed input and re-reading the window as one long occurrence —
+     the exact defect this model exists to remove, arriving through the front door instead. */
+  shapeRecurWindow(out, p){
+    /* Gated on the TEXT having named a rule, not merely on the result carrying one. `reconcileWhen`
+       RETAINS a repeat the title never mentioned ("a title that names no repeat is not an instruction to
+       stop repeating"), and re-shaping there would read a window the text said nothing about as absent
+       and erase the series end. Only a rule the user just typed is re-read. */
+    if(!out || !out.recur || !p || !p.recur) return out;
+    const clockSpan = (out.start!=null && out.end!=null && out.startClock && out.endClock)
+      ? Math.max(0, out.end-out.start) : null;
+    const occMs = clockSpan!=null ? clockSpan : ((p&&p.dur!=null) ? p.dur*60000 : 0);
+    const winEnd = (p&&p.windowEnd!=null) ? p.windowEnd
+                 : (out.recur.until!=null ? out.recur.until : null);
+    out.recur = Object.assign({}, out.recur, {durMs:occMs, until:null});
+    out.end = winEnd;
+    if(out.end!=null && out.start!=null && out.end<out.start) out.end=null;
+    /* The window's edges are days, not clocks: only the anchor's own clock survives, and only when the
+       text actually typed one. An `endClock` here would claim the SERIES ends at a time of day. */
+    out.endClock = null;
     return out;
   }
   /* /PP-EXT */
@@ -8478,7 +8998,7 @@ class Component extends DCLogic {
       if(!isFinite(bmin)){ bmin=todayStart; bmax=bmin+42*this.DAY; }
       let horizon=bmax;
       if(tasks.some(t=>t.recur)){
-        let uMax=-Infinity; tasks.forEach(t=>{ if(t.recur&&t.recur.until!=null) uMax=Math.max(uMax,t.recur.until); });
+        let uMax=-Infinity; tasks.forEach(t=>{ const e=this.seriesEndMs(t); if(e!=null) uMax=Math.max(uMax,e); });
         horizon=Math.max(bmax+75*this.DAY, isFinite(uMax)?uMax:-Infinity);
       }
       this._horizon=horizon;
@@ -8931,6 +9451,14 @@ class Component extends DCLogic {
           const flag=dp.key==='start'?'startClock':'endClock';
           task[flag]=p.clock?(this.hasClock(edgeMs)?null:true):null;
           if(!p.clock) task[dp.key]=dp.key==='end'&&task.allDay?edgeMs:this.startOfDay(edgeMs);
+          /* PP-EXT (owner ruling 2026-09-09): a REPEAT's two edges are the series window, so none of the
+             duration-carrying or all-day re-encoding below applies to them — the same branch `setDate`
+             takes, and stated here rather than shared because these two paths write different drafts.
+             The window still may not invert, which is the one clamp a repeat keeps. */
+          if(task.recur){
+            if(dp.key==='start' && task.end!=null && task.end<task.start) task.end=null;
+            if(dp.key==='end' && task.start!=null && task.end!=null && task.end<task.start) task.start=task.end;
+          } else {
           if(dp.key==='start' && prevStart!=null && task.end!=null && wasAppt){
             task.end += (task.start - prevStart);   /* PP-EXT (owner 2026-08-19): the span is preserved */
           }
@@ -8942,9 +9470,12 @@ class Component extends DCLogic {
             const maxStart=task.allDay?task.end-this.DAY:task.end;
             if(task.start>maxStart) task.start=maxStart;
           }
+          }
         }
         const span=this.anchorSpanMinutes(task);
         if(p.dur!=null) task.planned=p.dur; else if(span!=null) task.planned=span;
+        /* PP-EXT (owner ruling 2026-09-09): the picker is a direct date edit like any other. */
+        this.reDeriveInclusion(task);
       });
       this.setState({datePick:null});
       return;
@@ -9190,7 +9721,13 @@ class Component extends DCLogic {
     if(!t) return {ok:false, why:''};
     const what = key==='start' ? 'start' : 'due';
     if(t[key]==null) return {ok:false, why:'The '+what+' is already a ghost'};
-    if(t.recur) return {ok:false, why:'A repeating task needs a real '+what+' to expand from — remove the repeat first'};
+    /* PP-EXT (owner ruling 2026-09-09): a repeat's edges are the SERIES WINDOW. Its START is the anchor —
+       every occurrence index is measured from it and the rule cannot expand without one, so that edge is
+       still refused. Its END is only the last day the series may fire, and clearing it is a real, useful
+       edit: it unbounds the series. Refusing it was correct when `end` was the anchor occurrence's other
+       edge; under the window model it would forbid the one thing the End column is now for. */
+    if(t.recur && key==='start') return {ok:false, why:'A repeating task needs a real start to expand from — remove the repeat first'};
+    if(t.recur) return {ok:true, why:'Un-set the repeat end → the series runs on with no end date'};
     return {ok:true, why:'Un-set the '+what+' → the edge goes back to a derived ghost'};
   }
   /* Which RECUR_PRESETS row is currently active. PURE. Returns null for a parser-only rule the presets
@@ -9225,9 +9762,36 @@ class Component extends DCLogic {
            midnight boundary, and rounding those would push the span a whole day out. */
         t.end=this.hasClock(g.end) ? this.startOfDay(g.end)+this.DAY : g.end; }
       const same = !!t.recur && t.recur.kind===p.recur.kind && (t.recur.n||1)===(p.recur.n||1);
-      t.recur=Object.assign({}, p.recur, {until: same ? (t.recur.until||null) : null,
+      /* PP-EXT (owner ruling 2026-09-09): the picker now has to say which of the two things the task's
+         existing span MEANT, because in the window model they are different facts. The span answers it:
+           span > one period  → the dates are a WINDOW ("Sep 1 to Sep 30", then Daily). Keep them, and
+                                give the occurrence its own length.
+           span <= one period → the dates are the OCCURRENCE ("9–10am", then Daily). Move the length onto
+                                the rule and open the window, because no end was ever stated.
+         This is the whole of the owner's "extend indefinitely" report: the first case used to keep a
+         thirty-day occurrence AND an unbounded series, which is neither reading. */
+      const prevDur = t.recur ? this.recurDurMs(t) : null;
+      const prevEnd = t.recur ? this.seriesEndMs(t) : null;
+      const span = (t.start!=null && t.end!=null) ? Math.max(0, t.end-t.start) : 0;
+      const period = this.recurPeriodDays(p.recur)*this.DAY;
+      const windowed = !t.recur && span > period;
+      t.recur=Object.assign({}, p.recur, {
+        durMs: same ? prevDur : (t.recur ? prevDur : (windowed ? this.defaultOccDurMs(t, p.recur) : span)),
+        until: null,
         shifts: same ? (t.recur.shifts||[]) : [], overrides: same ? (t.recur.overrides||{}) : {}});
+      if(t.recur.durMs!=null && !windowed && !same && prevEnd==null && span>0 && span<=period) t.end=null;
+      else if(same) t.end = prevEnd;
     });
+  }
+  /* PURE (owner 2026-09-09): how long ONE occurrence lasts when the user's dates were a window and said
+     nothing about the occurrence. A written clock span is the best answer the data contains; otherwise a
+     day, because a windowed repeat is day-granular ("every Wednesday from A to B") until the detail panel
+     says otherwise. Never longer than the rule's own period — two occurrences must not overlap. */
+  defaultOccDurMs(t, r){
+    const period=this.recurPeriodDays(r)*this.DAY;
+    const clock=this.clockSpanMinutes(t);
+    if(clock!=null && clock>0) return Math.min(clock*60000, period);
+    return Math.min(this.DAY, period);
   }
   /* /PP-EXT */
 
@@ -9516,8 +10080,12 @@ class Component extends DCLogic {
      deletes DELETE the event and leave a tombstone so the next poll can't resurrect the task.
      Everything below the fetch layer is PURE and unit-tested (tests/twoway.test.js). */
   /* Inverse of rruleToRecur. Covers every local kind incl. quick-add's weekday/monthDay. UNTIL is UTC. */
-  recurToRRule(recur){
+  /* PP-EXT (owner 2026-09-09): the series end is the TASK's, not the rule's — `recur.until` is a legacy
+     input that `normalizeTask` folds into `t.end`. Callers pass `seriesEndMs(t)`; the `recur.until`
+     fallback keeps a rule that has not been through normalize (a fixture, an in-flight import) correct. */
+  recurToRRule(recur, seriesEnd){
     if(!recur) return null;
+    const until = seriesEnd!==undefined ? seriesEnd : (recur.until!=null ? recur.until : null);
     const WD={sun:'SU',mon:'MO',tue:'TU',wed:'WE',thu:'TH',fri:'FR',sat:'SA'};
     let s;
     switch(recur.kind){
@@ -9531,7 +10099,7 @@ class Component extends DCLogic {
       case 'year': s='FREQ=YEARLY'+((recur.n||1)>1?';INTERVAL='+recur.n:''); break;
       default: return null;
     }
-    if(recur.until!=null){ const d=new Date(recur.until); const p=n=>String(n).padStart(2,'0');
+    if(until!=null){ const d=new Date(until); const p=n=>String(n).padStart(2,'0');
       s+=';UNTIL='+d.getUTCFullYear()+p(d.getUTCMonth()+1)+p(d.getUTCDate())+'T'+p(d.getUTCHours())+p(d.getUTCMinutes())+p(d.getUTCSeconds())+'Z'; }
     return 'RRULE:'+s;
   }
@@ -9565,12 +10133,15 @@ class Component extends DCLogic {
   eventBodyOf(t, includeRecurrence){
     const body=Object.assign({summary:t.name||'(untitled)'}, this.timesBodyOf(t.start, t.end, !!t.allDay));
     body.description=this.descToText(t.description); /* PP-EXT: push description outbound as plain text (import still never overwrites the local rich copy) */
-    if(includeRecurrence && t.recur){ const r=this.recurToRRule(t.recur); if(r) body.recurrence=[r]; }
+    if(includeRecurrence && t.recur){ const r=this.recurToRRule(t.recur, this.seriesEndMs(t)); if(r) body.recurrence=[r]; }
     return body;
   }
   /* The sync fingerprint: these fields round-trip outbound (planned/goal/pins stay local; description pushes
      out but import never overwrites the local rich-text copy). */
-  recurRuleKey(r){ return r?JSON.stringify({k:r.kind,n:r.n||1,d:r.days||null,day:r.day!=null?r.day:null,u:r.until!=null?r.until:null}):null; }
+  /* PP-EXT (owner 2026-09-09): `durMs` joins the key — it is now what decides how long each occurrence
+     is, so two rules that differ only in it are genuinely different events. `u` stays for a rule that has
+     not been normalized; for a migrated one the series end rides in `syncFp`'s `e` (the task's end). */
+  recurRuleKey(r){ return r?JSON.stringify({k:r.kind,n:r.n||1,d:r.days||null,day:r.day!=null?r.day:null,u:r.until!=null?r.until:null,dur:r.durMs!=null?r.durMs:null}):null; }
   syncFp(t){ return JSON.stringify({n:t.name,s:t.start,e:t.end,a:!!t.allDay,r:this.recurRuleKey(t.recur),d:this.descToText(t.description)}); }
   /* PP-EXT (owner report 2026-08-19: "Changing the start and end times also did not update my gcal task as
      intended."): the ONE place that decides whose copy of a linked task wins a pull. Three guards, and the
@@ -12051,7 +12622,7 @@ class Component extends DCLogic {
     const kb=this.buildKids(TL);
     const flex=this.orderingSeam(TL.filter(t=>this.isActiveOn(t, B) && !this.isFixedOn(t, B)
         && !this.hasFullDragPinToday(t, B) /* PP-EXT: WHOLE-pinned tasks are placed as fixed blocks, not packed (04: a partly-pinned task still packs its remainder) */
-        && !(t.parentId!=null && kb.byId[t.parentId])
+        && !this.hasBudgetedParent(t, kb) && !this.isContainerParent(t, kb.kids)
         && ((kb.kids[t.id]&&kb.kids[t.id].length) ? this.famAllot(t.id,kb.kids,kb.byId,B)>0 : this.flexAllot(t.id)>0))
       .map(t=>{
         const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.flexAllot(t.id);
@@ -13937,6 +14508,25 @@ class Component extends DCLogic {
      mysteriously skips a Thursday.
      Only days from today ONWARD are shown: a skipped day in the past is history, not a decision you can
      still change, and listing them would grow without bound. */
+  /* PP-EXT (owner ask 2026-09-09): the row's link chip. One click opens the whole set — the point of
+     filing pages against a task is that starting the work is one gesture, not six. It states the count
+     rather than the pages: the row has no width for URLs, and the detail panel is where they are read
+     and edited. `stopPropagation` on both events keeps a click here from also opening the detail sheet,
+     the same guard every other in-row control carries. */
+  taskLinkChip(t){
+    const h=React.createElement;
+    const links=this.taskLinks(t);
+    if(!links.length) return null;
+    const only=links.length===1;
+    return h('span',{'data-task-links':String(links.length),
+      onMouseDown:e=>e.stopPropagation(),
+      onClick:e=>{ e.stopPropagation(); this.openTaskLinks(t.id); },
+      title:(only?'Open ':'Open all '+links.length+' links: ')+links.map(l=>l.label).join(', '),
+      style:{display:'inline-flex',alignItems:'center',height:'18px',padding:'0 5px',cursor:'pointer',
+        fontSize:'9.5px',color:'var(--tag-text)',background:'var(--tag-bg)',
+        border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',whiteSpace:'nowrap',flex:'none'}},
+      only ? ('🔗 '+links[0].label) : ('🔗 '+links.length));
+  }
   taskSnoozeDayChips(t){
     const h=React.createElement;
     const today=this.ymdOf(this.startOfToday());
@@ -15521,22 +16111,41 @@ class Component extends DCLogic {
       /* PP-EXT: enlarged triangle so the collapse caret is clearly distinct from the ☰ description toggle */
       style:{cursor:'pointer',marginRight:'4px',fontSize:'13px',lineHeight:1,color:'var(--text-mut2)',flex:'none',userSelect:'none'}},
       collapsedHere?'▸':'▾') : null;
+    /* PP-EXT (owner report 2026-09-09): a row with no children RESERVES the caret's column instead of
+       closing it up. Without this the indent lied: a leaf one level deeper than a parent started only
+       ~4px further right, because the missing caret ate most of the step. Names now line up per level,
+       which is the other half of "clearly indented". */
+    const caretSlot = caret || h('span',{'data-caret-slot':'1','aria-hidden':'true',
+      style:{display:'inline-block',width:'13px',marginRight:'4px',flex:'none'}});
     const kidBadge = (kidsN&&collapsedHere)? h('span',{style:{fontSize:'9.5px',color:'var(--text-mut)',background:'var(--chip-bg)',
       border:'1px solid var(--divider)',borderRadius:'var(--r-1)'/* PP-EXT B3 round2 */,padding:'0 var(--sp-0)'/* PP-EXT B3 round2 */,marginLeft:'5px',whiteSpace:'nowrap'}},'+'+kidsN) : null;
     /* PP-EXT V2.11: shared builder — see taskInlineTags. */
     const snoozeDayChips=this.taskSnoozeDayChips(t);   /* PP-EXT (Task 19) */
     const inlineTags=this.taskInlineTags(t);
-    const nameBlock=h('div',{style:{display:'flex',flexDirection:'column',justifyContent:'center',gap:'1px',minWidth:0,width:'100%',
-        paddingLeft:(depth*16)+'px' /* PP-EXT: subtask indent */}},
+    /* PP-EXT (owner report 2026-09-09): one vertical guide per ANCESTOR level, drawn through the whole
+       row height. Whitespace alone states depth only by comparison with the row above; a rule states
+       containment on the row you are looking at, and the second row of chips lines up with it because
+       the guide spans the block rather than sitting inside the name line.
+       `aria-hidden` and `pointerEvents:none`: it is a drawing of the structure the DOM already carries,
+       so it must not be read out and must not eat a click meant for the row. */
+    const indentGuides=Array.from({length:depth},(_,k)=>h('span',{key:'ig'+k,'aria-hidden':'true',
+      'data-indent-guide':String(k),
+      style:{position:'absolute',left:(k*this.SUBTASK_INDENT_PX+7)+'px',top:0,bottom:0,width:'1px',
+        background:'var(--divider)',pointerEvents:'none'}}));
+    const nameBlock=h('div',{'data-row-depth':String(depth),
+      style:{position:'relative',display:'flex',flexDirection:'column',justifyContent:'center',gap:'1px',minWidth:0,width:'100%',
+        paddingLeft:(depth*this.SUBTASK_INDENT_PX)+'px' /* PP-EXT: subtask indent */}},
+      ...indentGuides,
       h('div',{style:{fontSize:'13px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
-        caret, /* PP-EXT */
+        caretSlot, /* PP-EXT */
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
         h('b',{'data-task-name':'1',style:{fontWeight:'inherit'}},t.name), kidBadge /* PP-EXT */),
       h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0,height:'18px',overflow:'hidden'}},
         dueRecurChip,
         snoozeDayChips,   /* PP-EXT (Task 19) */
+        this.taskLinkChip(t),   /* PP-EXT (owner ask 2026-09-09) */
         inlineTags,
         ...depChips)
     );
@@ -15764,6 +16373,9 @@ class Component extends DCLogic {
     const wx0=this.ganttDayAt(tl.start,vd0), wx1=this.ganttDayAt(tl.start,vd1);
     const todayStart=this.startOfToday();
     tasks.forEach((t,i)=>{
+      /* PP-EXT (owner ruling 2026-09-09): a container parent draws NOTHING — its bar would restate the
+         span its children already draw, which is the redundancy the owner asked to be rid of. */
+      if(this.isContainerParent(t)) return;
       let occs=this._occById[t.id]||[];
       if(t.recur) occs=occs.filter(o=>o.start>=todayStart && this.occPct(t,o.idx)<100); /* PP-EXT: hide past + completed so the next instance leads */
       if(t.recur) occs=this.mergeConsecutiveOccurrenceDays(occs);
@@ -15893,7 +16505,12 @@ class Component extends DCLogic {
     /* PP-EXT (Chain 6 block 43): dates, not instants, own horizontal bar geometry. All-day ends
        are exclusive in storage, hence `-1`; timed ends are inclusive on their calendar day. During
        a drag, the grabbed missing edge becomes finite in the preview, as it will on commit. */
-    let openStart=t.start==null, openEnd=t.end==null;
+    /* PP-EXT (owner ruling 2026-09-09): "does this bar have an open END?" is a question about the
+       OCCURRENCE being drawn, not about the series window. A repeat's `t.end` is now the last day the
+       series may fire and is null whenever it is unbounded — reading it here drew every occurrence of
+       every ordinary daily repeat with a ghost end. `anchorEndMs` is null only for the shape that really
+       has no end: a repeating Point. */
+    let openStart=t.start==null, openEnd = t.recur ? (this.anchorEndMs(t)==null) : (t.end==null);
     if(dragging || (this.dragState&&this.dragState.id===t.id&&!this.dragState.recurring)){
       const m=this.dragState&&this.dragState.mode;
       if(m==='start'||m==='move') openStart=false;
@@ -15965,12 +16582,34 @@ class Component extends DCLogic {
     /* PP-EXT (V1.5, HIT_MIN_PX tenet): the 11px circle is now just the GLYPH, drawn inside a
        transparent HIT_MIN_PX box. `left:100%` starts the box exactly at the bar's right edge, so it
        still clears the 7px resize grip (the C3 rule) while being >2× easier to hit. */
-    const linkDot=h('div',Object.assign({onMouseDown:e=>this.startLink(e,t,o.idx),title:'Drag to a task to link as predecessor'+occLbl,
+    /* PP-EXT (owner report 2026-09-09): *"No circle in front of a task to drag dependency arrows to."*
+       There is one now, and it does two jobs at once. It is a HANDLE — drag from it to say "that task
+       comes first", the mirror of the trailing dot — and it is the visible AIM POINT during a drag from
+       somewhere else, which is what the report is really about: the drop always worked (the whole row is
+       the target), but nothing on screen said where to let go.
+       The 2026-07-26 note that "there is exactly one link handle" is superseded, and the objection it
+       recorded is honoured rather than reversed: the owner's complaint then was a circle drawn INSIDE the
+       bar. This one is fully outside the leading edge, clear of the resize grip, exactly like its twin. */
+    const linking=!!this.linkState;
+    const linkFromMe=linking && this.linkState.fromId===t.id;
+    /* Show the end you can act on: while dragging a successor link, every OTHER task's leading dot is a
+       target; while dragging a predecessor link, every other task's trailing dot is. */
+    const outOn = linkOn || (linking && (linkFromMe ? this.linkState.dir==='succ' : this.linkState.dir==='pred'));
+    const inOn  = linkOn || (linking && (linkFromMe ? this.linkState.dir==='pred' : this.linkState.dir==='succ'));
+    const dotGlyph=(side)=>h('div',{style:{position:'absolute',[side]:'5px',top:'50%',transform:'translateY(-50%)',
+      width:'11px',height:'11px',borderRadius:'50%',background:'var(--bg)',
+      border:'2px solid '+this._accent,pointerEvents:'none'}});
+    const linkDot=h('div',Object.assign({onMouseDown:e=>this.startLink(e,t,o.idx,'succ'),title:'Drag to a task that comes AFTER this one'+occLbl,
       style:{position:'absolute',left:'100%',top:'50%',transform:'translateY(-50%)',
         width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',cursor:'crosshair',zIndex:6,
-        pointerEvents:linkOn?'auto':'none',opacity:linkOn?1:0}},{key:'lnk'}),
-      h('div',{style:{position:'absolute',left:'5px',top:'50%',transform:'translateY(-50%)',width:'11px',height:'11px',
-        borderRadius:'50%',background:'var(--bg)',border:'2px solid '+this._accent,pointerEvents:'none'}}));
+        pointerEvents:outOn?'auto':'none',opacity:outOn?1:0}},{key:'lnk'}),
+      dotGlyph('left'));
+    const linkDotIn=h('div',Object.assign({onMouseDown:e=>this.startLink(e,t,o.idx,'pred'),
+      'data-dep-dot-in':t.id, title:'Drag to a task that must come BEFORE this one'+occLbl,
+      style:{position:'absolute',right:'100%',top:'50%',transform:'translateY(-50%)',
+        width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',cursor:'crosshair',zIndex:6,
+        pointerEvents:inOn?'auto':'none',opacity:inOn?1:0}},{key:'lnkin'}),
+      dotGlyph('right'));
 
     if(this.isMilestone(t)){
       const sz=this.barH;
@@ -16048,7 +16687,7 @@ class Component extends DCLogic {
         top:this.barH+'px',height:0,borderTop:'2px dashed var(--warn)',pointerEvents:'none',zIndex:6}}):null,
       displaced?h('div',{key:'dispg',style:{position:'absolute',left:'-9px',top:'50%',transform:'translateY(-50%)',
         fontSize:'10px',lineHeight:1,color:'var(--warn)',pointerEvents:'none',zIndex:6}},'»'):null,
-      grip('l'), grip('r'), linkDot,
+      grip('l'), grip('r'), linkDot, linkDotIn,
       /* PP-EXT (V1.5, owner 2026-07-26): the %-done handle moved OUT of the bar and UNDER it. It used to
          be a ringed disc sitting ON the fill at the progress boundary — at low % that put it near the
          bar's left edge, where it read as a second "dependency circle" mirroring the link dot on the
@@ -16121,36 +16760,104 @@ class Component extends DCLogic {
     );
   }
 
+  /* ==== PP-EXT (owner report 2026-09-09): orthogonal dependency routing. PURE, hence testable. ====
+     `arrowCorridorX` picks the x the vertical leg runs down. Forward edges use the midpoint of the gap,
+     which is what makes the horizontal runs on both ends visible and roughly equal — the "start from the
+     side, point to the side, then zig-zag" the owner asked for. `lane` shifts that corridor so parallel
+     edges do not share it. When the two bars are too close (or overlap) there is no gap to run down, and
+     the routing has to leave to the right and come back: `arrowPath` handles both with one signature. */
+  arrowCorridorX(sx, tx, lane){
+    const stub=this.ARROW_STUB_PX, L=lane||0;
+    const lo=sx+stub, hi=tx-stub;
+    if(hi<=lo) return sx+stub+L;                       /* no gap — the backward route uses this as its own stub */
+    return Math.max(lo, Math.min(hi, (sx+tx)/2 + L));
+  }
+  arrowPath(sx, sy, tx, ty, lane, rowH){
+    const stub=this.ARROW_STUB_PX, L=lane||0;
+    const head=6;                                       /* stop short so the marker tip lands ON the edge */
+    const ex=tx-head;
+    if(tx-stub > sx+stub){
+      const mx=this.arrowCorridorX(sx,tx,L);
+      /* Same row and a clear gap: one straight run, no corners to draw. */
+      if(Math.abs(ty-sy)<0.5) return 'M'+sx+','+sy+' H'+ex;
+      return 'M'+sx+','+sy+' H'+mx+' V'+ty+' H'+ex;
+    }
+    /* The target starts at or before the predecessor's end: leave right, cross in the channel between the
+       two rows, come back left, then drop in. The channel is offset by the lane too, so two edges doubling
+       back over the same pair of rows do not lie on top of each other. */
+    const rh=rowH||this.rowH;
+    const cy=(ty>sy ? sy+rh/2 : sy-rh/2) + (ty>sy ? L : -L);
+    return 'M'+sx+','+sy+' H'+(sx+stub+L)+' V'+cy+' H'+(tx-stub-L)+' V'+ty+' H'+ex;
+  }
+  /* Lane assignment. Edges whose vertical legs would run down the same corridor are spread sideways, in
+     the order the edges are collected — deterministic for a given task order, which is what keeps a
+     re-render from reshuffling the picture under the user. PURE: [{key,sx,tx}] in, {key: px} out. */
+  arrowLanes(edges){
+    const out={}, seen={};
+    (edges||[]).forEach(e=>{
+      const b=Math.round(this.arrowCorridorX(e.sx,e.tx,0)/this.ARROW_LANE_PX);
+      const k=(seen[b]=(seen[b]||0)+1)-1;
+      /* Alternate sides of the true corridor so a busy chart stays centred instead of drifting right. */
+      out[e.key]=(k===0?0:(k%2?1:-1)*Math.ceil(k/2)*this.ARROW_LANE_PX);
+    });
+    return out;
+  }
+  /* Several edges leaving ONE bar must not all start on the same pixel, or they read as a single thick
+     line that splits somewhere off to the right. Spread them across the bar's height, centred. PURE. */
+  arrowFanOffsets(n){
+    const out=[]; const N=Math.max(1,n|0);
+    for(let k=0;k<N;k++) out.push((k-(N-1)/2)*this.ARROW_FAN_PX);
+    return out;
+  }
+  /* /PP-EXT */
   renderArrows(tasks,totalW,bodyH){
     const h=React.createElement;
     const byId={}; const idx={}; tasks.forEach((t,i)=>{byId[t.id]=t;idx[t.id]=i;});
     const predEnd=(pid,occ)=>{ const occs=this._occById[pid]||[]; let o=null; if(occ!=null) o=occs.find(x=>x.idx===occ); if(!o) o=occs[0]; const p=byId[pid]; const e=o?o.end:(p?p.end:0); return this.xOf(e); };
     const tgtStart=(tid)=>{ const occs=this._occById[tid]||[]; const o=occs[0]; const t=byId[tid]; return this.xOf(o?o.start:(t?t.start:0)); };
-    const paths=[];
+    /* PP-EXT (owner report 2026-09-09): collect every edge FIRST, then route. Lanes and fan-out are both
+       facts about the whole set — an edge cannot know on its own whether it shares a corridor with
+       another — which is why the old inline single pass could only ever draw them on top of each other. */
+    const edges=[];
     tasks.forEach(t=>{
       (t.deps||[]).forEach(dep=>{
         const pid=this.depId(dep), occ=this.depOcc(dep);
         const p=byId[pid]; if(!p) return;
         if(!this.isScheduled(p) || !this.isScheduled(t)) return;
-        const sx=predEnd(pid,occ); const sy=this.yOfRow(idx[pid])+this.rowH/2;
-        const tx=tgtStart(t.id); const ty=this.yOfRow(idx[t.id])+this.rowH/2;
-        const critEdge=this._showCP && this._cpm.critical[pid] && this._cpm.critical[t.id];
-        const col=critEdge?'var(--danger)':'#6b7280';
-        const g=13;
-        let d;
-        if(tx > sx+g){ d='M'+sx+','+sy+' H'+(sx+g)+' V'+ty+' H'+(tx-7); }
-        else { const ym = ty>sy ? sy+this.rowH/2 : sy-this.rowH/2; d='M'+sx+','+sy+' H'+(sx+g)+' V'+ym+' H'+(tx-g)+' V'+ty+' H'+(tx-7); }
-        paths.push(h('path',{key:pid+'_'+occ+'_'+t.id,d,fill:'none',stroke:col,strokeWidth:critEdge?1.8:1.4,
-          markerEnd:'url(#'+(critEdge?'ahc':'ah')+')',
-          style:{cursor:'pointer',pointerEvents:'stroke'},
-          onClick:e=>{e.stopPropagation(); this.removeDep(t.id,pid);},
-          children:h('title',{},'Predecessor: '+p.name+(occ!=null?(' (occ '+(occ+1)+')'):'')+' → '+t.name+' · click to remove')}));
+        if(idx[pid]==null || idx[t.id]==null) return;
+        edges.push({key:pid+'_'+occ+'_'+t.id, pid, occ, to:t,
+          sx:predEnd(pid,occ), tx:tgtStart(t.id),
+          sy:this.yOfRow(idx[pid])+this.rowH/2, ty:this.yOfRow(idx[t.id])+this.rowH/2});
       });
+    });
+    /* Fan the departures per PREDECESSOR, in the order its edges were collected. */
+    const bySrc={}; edges.forEach(e=>{ (bySrc[e.pid]=bySrc[e.pid]||[]).push(e); });
+    Object.keys(bySrc).forEach(pid=>{ const list=bySrc[pid];
+      const offs=this.arrowFanOffsets(list.length);
+      list.forEach((e,k)=>{ e.sy+=offs[k]; }); });
+    const lanes=this.arrowLanes(edges);
+    const paths=edges.map(e=>{
+      const p=byId[e.pid], t=e.to;
+      const critEdge=this._showCP && this._cpm.critical[e.pid] && this._cpm.critical[t.id];
+      const col=critEdge?'var(--danger)':'#6b7280';
+      const d=this.arrowPath(e.sx, e.sy, e.tx, e.ty, lanes[e.key]||0, this.rowH);
+      return h('path',{key:e.key,d,fill:'none',stroke:col,strokeWidth:critEdge?1.8:1.4,
+        'data-dep-edge':e.key,
+        markerEnd:'url(#'+(critEdge?'ahc':'ah')+')',
+        strokeLinejoin:'round',
+        style:{cursor:'pointer',pointerEvents:'stroke'},
+        onClick:ev=>{ev.stopPropagation(); this.removeDep(t.id,e.pid);},
+        children:h('title',{},'Predecessor: '+p.name+(e.occ!=null?(' (occ '+(e.occ+1)+')'):'')+' → '+t.name+' · click to remove')});
     });
     // temp link line
     let temp=null;
     if(this.linkState){
-      if(this._occById[this.linkState.fromId]){ const sx=predEnd(this.linkState.fromId,this.linkState.fromOcc); const sy=this.yOfRow(idx[this.linkState.fromId])+this.rowH/2;
+      /* PP-EXT (owner report 2026-09-09): a 'pred' drag leaves the bar's LEADING edge, because that is the
+         dot it was started from — anchoring both directions at the trailing edge made the reverse drag
+         appear to come from the wrong side of the bar it belongs to. */
+      if(this._occById[this.linkState.fromId]){
+        const sx=this.linkState.dir==='pred' ? tgtStart(this.linkState.fromId) : predEnd(this.linkState.fromId,this.linkState.fromOcc);
+        const sy=this.yOfRow(idx[this.linkState.fromId])+this.rowH/2;
         temp=h('path',{d:'M'+sx+','+sy+' L'+this.linkState.x+','+this.linkState.y,fill:'none',
           stroke:this._accent,strokeWidth:1.8,strokeDasharray:'5 4',style:{animation:'ppdash 0.5s linear infinite'}}); }
     }
@@ -16272,6 +16979,10 @@ class Component extends DCLogic {
       multi?label(ids.length+' tasks selected'):null,
       !multi?row([ic('✎'),'Edit',kbd('Ctrl E')],()=>this.openDetail(ids[0])):null,
       !multi?row([ic('⤢'),'Open in details',kbd('')],()=>this.openDetail(ids[0])):null,
+      /* PP-EXT (owner ask 2026-09-09): open the task's pages and apps. Offered only when there are any,
+         on the 2026-08-12 rule that a menu entry with nothing to do is worse than no entry. */
+      (!multi && this.taskLinks((this.state.tasks||[]).find(x=>x.id===ids[0])||{}).length)
+        ? row([ic('🔗'),'Open links',kbd('')],()=>{ this.closeMenu(); this.openTaskLinks(ids[0]); }) : null,
       divider,
       label('Priority'),
       h('div',{style:{display:'flex',gap:'8px',padding:'2px 14px 8px'}},
@@ -16600,6 +17311,34 @@ class Component extends DCLogic {
         style:{textAlign:'left',flex:'1 0 56px',minWidth:'56px',border:'1px solid var(--divider)'},
         onBlur:e=>{ if(e.target.value.trim()){ addLabels(e.target.value); e.target.value=''; } },
         onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } }}));
+    /* PP-EXT (owner ask 2026-09-09): the task's pages and apps — see the taskLinks block. Same chip
+       idiom as the tag editor, because it is the same shape of thing: an ordered set you add to and
+       remove from. The chip OPENS; the × removes. "Open all" is the tab-group gesture — one click puts
+       the whole working set back on screen.
+       `rel` and the scheme filter are not decoration: these are user-supplied strings becoming hrefs, so
+       the link is opened through `openTaskLink` (which re-checks the scheme) rather than by letting the
+       browser navigate an anchor whose href came out of storage. */
+    const links=this.taskLinks(t);
+    const linkChip=(l)=>h('span',{key:l.url,style:{display:'inline-flex',alignItems:'center',gap:'4px',
+        maxWidth:'100%',fontSize:'11px',color:'var(--tag-text)',background:'var(--tag-bg)',
+        border:'1px solid var(--tag-border)',borderRadius:'4px',padding:'1px 4px 1px 6px',whiteSpace:'nowrap'}},
+      h('span',{'data-task-link':l.url, onClick:()=>this.openTaskLink(l.url), title:l.url,
+        style:{cursor:'pointer',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'190px'}}, '🔗 '+l.label),
+      h('span',{onClick:()=>this.removeTaskLink(t.id,l.url),title:'Remove link',
+        style:{cursor:'pointer',color:'var(--text-faint2)',fontSize:'13px',lineHeight:1},
+        onMouseEnter:e=>e.currentTarget.style.color='var(--danger-strong)',
+        onMouseLeave:e=>e.currentTarget.style.color='var(--text-faint2)'},'×'));
+    const linksEditor=h('div',{'data-qa':'task-links',style:{display:'flex',flexDirection:'column',gap:'6px'}},
+      h('div',{style:{display:'flex',flexWrap:'wrap',gap:'5px',alignItems:'center'}},
+        ...links.map(linkChip),
+        h('input',{className:'pp-num',type:'text',key:'addlink'+links.length,
+          placeholder:links.length?'+ link':'https://… or app://…',
+          style:{textAlign:'left',flex:'1 0 90px',minWidth:'90px',border:'1px solid var(--divider)'},
+          onBlur:e=>{ if(e.target.value.trim() && this.addTaskLink(t.id,e.target.value)) e.target.value=''; },
+          onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); e.target.blur(); } }})),
+      links.length>1 ? h('button',{className:'pp-tbtn','data-qa':'open-all-links',
+        onClick:()=>this.openTaskLinks(t.id), style:{alignSelf:'flex-start'}},
+        '↗ Open all '+links.length) : null);
     const goalEditor=h('input',{className:'pp-num',type:'text',key:'dg'+(t.goal||''),defaultValue:t.goal||'',placeholder:'Goal for this task',
       style:{textAlign:'left',width:'100%',border:'1px solid var(--divider)'},
       onBlur:e=>this.setGoal(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();}});
@@ -16607,7 +17346,11 @@ class Component extends DCLogic {
     const spentToday=this.getSpentOn(t, this.startOfToday());
     const spentField=valTxt(this.fmtDur(this.getSpent(t))+(this.isRunning(t.id)?' ⏱ running':'')+(spentToday>0?'  ·  '+this.fmtDur(spentToday)+' today':''), this.isRunning(t.id)?'var(--success)':'var(--text-2)');
     const al=this.allotOf(t.id);
-    const allotField = !al.active
+    /* PP-EXT (owner ruling 2026-09-09): a container says what it is instead of a reason that is not true
+       of it. It is not outside its window — it has no time of its own to be allotted, by design. */
+    const allotField = this.isContainerParent(t)
+      ? valTxt('— (a container: its subtasks hold the time)','var(--text-faint2)')
+      : !al.active
       ? valTxt('— (today outside [start, due])','var(--text-faint2)')
       : h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
           t.predictManual
@@ -16769,6 +17512,8 @@ class Component extends DCLogic {
         h('span',{onClick:()=>this.outdentRows([t.id]),title:'Un-nest (make it a top-level task)',
           style:{cursor:'pointer',fontSize:'11px',color:'var(--text-faint2)'}},'✕'))):null,
       field('Tags',tagsEditor),
+      /* PP-EXT (owner ask 2026-09-09): the pages and apps this task is done in. */
+      field(h('span',null,'Links',this.infoNote('Pages and apps this task is done in — paste a URL, or an app deep link like obsidian:// or slack://. A link typed into a task title is filed here automatically. “Open all” restores the whole set at once, which is what a browser tab group is for.')),linksEditor),
       field('When',whenCtl),
       field('Span',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'var(--danger-strong)':(this._schedWarn?'var(--warn)':'var(--text-2)'))),

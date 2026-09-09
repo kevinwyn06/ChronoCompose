@@ -23,7 +23,12 @@ async function bootRun(page) {
   const dates = await page.evaluate(() => {
     const t = JSON.parse(localStorage.getItem('pp-tasks'))[0];
     const add = (ms, n) => { const d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime(); };
-    return { starts: [0, 1, 2, 3].map(n => add(t.start, n)), ends: [0, 1, 2, 3].map(n => add(t.end, n)) };
+    /* 2026-09-09: an OCCURRENCE's end is the anchor plus the rule's own length — `t.end` is the series
+       window's end and is a different quantity (and may be null). Every assertion in this file is about
+       occurrence boundaries, so they are derived here rather than from the window. */
+    const dur = (t.recur && t.recur.durMs != null) ? t.recur.durMs : (t.end - t.start);
+    return { starts: [0, 1, 2, 3].map(n => add(t.start, n)),
+             ends:   [0, 1, 2, 3].map(n => add(t.start, n) + dur) };
   });
   return { bar, dates };
 }
@@ -85,13 +90,29 @@ test('body drag previews and commits every occurrence in the merged run as one s
   expect(ov[2].end).toBe(dates.ends[3]);
 });
 
+/* REVISED 2026-09-09 (owner ruling: a repeat's start/end are the SERIES WINDOW). "All occurrences"
+   still moves the whole series by exactly one day — but `end` is now the last day the series may fire
+   rather than the anchor occurrence's other edge, and the occurrence's own length lives on the rule. So
+   the assertions read as DELTAS against the stored row, which is true under either shape and is what
+   "shifts the series once" actually claims. */
 test('body drag All occurrences shifts the series once without run overrides', async ({ page }) => {
-  const { bar, dates } = await bootRun(page);
+  const { bar } = await bootRun(page);
+  const before = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks'))[0]);
   await dragOneDay(page, bar, 'body', 1, 'All occurrences');
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks'))[0]);
-  expect(saved.start).toBe(dates.starts[1]);
-  expect(saved.end).toBe(dates.ends[1]);
+  const plusOneDay = (ms) => page.evaluate(m => { const d = new Date(m); d.setDate(d.getDate() + 1); return d.getTime(); }, ms);
+
+  expect(saved.start).toBe(await plusOneDay(before.start));
+  // the occurrence length is untouched — a move is not a resize
+  expect(saved.recur.durMs).toBe(86400000);
+  // No per-occurrence overrides: "All occurrences" moves the SERIES, which is the whole point of the
+  // gesture and the reason this spec exists.
   expect(saved.recur.overrides || {}).toEqual({});
+  // The window END is deliberately NOT asserted here. `before` is read from `pp-tasks`, which still
+  // holds the seeded LEGACY row until the app's first write — the window conversion happens in
+  // `normalizeTask` on load — so the two sides of a delta comparison are in different shapes and the
+  // subtraction is meaningless. What the window end does under every scope is pinned in
+  // tests/repeat-series-window.test.js, against the model rather than against a stale row.
 });
 
 test('left-edge run resize commits only the first occurrence boundary', async ({ page }) => {

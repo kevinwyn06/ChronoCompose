@@ -228,7 +228,10 @@ test('carve-out: a RECURRING predecessor anchors via currentOcc but is never its
   const anchor = c.currentOcc(A).end;
   c.autoSchedule([A, B], T);
   assert.strictEqual(A.start, T - 10 * DAY, 'the series is rule-driven and is not rescheduled');
-  assert.strictEqual(A.end, T - 10 * DAY + DAY);
+  // 2026-09-09: `end` is the SERIES WINDOW's end and this series is unbounded. What must not move is the
+  // anchor (above) and the rule's own occurrence length (here).
+  assert.strictEqual(A.end, null);
+  assert.strictEqual(c.recurDurMs(A), DAY);
   assert.strictEqual(c.effectiveEndOf(A, T), anchor,
     'and its projection is currentOcc().end verbatim — no overdue projection on a series');
   assert.strictEqual(B.start, Math.max(T - 10 * DAY, anchor), 'B anchors on that occurrence end');

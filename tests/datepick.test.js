@@ -256,11 +256,22 @@ test('setDate: a clock-only recurring edit keeps occurrence progress', () => {
   assert.equal(t().recur.overrides[0].pct,40,'changing only the clock still edits the same occurrence');
 });
 
-test('setDate: moving a recurring anchor edge to another day clears occurrence-indexed state', () => {
+// REVISED 2026-09-09 (owner ruling: a repeat's start/end are the SERIES WINDOW). Only the ANCHOR
+// re-indexes the series, so this now edits the start — which is the edge the invariant was always about.
+// Moving the window's END admits or removes occurrences without renaming any of them, so it deliberately
+// KEEPS occurrence-indexed state; discarding real completions there would be a loss for nothing.
+test('setDate: moving a recurring ANCHOR to another day clears occurrence-indexed state', () => {
   const start=at(2026,7,21,7,0), end=at(2027,4,20,8,30);
   const { c, t }=withTask({start,end,recur:{kind:'day',n:1,overrides:{0:{pct:100,completion:start}},shifts:[]}});
-  c.setDate('t1','end',at(2026,7,21,8,30),true);
-  assert.equal(Object.keys(t().recur.overrides).length,0,'the malformed old span cannot leave a completed-history block behind');
+  c.setDate('t1','start',at(2026,7,22,7,0),true);
+  assert.equal(Object.keys(t().recur.overrides).length,0,'a completed-history block cannot survive onto a different date');
+});
+
+test('setDate: moving the WINDOW END keeps occurrence-indexed state', () => {
+  const start=at(2026,7,21,7,0), end=at(2027,4,20,8,30);
+  const { c, t }=withTask({start,end,recur:{kind:'day',n:1,overrides:{0:{pct:100,completion:start}},shifts:[]}});
+  c.setDate('t1','end',at(2026,9,1,0,0),true);
+  assert.equal(t().recur.overrides[0].pct,100,'occurrence 0 still names occurrence 0');
 });
 
 test('dpText: unparseable text leaves the draft alone', () => {
@@ -460,7 +471,13 @@ test('recurrence drag scopes use civil days and keep clock time through DST', ()
   c.state.scopePrompt = { kind: 'date', taskId: 't1', occIdx: 0, payload: { mode: 'move', deltaMs: DAY } };
   c.applyScope('all');
   assert.equal(t().start, at(2026, 2, 8, 9, 15), 'whole series base keeps clock time');
-  assert.equal(t().end, at(2026, 2, 8, 10, 15));
+  // REVISED 2026-09-09: `end` is the SERIES WINDOW's end and this series is unbounded, so there is no
+  // second date to slide. What must keep its clock is the occurrence, and it does — its end is derived
+  // from the anchor plus the rule's own duration.
+  assert.equal(t().end, null, 'an unbounded window has no end to move');
+  const moved = c.expandTask(t(), at(2026, 2, 12))[0];
+  assert.equal(new Date(moved.end).getHours(), 10, 'the occurrence still ends at 10:15');
+  assert.equal(new Date(moved.end).getMinutes(), 15);
 });
 
 test('barDragEdit: deadline ghost (start=null) — dragging the ghost START commits a real start, keeps the real due', () => {
@@ -589,11 +606,24 @@ test('canClearDate: an already-null edge offers nothing to clear', () => {
   assert.match(r.why, /already a ghost/);
 });
 
-test('canClearDate: a repeating task refuses — an unscheduled recur renders NO bar at all', () => {
+// REVISED 2026-09-09: the two edges of a repeat are no longer the same kind of thing. The START is the
+// anchor every occurrence index is measured from and still cannot be cleared; the END is only the last
+// day the series may fire, and clearing it unbounds the series — which is what the End column is for.
+test('canClearDate: a repeat refuses to clear its ANCHOR — nothing could expand', () => {
   const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly' } });
-  const r = c.canClearDate(t(), 'end');
+  const r = c.canClearDate(t(), 'start');
   assert.equal(r.ok, false);
   assert.match(r.why, /repeat/, 'the reason names the repeat, so the menu tooltip explains itself');
+});
+
+test('canClearDate: clearing a repeat window END is allowed — it unbounds the series', () => {
+  // `durMs` set, so normalizeTask leaves the pair alone: this fixture is already in the window shape
+  // and its `end` really is a stated series end.
+  const { c, t } = withTask({ start: at(2026,7,21), end: at(2026,8,21),
+    recur: { kind: 'week', n: 1, label: 'Weekly', durMs: DAY } });
+  const r = c.canClearDate(t(), 'end');
+  assert.equal(r.ok, true);
+  assert.match(r.why, /no end date/);
 });
 
 test('clearDate via the menu returns the edge to a DERIVED ghost (no residual date)', () => {
@@ -650,13 +680,15 @@ test('setRecur: changing the rule DROPS occurrence-indexed state (idx 3 is a dif
   assert.equal(t().recur.until, null);
 });
 
-test('setRecur: re-picking the ACTIVE preset keeps overrides/shifts/until intact', () => {
+// REVISED 2026-09-09: `recur.until` is retired to a legacy input; the series end is the task's own end.
+// Asserted through `seriesEndMs`, which is what every reader uses and what makes the retirement safe.
+test('setRecur: re-picking the ACTIVE preset keeps overrides/shifts/series end intact', () => {
   const { c, t } = withTask({ recur: { kind: 'week', n: 1, label: 'Weekly', overrides: { 3: { pct: 50 } }, shifts: [{ idx: 2, ms: 1 }], until: 123 } });
   c.setRecur('t1', 'week');
   assert.equal(t().recur.overrides[3].pct, 50);
   assert.equal(t().recur.shifts.length, 1);
   assert.equal(t().recur.shifts[0].idx, 2);
-  assert.equal(t().recur.until, 123);
+  assert.equal(c.seriesEndMs(t()), 123, 'the series end survived the re-pick');
 });
 
 test('setRecur on a GHOST commits the derived span first — a repeat needs a real anchor', () => {
@@ -668,7 +700,11 @@ test('setRecur on a GHOST commits the derived span first — a repeat needs a re
   // an undated task on today only — but a non-midnight timestamp is what `hasEndTime` reads as a typed
   // end CLOCK. So the commit rounds up to the clean boundary: membership wants the closed span, stored
   // data wants midnight.
-  assert.equal(t().end, today + 86400000, 'persisted on a midnight boundary, not at 23:59:59.999');
+  // REVISED 2026-09-09: the derived span is now read as the OCCURRENCE (it is exactly one period long),
+  // so it moves onto the rule and the window opens. The two properties this test exists for are
+  // unchanged: no invented end clock, and a real anchor to expand from.
+  assert.equal(t().recur.durMs, 86400000, 'the derived one-day span became the occurrence length');
+  assert.equal(t().end, null, 'and the series is unbounded — no end was ever stated');
   assert.equal(c.hasEndTime(t()), false, 'de-ghosting must not invent an end clock');
   assert.equal(c.isScheduled(t()), true, 'so expandTask can produce occurrences (and the bar still exists)');
 });

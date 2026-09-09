@@ -54,7 +54,9 @@ test('computeSyncOps: every mirrored field change -> exactly one update op', () 
   const mutations = {
     name:'Renamed', start: 1, end: 2, priority: 1, deps:['t9'], pct: 50, planned: 120,
     predicted: 30, predictManual: true, spent: 15, spentByDay:{'2026-07-11':10}, completion: 5,
-    recur:{kind:'day',n:1}, labels:['@x'], description:'d', goal:'g', wbs:'1.1',
+    /* 2026-09-09: a fully-shaped rule, so `normalizeTask`'s window conversion is a no-op here and this
+       generic "the field is carried verbatim" assertion still measures what it means to. */
+    recur:{kind:'day',n:1,durMs:3600000,until:null}, labels:['@x'], description:'d', goal:'g', wbs:'1.1',
     type:'Milestone', allDay:true, calendarId:'c', eventId:'e', startClock:true, endClock:true,
     included:false, archivedAt: 7, parentId:'p', pin:{day:1,start:2,dur:3},
   };

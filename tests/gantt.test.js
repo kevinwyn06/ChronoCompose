@@ -224,19 +224,29 @@ test('a Gantt bar owns its own hover state (the row stripe alone cannot keep hov
 // Owner tenet (2026-07-26): "all the clickboxes are all too tiny. Humans do not have machine
 // precision." Every handle carries a transparent hit box of at least HIT_MIN_PX in the axis that
 // matters, with the small glyph drawn inside it.
-test('the link dot carries a HIT_MIN_PX hit box that clears the right resize grip', () => {
+// Owner report 2026-09-09: *"No circle in front of a task to drag dependency arrows to."* There are TWO
+// dots now — trailing ("comes after") and leading ("comes before") — and the C3 rule applies to both: the
+// hit box sits fully OUTSIDE its edge, clear of that side's 7px resize grip, with the small circle drawn
+// inside it. The 2026-07-26 note that "there is exactly one link handle" is superseded; the objection it
+// recorded (a circle drawn INSIDE the bar) is honoured by this one being outside, exactly like its twin.
+test('both link dots carry a HIT_MIN_PX hit box that clears their resize grip', () => {
   const c = ganttReady();
   const t = mkTask(c);
   const bar = c.ganttBlock(t, 0, occOf(t));
-  const dot = findAll(bar, n => n.props && /link as predecessor/.test(n.props.title || ''))[0];
-  assert.ok(dot, 'link dot exists');
-  const s = styleOf(dot);
-  assert.ok(px(s.width) >= c.HIT_MIN_PX, 'hit box is at least HIT_MIN_PX wide, got ' + s.width);
-  assert.ok(px(s.height) >= c.HIT_MIN_PX, 'hit box is at least HIT_MIN_PX tall, got ' + s.height);
-  // Must start at/after the bar's right edge — overlapping the 7px grip is the C3 regression.
-  assert.strictEqual(s.left, '100%', 'hit box starts at the bar right edge, clear of the grip');
-  assert.ok(findAll(dot, n => /50%/.test(String(styleOf(n).borderRadius || ''))).length,
-    'the visible circle is drawn inside the hit box, not enlarged');
+  const out = findAll(bar, n => n.props && /comes AFTER this one/.test(n.props.title || ''))[0];
+  const inn = findAll(bar, n => n.props && /come BEFORE this one/.test(n.props.title || ''))[0];
+  assert.ok(out, 'the trailing link dot exists');
+  assert.ok(inn, 'the leading link dot exists');
+  [out, inn].forEach(dot => {
+    const s = styleOf(dot);
+    assert.ok(px(s.width) >= c.HIT_MIN_PX, 'hit box is at least HIT_MIN_PX wide, got ' + s.width);
+    assert.ok(px(s.height) >= c.HIT_MIN_PX, 'hit box is at least HIT_MIN_PX tall, got ' + s.height);
+    assert.ok(findAll(dot, n => /50%/.test(String(styleOf(n).borderRadius || ''))).length,
+      'the visible circle is drawn inside the hit box, not enlarged');
+  });
+  // Overlapping either 7px grip is the C3 regression: each box starts at its own edge, outside the bar.
+  assert.strictEqual(styleOf(out).left, '100%', 'trailing box starts at the bar right edge');
+  assert.strictEqual(styleOf(inn).right, '100%', 'leading box starts at the bar left edge');
 });
 
 // The %-done control has TWO targets as of the owner's 2026-08-15 instruction ("I would actually prefer
@@ -405,7 +415,10 @@ test('no Gantt shape renders its task name as text; the tooltip still carries it
       { idx: 0, start: wide.start, end: wide.end, ghost: true, ghostStart: true }), 'Quarterly board deck'],
     ['milestone', c.ganttBlock(ms, 0, occOf(ms)), 'Launch'],
     ['merged recurrence run', c.ganttBlock(rt, 0, c.mergeConsecutiveOccurrenceDays(
-      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.end + DAY }])[0]), 'Standup'],
+      /* 2026-09-09: the sibling occurrence is derived from the RULE's own length. `rt.end` is now the
+         series window's end (null here — the series is unbounded), so building an occurrence from it
+         produced NaN edges and a shape this assertion could not read. */
+      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.start + DAY + c.recurDurMs(rt) }])[0]), 'Standup'],
   ];
 
   for (const [what, node, name] of shapes) {

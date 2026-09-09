@@ -10,6 +10,13 @@
 // Non-recurring tasks were never affected — `occOf` reads `t.start`/`t.end` off the draft — which is
 // also why the whole unit suite stayed green: it never populates `_occById`, so every recurring case
 // silently took the fresh `expandTask` fallback that production does not take.
+//
+// REVISED 2026-09-09 (owner ruling: a repeat's start/end are the SERIES WINDOW). The staleness this file
+// exists to pin is unchanged and still real — a mutator must read the DRAFT, never the render memo. What
+// changed is which edit expresses "the occurrence is now 2.5 hours long": for a repeat that is
+// `setOccDuration`, because `setDate('end')` now moves the last day the series may fire. The recurring
+// cases below therefore drive the new mutator and assert the same property; the non-recurring case is
+// untouched, because for a plain task the occurrence still IS start..end.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, DAY } = require('./_load.js');
@@ -34,14 +41,15 @@ function appt(c, over){
   }, over));
 }
 
-test('a recurring Exact task re-plans from its NEW end clock, not the cached occurrence', () => {
+test('a recurring Exact task re-plans from its NEW occurrence length, not the cached occurrence', () => {
   const c = make(); const day = c.startOfToday();
   rendered(c, appt(c, { recur: { kind: 'day', n: 1 } }));
-  c.setDate('a', 'end', day + 11.5 * HOUR, true);
+  c.setOccDuration('a', 150);
   const t = c.state.tasks[0];
   assert.equal(c.isUncompressable(t), true, 'still an Exact appointment');
   assert.equal(t.planned, 150,
     'the booked span is 09:00–11:30; the stale cache used to write back the old 60');
+  assert.equal(c.expandTask(t, c._horizon)[0].end, day + 11.5 * HOUR, 'and the occurrence really is 2.5h');
 });
 
 // REVISED 2026-08-19 (owner, same session as A4): "Start moves end; end sets duration." A start-clock
@@ -53,13 +61,18 @@ test('a recurring Exact task re-plans from its NEW end clock, not the cached occ
 // written for. That property is still proven by its two siblings above and below, both of which edit the
 // END and are unaffected by the new rule. What this test now pins is the new rule itself, on a recurring
 // Exact task — the shape most likely to regress it.
-test('a recurring Exact task slides its end when the start clock moves', () => {
+// REVISED 2026-09-09: "start moves end, preserving the span" is now free rather than arranged — the
+// occurrence's length lives on the rule, so moving the anchor cannot change it and there is no second
+// edge to drag. The observable rule the owner stated ("changing one preserves the duration") is what is
+// asserted, through the occurrence rather than through `t.end`.
+test('a recurring Exact task keeps its occurrence length when the start clock moves', () => {
   const c = make(); const day = c.startOfToday();
   rendered(c, appt(c, { recur: { kind: 'day', n: 1 } }));
   c.setDate('a', 'start', day + 7 * HOUR, true);
   const t = c.state.tasks[0];
   assert.equal(t.start, day + 7 * HOUR);
-  assert.equal(t.end, day + 8 * HOUR, 'the end slid by the same delta');
+  const occ = c.expandTask(t, c._horizon)[0];
+  assert.equal(occ.end, day + 8 * HOUR, 'the occurrence slid by the same delta');
   assert.equal(t.planned, 60, 'the span is unchanged, so the plan is unchanged');
 });
 
@@ -67,7 +80,7 @@ test('a weekly recurring Exact task re-plans even when the edit lands off the ol
   const c = make(); const day = c.startOfToday();
   const weekly = { recur: { kind: 'week', n: 1, days: [new Date(day).getDay()] } };
   rendered(c, appt(c, weekly));
-  c.setDate('a', 'end', day + 12 * HOUR, true);
+  c.setOccDuration('a', 180);
   assert.equal(c.state.tasks[0].planned, 180,
     'the weekly rule expands around the edited edge instead of the cached one');
 });
@@ -84,10 +97,12 @@ test('anchorSpanMinutes reads the draft, and keeps both clockSpanMinutes guards'
   const t = appt(c, { recur: { kind: 'day', n: 1 } });
   rendered(c, t);
   assert.equal(c.anchorSpanMinutes(t), 60, 'the anchor span, with no memo involved');
-  assert.equal(c.anchorSpanMinutes({ ...t, end: t.start }), null,
-    'a zero-length window is null, not 0 — the same distinction clockSpanMinutes draws');
-  assert.equal(c.anchorSpanMinutes({ ...t, end: t.start + 2 * DAY }), null,
-    'a window that cannot fit in one day is not an appointment (the day-fit guard)');
+  // REVISED 2026-09-09: for a repeat the anchor span is the RULE's occurrence length, so the two guards
+  // are exercised through `durMs` — `t.end` is the series window and says nothing about a span.
+  assert.equal(c.anchorSpanMinutes({ ...t, recur: { ...t.recur, durMs: 0 } }), null,
+    'a zero-length occurrence is null, not 0 — the same distinction clockSpanMinutes draws');
+  assert.equal(c.anchorSpanMinutes({ ...t, recur: { ...t.recur, durMs: 2 * DAY } }), null,
+    'an occurrence that cannot fit in one day is not an appointment (the day-fit guard)');
   assert.equal(c.anchorSpanMinutes({ ...t, endClock: false }), null,
     'both edges must carry a real clock');
   assert.equal(c.anchorSpanMinutes(null), null, 'no task, no span');
@@ -99,7 +114,7 @@ test('the memo, left in place, still serves the render path it belongs to', () =
   const c = make(); const day = c.startOfToday();
   rendered(c, appt(c, { recur: { kind: 'day', n: 1 } }));
   const cached = c._occById.a;
-  c.setDate('a', 'end', day + 11 * HOUR, true);
-  assert.equal(c._occById.a, cached, 'setDate does not touch _occById');
+  c.setOccDuration('a', 120);
+  assert.equal(c._occById.a, cached, 'the mutator does not touch _occById');
   assert.equal(c.state.tasks[0].planned, 120, '...and still re-plans correctly from the draft');
 });
