@@ -1060,6 +1060,46 @@ class Component extends DCLogic {
     t.recur.until = null;
     t.end = until;
     n++; }); return n; }
+  /* PP-EXT (owner report 2026-09-09, the Google Calendar sweep): the LONGEST an occurrence of a rule can
+     sanely be — its own period. PURE, returns null for a rule with no period we model.
+     This is an invariant, not a guess about intent: an occurrence longer than the gap to the next one
+     makes `expandTask` emit permanently overlapping instances, which is precisely what buried the owner's
+     week view. `weekdays` is capped at a week because its selected days all fall inside one. */
+  recurPeriodMs(r){
+    if(!r) return null;
+    const n=Math.max(1, r.n||1);
+    switch(r.kind){
+      case 'day': return n*this.DAY;
+      case 'weekdays': return 7*this.DAY;
+      case 'week': return n*7*this.DAY;
+      case 'month': return n*31*this.DAY;
+      case 'year': return n*366*this.DAY;
+      default: return null;
+    }
+  }
+  /* PP-EXT (owner report 2026-09-09): repair `recur.durMs` where the series-window migration mis-derived
+     it. PURE (mutates `tasks`), returns the number of rows changed.
+     `migrateRecurWindow` computes `durMs = t.end - t.start`, which is right for a LEGACY repeat — there
+     `t.end` was the anchor occurrence's end. It is wrong for a repeat whose `t.end` was ALREADY a series
+     end, and the migration cannot tell the two apart from the pair alone. The owner's timetable is the
+     clear case: `MATH_V 322-101` ended up claiming each 90-minute class lasted 86.5 days, which is
+     exactly `Dec 3 − Sep 8`. Seven of fourteen linked repeats were in that state, and the corrected push
+     in `eventBodyOf` faithfully re-published every one of them as a term-long band.
+     Detection is the period invariant above, so nothing is touched unless its stated length is impossible.
+     The replacement, in the owner's own order of preference (ruling 2026-09-09):
+       1. `//planned-duration: HH:MM` in the description — what Todoist writes for the event it created,
+          and more authoritative than anything else for a task that came FROM Todoist;
+       2. the task's own `planned` minutes;
+       3. failing both, a clamp to the period — no invented number, just a renderable shape. */
+  migrateRecurOccLength(tasks){ let n=0; (tasks||[]).forEach(t=>{
+    if(!t || !t.recur || t.recur.durMs==null) return;
+    const period=this.recurPeriodMs(t.recur);
+    if(period==null || t.recur.durMs<=period) return;   /* `<=`: an all-day DAILY repeat is legitimately one day */
+    const m=String(t.description||'').match(/\/\/planned-duration:\s*(\d{1,2}):(\d{2})/);
+    const stated = m ? (+m[1]*60 + +m[2])*60000 : null;
+    const planned = (typeof t.planned==='number' && t.planned>0) ? t.planned*60000 : null;
+    t.recur.durMs = stated!=null ? stated : (planned!=null ? planned : period);
+    n++; }); return n; }
   /* PP-EXT: one-time cleanup for the pin removal. The parser used to stamp a bare day with a 9am
      placeholder and mark it startClock:false; bare days are now plain midnight, so collapse those
      starts and drop the flag back to null (derive). pinStart/pinEnd no longer exist because every
@@ -1099,6 +1139,16 @@ class Component extends DCLogic {
         const ops=this.gcalRepairRepeatOps(tasks); done['gcal-repeat-occurrence-length']=1;
         this.lsSet('pp-migrations', JSON.stringify(done));
         if(ops.length) this.gcalEnqueue(ops); }
+      /* PP-EXT (owner report 2026-09-09): the flag above shipped BEFORE we knew `recur.durMs` was itself
+         mis-derived for seven of the owner's repeats, so that pass re-published the corruption instead of
+         curing it. This one repairs the data first and only then re-pushes — hence a second flag rather
+         than a wider guard on the first. See `migrateRecurOccLength` for the invariant it detects and the
+         order it prefers replacements in. */
+      if(!done['recur-occurrence-length-repair']){
+        const fixed=this.migrateRecurOccLength(tasks); done['recur-occurrence-length-repair']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done));
+        if(fixed){ this.saveTasks(tasks);
+          const ops=this.gcalRepairRepeatOps(tasks); if(ops.length) this.gcalEnqueue(ops); } }
       if(!done['schedule-pins-removed']){ const n=this.migratePins(tasks); done['schedule-pins-removed']=1;
         this.lsSet('pp-migrations', JSON.stringify(done)); if(n) this.saveTasks(tasks); }
       /* PP-EXT V2.6: seed sections from primary @tags, once, at promotion threshold 2. Guarded like the
@@ -10365,6 +10415,11 @@ class Component extends DCLogic {
     this.migrateIncludedDatedDefault(one); /* unprovenanced legacy true -> dated/window-aware undecided */
     this.migratePins(one);          /* startClock:false placeholder starts -> plain midnight */
     this.migrateDragPinList(one);   /* legacy single-object drag pin -> one-element list */
+    /* PP-EXT (owner report 2026-09-09): belongs in this list for the exact reason the comment above
+       gives — the rows in Supabase carry the mis-derived `recur.durMs`, and a pull would otherwise
+       re-import it straight over the local repair. Idempotent: once a length is inside its own period the
+       pass cannot see it. */
+    this.migrateRecurOccLength(one);
     return t;
   }
   /* merge a pulled snapshot into local tasks. Row-level LWW: newer updatedAt wins; a tie keeps local
