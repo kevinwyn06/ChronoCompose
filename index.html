@@ -9846,7 +9846,29 @@ class Component extends DCLogic {
     const p=(this.RECUR_PRESETS||[]).find(x=>x.k===k); if(!p) return;
     const today=this.startOfToday();
     this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
-      if(!p.recur){ t.recur=null; return; }
+      /* PP-EXT (owner report 2026-09-09, "I'm unable to change it in chronocompose from a recurring task
+         to a non recurring task"): dropping the rule used to null `recur` and stop. Under the window model
+         that is a data bug, because `t.start`/`t.end` are the SERIES WINDOW — so a weekly 1h task with a
+         term-long window turned into ONE 86-day block, in the sheet and, once pushed, on Google. The rule
+         was the only thing that made those two dates mean "the range this repeats over"; take it away and
+         the pair has to go back to meaning what every non-repeating task's pair means: the occurrence.
+         So `start` stays (it is the series anchor — an honest date the user already sees, and moving it
+         would silently redate the task) and `end` collapses to the occurrence length the rule carried.
+         The window's close is not lost silently: it was only ever "stop repeating after this", and there
+         is nothing left to stop. */
+      if(!p.recur){
+        if(t.recur && t.start!=null){
+          const occ=this.recurDurMs(t);
+          /* A 0-length or missing occurrence can't be trusted as an end (four repeats reached this shape
+             through the 2026-09-09 window migration), so fall back to the plan, then to the anchor day. */
+          const dur = occ>0 ? occ
+            : (typeof t.planned==='number' && t.planned>0) ? t.planned*60000
+            : (this.startOfDay(t.start)+this.DAY-t.start);
+          t.end=t.start+dur;
+          if(t.end!=null && this.hasClock(t.end)) t.endClock=true;
+        }
+        t.recur=null; return;
+      }
       /* A repeat needs a real span to expand from, so committing one onto a ghost also commits the
          ghost's derived dates (the only place in V1.4 where an action de-ghosts implicitly). */
       /* PP-EXT (owner 2026-08-20, task 11): the committed end is rounded UP to the next midnight. The
@@ -17655,6 +17677,28 @@ class Component extends DCLogic {
           wl.sub?h('div',{'data-qa':'when-sub',
             style:{fontSize:'11px',color:'var(--text-faint2)',marginTop:'3px'}},wl.sub):null);
 
+    /* PP-EXT (owner report 2026-09-09, "I'm unable to change it in chronocompose from a recurring task to
+       a non recurring task"): `setRecur` was reachable from exactly ONE place — the right-click menu on a
+       Gantt BAR. Not the row menu, not here. So a task that repeats daily forever could be seen, opened
+       and read in the detail panel with no way to stop it repeating, unless you knew to go find its bar
+       and right-click it. The presets that menu offers belong wherever the task's other facts are edited.
+       Same `setRecur`, same preset list — one implementation, a second caller.
+       A parser-made rule the presets cannot express (a weekdays set, a monthDay) is shown as a "Custom"
+       entry so the control never silently flattens it into the nearest preset; picking any preset then
+       replaces it deliberately, which is exactly what the bar menu does. */
+    const recurKey=this.recurPresetKey(t);
+    const repeatCtl=h('div',{style:{display:'flex',flexDirection:'column',gap:'4px'}},
+      h('select',{'data-qa':'detail-repeat', value:recurKey===null?'__custom':recurKey,
+        onChange:e=>{ if(e.target.value!=='__custom') this.setRecur(t.id,e.target.value); },
+        style:{width:'100%',fontSize:'12px',padding:'6px 8px',borderRadius:'8px',minHeight:this.HIT_MIN_PX+'px',
+          border:'1px solid var(--divider)',background:'var(--gantt-bg)',color:'var(--text-2)'}},
+        recurKey===null?h('option',{key:'__custom',value:'__custom'},'Custom: '+((t.recur&&t.recur.label)||'repeat')):null,
+        ...(this.RECUR_PRESETS||[]).map(p=>h('option',{key:p.k,value:p.k},p.label))),
+      t.recur?h('div',{'data-qa':'detail-repeat-sub',style:{fontSize:'11px',color:'var(--text-faint2)'}},
+        'Each one lasts '+this.fmtDur(Math.round(this.recurDurMs(t)/60000))
+        +(this.seriesEndMs(t)!=null?(' · until '+this.fmtDT(this.seriesEndMs(t),!!t.allDay)):' · no end date')
+        ):null);
+
     const actBtn=(label,onClick,danger)=>h('button',{className:'pp-tbtn',onClick,
       style:{flex:1,minHeight:this.HIT_MIN_PX+'px',cursor:'pointer',
         color:danger?'var(--danger-strong)':undefined}},label);
@@ -17682,6 +17726,7 @@ class Component extends DCLogic {
       /* PP-EXT (owner ask 2026-09-09): the pages and apps this task is done in. */
       field(h('span',null,'Links',this.infoNote('Pages and apps this task is done in — paste a URL, or an app deep link like obsidian:// or slack://. A link typed into a task title is filed here automatically. “Open all” restores the whole set at once, which is what a browser tab group is for.')),linksEditor),
       field('When',whenCtl),
+      field(h('span',null,'Repeat',this.infoNote('How often this task comes back. The dates above become the WINDOW the repeat runs over; each occurrence keeps its own length. Choosing “Does not repeat” turns the task back into the single occurrence it started as — it does not leave the whole window behind as one long block.')),repeatCtl),
       field('Span',valTxt(Math.round(this.durDays(t))+' days · '+(this._cpm.critical[t.id]?'critical path':(Math.max(0,Math.round((this._slack[t.id]||0)*10)/10))+'d slack')+(this._schedWarn?' · ⚠ dependency cycle':''),
         this._cpm.critical[t.id]?'var(--danger-strong)':(this._schedWarn?'var(--warn)':'var(--text-2)'))),
       h('div',{style:{display:'flex'}},
