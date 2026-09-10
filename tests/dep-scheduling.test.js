@@ -24,24 +24,52 @@ const T = new Date(2026, 7, 14).getTime(); // 2026-08-14, local midnight
 
 /* ===================== effective end — the definition itself ===================== */
 
-test('effectiveEndOf: an unfinished task past its due date projects to the start of today', () => {
+// 2026-09-09: both ends below are EXCLUSIVE. A date-only `end` is midnight of the task's inclusive last
+// day, so the first instant a successor is free is the midnight after it — see `endExclusiveOf`, the one
+// place the ordinary / allDay / timed conventions are reconciled.
+
+test('endExclusiveOf: the three conventions `end` carries', () => {
+  const c = make();
+  const dateOnly = mk(c, { start: T, end: T + 2 * DAY });
+  assert.strictEqual(c.endExclusiveOf(dateOnly, dateOnly.end), T + 3 * DAY,
+    'a date-only end means "through that day" ⇒ exclusive edge is the next midnight');
+  const allDay = mk(c, { start: T, end: T + 2 * DAY, allDay: true });
+  assert.strictEqual(c.endExclusiveOf(allDay, allDay.end), T + 2 * DAY,
+    'a gcal all-day end is ALREADY the exclusive next midnight — converting it twice would be the bug');
+  const timed = mk(c, { start: T, end: T + 2 * DAY + 17 * 3600e3, endClock: true });
+  assert.strictEqual(c.endExclusiveOf(timed, timed.end), T + 2 * DAY + 17 * 3600e3,
+    'a user-typed clock is already the exact instant work stops');
+  assert.strictEqual(c.endExclusiveOf(dateOnly, null), null, 'no end, no edge');
+});
+
+test('effectiveEndOf: an unfinished task past its due date projects past the end of today', () => {
   const c = make();
   const A = mk(c, { start: T - 5 * DAY, end: T - 3 * DAY });
-  assert.strictEqual(c.plannedEndOf(A), T - 3 * DAY, 'planned end is untouched');
-  assert.strictEqual(c.effectiveEndOf(A, T), T, 'projected end is at least today');
+  assert.strictEqual(c.plannedEndOf(A), T - 2 * DAY, 'planned end is untouched (as its exclusive edge)');
+  // The work has not happened; the soonest it can is today, so today is occupied and a successor is
+  // free tomorrow.
+  assert.strictEqual(c.effectiveEndOf(A, T), T + DAY, 'projected end is at least the end of today');
 });
 
 test('effectiveEndOf: a FINISHED task keeps its planned end even when that is in the past', () => {
   const c = make();
   const A = mk(c, { start: T - 5 * DAY, end: T - 3 * DAY, pct: 100, completion: T - 3 * DAY });
-  assert.strictEqual(c.effectiveEndOf(A, T), T - 3 * DAY, 'it really did end there');
+  assert.strictEqual(c.effectiveEndOf(A, T), T - 2 * DAY, 'it really did end there');
 });
 
 test('effectiveEndOf: a future end is never pulled forward, and an unscheduled task has none', () => {
   const c = make();
   const A = mk(c, { start: T, end: T + 4 * DAY });
-  assert.strictEqual(c.effectiveEndOf(A, T), T + 4 * DAY);
+  assert.strictEqual(c.effectiveEndOf(A, T), T + 5 * DAY);
   assert.strictEqual(c.effectiveEndOf(mk(c, { start: null, end: null }), T), null);
+});
+
+test('effectiveEndOf: a TIMED end still ahead is not rounded up a day', () => {
+  const c = make();
+  // Due at 17:00 today, unfinished. It is not overdue, and its successor is free at 17:00 — a task with
+  // a real clock is held to the instant, never to the day.
+  const A = mk(c, { start: T, end: T + 17 * 3600e3, endClock: true });
+  assert.strictEqual(c.effectiveEndOf(A, T), T + 17 * 3600e3);
 });
 
 /* ===================== the rungs that already worked (regression guards) ===================== */
@@ -75,8 +103,8 @@ test('rung: A dragged LATER beyond the slack pushes B, and the slack floors at 0
   const B = mk(c, { start: T + 6 * DAY, end: T + 7 * DAY, deps: [A.id] });
   A.start = T + 8 * DAY; A.end = T + 9 * DAY;   // 2 days past B's start
   c.autoSchedule([A, B], T);
-  assert.strictEqual(B.start, T + 9 * DAY, 'B snaps to A.end');
-  assert.strictEqual(B.end, T + 10 * DAY, 'B keeps its 1-day duration');
+  assert.strictEqual(B.start, T + 10 * DAY, 'B starts the day after A\'s last day');
+  assert.strictEqual(B.end, T + 11 * DAY, 'B keeps its 1-day duration');
   const slack = c.computeSlack([A, B]);
   assert.strictEqual(Math.max(0, slack[B.id]), 0, 'no slack left, and it floors at 0 rather than going negative');
   assert.ok(slack[A.id] < 0.01, 'A is now on the chain too');
@@ -94,7 +122,7 @@ test('rung: dragging B never moves A', () => {
   c.autoSchedule([A, B], T);
   assert.strictEqual(A.start, T, 'still untouched — propagation only ever walks successors');
   assert.strictEqual(A.end, T + 2 * DAY);
-  assert.strictEqual(B.start, T + 2 * DAY, 'B is the one that gives way');
+  assert.strictEqual(B.start, T + 3 * DAY, 'B is the one that gives way');
 });
 
 /* ===================== Gap 1 — the drag-time clamp ===================== */
@@ -104,9 +132,9 @@ test('gap 1: depFloorFor is the latest predecessor effective end, and null witho
   const A = mk(c, { start: T, end: T + 2 * DAY });
   const A2 = mk(c, { start: T, end: T + 5 * DAY });
   const B = mk(c, { start: T + 6 * DAY, end: T + 7 * DAY, deps: [A.id, A2.id] });
-  assert.strictEqual(c.depFloorFor(B.id, [A, A2, B], T), T + 5 * DAY, 'the LATEST predecessor end wins');
+  assert.strictEqual(c.depFloorFor(B.id, [A, A2, B], T), T + 6 * DAY, 'the LATEST predecessor end wins');
   assert.strictEqual(c.depFloorFor(A.id, [A, A2, B], T), null, 'no predecessors ⇒ no floor');
-  assert.strictEqual(c.depFloorFor(B.id, [A, A2, B], T, [A2.id]), T + 2 * DAY,
+  assert.strictEqual(c.depFloorFor(B.id, [A, A2, B], T, [A2.id]), T + 3 * DAY,
     'a skipped predecessor (a dragged subtree member) is not its own floor');
 });
 
@@ -120,8 +148,8 @@ test('gap 1: B is clamped at A\'s end during the drag instead of crossing it', (
   assert.strictEqual(raw.start, T + DAY, 'unclamped, the gesture crosses into A');
   const cl = c.clampBarToDeps('move', raw, floor);
   assert.strictEqual(cl.clamped, true, 'the clamp reports that it bit (this is what draws the barrier)');
-  assert.strictEqual(cl.start, T + 2 * DAY, 'B stops exactly at A.end');
-  assert.strictEqual(cl.end, T + 3 * DAY, 'and carries its full 1-day span with it');
+  assert.strictEqual(cl.start, T + 3 * DAY, 'B stops at the first day A has left free');
+  assert.strictEqual(cl.end, T + 4 * DAY, 'and carries its full 1-day span with it');
 });
 
 test('gap 1: the clamp agrees with autoSchedule — the affordance can never disagree with the authority', () => {
@@ -172,8 +200,8 @@ test('gap 2: A overdue by N days pushes B by exactly the overrun', () => {
     c.autoSchedule([A, B], T);
     assert.strictEqual(A.start, T - (N + 2) * DAY, 'A itself is NOT moved — only its projection propagates');
     assert.strictEqual(A.end, T - N * DAY, 'A keeps its planned (now overdue) end');
-    assert.strictEqual(B.start, T, 'B starts at A\'s projected end, i.e. today');
-    assert.strictEqual(B.end, T + 2 * DAY, 'duration preserved');
+    assert.strictEqual(B.start, T + DAY, 'B starts at A\'s projected end — A still owes today, so B is free tomorrow');
+    assert.strictEqual(B.end, T + 3 * DAY, 'duration preserved');
     assert.strictEqual(c._schedDisplaced[B.id], N * DAY, 'displaced by exactly the overrun (' + N + 'd)');
   }
 });
@@ -190,9 +218,9 @@ test('gap 2: an overdue predecessor eats the slack first, and only overflow move
 test('gap 2: a FINISHED overdue predecessor pushes nothing', () => {
   const c = make();
   const A = mk(c, { start: T - 5 * DAY, end: T - 3 * DAY, pct: 100, completion: T - 3 * DAY });
-  const B = mk(c, { start: T - 3 * DAY, end: T - 2 * DAY, deps: [A.id] });
+  const B = mk(c, { start: T - 2 * DAY, end: T - DAY, deps: [A.id] });
   c.autoSchedule([A, B], T);
-  assert.strictEqual(B.start, T - 3 * DAY, 'the work really is done; the plan is not fiction');
+  assert.strictEqual(B.start, T - 2 * DAY, 'the work really is done; the plan is not fiction');
   assert.deepStrictEqual(Object.keys(c._schedDisplaced), []);
 });
 
@@ -202,8 +230,8 @@ test('gap 2: displacement is attributed all the way down a chain, not lost at th
   const B = mk(c, { start: T - 4 * DAY, end: T - 3 * DAY, deps: [A.id] });
   const C = mk(c, { start: T - 3 * DAY, end: T - 2 * DAY, deps: [B.id] });
   c.autoSchedule([A, B, C], T);
-  assert.strictEqual(B.start, T, 'B pushed to today');
-  assert.strictEqual(C.start, T + DAY, 'C follows B');
+  assert.strictEqual(B.start, T + DAY, 'B pushed past today, which A still owes');
+  assert.strictEqual(C.start, T + 3 * DAY, 'C follows B');
   assert.strictEqual(c._schedDisplaced[B.id], 4 * DAY, 'B: 4 days of overrun');
   assert.strictEqual(c._schedDisplaced[C.id], 4 * DAY,
     'C: the SAME 4 days — the credit survives the hop, so C can say why it moved');

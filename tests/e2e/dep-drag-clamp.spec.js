@@ -74,12 +74,11 @@ test.describe('dependency drag clamp', () => {
 
     /* (2) The bar itself actually stopped, rather than being corrected afterwards. */
     const held = await box(page, BAR_B);
-    /* Chain 6 block 43 makes a due day inclusive in paint. A.end is the START of A's final
-       painted day, so B correctly shares that date column while still respecting the exact
-       finish-to-start instant. A spans three painted days in this fixture. */
-    const aEndDayLeft = aRight - a.width / 3;
-    expect(held.x, 'B stops at A.end (the left edge of A\'s inclusive due day) mid-drag')
-      .toBeGreaterThan(aEndDayLeft - 3);
+    /* 2026-09-09: A.end names A's INCLUSIVE last day — a day A still occupies — so the floor is the
+       midnight after it and B stops in the NEXT column, at A's right edge. (It used to stop one column
+       earlier, sharing A's final date, which is the overlap this fix removed.) */
+    expect(held.x, 'B stops the day after A\'s inclusive last day, mid-drag')
+      .toBeGreaterThan(aRight - 3);
 
     await page.mouse.up();
 
@@ -90,7 +89,9 @@ test.describe('dependency drag clamp', () => {
            there is no post-release jump. B sits exactly at A's end. */
     const A = await dates(page, 'dep-a');
     const B = await dates(page, 'dep-b');
-    expect(B.start, 'B starts exactly at A.end — no rubber-band on release').toBe(A.end);
+    /* No DST inside this fixture's ten-day window, so the day step is a flat 24h here. */
+    expect(B.start, 'B starts the day after A\'s last day — no rubber-band on release')
+      .toBe(A.end + 86400000);
     expect(B.end - B.start, 'and keeps its 2-day duration').toBe(A.end - A.start);
   });
 

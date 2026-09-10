@@ -238,7 +238,7 @@ walks successors only, so dragging a successor never moves its predecessor. Two 
 
 - **Propagation runs from the EFFECTIVE end, not the planned one.** `effectiveEndOf(t, now)` is the end a
   successor is actually anchored to: for an **unfinished, non-recurring** task whose planned end is already
-  in the past, it is at least the start of today, because the work has not happened and the old date is
+  in the past, it is at least the end of today, because the work has not happened and the old date is
   fiction. The difference between `plannedEndOf` and `effectiveEndOf` is the **overrun**, and it absorbs
   slack and pushes successors exactly as a later drag does. Three cases deliberately keep the planned end:
   a **finished** task (`doneOn` — it really did end there), a **recurring** task (its `currentOcc(t).end` is
@@ -252,6 +252,27 @@ walks successors only, so dragging a successor never moves its predecessor. Two 
   nothing left to correct on a clamped drop, so there is no rubber-band jump on release. An `end`-edge drag
   is never clamped (it does not move the start), and a `start`-edge drag that would invert the bar is left
   alone rather than emitting a bad span.
+
+**The floor is an EXCLUSIVE edge** (owner 2026-09-09). Every end above goes through `endExclusiveOf(t, ms)`,
+which is the one place the two meanings `end` carries are reconciled — and the reason a one-day push of a
+predecessor used to move nothing at all:
+
+| The task | What `end` holds | Exclusive edge |
+|---|---|---|
+| ordinary | midnight of the **inclusive last day** — "due that day", as `dueMsOf` has always read it | next midnight (`addLocalDays`, so a DST crossing lands on midnight, not 23:00) |
+| `allDay` (the gcal shape) | already the **exclusive** next midnight — which is why `sheetDateParts` subtracts 1ms to display it | unchanged |
+| a user-typed **clock** | the exact instant work stops | unchanged |
+| **recurring** | `currentOcc(t).end` = `start + recur.durMs`, an instant the rule produced | unchanged — converting it would add a second day to any whole-day occurrence starting at midnight |
+
+The floor read `t.end` raw and so knew about none of them, letting a successor start ON its predecessor's
+last day: a full day of overlap that the Gantt draws as one, and a link that ate a day of push before it
+reacted. `startFloorFor(t, lb)` then puts that edge in the **successor's** granularity — a task whose start
+carries a clock is held to the instant, a date-only task to the day the instant falls in, which is also what
+stops `autoSchedule` from writing a non-midnight start that `hasStartTime` would read back as a clock the
+user never typed. `depFloorFor` and `autoSchedule` both apply it, so the affordance and the authority still
+agree exactly. `computeSlack` measures the same occupancy span for the same reason: on `end - start` a chain
+would collect one free day of float per link and stop reading as critical exactly when it was.
+`computeCPM` is untouched — it chains relative durations from zero and never reads a stored date.
 
 **Named consequence, handled rather than hidden:** with the effective end in play, a successor's dates move
 *on their own* as days pass with its predecessor unfinished — a background rewrite of the user's plan.

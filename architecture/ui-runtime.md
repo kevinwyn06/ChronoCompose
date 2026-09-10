@@ -971,10 +971,26 @@ longer authored by a chip.
 
 ## Dependency arrows, and the two link dots (owner reports 2026-09-09)
 
-Three reports about one control, and the first is worth stating precisely because the old code was not
-doing what the report said. *"Arrows start from the middle of a block and point down"* — the line DID
-leave the predecessor's right edge. What made it read as a drop out of the middle was a 13px stub: it
-turned downward before the eye registered a horizontal run at all, right beside the bar it came from.
+Three reports about one control. The first was misdiagnosed the first time round and is corrected below:
+*"Arrows start from the middle of a block and point down."* The reading recorded here was that the line
+already left the predecessor's right edge and only turned too early, so the 13px stub was widened to 14
+and the vertical leg moved to the middle of the gap. That was treating a symptom.
+
+**The line did not leave the right edge** (owner, 2026-09-09b: *"dependency arrows must originate and end
+from the side of a bar and must extend some distance past the bar, even if it needs to bend more times."*)
+`renderArrows` departed from `xOf(occ.end)`, and bars are painted by INCLUSIVE day — `ganttDayBarGeometry`
+gives `(last-first+1)*dayW` — so that x is the **left edge of the bar's final column**, one whole day-width
+inside the bar. A column is always wider than the stub, so the vertical leg turned while still on top of
+the bar it had just left, which is precisely the reported shape. `ganttBarRightX(allDay, start, end)` is
+the departure pixel now: the day after the last painted one, derived by the same expression `ganttBlock`
+uses to pick its `endDay`, so the arrow and the bar cannot drift apart at any zoom. The target side never
+had the problem — `xOf(occ.start)` already is the target bar's left edge.
+
+The **lane is spent outward only**. Signed, a negative lane subtracted from the departure walked the turn
+back inside the bar it had just left, and at `L = -14` the approach landed past the arrowhead's own x, so
+the last run went right-to-left and the marker pointed into the target instead of at it. Each lane now
+pushes whichever end it belongs to further out, which keeps every edge's geometry distinct while both runs
+stay at least one full `ARROW_STUB_PX` clear of their bar.
 
 `arrowPath(sx, sy, tx, ty, lane, rowH)`, `arrowCorridorX` and `arrowLanes`/`arrowFanOffsets` are PURE and
 own the whole geometry (`tests/dep-arrows.test.js`):

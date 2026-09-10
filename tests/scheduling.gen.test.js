@@ -173,8 +173,9 @@ test('scheduler: successor snaps to predecessor end, duration preserved', () => 
   c.autoSchedule(arr);
   assert.strictEqual(A.start, T, 'A unchanged (no preds)');
   assert.strictEqual(A.end, T + 2 * DAY);
-  assert.strictEqual(B.start, A.end, 'B snaps to A.end');
-  assert.strictEqual(B.end, A.end + DAY, 'B duration (1 day) preserved');
+  // A date-only `end` is the INCLUSIVE last day, so B starts the day AFTER A's end, not on it.
+  assert.strictEqual(B.start, A.end + DAY, 'B starts the day after A\'s last day');
+  assert.strictEqual(B.end, A.end + 2 * DAY, 'B duration (1 day) preserved');
 });
 
 // 7. Slack preserved: a successor already later than the lower bound is untouched.
@@ -196,10 +197,10 @@ test('scheduler: A->B->C cascade, each starts at prior end', () => {
   const B = mk(c, { start: T, end: T + DAY, deps: [A.id] });
   const C = mk(c, { start: T, end: T + DAY, deps: [B.id] });
   c.autoSchedule([A, B, C]);
-  assert.strictEqual(B.start, T + 2 * DAY, 'B at A.end');
-  assert.strictEqual(B.end, T + 3 * DAY);
-  assert.strictEqual(C.start, T + 3 * DAY, 'C at B.end');
-  assert.strictEqual(C.end, T + 4 * DAY);
+  assert.strictEqual(B.start, T + 3 * DAY, 'B the day after A\'s last day');
+  assert.strictEqual(B.end, T + 4 * DAY);
+  assert.strictEqual(C.start, T + 5 * DAY, 'C the day after B\'s last day');
+  assert.strictEqual(C.end, T + 6 * DAY);
 });
 
 // 9. Never pulls earlier: even after moving a predecessor earlier, a slack successor stays put.
@@ -235,7 +236,8 @@ test('slack: critical chain ~0, parallel task > 0', () => {
   const c = make();
   const T = c.startOfDay(Date.now());
   const A = mk(c, { start: T, end: T + 2 * DAY });                    // chain
-  const B = mk(c, { start: T + 2 * DAY, end: T + 5 * DAY, deps: [A.id] }); // chain, ends the project
+  // B starts the day AFTER A's inclusive last day — abutting starts would be a violation, not a chain.
+  const B = mk(c, { start: T + 3 * DAY, end: T + 6 * DAY, deps: [A.id] }); // chain, ends the project
   const P = mk(c, { start: T, end: T + DAY });                        // parallel, short, no deps
   const tasks = [A, B, P];
 
@@ -243,7 +245,8 @@ test('slack: critical chain ~0, parallel task > 0', () => {
   assert.ok(Math.abs(slack[A.id]) < 0.01, `A on critical chain, slack~0 (got ${slack[A.id]})`);
   assert.ok(Math.abs(slack[B.id]) < 0.01, `B on critical chain, slack~0 (got ${slack[B.id]})`);
   assert.ok(slack[P.id] > 0.5, `P off critical path, slack>0 (got ${slack[P.id]})`);
-  assert.strictEqual(Math.round(slack[P.id]), 4, 'P float = projEnd(5d) - P.dur(1d) - P.start(0) = 4 days');
+  assert.strictEqual(Math.round(slack[P.id]), 5,
+    'P float = projEnd(7d, B\'s exclusive edge) - P.span(2d) - P.start(0) = 5 days');
 
   const { critical } = c.computeCPM(tasks);
   assert.strictEqual(critical[A.id], true, 'A critical');

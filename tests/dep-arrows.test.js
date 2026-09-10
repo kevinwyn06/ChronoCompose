@@ -139,3 +139,81 @@ test('startLink records which end the drag is fixed at', () => {
   c.startLink(ev, t, 0);
   assert.strictEqual(c.linkState.dir, 'succ', 'the historic direction is the default');
 });
+
+// ---------------------------------------------------------------------------
+// Owner, 2026-09-09b: "dependency arrows must originate and end from the side of a bar and must extend
+// some distance past the bar, even if it needs to bend more times."
+//
+// The header of this file records the previous session's reading — that the line already "DID start at
+// the predecessor's right edge". It did not. `renderArrows` departed from `xOf(occ.end)`, and bars are
+// painted by INCLUSIVE day, so that x is the LEFT edge of the bar's final column — a whole day-width
+// inside the bar. Since a column is always wider than the 14px stub, the vertical leg turned while still
+// on top of the bar it had just left, which is exactly what the report describes. The stub was never the
+// problem; the departure pixel was.
+
+test('ganttBarRightX: the departure pixel is the bar trailing edge, not its last column', () => {
+  const c = make();
+  const DAY = c.DAY;
+  const T = c.startOfDay(Date.now());
+  c._tl = { start: T, days: 60 };
+  c.state = Object.assign({}, c.state, { dayW: 40 });
+
+  // A task Sep 10 → Sep 12 paints three columns: left 0, width 120. Its trailing edge is 120.
+  assert.strictEqual(c.ganttBarRightX(false, T, T + 2 * DAY), 120,
+    'the day AFTER the last painted one — the same edge ganttDayBarGeometry gives the bar');
+  assert.ok(c.ganttBarRightX(false, T, T + 2 * DAY) > c.xOf(T + 2 * DAY),
+    'and strictly outside xOf(end), which is where the arrow used to start');
+  assert.strictEqual(c.ganttBarRightX(false, T, T + 2 * DAY) - c.xOf(T + 2 * DAY), 40,
+    'by exactly one column — the gap an arrow used to spend its whole stub crossing');
+
+  // A one-day bar is one column wide, so its trailing edge is one column out.
+  assert.strictEqual(c.ganttBarRightX(false, T, T), 40);
+
+  // An allDay end is already the exclusive next midnight, so the -1 lands it on the same column as the
+  // date-only task that displays the same last day.
+  assert.strictEqual(c.ganttBarRightX(true, T, T + 3 * DAY), c.ganttBarRightX(false, T, T + 2 * DAY),
+    'allDay and date-only bars showing the same last day share a trailing edge');
+
+  // A missing end paints one column from the start, and the arrow leaves that column's far side.
+  assert.strictEqual(c.ganttBarRightX(false, T, null), 40);
+  assert.strictEqual(c.ganttBarRightX(false, null, null), null, 'nothing to leave from');
+});
+
+test('ganttBarRightX agrees with the painted bar at every zoom', () => {
+  const c = make();
+  const DAY = c.DAY;
+  const T = c.startOfDay(Date.now());
+  c._tl = { start: T, days: 60 };
+  for (const dayW of [3, 42, 720]) {
+    c.state = Object.assign({}, c.state, { dayW });
+    const geom = c.ganttDayBarGeometry(0, 2, dayW, 0, 60);
+    assert.strictEqual(c.ganttBarRightX(false, T, T + 2 * DAY), geom.left + geom.width,
+      'arrow departure == bar right edge at zoom ' + dayW);
+  }
+});
+
+test('a lane offset never walks a turn back inside the bar it belongs to', () => {
+  const c = make();
+  const stub = c.ARROW_STUB_PX;
+  // The backward route, where the lane shifts both x turns. Signed, L=-14 put the approach at tx, past
+  // the arrowhead's own x — so the final run went right-to-left and the marker pointed INTO the target.
+  for (const L of [-21, -14, -7, 0, 7, 14, 21]) {
+    const s = segs(c.arrowPath(400, 10, 150, 60, L, 28));
+    assert.strictEqual(kinds(c.arrowPath(400, 10, 150, 60, L, 28)), 'MHVHVH', 'lane ' + L);
+    assert.ok(s[1][1] >= 400 + stub,
+      'departure stays a full stub clear of the predecessor (lane ' + L + ', got ' + s[1][1] + ')');
+    assert.ok(s[3][1] <= 150 - stub,
+      'approach stays a full stub clear of the target (lane ' + L + ', got ' + s[3][1] + ')');
+    assert.ok(s[5][1] > s[3][1],
+      'and the last run points RIGHT, at the target edge (lane ' + L + ')');
+  }
+});
+
+test('lanes still separate the edges they are there to separate', () => {
+  const c = make();
+  const xs = [-14, -7, 0, 7, 14].map(L => {
+    const s = segs(c.arrowPath(400, 10, 150, 60, L, 28));
+    return s[1][1] + ':' + s[3][1];
+  });
+  assert.strictEqual(new Set(xs).size, xs.length, 'every lane still draws a distinct path: ' + xs);
+});

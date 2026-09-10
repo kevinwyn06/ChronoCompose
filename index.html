@@ -6778,26 +6778,64 @@ class Component extends DCLogic {
      successors forward — while a predecessor moved earlier never drags a successor back. Runs in `commit` and
      on drag-finalize, so scheduling is automatic and undoable. Recurring tasks anchor their successors (via the
      current occurrence's end) but are not themselves moved — their dates are rule-driven. Mutates `tasks`. */
+  /* PP-EXT (owner 2026-09-09): PURE. THE ONE PLACE the two meanings of `end` are reconciled, and the
+     reason dependency scheduling was a day short. `end` carries two conventions:
+       · an ORDINARY task's `end` is midnight of its INCLUSIVE last day — "due that day". `dueMsOf` has
+         always said so, converting with `startOfDay(end)+DAY` at its own point of use;
+       · an `allDay` task (the Google Calendar shape) already stores the EXCLUSIVE next midnight, which
+         is why `sheetDateParts` subtracts 1ms to display it;
+       · an end carrying a user-typed CLOCK is already the exact instant work stops.
+     The dependency floor read `t.end` raw and so knew about none of them: a successor was allowed to
+     start ON the last day of its predecessor, which is a full day of overlap that the Gantt draws as
+     one. Pushing a predecessor by a day therefore moved nothing — every link ate a day before it
+     reacted. Everything here answers the only question a finish-to-start edge asks: the first instant
+     the successor is free to start. `addLocalDays` rather than `+DAY` so a floor spanning a DST change
+     lands on midnight, not 23:00.
+     A RECURRING task never comes through here: `currentOcc(t).end` is `start + recur.durMs`, an instant
+     the RULE produced, and it is exclusive by construction. Converting it would add a second day to any
+     whole-day occurrence starting at midnight, whose end lands on a midnight for a reason that has
+     nothing to do with the date-only convention this reconciles. */
+  endExclusiveOf(t, ms){
+    if(t==null || ms==null || t.recur) return ms==null ? null : ms;
+    if(t.allDay || this.hasEndTime(t)) return ms;
+    return this.addLocalDays(this.startOfDay(ms), 1);
+  }
   /* PP-EXT (deps gap 2): PURE. The PLANNED anchor — the end a successor would be held to if nothing had
-     overrun. Recurring tasks anchor through the current occurrence, exactly as before. */
-  plannedEndOf(t){ if(!t || !this.isScheduled(t)) return null; return t.recur ? this.currentOcc(t).end : t.end; }
+     overrun. Recurring tasks anchor through the current occurrence, exactly as before. Exclusive, so
+     that subtracting it from `effectiveEndOf` yields the overrun and nothing else. */
+  plannedEndOf(t){ if(!t || !this.isScheduled(t)) return null;
+    return this.endExclusiveOf(t, t.recur ? this.currentOcc(t).end : t.end); }
   /* PP-EXT (deps gap 2): PURE. The EFFECTIVE / PROJECTED end — what a successor is actually anchored to.
      An unfinished task whose planned end is already in the past has not ended: the plan is fiction, and
      the gap between its planned end and today is an OVERRUN the successors have to absorb. So the
-     projected end of unfinished, overdue work is at least the start of today; the difference is what
-     propagates. Three things deliberately keep their planned end:
+     projected end of unfinished, overdue work is at least the start of TOMORROW — the work still has to
+     happen, and the soonest that can be is today, so today is occupied and the successor is free the day
+     after. (Read the rung against the exclusive edge and it is the same statement the old `t.end<today ?
+     today` made, moved onto the corrected units.) The difference is what propagates. Three things
+     deliberately keep their planned end:
        · a FINISHED task (`doneOn`) — it really did end there;
        · a RECURRING task — its dates are rule-driven and the V1 carve-out that it is never moved stands;
        · anything unscheduled — no end to project.
+     A still-future end is never touched, so a task due at 17:00 today keeps anchoring its successor to
+     17:00 today rather than being rounded up a day.
      `now` is injectable so every rung of this is unit-testable without clock games. */
   effectiveEndOf(t, now){
     if(!t || !this.isScheduled(t)) return null;
-    if(t.recur) return this.currentOcc(t).end;
+    if(t.recur) return this.endExclusiveOf(t, this.currentOcc(t).end);
     if(t.end==null) return null;
+    const e=this.endExclusiveOf(t, t.end);
     const today=this.startOfDay(now==null?Date.now():now);
-    if(this.doneOn(t, today)) return t.end;
-    return t.end<today ? today : t.end;
+    if(this.doneOn(t, today)) return e;
+    return e<=today ? this.addLocalDays(today, 1) : e;
   }
+  /* PP-EXT (owner 2026-09-09): PURE. A predecessor's exclusive end expressed in the SUCCESSOR's own
+     granularity. A task whose start carries a user-typed clock is held to the instant exactly. A
+     date-only task has no way to say "starts at 17:00", so it is held to the DAY that instant falls in
+     — which is also what stops `autoSchedule` from writing a non-midnight start that `hasStartTime`
+     would read straight back as a clock the user never typed. For the ordinary all-day chain the two
+     branches agree: the floor is already a midnight. */
+  startFloorFor(t, lb){ if(t==null || lb==null) return null;
+    return this.hasStartTime(t) ? lb : this.startOfDay(lb); }
   /* PP-EXT (deps gap 1): PURE. The earliest start a finish-to-start dependency permits for `id`, or null
      when it has no scheduled predecessors. THIS IS THE SINGLE SOURCE the drag-time clamp and
      `autoSchedule` both read, so the affordance and the authority cannot disagree — the clamp is UI, the
@@ -6810,7 +6848,7 @@ class Component extends DCLogic {
     (t.deps||[]).forEach(d=>{ const p=this.depId(d);
       if(p===id || !byId[p] || (skip && skip.indexOf(p)>=0)) return;
       const e=this.effectiveEndOf(byId[p], now); if(e!=null) lb=Math.max(lb, e); });
-    return isFinite(lb) ? lb : null;
+    return isFinite(lb) ? this.startFloorFor(t, lb) : null;
   }
   /* PP-EXT (deps gap 1): PURE. Clamp a proposed bar-drag result so the dragged task cannot cross its
      dependency floor mid-gesture. `mode:'end'` never moves the start, so it is never clamped. A 'start'
@@ -6853,8 +6891,11 @@ class Component extends DCLogic {
       ps.forEach(p=>{ const e=this.effectiveEndOf(byId[p], now); if(e==null) return;
         lbE=Math.max(lbE, e); lbP=Math.max(lbP, e-overOf(p)); });
       if(!isFinite(lbE)) return;
-      const dur=Math.max(0, t.end-t.start), ns=Math.max(t.start, lbE);
-      const nsP=Math.max(t.start, isFinite(lbP)?lbP:t.start);
+      /* PP-EXT (owner 2026-09-09): through `startFloorFor`, the same conversion `depFloorFor` hands the
+         drag-time clamp — otherwise the authority and the affordance disagree by up to a day and a
+         clamped drop rubber-bands on release. */
+      const dur=Math.max(0, t.end-t.start), ns=Math.max(t.start, this.startFloorFor(t, lbE));
+      const nsP=Math.max(t.start, isFinite(lbP)?this.startFloorFor(t, lbP):t.start);
       if(ns!==t.start){ t.start=ns; t.end=ns+dur; }
       const disp=ns-nsP;
       if(disp>0) displaced[id]=disp;
@@ -6871,14 +6912,19 @@ class Component extends DCLogic {
   computeSlack(tasks){
     const byId={}; tasks.forEach(t=>byId[t.id]=t);
     const sched=tasks.filter(t=>this.isScheduled(t));
-    const projEnd = sched.length ? Math.max(...sched.map(t=>t.end)) : 0;
+    /* PP-EXT (owner 2026-09-09): every span here is the OCCUPANCY span — start to the exclusive end,
+       the same edge the dependency floor is built from. Measuring `end-start` instead would hand a task
+       one free day of float per link, because the day a task's inclusive end names is a day it still
+       occupies, and the chain would stop reading as critical the moment it actually was. */
+    const spanOf=t=>{ const e=this.endExclusiveOf(t, t.end); return e==null ? 0 : Math.max(0, e-t.start); };
+    const projEnd = sched.length ? Math.max(...sched.map(t=>this.endExclusiveOf(t, t.end))) : 0;
     const succ={}; tasks.forEach(t=>(t.deps||[]).forEach(d=>{ const p=this.depId(d); if(byId[p]) (succ[p]=succ[p]||[]).push(t.id); }));
     const LS={};
     const ls=(id,guard)=>{
       if(LS[id]!=null) return LS[id];
       const t=byId[id]; if(!this.isScheduled(t)) return projEnd;
       if(guard[id]) return t.start; guard[id]=1;
-      const dur=Math.max(0,t.end-t.start);
+      const dur=spanOf(t);
       const ss=(succ[id]||[]).filter(s=>byId[s] && this.isScheduled(byId[s]));
       const lf = ss.length ? Math.min(...ss.map(s=>ls(s,guard))) : projEnd;
       LS[id]=lf-dur; return LS[id];
@@ -6927,6 +6973,20 @@ class Component extends DCLogic {
     else if(startDay==null) last=Math.min(last,d1-1);
     if(first>=d1 || last<d0 || last<first) return null;
     return {left:first*dayW,width:(last-first+1)*dayW,first,last};
+  }
+  /* PP-EXT (owner 2026-09-09b): the x of a bar's TRAILING edge — the pixel a dependency arrow has to
+     leave from. `xOf(end)` is not it: bars are painted by INCLUSIVE day (`ganttDayBarGeometry` gives
+     `(last-first+1)*dayW`), so `xOf(end)` lands on the left edge of the bar's final column, a whole
+     day-width INSIDE the bar. An arrow drawn from there left the bar's middle and, since a column is
+     always wider than the 14px stub, turned downward while still on top of it — which is the "arrows
+     don't come out of the side" report. The trailing edge is the day after the last painted one.
+     `allDay` ends are exclusive in storage, hence the `-1` before the day is taken: the same expression
+     `ganttBlock` uses to pick its `endDay`, so the arrow and the bar cannot drift apart.
+     A missing end falls back to the start's own day, matching the one-column bar that gets painted. */
+  ganttBarRightX(allDay, startMs, endMs){
+    if(startMs==null && endMs==null) return null;
+    const e = endMs==null ? startMs : (allDay ? Math.max(startMs==null?endMs:startMs, endMs-1) : endMs);
+    return (this.ganttDayIndex(this.startOfDay(e), this._tl.start)+1)*this.state.dayW;
   }
   /* PP-EXT (C2): clamp a proposed day-width to the zoom bounds (pure — testable without a DOM). */
   clampDayW(v){ return Math.max(this.GANTT_DAYW_MIN, Math.min(this.GANTT_DAYW_MAX, v)); }
@@ -16973,10 +17033,16 @@ class Component extends DCLogic {
     }
     /* The target starts at or before the predecessor's end: leave right, cross in the channel between the
        two rows, come back left, then drop in. The channel is offset by the lane too, so two edges doubling
-       back over the same pair of rows do not lie on top of each other. */
+       back over the same pair of rows do not lie on top of each other.
+       PP-EXT (owner 2026-09-09b): the lane is spent OUTWARD ONLY. Signed, a negative lane subtracted from
+       the departure (or added to the approach) walked the turn back INSIDE the bar it had just left — and
+       at L=-14 the approach ran past `ex` entirely, so the marker pointed left, into the target, instead of
+       at it. Splitting the lane by sign keeps every edge's geometry distinct while both runs stay at least
+       one full stub clear of their bar, which is the whole point of the shape. */
     const rh=rowH||this.rowH;
     const cy=(ty>sy ? sy+rh/2 : sy-rh/2) + (ty>sy ? L : -L);
-    return 'M'+sx+','+sy+' H'+(sx+stub+L)+' V'+cy+' H'+(tx-stub-L)+' V'+ty+' H'+ex;
+    const outX=sx+stub+Math.max(0,L), backX=tx-stub-Math.max(0,-L);
+    return 'M'+sx+','+sy+' H'+outX+' V'+cy+' H'+backX+' V'+ty+' H'+ex;
   }
   /* Lane assignment. Edges whose vertical legs would run down the same corridor are spread sideways, in
      the order the edges are collected — deterministic for a given task order, which is what keeps a
@@ -17002,7 +17068,12 @@ class Component extends DCLogic {
   renderArrows(tasks,totalW,bodyH){
     const h=React.createElement;
     const byId={}; const idx={}; tasks.forEach((t,i)=>{byId[t.id]=t;idx[t.id]=i;});
-    const predEnd=(pid,occ)=>{ const occs=this._occById[pid]||[]; let o=null; if(occ!=null) o=occs.find(x=>x.idx===occ); if(!o) o=occs[0]; const p=byId[pid]; const e=o?o.end:(p?p.end:0); return this.xOf(e); };
+    /* PP-EXT (owner 2026-09-09b): the bar's TRAILING EDGE, not `xOf(end)` — see `ganttBarRightX`. An
+       arrow leaves the side of the bar it belongs to, so the 14px stub is 14px of clear air rather than
+       14px spent crossing the bar's own final column. */
+    const predEnd=(pid,occ)=>{ const occs=this._occById[pid]||[]; let o=null; if(occ!=null) o=occs.find(x=>x.idx===occ); if(!o) o=occs[0]; const p=byId[pid];
+      const s=o?o.start:(p?p.start:null), e=o?o.end:(p?p.end:null);
+      return this.ganttBarRightX(!!(p&&p.allDay), s, e); };
     const tgtStart=(tid)=>{ const occs=this._occById[tid]||[]; const o=occs[0]; const t=byId[tid]; return this.xOf(o?o.start:(t?t.start:0)); };
     /* PP-EXT (owner report 2026-09-09): collect every edge FIRST, then route. Lanes and fan-out are both
        facts about the whole set — an edge cannot know on its own whether it shares a corridor with
