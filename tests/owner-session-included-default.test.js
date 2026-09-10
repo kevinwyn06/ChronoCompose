@@ -63,7 +63,13 @@ test('legacy included:true migration is idempotent and reports the representativ
       recur:{kind:'week', interval:1, days:[new Date(B+2*DAY).getDay()], until:null}})
   ];
   const before=tasks.filter(t=>c.isActiveOn(t,B)).length;
-  assert.equal(before, 5, 'legacy unconditional presses make every fixture active');
+  /* PP-EXT (owner report 2026-09-10): the live rule now subsumes the FUTURE half of what this one-time
+     migration corrects — `pressedForToday` ignores a non-explicit `included:true` whose start day has
+     not arrived, so `future` and `weekly` are already off today before the sweep runs. The sweep still
+     earns its keep: it CLEARS the stale flag (rather than merely ignoring it) and it also covers the
+     window that has already closed, which the live rule deliberately leaves alone so overdue work
+     stays visible. */
+  assert.equal(before, 3, 'a stale press still holds a dateless, a today and a PAST window on today');
   assert.equal(c.migrateIncludedDatedDefault(tasks), 3);
   const after=tasks.filter(t=>c.isActiveOn(t,B)).length;
   assert.equal(after, 2, 'only dateless work and a window containing today remain active');

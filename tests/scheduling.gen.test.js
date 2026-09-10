@@ -22,7 +22,9 @@ const schedMin = (chunks, id) =>
 test('V2.1: pressed is today inclusion; unpressing removes it regardless of date window', () => {
   const c=make(); cleanDay(c,'02:00');
   const B=c.startOfToday();
-  const outside=activeTask(c,{start:B+4*DAY,end:B+5*DAY,included:true,planned:60});
+  /* PP-EXT (owner report 2026-09-10): "pressed" is `includedExplicit` now — a bare `included:true` on
+     work that starts next week is the creation default, and no longer pulls it into today. */
+  const outside=activeTask(c,{start:B+4*DAY,end:B+5*DAY,included:true,includedExplicit:true,planned:60});
   let map=c.computeAllotted([outside]);
   assert.strictEqual(map[outside.id].active,true,'pressed out-of-window task joins by discretion');
   outside.included=null;

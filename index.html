@@ -2801,9 +2801,42 @@ class Component extends DCLogic {
     /* PP-EXT V5 (F19/F20, block 20): auto-included work is not opted out. Without this clause the band
        header, the table icon, the Gantt mute AND `isTopHoverOn` would all still call a task the calendar
        just brought in "excluded", while the scheduler had already given it minutes. */
-    return t.included!==true && !this.isInheritedToday(t) && !this.autoIncludedToday(t);
+    return !this.pressedForToday(t) && !this.isInheritedToday(t) && !this.autoIncludedToday(t);
     /* /PP-EXT */
   }
+  /* ==== PP-EXT (owner report 2026-09-10): A PRESS IS NOT A LICENCE TO ARRIVE EARLY ====
+     Owner, verbatim: *"If a task starts on sept 16, I have no idea why it would be auto included in
+     today. If its sept 16 9am it doesn't have the same problem. It makes no sense. Today's the 10th."*
+
+     The second sentence is the diagnostic. Nothing about a clock belongs in this question, and the 9am
+     variant was not behaving — it was being vetoed for an unrelated reason. A clocked start with no end
+     and no planned time is a POINT, and a Point is refused on every day but its own; give that same 9am
+     task a planned duration and it reappeared on today exactly like the untimed one. So the Point veto
+     was standing in for a window test that `isActiveOn`'s today branch never had: `included===true`
+     returned true on its own, whatever the dates said.
+
+     `included===true` is not always a decision. `normalizeTask` writes it as the CREATION DEFAULT for a
+     dateless task (correct — a dateless chore is today's work), and `includedExplicit` is the note the
+     2026-09-09 ruling asked the backend to take about a real press. A leftover default that survives the
+     task being given a future start describes nothing the user decided, and pins the row to today
+     forever.
+
+     Judged on the START edge and on nothing else, for two reasons:
+       • the veto must be FUTURE-only. Overdue work carries a press precisely so it stays visible, and a
+         window test would drop a missed deadline off the list — the opposite of the owner's tenet that
+         the laziest path never silently loses work.
+       • for a REPEAT, `t.start` is the series ANCHOR, so a running weekly series (anchored months ago)
+         is never "starts in the future" even on a week when its next occurrence is Friday. Asking
+         `occForDay` instead would have vetoed every repeat on its off-days, which is a different rule
+         than the one the owner reported.
+     A dateless task and a deadline-only task have no start to be in the future, and keep their press. */
+  pressedForToday(t, B){
+    if(!t || t.included!==true) return false;
+    if(t.includedExplicit===true) return true; /* a real press outranks the dates (owner 2026-09-09) */
+    if(t.start==null) return true;
+    return this.startOfDay(t.start) <= (B==null ? this.startOfToday() : B);
+  }
+  /* ==== /PP-EXT ==== */
   /* ==== PP-EXT (owner 2026-08-21): the today predicates ask for a WINDOW, not for two edges ====
      Owner report: a quick-added `test today` was absent from today's list and present on tomorrow's.
      Diagnosis in docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md; the root cause was
@@ -2967,7 +3000,9 @@ class Component extends DCLogic {
       /* PP-EXT V5 (F19/F20, block 20): `autoIncludedToday` is the third way in — an opening window or an
          expired snooze. Adding demand here makes the day fuller on purpose; over-subscription is the
          signal the owner uses, so nothing elsewhere is trimmed to compensate. */
-      return t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t); /* inherited legacy/unpressed work carries forward */
+      /* PP-EXT (owner report 2026-09-10): `pressedForToday`, not the raw flag — a creation-default
+         `included===true` on a task whose start day has not arrived is not a press. See the helper. */
+      return this.pressedForToday(t, B) || this.isInheritedToday(t) || this.autoIncludedToday(t); /* inherited legacy/unpressed work carries forward */
       /* /PP-EXT */
     }
     const win = this.isScheduled(t) ? this.occForDay(t, B) : this.ghostSpan(t, this.startOfToday());
@@ -2989,7 +3024,7 @@ class Component extends DCLogic {
     if(this.snoozeActive(t, this.startOfToday(), Date.now())) return 'snoozed';
     /* PP-EXT V5 (block 20): auto-included work reads as pressed, so `inclBand` files it under
        Included and `isUndecided` stops calling it undecided. One predicate, one answer. */
-    return (t.included===true || this.isInheritedToday(t) || this.autoIncludedToday(t)) ? 'pressed' : 'unpressed';
+    return (this.pressedForToday(t) || this.isInheritedToday(t) || this.autoIncludedToday(t)) ? 'pressed' : 'unpressed';
     /* /PP-EXT */
   }
   /* ===== PP-EXT V2.9 §4: shared derivations for the Selection view and the Gantt inclusion division =====
@@ -6449,6 +6484,25 @@ class Component extends DCLogic {
         if(!timed) t[key]=this.startOfDay(ms);
         ms=t[key];
       }
+      /* PP-EXT (owner ruling 2026-09-10): DELETING A TIME CHANGES ONLY THE EDGE YOU CLEARED.
+         Owner report: *"frequently I can't delete the time from a date."* Clearing the 9am off a
+         9–10am appointment ran the 2026-08-19 duration rule ("START moves end") and slid the end back
+         nine hours, so the row read `Sep 16` / `Sep 16, 1:00am`. The clock had not been deleted; it had
+         moved — which is exactly what "it won't go away" looks like from the outside. The same defect
+         wore the other face on the END edge: the anti-inversion clamp dragged the 9am START to midnight,
+         deleting a time the user never touched.
+
+         `deTimed` turns off the duration carry. `sameDayDeTime` additionally suspends the two clamps,
+         and ONLY while both edges land on the same civil day: a bare-date edge is stored at that day's
+         midnight, so `9:00am → midnight of the same day` is day-ordered (which is what every window test
+         in the app actually reads) while being numerically backwards by nine hours. Nothing downstream
+         mistakes that for an appointment — `clockSpanMinutes`/`anchorSpanMinutes` both return null for
+         `end <= start`, so there is no span to read, no fixed block, and no `planned` overwrite. A
+         de-timing that lands on a DIFFERENT day is a real re-date, and keeps the clamp. */
+      const deTimed = timed===false;
+      const sameDayDeTime = deTimed && !t.recur && t.start!=null && t.end!=null
+        && this.startOfDay(t.start)===this.startOfDay(t.end);
+      /* /PP-EXT */
       /* PP-EXT (owner 2026-08-19): "If both start and end time exist, changing one should change the
          other by preserving the duration." Owner decision: START moves end; END sets duration.
          The gate is clockSpanMinutes, NOT hasStartTime && hasEndTime — the latter is a strictly wider
@@ -6471,18 +6525,18 @@ class Component extends DCLogic {
         if(key==='start' && t.end!=null && t.end<t.start) t.end=null;   /* the window would be empty */
         if(key==='end' && t.start!=null && ms!=null && ms<t.start) t.start=ms;
       } else {
-      if(key==='start' && prevStart!=null && t.end!=null && wasAppt){
+      if(key==='start' && prevStart!=null && t.end!=null && wasAppt && !deTimed){
         t.end += (ms - prevStart);
       }
       /* /PP-EXT */
       /* An all-day end is the EXCLUSIVE next-day midnight, so the carried edge has to be re-encoded in
          those terms too — copying the raw instant across would leave end==start, which renders (end-1)
          as the day BEFORE the start and reads as an inverted window. */
-      if(key==='start' && t.end!=null){
+      if(key==='start' && t.end!=null && !sameDayDeTime){
         const minEnd = t.allDay ? this.atMidnight(new Date(ms)).getTime()+this.DAY : ms;
         if(t.end<minEnd) t.end=minEnd;
       }
-      if(key==='end' && t.start!=null){
+      if(key==='end' && t.start!=null && !sameDayDeTime){
         const maxStart = t.allDay ? ms-this.DAY : ms;
         if(t.start>maxStart) t.start=maxStart;
       }
@@ -7758,6 +7812,17 @@ class Component extends DCLogic {
         /* PP-EXT: drag-start already snapshotted; enforce deps on the dropped dates (clamp if the drop violates
            a predecessor, cascade successors forward), then persist — reusing that snapshot as the undo point. */
         const tasks=this.state.tasks.map(t=>({...t, deps:[...(t.deps||[])]}));
+        /* PP-EXT (owner report 2026-09-10): A BAR DRAG IS A DIRECT DATE EDIT.
+           The 2026-09-09 ruling — "auto inclusion should update every time dates are edited directly" —
+           was wired into the date cells, the picker and the When line, all of which route through
+           `commit()`. This path does not: it maps `state.tasks` and persists with `saveTasks` (see the
+           gcal note below), so it was the one gesture that moved a task's dates and left a stale
+           `included===true` behind. Dragging a dateless chore (created pressed) out to next week
+           therefore pinned it to today forever, which is half of the owner's report.
+           Applied to the dragged task AND its travelling subtree, because they all just moved. */
+        const moved={}; moved[d.id]=1; if(d.subs) Object.keys(d.subs).forEach(k=>moved[k]=1);
+        tasks.forEach(t=>{ if(moved[t.id]) this.reDeriveInclusion(t); });
+        /* /PP-EXT */
         this.autoSchedule(tasks); this.setState({tasks}); this.saveTasks(tasks);
         /* PP-EXT: drag bypasses commit, so push the reschedule out to gcal explicitly (diff vs the drag-start snapshot) */
         try{ const before=JSON.parse(this.history[this.history.length-1]); this.gcalSyncOut(before, tasks); }catch(_e){}
@@ -9630,6 +9695,14 @@ class Component extends DCLogic {
           const flag=dp.key==='start'?'startClock':'endClock';
           task[flag]=p.clock?(this.hasClock(edgeMs)?null:true):null;
           if(!p.clock) task[dp.key]=dp.key==='end'&&task.allDay?edgeMs:this.startOfDay(edgeMs);
+          /* PP-EXT (owner ruling 2026-09-10): the same de-timing rule `setDate` applies — typing a bare
+             date over one edge of a booked span deletes THAT edge's clock and moves nothing else. Stated
+             here rather than shared for the reason the 2026-09-09 note below gives: the two paths write
+             different drafts. */
+          const deTimed = !p.clock;
+          const sameDayDeTime = deTimed && !task.recur && task.start!=null && task.end!=null
+            && this.startOfDay(task.start)===this.startOfDay(task.end);
+          /* /PP-EXT */
           /* PP-EXT (owner ruling 2026-09-09): a REPEAT's two edges are the series window, so none of the
              duration-carrying or all-day re-encoding below applies to them — the same branch `setDate`
              takes, and stated here rather than shared because these two paths write different drafts.
@@ -9638,14 +9711,14 @@ class Component extends DCLogic {
             if(dp.key==='start' && task.end!=null && task.end<task.start) task.end=null;
             if(dp.key==='end' && task.start!=null && task.end!=null && task.end<task.start) task.start=task.end;
           } else {
-          if(dp.key==='start' && prevStart!=null && task.end!=null && wasAppt){
+          if(dp.key==='start' && prevStart!=null && task.end!=null && wasAppt && !deTimed){
             task.end += (task.start - prevStart);   /* PP-EXT (owner 2026-08-19): the span is preserved */
           }
-          if(dp.key==='start' && task.end!=null){
+          if(dp.key==='start' && task.end!=null && !sameDayDeTime){
             const minEnd=task.allDay?this.atMidnight(new Date(task.start)).getTime()+this.DAY:task.start;
             if(task.end<minEnd) task.end=minEnd;
           }
-          if(dp.key==='end' && task.start!=null){
+          if(dp.key==='end' && task.start!=null && !sameDayDeTime){
             const maxStart=task.allDay?task.end-this.DAY:task.end;
             if(task.start>maxStart) task.start=maxStart;
           }

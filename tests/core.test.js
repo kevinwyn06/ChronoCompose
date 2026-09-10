@@ -72,11 +72,16 @@ test('isActiveToday: explicit pressed state plus V2.2 inheritance replace today-
      decided by the press, which line below preserves. */
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:today, end:today+DAY, included:null })), true, 'a window opening today auto-includes');
   assert.strictEqual(c.isActiveToday(activeTask(c, { start:today+2*DAY, end:today+4*DAY, included:null })), false, 'an unopened window alone does not include');
-  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), true, 'pressed future task is user discretion');
+  /* PP-EXT (owner report 2026-09-10): a press is user discretion, and a press is now `includedExplicit`.
+     A bare `included:true` on future-dated work is the creation default, not a decision — see
+     `pressedForToday`. The fixture says which one it means rather than relying on the flag's old
+     double duty. */
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, includedExplicit:true })), true, 'pressed future task is user discretion');
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY })), false, 'a DEFAULT true does not pull unopened work forward');
   assert.strictEqual(c.isActiveToday(activeTask(c, { included:null, snoozeUntil: today+DAY })), false, 'excluded (V2.11: a snooze, not Off)');
   assert.strictEqual(c.isActiveToday(activeTask(c, { type:'Milestone' })), false, 'milestone');
-  // included:true forces active even outside the [start,end] window
-  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true })), true, 'force-included');
+  // an explicit press forces active even outside the [start,end] window (2026-09-10: explicit, not bare)
+  assert.strictEqual(c.isActiveToday(activeTask(c, { start:B+2*DAY, end:B+4*DAY, included:true, includedExplicit:true })), true, 'force-included');
 });
 
 // V5 (F4): `packFromNow` now defaults TRUE, so a pool taken from the DEFAULT 07:00–23:00 window is

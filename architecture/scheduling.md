@@ -205,7 +205,9 @@ after a pin was found to shrink the competing count and hand the remaining tasks
 each.
 
 V2.1 makes today's participation explicit: `included===true` is pressed/in today regardless of the
-date window, while false or null is unpressed. Since 2026-08-17 creation follows datedness: a dateless
+date window, while false or null is unpressed. **Qualified 2026-09-10** — see "A press is not a licence to
+arrive early" below: the flag is read through `pressedForToday`, so a NON-explicit `true` no longer holds
+a task whose start day has not arrived. Since 2026-08-17 creation follows datedness: a dateless
 quick task defaults to `true`, while any task carrying a start or end defaults to `null` and waits for
 its occurrence window (or a later explicit press). The most recently started running timer is the
 single stronger active state; it participates even if previously unpressed and packs no earlier than
@@ -618,6 +620,59 @@ strictly wider set and admits a multi-day window at non-midnight timestamps, who
 
 This NARROWS but does not repeal the 2026-08-17 rule that a clock edit makes the booked span the plan: the
 span is still the plan on every path; a start edit simply no longer changes the span.
+
+### …but DELETING a time is not moving one (owner ruling, 2026-09-10)
+
+Owner report: *"frequently I can't delete the time from a date."* The duration rule fired on a de-timing
+edit too, so clearing the 9am off a 9–10am appointment slid the end back nine hours to 1:00am — the clock
+had not been deleted, it had moved. On the END edge the anti-inversion clamp did the mirror image,
+dragging the 9am start to midnight. Ruling: **only the edge you cleared changes.**
+
+`setDate` and `dpApply`'s parsed branch each derive two flags after writing the edge. `deTimed`
+(`timed===false`, or a parse with no clock) turns off the duration carry. `sameDayDeTime` additionally
+suspends the min/max clamps, and ONLY while both edges land on the same civil day. A bare-date edge is
+stored at that day's midnight, so `9:00am → midnight of the same day` is **day-ordered** — the form every
+window test in the app reads — while being numerically backwards by nine hours. That state is safe by
+construction rather than by luck: `clockSpanMinutes` and `anchorSpanMinutes` both return null for
+`end <= start`, so there is no span to read, no fixed block, no Exact derivation and no `planned`
+overwrite. A de-timing that lands on a DIFFERENT day is a real re-date and keeps the clamp.
+
+## A press is not a licence to arrive early (owner report, 2026-09-10)
+
+*"If a task starts on sept 16, I have no idea why it would be auto included in today. If its sept 16 9am
+it doesn't have the same problem. Today's the 10th."*
+
+The clock in that report is a red herring, and chasing it is how the defect survived. `isActiveOn`'s today
+branch returned true on `included===true` with **no window test**; the 9am variant escaped only because a
+clocked start with no end and no planned time is a **Point**, and a Point is vetoed off every day but its
+own. Add a planned duration and the 9am task rejoined today exactly like the untimed one — the Point veto
+had been standing in for a rule nobody had written.
+
+`pressedForToday(t, B)` is that rule, and it is read by `isActiveOn`, `isOptedOut` and `inclState`
+together so the row and the scheduler cannot disagree:
+
+```
+included !== true            → not pressed
+includedExplicit === true    → pressed, whatever the dates say  (owner ruling 2026-09-09)
+start == null                → pressed (dateless / deadline-only: no start to be in the future)
+otherwise                    → pressed iff startOfDay(t.start) <= B
+```
+
+`included===true` is not always a decision — `normalizeTask` writes it as the creation default for a
+dateless task, and `includedExplicit` is the provenance note. Judged on the START edge alone, deliberately:
+
+- the veto must be **future-only**, or an overdue task would silently leave the list — the opposite of the
+  tenet that the laziest path never loses work;
+- for a REPEAT, `t.start` is the series **anchor**, so a running weekly series is never "starts in the
+  future" on the days between its occurrences. Asking `occForDay` here would have vetoed every repeat on
+  its off-days, which is a different rule than the one reported.
+
+**A Gantt bar drag is a direct date edit.** The 2026-09-09 ruling ("auto inclusion updates every time
+dates are edited directly") reached the date cells, the picker and the When line — all of which route
+through `commit()`. The bar drag maps `state.tasks` and persists with `saveTasks`, so it was the one
+gesture that moved a task's dates and left a stale `included===true` behind, which is how a dateless
+chore dragged out to next week stayed pinned to today. `onMouseUp` now runs the dragged task and its
+travelling subtree through `reDeriveInclusion` before `autoSchedule`.
 
 ## Routines replace the hardcoded meals (owner decision, 2026-08-19)
 

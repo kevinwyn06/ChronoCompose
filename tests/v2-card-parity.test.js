@@ -84,9 +84,11 @@ test('the inclusion control offers four states and never the retired Off', () =>
        states reachable, which is what this test is about. */
     name:'t', type:'Proportional', start:B+2*DAY, end:B+4*DAY, priority:4, deps:[], pct:0, planned:60, spent:0 }, over));
   const glyph = t => { c.state.tasks=[t]; return c.taskInclControl(t).children[0]; };
-  assert.strictEqual(glyph(mk({ included:true })), '☑', 'pressed');
+  /* PP-EXT (owner report 2026-09-10): on a not-yet-open window, PRESSED means an explicit press —
+     `pressedForToday` ignores a bare creation-default `true` there. The four states are unchanged. */
+  assert.strictEqual(glyph(mk({ included:true, includedExplicit:true })), '☑', 'pressed');
   assert.strictEqual(glyph(mk({ included:null })), '☐', 'unpressed');
-  assert.strictEqual(glyph(mk({ included:true, snoozeUntil:B+DAY })), '💤', 'snoozed');
+  assert.strictEqual(glyph(mk({ included:true, includedExplicit:true, snoozeUntil:B+DAY })), '💤', 'snoozed');
   // ⊘ was the Off glyph; nothing may render it any more
   [true, null].forEach(v => assert.notStrictEqual(glyph(mk({ included:v })), '⊘'));
 });
@@ -112,7 +114,9 @@ test('the active-state inclusion glyph is a checkbox, never a play triangle', ()
 
   // Parity with pressed is the actual contract: same mark, differing only in colour.
   const pressed = c.normalizeTask({ id:'pr', name:'p', type:'Proportional',
-    start:B+2*DAY, end:B+4*DAY, priority:4, deps:[], pct:0, planned:60, spent:0, included:true });
+    /* 2026-09-10: an explicit press, since the window has not opened — see `pressedForToday`. */
+    start:B+2*DAY, end:B+4*DAY, priority:4, deps:[], pct:0, planned:60, spent:0,
+    included:true, includedExplicit:true });
   assert.strictEqual(activeGlyph, glyphOf(pressed), 'active renders the pressed mark');
   assert.strictEqual(activeGlyph, '☑');
 
