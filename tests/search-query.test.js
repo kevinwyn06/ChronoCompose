@@ -120,7 +120,6 @@ test('a running search suspends horizon, chips and sort', () => {
   assert.equal(c.searchActive(), true);
   assert.equal(c.filterTasks([a], {}).length, 1);   // the search alone decides
   assert.equal(c.effectiveSort(), null);
-  assert.equal(c.effectiveGroupBy(), 'section');
 });
 
 test('clearing the search restores everything, untouched', () => {

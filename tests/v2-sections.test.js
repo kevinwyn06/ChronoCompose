@@ -339,10 +339,9 @@ test('V2.6 inline rename commits a trimmed name and ignores an empty one', () =>
   assert.equal(c.state.sections.find(s => s.id === 's1').name, 'Deep work', 'blank is refused, old name kept');
 });
 
-/* PP-EXT (owner 2026-08-25, filter-bar redesign): Group by: None is DELETED as an option — the Group
-   control is a two-notch segmented control now, Section | Incl. The old flat-band assertion is replaced
-   by its successor: 'none' can no longer be reached, and a stored one degrades to 'section'. */
-test('V2.6 Group by: None is retired — it folds back to Section', () => {
+/* PP-EXT (owner 2026-09-10): `groupBy` is DELETED outright — sections group unconditionally. There is
+   no mode to fold, so what survives of the old test is the projection's own shape. */
+test('V2.6 sections are the grouping, unconditionally', () => {
   const c = make();
   c.state.sections = secs(c);
   const tasks = [
@@ -350,16 +349,26 @@ test('V2.6 Group by: None is retired — it folds back to Section', () => {
     activeTask(c, { id:'b', sectionId:null }),
   ];
 
-  c.state.groupBy = 'section';
   /* s1 (has 'a'), s2 (declared, empty), No section (has 'b') */
-  assert.equal(c.sectionProjection(tasks).length, 3, 'grouped: a band per section plus No section');
+  assert.equal(c.sectionProjection(tasks).length, 3, 'a band per section plus No section');
+  assert.equal(typeof c.setGroupBy, 'undefined', 'the mode mutator is gone with the mode');
+});
 
-  c.setGroupBy('none');
-  assert.equal(c.state.groupBy, 'section', 'the mutator refuses none');
-  assert.equal(c.migrateFilterPrefs({ groupBy:'none' }).groupBy, 'section', 'a stored none is migrated away');
-  /* Even if 'none' were forced into state by hand, no flat band is produced any more. */
-  c.state.groupBy = 'none';
-  assert.equal(c.sectionProjection(tasks).length, 3, 'no flat, header-less band survives');
+/* PP-EXT (owner 2026-09-10): *"Filter views should remove empty sections from view."* An empty section
+   is a container you made, so it survives an unfiltered view; under a filter a header over nothing says
+   only "your filter excluded all of this", which is a row spent on an absence. */
+test('V2.6 an empty section survives an unfiltered view and drops out of a filtered one', () => {
+  const c = make();
+  c.state.sections = secs(c);
+  const tasks = [ activeTask(c, { id:'a', sectionId:'s1' }) ];
+
+  assert.deepEqual(c.sectionProjection(tasks).map(s => s.id), ['s1', 's2'],
+    'unfiltered: the empty s2 keeps its header');
+
+  c.state.inclOnly = true;   /* any filter will do — hasFilters() is the switch */
+  assert.deepEqual(c.sectionProjection(tasks).map(s => s.id), ['s1'],
+    'filtered: only sections that still hold a row keep a header');
+  c.state.inclOnly = false;
 });
 
 /* ---- V2.6b: drag. Sections were reorderable only by ▲▼, and a task could only change section through the

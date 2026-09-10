@@ -158,80 +158,72 @@ test('selectionProjection ignores archived tasks', () => {
    the Matrix surface on the owner's ruling. Their tests are deleted rather than skipped: a skipped test
    for code that no longer exists is a claim the surface is coming back, and it is not. */
 
-/* ---------- §6 the Gantt inclusion division ---------- */
+/* ---------- the INCLUDED filter (owner 2026-09-10) ----------
+   The V2.9 §6 Gantt inclusion DIVISION is deleted, and its four tests with it. Owner: *"Section view
+   should always be the case and not mutually exclusive with included."* Inclusion is a filter now, so
+   what has to be pinned is no longer a band shape but a keep-SET, and it has two halves that pull
+   against each other:
+     · inclusion is asked of the task ITSELF — an excluded subtask does not ride in on its parent
+     · an ANCESTOR of a kept task is kept whatever its own inclusion says, or the row could not be drawn
+   The second is the owner's *"A excluded parent task should still be shown if it has included
+   subtasks"*, and one such child is enough. */
 
-test('V2.9 inclusionProjection emits the same band shape sectionProjection does', () => {
+test('inclOnly asks each task ITSELF — an excluded subtask does not ride in on an included parent', () => {
   const c=make(); const B=c.startOfToday();
-  const inTask=activeTask(c,{id:'in',start:B,end:B+DAY,included:true});
-  /* V2.11: unpressed is the excluded state. V5 block 20: the window must not open today, or the task
-     would be auto-included and there would be nothing in the Excluded band to assert on. */
-  const outTask=activeTask(c,{id:'out',start:B+2*DAY,end:B+4*DAY,included:null});
-  c.state.tasks=[inTask,outTask];
-  const bands=c.inclusionProjection(c.state.tasks);
+  const parent=activeTask(c,{id:'p',start:B,end:B+DAY,included:true});
+  /* V5 block 20 / V2.11: a window that has not opened yet keeps `included:null` genuinely undecided,
+     which is the excluded state. Opening today would auto-include the child and prove nothing. */
+  const kid=activeTask(c,{id:'k',parentId:'p',start:B+2*DAY,end:B+4*DAY,included:null});
+  c.state.tasks=[parent,kid]; c.state.inclOnly=true;
 
-  assert.strictEqual(bands.length,2,'both bands always render');
-  assert.strictEqual(bands[0].id,c.INCL_BAND_IN());
-  assert.strictEqual(bands[1].id,c.INCL_BAND_OUT());
-  assert.strictEqual(bands[0].name,'Included');
-  assert.strictEqual(bands[1].name,'Excluded');
-  assert.strictEqual(bands[0].tasks.length,1);
-  assert.strictEqual(bands[1].tasks.length,1);
-  /* the shape sectionGeometry consumes: every band carries id/name/tasks/collapsed */
-  bands.forEach(b=>{ assert.ok('collapsed' in b); assert.ok(Array.isArray(b.tasks)); });
+  const keep=c.inclOnlyKeepSet(c.state.tasks);
+  assert.strictEqual(keep.has('p'),true,'the parent is included in its own right');
+  assert.strictEqual(keep.has('k'),false,'the excluded child is NOT carried in by its parent');
 });
 
-test('V2.9 both bands render even when empty, and Excluded defaults to collapsed-but-counted', () => {
+test('inclOnly keeps an EXCLUDED parent that holds even one included subtask', () => {
   const c=make(); const B=c.startOfToday();
-  const only=activeTask(c,{id:'only',start:B,end:B+DAY,included:true});
-  c.state.tasks=[only]; c.state.collapsedSections={};
-  const bands=c.inclusionProjection(c.state.tasks);
+  const parent=activeTask(c,{id:'p',start:B+2*DAY,end:B+4*DAY,included:null});
+  const inKid=activeTask(c,{id:'k1',parentId:'p',start:B,end:B+DAY,included:true});
+  const outKid=activeTask(c,{id:'k2',parentId:'p',start:B+2*DAY,end:B+4*DAY,included:null});
+  c.state.tasks=[parent,inKid,outKid]; c.state.inclOnly=true;
 
-  assert.strictEqual(bands.length,2,'an empty Excluded band still renders — it is structure, not a bucket');
-  assert.strictEqual(bands[0].collapsed,false,'Included is expanded by default');
-  assert.strictEqual(bands[1].collapsed,true,'Excluded is collapsed by default');
-  assert.strictEqual(bands[1].tasks.length,0,'…but its count is still derivable, never hidden');
+  const keep=c.inclOnlyKeepSet(c.state.tasks);
+  assert.strictEqual(keep.has('k1'),true);
+  assert.strictEqual(keep.has('p'),true,'one included child is enough to bring the parent back');
+  assert.strictEqual(keep.has('k2'),false,'…and the other, excluded child stays gone');
 });
 
-test('V2.9 a subtree follows its ROOT across the division, never tearing parent from child', () => {
+test('inclOnly keeps a grandparent chain, and is judged over ALL tasks so a collapsed parent survives', () => {
   const c=make(); const B=c.startOfToday();
-  /* V5 block 20: a not-yet-open window keeps the root genuinely undecided (auto-inclusion only fires on
-     the day a window opens), so the subtree rule is still being tested rather than the new default. */
-  const root=activeTask(c,{id:'root',start:B+2*DAY,end:B+4*DAY,included:null});
-  const kid=activeTask(c,{id:'kid',parentId:'root',start:B+2*DAY,end:B+4*DAY,included:true});
-  c.state.tasks=[root,kid];
-  const bands=c.inclusionProjection(c.state.tasks);
+  const gp=activeTask(c,{id:'gp',start:B+2*DAY,end:B+4*DAY,included:null});
+  const mid=activeTask(c,{id:'mid',parentId:'gp',start:B+2*DAY,end:B+4*DAY,included:null});
+  const leaf=activeTask(c,{id:'leaf',parentId:'mid',start:B,end:B+DAY,included:true});
+  c.state.tasks=[gp,mid,leaf]; c.state.inclOnly=true;
+  c.state.collapsed={gp:1}; /* the evidence is folded away, but the keep-set reads state.tasks */
 
-  assert.strictEqual(bands[0].tasks.length,0);
-  assert.strictEqual(bands[1].tasks.length,2,'the child follows its root into Excluded');
+  const kept=c.filterTasks([gp],{gp:gp,mid:mid,leaf:leaf}).map(t=>t.id);
+  assert.deepEqual(kept,['gp'],'a collapsed ancestor of included work still survives the filter');
+
+  const keep=c.inclOnlyKeepSet(c.state.tasks);
+  assert.strictEqual(keep.has('mid'),true,'every ancestor on the chain, not just the immediate parent');
 });
 
-test('V2.9 sectionProjection routes the inclusion mode, so both panes consume one projection', () => {
+test('inclOnly is a FILTER, so it composes with sections rather than replacing them', () => {
   const c=make(); const B=c.startOfToday();
-  c.state.tasks=[activeTask(c,{id:'a',start:B,end:B+DAY,included:true})];
-  c.state.groupBy='inclusion';
-  const p=c.sectionProjection(c.state.tasks);
-  assert.strictEqual(p.length,2);
-  assert.strictEqual(p[0].id,c.INCL_BAND_IN(),'the same entry point both renderSheet and renderGantt call');
-});
+  c.state.sections=[{id:'s1',name:'One',order:0},{id:'s2',name:'Two',order:1}];
+  const a=activeTask(c,{id:'a',sectionId:'s1',start:B,end:B+DAY,included:true});
+  const b=activeTask(c,{id:'b',sectionId:'s2',start:B+2*DAY,end:B+4*DAY,included:null});
+  c.state.tasks=[a,b];
 
-test('V2.9 a row dragged across the divider writes included in ONE commit, and clears any snooze', () => {
-  const c=make(); const B=c.startOfToday();
-  const t=activeTask(c,{id:'t',start:B,end:B+DAY,included:true,snoozeUntil:B+DAY});
-  c.state.tasks=[t]; c._visTasks=c.state.tasks;
-  const undo0=c.history.length;
+  c.state.inclOnly=false;
+  assert.deepEqual(c.sectionProjection(c.state.tasks).map(x=>x.id),['s1','s2'],
+    'unfiltered: both sections, no Included/Excluded bands anywhere');
 
-  c.reorderRows(['t'],0,undefined,undefined,'excluded');
-  const got=c.state.tasks.find(x=>x.id==='t');
-  assert.strictEqual(got.included,null,'the drop writes inclusion (V2.11: unpressed), not sectionId');
-  assert.strictEqual(got.sectionId,t.sectionId,'sectionId is untouched in inclusion mode');
-  assert.strictEqual(c.history.length,undo0+1,'one drag is exactly one undo step');
-  /* The contract is AGREEMENT between the two paths, not a particular snooze value: a cross-divider drag
-     and the popover must leave a task in the same state, or the Gantt division and the Selection view
-     would quietly mean different things. Asserted by running both and comparing. */
-  const viaMutator=activeTask(c,{id:'t2',start:B,end:B+DAY,included:true,snoozeUntil:B+DAY});
-  c.state.tasks=c.state.tasks.concat([viaMutator]);
-  c.setIncludedOff('t2');
-  const m=c.state.tasks.find(x=>x.id==='t2');
-  assert.strictEqual(got.included,m.included,'drag and popover agree about included');
-  assert.strictEqual(got.snoozeUntil,m.snoozeUntil,'drag and popover agree about snooze');
+  c.state.inclOnly=true;
+  const kept=c.filterTasks(c.state.tasks,{a:a,b:b});
+  assert.deepEqual(kept.map(t=>t.id),['a']);
+  assert.deepEqual(c.sectionProjection(kept).map(x=>x.id),['s1'],
+    'the section left empty by the filter drops out, and sections are still the grouping');
+  c.state.inclOnly=false;
 });

@@ -71,15 +71,16 @@ test('a tag token filters, and negation excludes', async ({ page }) => {
   await expect(rows).toHaveCount(1);
 });
 
-test('the horizon and group controls are parked while a search runs', async ({ page }) => {
+test('the horizon and the Included chip are parked while a search runs', async ({ page }) => {
   await boot(page, FIXTURE);
   await page.keyboard.press('s');
   await page.keyboard.type('report');
   await page.keyboard.press('Enter');
   /* Parked, NOT removed: the user has to be able to see what is coming back. */
   await expect(page.locator('[data-pp-seg="horizon"]')).toHaveCount(1);
-  await expect(page.locator('[data-pp-seg="group"]')).toHaveCount(1);
+  await expect(page.locator('[data-pp-chip="incl"]')).toHaveCount(1);
   await expect(page.locator('[data-pp-seg="horizon"]')).toHaveCSS('pointer-events', 'none');
+  await expect(page.locator('[data-pp-chip="incl"]')).toHaveCSS('pointer-events', 'none');
 });
 
 test('Escape clears the search and restores the pre-search horizon', async ({ page }) => {

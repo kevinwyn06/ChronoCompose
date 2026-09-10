@@ -9,10 +9,8 @@ test('retired smart chips are dropped, Unplanned survives', () => {
   assert.deepEqual(m.chips, ['unplanned']);
 });
 
-test('groupBy none folds to section', () => {
-  assert.equal(c().migrateFilterPrefs({ groupBy: 'none' }).groupBy, 'section');
-  assert.equal(c().migrateFilterPrefs({ groupBy: 'inclusion' }).groupBy, 'inclusion');
-  assert.equal(c().migrateFilterPrefs({}).groupBy, 'section');
+test('groupBy is gone from the migrated prefs entirely', () => {
+  assert.equal('groupBy' in c().migrateFilterPrefs({ groupBy: 'inclusion' }), false);
 });
 
 test('a sort naming a column-less key is cleared', () => {
@@ -34,7 +32,23 @@ test('priority column filters are not touched', () => {
   assert.deepEqual(comp.state.colFilters.priority.set, [1,2]);
 });
 
-test('setGroupBy no longer accepts none', () => {
-  const comp = c(); comp.setGroupBy('none');
-  assert.equal(comp.state.groupBy, 'section');
+/* PP-EXT (owner 2026-09-10): groupBy is deleted; the inclusion mode became the `inclOnly` FILTER. */
+test('a stored groupBy:inclusion migrates into the inclOnly filter', () => {
+  assert.equal(c().migrateFilterPrefs({ groupBy:'inclusion' }).inclOnly, true);
+  assert.equal(c().migrateFilterPrefs({ groupBy:'section' }).inclOnly, false);
+  assert.equal(c().migrateFilterPrefs({ groupBy:'none' }).inclOnly, false);
+  assert.equal(c().migrateFilterPrefs({}).inclOnly, false);
+});
+
+test('an explicitly stored inclOnly wins over the legacy groupBy', () => {
+  assert.equal(c().migrateFilterPrefs({ inclOnly:false, groupBy:'inclusion' }).inclOnly, false);
+  assert.equal(c().migrateFilterPrefs({ inclOnly:true }).inclOnly, true);
+});
+
+test('toggleInclOnly flips the filter and persists it', () => {
+  const comp = c();
+  comp.toggleInclOnly();
+  assert.equal(comp.state.inclOnly, true);
+  comp.toggleInclOnly();
+  assert.equal(comp.state.inclOnly, false);
 });

@@ -76,18 +76,18 @@ test('inclusion actions: setIncludedOff no longer secretly snoozes an inherited 
   });
 });
 
-test('inclusion actions: the row-drag mirror agrees with setIncludedOff', () => {
+/* PP-EXT (owner 2026-09-10): the row-drag MIRROR is deleted with Group by: Inclusion — a row drag
+   re-sections and reorders, and `setIncludedOff` is once again the only way to take a task off today.
+   What the mirror test protected (the two paths agreeing) is now true by there being only one path. */
+test('inclusion actions: a row drag no longer writes inclusion at all', () => {
   withNow(FIXED_NOW, () => {
     const c = make();
     const B = c.startOfToday();
     const t = activeTask(c, { id:'carry', start:B-2*DAY, end:B+2*DAY, included:true, pct:10 });
-    c.state.tasks = [t];
-    // Dragging a row below the divider under Group by: Inclusion is the second path into the same
-    // decision. Leaving it with the tail would make the two paths disagree.
-    c.reorderRows(['carry'], 0, undefined, undefined, 'excluded');
+    c.state.tasks = [t]; c._visTasks = c.state.tasks;
+    c.reorderRows(['carry'], 0, undefined, undefined, 'excluded'); /* the old 5th argument is ignored */
     const got = c.state.tasks.find(x => x.id === 'carry');
-    assert.strictEqual(got.included, null);
-    assert.strictEqual(got.snoozeUntil, null, 'the mirror got the same treatment');
+    assert.strictEqual(got.included, true, 'reordering a row is not an inclusion decision');
   });
 });
 

@@ -70,13 +70,19 @@ test('a wider horizon admits the mid task and still excludes the far one', async
   await expect(page.locator('[data-task-id="noDate"]')).toHaveCount(1);
 });
 
-test('the group control offers Section and Incl, and no None', async ({ page }) => {
+/* PP-EXT (owner 2026-09-10): the group SEGMENT is gone - sections always group, and inclusion is a
+   filter chip that composes with the rest of the bar instead of excluding them. */
+test('there is no group control left, and Included is a chip beside the other filters', async ({ page }) => {
   await boot(page, FIXTURE);
-  const seg = page.locator('[data-pp-seg="group"]');
-  await expect(seg.locator('[data-seg-key]')).toHaveCount(2);
-  await expect(seg.locator('[data-seg-key="section"]')).toHaveCount(1);
-  await expect(seg.locator('[data-seg-key="inclusion"]')).toHaveCount(1);
-  await expect(seg.getByText('None', { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-pp-seg="group"]')).toHaveCount(0);
+  const chip = page.locator('[data-pp-filterbar] [data-pp-chip="incl"]');
+  await expect(chip).toHaveCount(1);
+  await expect(chip).not.toHaveAttribute('data-active', '1');
+  await chip.click();
+  await expect(chip).toHaveAttribute('data-active', '1');
+  /* And it is a filter like any other, so Clear all reaches it. */
+  await page.locator('[data-pp-filterbar] [data-pp-chip="clr"]').click();
+  await expect(chip).not.toHaveAttribute('data-active', '1');
 });
 
 /* Deliberately section-less: `sortTree` sorts SIBLINGS, so with FIXTURE's `s1` band the P1 row is alone

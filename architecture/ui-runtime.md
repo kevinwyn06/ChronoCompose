@@ -62,15 +62,28 @@ by id; the `No section` bucket always renders last and is not a thing anyone mad
 reordered, deleted, or dragged.
 
 `sectionProjection` is the single projection **both panes consume**, which is what keeps sheet and Gantt
-rows aligned by construction rather than by two call sites agreeing. It has three `Group by` modes:
-`section`, `inclusion` (V2.9), and `none` (one flat, header-less band). `inclusionProjection` emits the
-same band shape, so the inclusion division is a sibling grouping mode rather than a level above sections —
-nesting it above would render a section holding both included and excluded work twice. `sectionGeometry`
+rows aligned by construction rather than by two call sites agreeing. Sections are the **only** grouping.
+
+**Group by is deleted (owner 2026-09-10).** Owner: *"Section view should always be the case and not
+mutually exclusive with included."* `state.groupBy`, `setGroupBy`, `effectiveGroupBy`,
+`inclusionProjection` and the `__incl_in` / `__incl_out` bands are gone; a stored `groupBy:'inclusion'`
+migrates to `inclOnly:true`. Inclusion is a **filter** now — see *The Included filter* below — which is
+what lets it compose with sections instead of replacing them. The drag-a-row-across-the-divider gesture
+went with the bands: a row drag re-sections and reorders, and inclusion is written by the row's own
+checkbox (`taskInclControl`), which the 2026-08-20 ruling had already made the single path for it.
+
+**An empty section drops out of a FILTERED view (owner 2026-09-10).** Owner: *"Filter views should remove
+empty sections from view."* An empty section you made still renders when nothing is filtering — it is a
+container you keep — but while `hasFilters()` is true a header over nothing says only "your filter
+excluded all of this", which is a row spent on an absence. Judged on the section's own post-filter
+emptiness, so the No-section bucket needs no special case.
+
+`sectionGeometry`
 is the one vertical-geometry pass, returning `_yTop` (indexed by the flattened task list) **and**
 `_secLayout` (each band's full extent); the second exists because `_yTop` cannot answer "which section
 owns this Y", and an empty band owns Y-space but no row. `sectionAtY` resolves a drop into a band,
-including an empty or collapsed one. A row drag re-sections **or** re-includes inside the same `commit()`
-as the reorder, so one drag is one undo step. `TAG_SECTION_H` is consumed by matching sheet headers and
+including an empty or collapsed one. A row drag re-sections inside the same `commit()` as the reorder, so
+one drag is one undo step. `TAG_SECTION_H` is consumed by matching sheet headers and
 Gantt rails, and Gantt `_yTop` continues to index tasks only. Normal and milestone task rows retain the
 same fixed row height; expanded description height is still measured into the Gantt Y offsets. Focus uses
 the same sections and uniform 52px task rows with `spent / allotted`, a progress fill, done, timer, and
@@ -697,6 +710,29 @@ Schedule agenda chip alike — the two carried the same signal deliberately, so 
 width across locked and auto blocks), because "no signal" can regress as quietly as a signal can.
 What survives says something else: a **dashed** border still means drag-pinned or a fixed window (the
 shape of the day, not its lock state), and the 📌/📍 glyphs still name why a block sits where it does.
+
+**The pinned EDGE rule (owner 2026-09-10).** Owner: *"Give tasks with pins and times a inside facing red
+border on the side(s) with the pin in the timelines."* A block runs top = start → bottom = end, so the
+side is the edge whose **instant** the user actually fixed:
+
+| shape | top | bottom |
+|---|---|---|
+| drag pin (carries its own `pin.dur`) | red | red |
+| clock-fixed appointment, end time written | red | red |
+| clock-fixed appointment, open end | red | — |
+| auto-scheduled | — | — |
+
+Drawn as two `inset` `box-shadow` layers (`TL_PIN_EDGE_PX`, `--tl-pin-edge`) rather than a border, so it
+cannot change the block's box and it faces *into* the block as the ruling asks; they are listed **before**
+the left rail so the red owns the corners the two share — the rail says who placed the block, this says
+which instant is nailed down, and the nailed instant is the more specific claim.
+
+The edges are decided at BUILD time (`dragBlocksOn` / `fixedBlocksToday` → `fixTop`/`fixBot`, carried
+through `dayIntervals`'s `addBusy` onto the chunk) because only there is the unclipped instant still
+known: a block cut by midnight **or by the day window** draws an edge nobody placed, and that edge is not
+fixed. `data-tl-fixedge` (`top` | `bottom` | `both`) is the e2e hook, so a failure never has to match on
+a colour. Scope is `renderDayColumn` — the drawer and the Week/4-Day grid — per the owner's ruling; the
+Schedule agenda chips and the Gantt bars are deliberately untouched.
 V5 block 25a **deleted** the diagonal hatch that used to mark auto-scheduled blocks, along with
 `--tl-hatch`: nearly everything is auto-scheduled, so the texture covered ~90% of the week and carried no
 information — the same measurement that retired `ambientRowBackground` in V2.9.
@@ -855,13 +891,31 @@ on. Get rid of the sort dropdown. The grouping shouldn't be a dropdown. I want a
 typing it gives a preview and when hitting enter it generates a filter view."*
 
 The bar is now one row: a search field taking the leftover width, a **Horizon** segmented control, the
-one surviving `Unplanned` chip, a **Group** segmented control (`Section | Incl` — `none` is deleted),
-`+ Section`, `Clear all`, then the untouched `leading` slot (List/Selection toggle and the six view
-tabs). Horizon and Group share the segmented idiom on purpose: both answer "pick exactly one of N".
+`Unplanned` and `Included` chips, `+ Section`, `Clear all`, then the untouched `leading` slot
+(List/Selection toggle and the six view tabs). Horizon is the bar's one segmented control — it answers
+"pick exactly one of N". `Included` is a chip because a chip is an independent on/off, which is exactly
+what makes it composable with the rest (owner 2026-09-10; it replaced the `Section | Incl` segment).
+Every chip carries `data-pp-chip` + `data-active` as its e2e hook.
+
+### The Included filter
+
+Owner, 2026-09-10: *"Included should include only included tasks and subtasks. An excluded subtask should
+not be included just bc its parent task is included. A excluded parent task should still be shown if it
+has included subtasks."* Two rules pulling opposite ways, which is why `inclOnlyKeepSet` is a keep-SET
+and not a per-row predicate:
+
+- inclusion is asked of the task **itself** (`inclBand`), so an excluded subtask no longer rides in on
+  its parent's ticket — the grouping asked it of the subtree ROOT, which was the first half of the report;
+- every **ancestor** of a kept task is kept whatever its own inclusion says, or the row could not be drawn
+  at its indent. One included child is enough; the parent's other, excluded children stay hidden.
+
+The set is built over `state.tasks`, not over the list being filtered: `visibleTasks` has already dropped
+rows hidden by a collapsed parent by the time `filterTasks` runs, and a collapsed parent holding included
+work must not vanish because the evidence for it was folded away.
 
 ### Two parallel systems, never both authoritative
 
-The chip/horizon/group path keeps the existing `state.chips` / `state.colFilters` / `state.groupBy`
+The chip/horizon path keeps the existing `state.chips` / `state.colFilters` / `state.inclOnly`
 plumbing. Search gets its own pure `(text) → AST` parser and `(task, AST) → bool` evaluator.
 `filterTasks` stays the single entry point and dispatches to **exactly one** of the two.
 
@@ -922,11 +976,10 @@ clears and blurs.
 
 Owner ruling: *"When search is active all other filters/sorts are saved and overridden. They will be
 recovered when exiting the search view."* Implemented as **read-time suspension**, not
-snapshot-and-rewrite. `state.horizon`, `chips`, `colFilters`, `groupBy` and `sort` are never touched
-while a search runs; every reader asks `searchActive()` / `effectiveSort()` / `effectiveGroupBy()`
-instead. "Restored exactly" is therefore **the absence of a write** — it cannot drift, cannot
+snapshot-and-rewrite. `state.horizon`, `chips`, `colFilters`, `inclOnly` and `sort` are never touched
+while a search runs; every reader asks `searchActive()` / `effectiveSort()` instead. "Restored exactly" is therefore **the absence of a write** — it cannot drift, cannot
 half-apply, and cannot strand the user mid-search if the tab dies. It is also what keeps the two systems
-from ever both being authoritative. While a search runs the horizon and group controls are visibly
+from ever both being authoritative. While a search runs the horizon and the chips are visibly
 **parked** (dimmed, `pointerEvents:none`) rather than removed: the user must be able to see what is
 coming back.
 
@@ -962,7 +1015,9 @@ which owns reorder-drag and ctrl-click selection — neither of which a locked c
 ### Prefs migration
 
 `migrateFilterPrefs(pf)` is pure over the raw prefs object: retired chip keys are dropped (`unplanned`
-survives), `groupBy:'none'` folds to `'section'`, a saved sort naming `tags`/`calendar` is cleared (both
+survives), `groupBy` is gone from the output entirely and a stored `'inclusion'` becomes `inclOnly:true`
+(someone looking at the split was asking to separate today's work from the rest, and the filter is the
+surviving way to ask that), a saved sort naming `tags`/`calendar` is cleared (both
 stay *filterable* via `@tag` / `calendar:`, but neither has a column and the Sort select is gone), and
 `horizon` is validated against `HORIZONS` so a hand-edited pref cannot produce a phantom window.
 `colFilters` is deliberately untouched — `colFilters.priority` is still a supported spec, simply no

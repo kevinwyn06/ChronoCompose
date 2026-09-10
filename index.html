@@ -114,6 +114,8 @@
   --tl-band:rgba(255,255,255,0.028);
   --tl-blk-border:rgba(0,0,0,0.45);--tl-rail-auto:rgba(0,0,0,0.35);
   --tl-rail-fixed:#5fbf8c;--tl-rail-pinned:#7ad3a4;
+  /* PP-EXT (owner 2026-09-10): the inside-facing rule on a block edge the user pinned to an instant. */
+  --tl-pin-edge:#ea4335;
   --tl-ctl-bg:rgba(28,28,30,0.88);--tl-ctl-fg:#d8ecdd;--tl-grip:rgba(255,255,255,0.32);
   --tl-grip-active:rgba(255,255,255,0.7);
   /* PP-EXT (C1, owner ruling 2026-08-21): subtask DEPTH is carried by tick colour + indent, and the
@@ -131,6 +133,7 @@
   --tl-band:rgba(0,0,0,0.035);
   --tl-blk-border:rgba(0,0,0,0.15);--tl-rail-auto:rgba(0,0,0,0.07);
   --tl-rail-fixed:#14532d;--tl-rail-pinned:#1e7a4c;
+  --tl-pin-edge:#c5221f; /* PP-EXT (owner 2026-09-10): the light theme's pinned-edge red */
   --tl-ctl-bg:rgba(255,255,255,0.85);--tl-ctl-fg:#233529;--tl-grip:rgba(0,0,0,0.28);
   --tl-grip-active:rgba(0,0,0,0.6);
   --tl-kid-d1:#3c6ba8;--tl-kid-d2:#6b7a8c;--tl-kid-active-bg:rgba(26,115,232,0.14);
@@ -572,6 +575,15 @@ class Component extends DCLogic {
        PP-EXT (owner 2026-08-21, ruling 5): the 📍 half of that pair is GONE — a drag-pinned block
        carries a ✕ saying the same thing, and the owner ruled the ✕ survives. See `blockGlyph`. */
     this.TL_BLK_BORDER_PX = 1;   // PP-EXT V5.25: border width on every timeline block, locked or not
+    /* PP-EXT (owner 2026-09-10): "tasks with pins and times get an inside-facing red border on the side(s)
+       with the pin". A timeline block runs top=start → bottom=end, so the SIDE is the edge whose instant
+       the user actually fixed: a drag pin fixes both (it carries its own duration), a clock-fixed
+       appointment always fixes its top and fixes its bottom only when an end time was written. Drawn as
+       INSET box-shadow layers rather than a border so it cannot change the block's box, and so it reads as
+       facing into the block exactly as the ruling asks. The edges are decided at build time
+       (`fixedBlocksToday` → `fixTop`/`fixBot`) because only there is the UNCLIPPED instant still known —
+       a block cut by the day window draws an edge nobody placed, and that edge is not fixed. */
+    this.TL_PIN_EDGE_PX = 3;     // PP-EXT (owner 2026-09-10): thickness of the red inside-facing pinned-edge rule
     /* PP-EXT (V4.2): edge-drag = a sticky manual ALLOTTED override (predicted/predictManual). */
     this.EDGE_MIN_ALLOT = 5;     // PP-EXT V4.2: minutes floor for an edge-dragged allotment (a 0-minute task would vanish mid-gesture)
     this.EDGE_MIN_BLOCK_PX = 72; // PP-EXT V4.2: no edge handle below this block height (local px) — 3×HIT_MIN_PX, so the body keeps a target twice the handle's size and a press anywhere in a block's upper half is ALWAYS a body-drag
@@ -772,7 +784,13 @@ class Component extends DCLogic {
       pomo:this.loadPomo(), /* PP-EXT Phase 10: active pomodoro session {taskId,phase,phaseStart,cycle} or null (pp-pomo) */
       habits:this.loadHabits(), /* PP-EXT Phase 9: pp-habits entity (separate from tasks — no gcal/undo funnel) */
       sections:this.loadSections(), /* PP-EXT V2.6: pp-sections container entity (see tasksBySection) */
-      groupBy: fmig.groupBy, /* PP-EXT V2.6 + V2.9 §6, narrowed 2026-08-25: 'section' | 'inclusion' ('none' deleted) */
+      /* PP-EXT (owner 2026-09-10): `groupBy` is DELETED. Owner: *"Section view should always be the case
+         and not mutually exclusive with included."* Sections are the grouping, always; inclusion is a
+         FILTER (`inclOnly`) that runs inside them, so the two can now be on at once — which is precisely
+         what a mode switch made impossible. The Included/Excluded bands, `inclusionProjection` and the
+         drag-across-the-divider gesture went with the mode; inclusion is changed by the row's own
+         checkbox (`taskInclControl`), which was already the documented path. */
+      inclOnly: fmig.inclOnly, /* PP-EXT (owner 2026-09-10): show only included tasks (+ the ancestors they hang from); persisted in pp-prefs */
       horizon: fmig.horizon, /* PP-EXT (owner 2026-08-25): null | 1w|2w|1m|3m|6m|1y — the lookahead slider, persisted in pp-prefs */
       searchText:'', searchQuery:null, searchOpen:false, /* PP-EXT (owner 2026-08-25): draft text, APPLIED query (null = no search), field mounted. UI-only, NOT persisted — a reload leaves no search running, and the suspended filters were never overwritten to begin with. */
       collapsedSections: pf.collapsedSections||{}, /* PP-EXT V2.6: section id → 1 when collapsed (view pref, persisted) */
@@ -3229,9 +3247,9 @@ class Component extends DCLogic {
      five-bucket partition replaces that dimension outright: Snoozed is now a bucket, and everything else
      on the surface is on the list by definition. Do not reintroduce a row dimension here.
 
-     The SHEET keeps an Included/Excluded grouping (`groupBy==='inclusion'`), which is a different
-     surface answering a different question, so its predicate lives below under its own name rather than
-     borrowing one from a view that no longer has rows. */
+     PP-EXT (owner 2026-09-10): the SHEET's Included/Excluded GROUPING is gone too — inclusion is a
+     filter now (`inclOnly`), not a division of the page. `inclBand` survives as its predicate, because
+     "is this task on today's list" is still the question being asked, only of one task at a time. */
   inclBand(t){
     const st=this.inclState(t);
     return (st==='pressed'||st==='active') ? 'included' : 'excluded';
@@ -3242,9 +3260,9 @@ class Component extends DCLogic {
      (muted, dashed edge). This predicate exists so that rule has a single source. */
   isUndecided(t){ return this.inclState(t)==='unpressed'; }
 
-  /* Position WRITES state — dropping a SHEET row into an inclusion band calls the existing mutators.
-     Zero new persisted fields. (The Selection view's card drag that used to share this is gone with the
-     rows; ticking is the gesture there now.) */
+  /* PP-EXT (owner 2026-09-10): `setInclBand` had ONE caller — the sheet row dropped across the
+     Included/Excluded divider — and that divider no longer exists. Kept as the named verb the checkbox
+     path and the tests both read through, so "put this task in that band" still has one definition. */
   setInclBand(id, band){
     /* PP-EXT (owner 2026-08-20): the Included drop is a press like any other, so it ticks. `setIncludedOn`
        survives as the field-level primitive both verbs are built from, but no GESTURE calls it directly —
@@ -3698,13 +3716,19 @@ class Component extends DCLogic {
        BLOCKING (owner 2026-08-06) — they carry no task, so they can never hold a per-task field and need
        this default stated here. extraBusy keeps whatever fixedBlocksToday stamped on it. Annotation only:
        no consumer in this block branches on it (block 11 does). */
-    const addBusy=(a,b,note,taskId,blocking)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd); if(e0>s0) busy.push({start:s0,end:e0,note,taskId,blocking:(blocking==null?this.BLOCKING_DEFAULT:!!blocking)}); }; /* PP-EXT: taskId marks pinned-task blocks */
+    /* PP-EXT (owner 2026-09-10): `edges` = {fixTop,fixBot} — which of this interval's edges the user
+       actually placed, for the red inside-facing rule. Carried here rather than re-derived downstream
+       because the DAY-WINDOW clamp two lines below is itself a reason an edge stops being the user's:
+       a block cut at dayStart/dayEnd draws an edge nobody chose, exactly as a midnight cut does. */
+    const addBusy=(a,b,note,taskId,blocking,edges)=>{ const s0=Math.max(a,winStart),e0=Math.min(b,winEnd);
+      if(e0>s0) busy.push({start:s0,end:e0,note,taskId,blocking:(blocking==null?this.BLOCKING_DEFAULT:!!blocking),
+        fixTop:!!(edges&&edges.fixTop)&&s0===a, fixBot:!!(edges&&edges.fixBot)&&e0===b}); }; /* PP-EXT: taskId marks pinned-task blocks */
     /* PP-EXT (owner 2026-08-19): the two hardcoded meal blocks are GONE. Lunch and Dinner are ordinary
        tasks now (see seedRoutines/migrateRoutines), so they arrive through fixedBlocksToday like every
        other appointment — which is what finally lets them be renamed, moved for one day, completed or
        given a real duration. */
     const ft=Math.max(0, s.freeTime||0); if(ft>0) addBusy(winEnd-ft*60000, winEnd, 'Free time', undefined, true);
-    (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId, b.blocking)); /* PP-EXT */
+    (extraBusy||[]).forEach(b=>addBusy(b.start, b.end, b.note, b.taskId, b.blocking, b)); /* PP-EXT */
     const arr=busy.slice().sort((a,b)=>a.start-b.start);
     let free=[]; let cur=lo;
     arr.forEach(b=>{ if(b.end<=lo) return; const bs=Math.max(b.start,lo); if(bs>cur) free.push({start:cur,end:bs}); cur=Math.max(cur,b.end); });
@@ -3921,7 +3945,12 @@ class Component extends DCLogic {
       if(p.day!==B) return;
       const dur=Math.max(0, p.dur||0);
       const a=Math.max(p.start, B), b=Math.min(p.start + dur*60000, B+this.DAY);
-      if(b>a) out.push({start:a, end:b, partial:!!p.partial});
+      /* PP-EXT (owner 2026-09-10): `fixTop`/`fixBot` say whether the DRAWN edge is the pinned one. A pin
+         fixes both the start and the length (`pin.dur` is captured at drop), so both edges of a whole pin
+         are fixed — but a pin clipped by the day window draws an edge the user never placed, and that
+         edge must not claim to be fixed. Compared against the UNCLIPPED values for exactly that reason. */
+      if(b>a) out.push({start:a, end:b, partial:!!p.partial,
+        fixTop:a===p.start, fixBot:b===p.start+dur*60000});
     });
     return out.sort((x,y)=>x.start-y.start);
   }
@@ -3945,7 +3974,12 @@ class Component extends DCLogic {
         const oc=this.occForDay(t, B);
         const a=Math.max(oc.start, B), b=Math.min(oc.end, B+this.DAY);
         /* PP-EXT (10): a fixed appointment's block inherits the task's tri-state flag. */
-        if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id, blocking:this.isBlockingTask(t)});
+        /* PP-EXT (owner 2026-09-10): which edge of this block is FIXED, for the red inside-facing rule
+           `renderDayColumn` paints. `isFixedOn` already guarantees a written start clock, so the top is
+           fixed whenever it is not the day window's own clamp; the end is fixed only when the task
+           actually states one (`hasEndTime`) — an appointment with an open end has a computed bottom. */
+        if(b>a) out.push({start:a, end:b, note:t.name, taskId:t.id, blocking:this.isBlockingTask(t),
+          fixTop:a===oc.start, fixBot:b===oc.end && this.hasEndTime(t)});
         return;
       }
       if(!this.isActiveOn(t, B)) return; /* a drag-pin only holds while the task participates that day */
@@ -3955,7 +3989,8 @@ class Component extends DCLogic {
          each other, which is an existing permission block 11 must not revoke. It is deliberately NOT
          isBlockingTask(t): the flag describes the task's *appointment*, not a hand-placed chunk of it. */
       this.dragBlocksOn(t, B).forEach(db=>out.push({start:db.start, end:db.end, note:labelOf(t),
-        taskId:t.id, dragPin:true, partial:db.partial, blocking:false}));
+        taskId:t.id, dragPin:true, partial:db.partial, blocking:false,
+        fixTop:db.fixTop, fixBot:db.fixBot})); /* PP-EXT (owner 2026-09-10): the pinned edges, carried through */
     });
     return out;
   }
@@ -4275,48 +4310,23 @@ class Component extends DCLogic {
     if(none.tasks.length) out.push(none); /* always last */
     return out;
   }
-  /* PP-EXT V2.6: the single projection BOTH panes consume. `Group by: None` yields one flat, header-less
-     band, so the sheet and the Gantt drop the same TAG_SECTION_H rows in lock-step and row alignment is
-     preserved by construction rather than by two call sites agreeing. */
-  /* PP-EXT V2.9 §6: the inclusion division, as a THIRD `Group by` mode rather than a level ABOVE sections.
-     The owner asked for a divider higher than sections. Nesting it there has a structural cost that is
-     worth naming: sections would live inside each half, so a section holding both included and excluded
-     work renders TWICE — doubling the header count on a busy plan, which is exactly the density problem
-     that killed sections-as-tags. Making it a sibling grouping mode avoids that entirely, and is nearly
-     free: it emits the SAME band shape `sectionProjection` already produces, so both panes keep consuming
-     one projection, the divider reuses TAG_SECTION_H, and `sectionGeometry` needs no change at all.
-     Cost of the choice, stated plainly: you see sections OR the split, never both stacked.
-
-     Subtree roots decide inclusion, exactly as they decide section — a child follows its root, so grouping
-     never tears a parent away from its children. */
-  INCL_BAND_IN(){ return '__incl_in'; }
-  INCL_BAND_OUT(){ return '__incl_out'; }
-  inclusionProjection(tasks){
-    const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
-    const rootOf=t=>{ let r=t, seen={};
-      while(r && r.parentId!=null && byId[r.parentId] && !seen[r.id]){ seen[r.id]=1; r=byId[r.parentId]; }
-      return r||t; };
-    const inc={id:this.INCL_BAND_IN(), name:'Included', tasks:[]};
-    const exc={id:this.INCL_BAND_OUT(), name:'Excluded', tasks:[]};
-    list.forEach(t=>{ (this.inclBand(rootOf(t))==='included'?inc:exc).tasks.push(t); });
-    /* Both bands ALWAYS render, empty or not — they are the structure, not a bucket that earned its place.
-       Excluded defaults to COLLAPSED-BUT-COUNTED, never hidden: `EXCLUDED · 9` is a passive reminder that
-       honours the standing rule that the shortest-effort path must not silently drop tasks, and it spends
-       exactly one row to do it. */
-    const col=this.state.collapsedSections||{};
-    const collapsedOf=(id,dflt)=>{ const v=col[this.secKey(id)]; return v==null?dflt:!!v; };
-    return [ Object.assign({},inc,{collapsed:collapsedOf(inc.id,false)}),
-             Object.assign({},exc,{collapsed:collapsedOf(exc.id,true)}) ];
-  }
+  /* PP-EXT V2.6: the single projection BOTH panes consume — the sheet and the Gantt read one list, so
+     every task row shares one Y by construction rather than by two call sites agreeing.
+     PP-EXT (owner 2026-09-10): the V2.9 §6 `Group by: Inclusion` mode is GONE, and with it
+     `inclusionProjection` and the `__incl_in`/`__incl_out` bands. Owner: *"Section view should always be
+     the case and not mutually exclusive with included."* A mode makes them exclusive by definition; a
+     FILTER (`inclOnly`) does not, and it composes with the horizon, the search and the column filters the
+     way every other filter already does. Inclusion is written by the row checkbox, which is where the
+     2026-08-20 ruling already put it. */
   sectionProjection(tasks){
-    /* PP-EXT (owner 2026-08-25): the groupBy:'none' flat projection is DELETED with the option. Every
-       stored 'none' resolves to 'section' in migrateFilterPrefs, so nothing reaches here with it. */
-    if(this.effectiveGroupBy()==='inclusion') return this.inclusionProjection(tasks); /* PP-EXT V2.9 §6 */
-    /* `collapsed` is stamped HERE, once, so the sheet, the Gantt, and the flattened _visTasks list all read
-       the same field. Collapse must remove rows from _visTasks too, not just from the painted output:
-       _yTop is indexed by that list and rowAtY asserts the two lengths match (see rowAtY), so hiding rows
-       in only one place would silently shift every bar below a collapsed section. */
-    return this.tasksBySection(tasks).map(sec=>Object.assign({},sec,{collapsed:this.isSectionCollapsed(sec.id)}));
+    /* An empty section survives when nothing is filtering — a container you made is a container you keep.
+       PP-EXT (owner 2026-09-10): *"Filter views should remove empty sections from view."* While a filter
+       or a search is running, a header over nothing says only "your filter excluded this whole section",
+       which is a row spent on an absence. Judged on the section's OWN emptiness after the filter, so the
+       No-section bucket needs no special case (it already drops itself when empty). */
+    const secs=this.tasksBySection(tasks)
+      .map(sec=>Object.assign({},sec,{collapsed:this.isSectionCollapsed(sec.id)}));
+    return this.hasFilters() ? secs.filter(sec=>sec.tasks.length>0) : secs;
   }
   /* The flattened, render-order task list both panes index by — collapsed sections contribute no rows. */
   flattenSections(sections){
@@ -4478,7 +4488,10 @@ class Component extends DCLogic {
   /* PP-EXT (owner 2026-08-25): pp-prefs migration for the filter-bar redesign. Pure over the raw prefs
      object so it is unit-testable and so the constructor stays a list of assignments.
        • the four retired smart chips are unknown keys now — dropped, Unplanned kept
-       • groupBy 'none' was deleted as an option — folds to 'section'
+       • groupBy is deleted outright (owner 2026-09-10). A stored 'inclusion' becomes `inclOnly:true` —
+         someone who was looking at the split was asking to separate today's work from the rest, and the
+         filter is the surviving way to ask that. Any other stored value (including 'section' and the
+         long-dead 'none') simply carries no filter.
        • a saved sort naming `tags`/`calendar` is unreachable now that the Sort select is gone and neither
          has a column, so it is cleared rather than left silently in effect
        • horizon is validated against HORIZONS so a hand-edited pref cannot produce a phantom window
@@ -4488,11 +4501,11 @@ class Component extends DCLogic {
     pf=pf||{};
     const keep=this.SMART_CHIPS().map(c=>c.k);
     const chips=(Array.isArray(pf.chips)?pf.chips:[]).filter(k=>keep.indexOf(k)>=0);
-    const groupBy=(pf.groupBy==='inclusion')?'inclusion':'section';
+    const inclOnly = (pf.inclOnly!=null) ? !!pf.inclOnly : (pf.groupBy==='inclusion');
     const s=pf.sort;
     const sort=(s&&s.key&&this.SORT_KEYS().indexOf(s.key)>=0&&s.key!=='tags'&&s.key!=='calendar')?s:null;
     const horizon=this.HORIZONS().some(x=>x.k===pf.horizon)?pf.horizon:null;
-    return {chips, groupBy, sort, horizon};
+    return {chips, inclOnly, sort, horizon};
   }
   /* PP-EXT (owner 2026-08-25): four of the five smart chips are DELETED — *"active today and startable
      and overdue and running are not selectors I would ever click on."* They survive as `is:` search
@@ -4615,19 +4628,19 @@ class Component extends DCLogic {
   }
   hasFilters(){ const cf=this.state.colFilters||{};
     if(this.searchActive()) return true; /* PP-EXT (owner 2026-08-25): a running search is itself the filter */
-    return !!this.state.horizon || (this.state.chips||[]).length>0 || this.SORT_KEYS().some(k=>this.filterActive(cf[k])); }
+    return !!this.state.horizon || !!this.state.inclOnly /* PP-EXT (owner 2026-09-10) */
+      || (this.state.chips||[]).length>0 || this.SORT_KEYS().some(k=>this.filterActive(cf[k])); }
   /* PP-EXT (owner ruling 2026-08-25): *"When search is active all other filters/sorts are saved and
      overridden. They will be recovered when exiting the search view."*
 
      Implemented as READ-TIME suspension rather than snapshot-and-rewrite. `state.horizon`, `chips`,
-     `colFilters`, `groupBy` and `sort` are never touched while a search runs, so "restored exactly" is
+     `colFilters`, `inclOnly` and `sort` are never touched while a search runs, so "restored exactly" is
      not a restore at all — it is the absence of a write, which cannot drift, cannot half-apply, and
      cannot strand the user in a wrong state if the tab dies mid-search. Everything that READS one of the
      five asks here instead. This is also what keeps decision 1's two systems from ever both being
      authoritative, and it is why `filterTasks` never has to compose an AST with the chip state. */
   searchActive(){ return this.state.searchQuery!=null; }
   effectiveSort(){ return this.searchActive()?null:this.state.sort; }
-  effectiveGroupBy(){ return this.searchActive()?'section':(this.state.groupBy||'section'); }
   setSearch(text){ const s=(''+(text||'')).trim();
     if(!s) return this.clearSearch();
     this.trackAction('filter.search',{ len:s.length }); /* PP-EXT (31) — length only, never the query text */
@@ -4644,6 +4657,33 @@ class Component extends DCLogic {
     if(f.contains) return true; if(f.val!=null) return true; if(f.min!=null||f.max!=null) return true;
     if(f.set&&f.set.length) return true; /* PP-EXT Phase 7: set-membership filter (priority P1–P4 chips) */
     return false; }
+  /* ==== PP-EXT (owner 2026-09-10): the INCLUDED filter ====
+     Owner, verbatim: *"Included should include only included tasks and subtasks. An excluded subtask
+     should not be included just bc its parent task is included. A excluded parent task should still be
+     shown if it has included subtasks."*
+
+     Two rules, and they pull in opposite directions, which is why this is a keep-SET and not a per-row
+     predicate. Inclusion is asked of the task ITSELF — the old grouping asked it of the subtree ROOT, so
+     an excluded subtask rode into today on its parent's ticket, which is the first half of the report.
+     But a row whose ancestors are gone cannot be drawn at its own indent, so every ANCESTOR of a kept
+     task is kept too, whatever its own inclusion says: one included child is enough to bring its parent
+     back, and the parent's other, excluded children stay gone.
+
+     Built over `state.tasks` rather than over the list being filtered, deliberately: `visibleTasks` has
+     already dropped rows hidden by a COLLAPSED parent by the time it calls here, and a collapsed parent
+     holding included work must not vanish because the evidence for it was folded away.
+     PURE given `tasks`. */
+  inclOnlyKeepSet(tasks){
+    const list=tasks||[], byId={}; list.forEach(t=>byId[t.id]=t);
+    const keep=new Set();
+    list.forEach(t=>{
+      if(t.archivedAt) return;
+      if(this.inclBand(t)!=='included') return;
+      let x=t, seen={};
+      while(x && !seen[x.id]){ keep.add(x.id); seen[x.id]=1; x=(x.parentId!=null)?byId[x.parentId]:null; }
+    });
+    return keep;
+  }
   /* Apply active column filters + smart chips (AND) to a flat list. Pure over (list, byId, state). */
   filterTasks(list, byId){
     if(this.searchActive()){ /* PP-EXT (owner 2026-08-25): the search is the ONLY thing filtering */
@@ -4653,7 +4693,9 @@ class Component extends DCLogic {
     const cf=this.state.colFilters||{}; const chips=this.state.chips||[];
     if(!this.hasFilters()) return list;
     const hz=this.state.horizon, hdays=hz?this.horizonDays(hz):null, B=this.startOfToday();
+    const keep=this.state.inclOnly ? this.inclOnlyKeepSet(this.state.tasks) : null; /* PP-EXT (owner 2026-09-10) */
     return list.filter(t=>{
+      if(keep && !keep.has(t.id)) return false; /* PP-EXT (owner 2026-09-10) */
       if(hdays!=null && !this.horizonMatch(t, B, hdays)) return false; /* PP-EXT (owner 2026-08-25) */
       for(const k of this.SORT_KEYS()){ if(this.filterActive(cf[k]) && !this.matchColFilter(t,k,cf[k])) return false; }
       for(const c of chips){ if(!this.matchChip(t,c,byId)) return false; }
@@ -4696,7 +4738,7 @@ class Component extends DCLogic {
   /* PP-EXT (owner 2026-08-25): `togglePriority` is DELETED with the "Filters ▾" popover's P1–P4 chips.
      A `colFilters.priority` spec is still a supported filter (the migration deliberately preserves any
      stored one, and the `check` column's context menu still authors it) — it simply has no chip. */
-  clearAllFilters(){ this.setState({colFilters:{}, chips:[]}); this.savePrefs({colFilters:{}, chips:[]}); }
+  clearAllFilters(){ this.setState({colFilters:{}, chips:[], inclOnly:false}); this.savePrefs({colFilters:{}, chips:[], inclOnly:false}); }
   /* ==== /PP-EXT Phase 7 core ==== */
   visibleTasks(){
     const ts=this.state.tasks;
@@ -5087,8 +5129,11 @@ class Component extends DCLogic {
     changed += this.stripSectionTags(list, sections);
     return {sections, changed};
   }
-  setGroupBy(mode){ const m=(mode==='inclusion')?'inclusion':'section'; /* PP-EXT V2.9 §6; 'none' deleted 2026-08-25 */
-    this.savePrefs({groupBy:m}); this.setState({groupBy:m}); }
+  /* PP-EXT (owner 2026-09-10): `setGroupBy` is DELETED with the mode. This is its replacement, and it is
+     a FILTER toggle — sections group unconditionally now, so there is nothing left to choose between. */
+  toggleInclOnly(){ const v=!this.state.inclOnly;
+    this.trackAction('filter.inclOnly',{ on:v }); /* PP-EXT (31) */
+    this.setState({inclOnly:v}); this.savePrefs({inclOnly:v}); }
   /* Create-then-edit: a new section appears immediately with its name field focused, rather than blocking
      on a modal prompt. Nothing is "pending" — the section exists the moment you ask for it, and renaming is
      the same gesture as naming, so there is only one thing to learn. */
@@ -7206,10 +7251,7 @@ class Component extends DCLogic {
     const byId=this._byId||{}; const root=byId[this.sectionRootId(this.state.tasks,p.id)];
     this._rowDrag={ids,primaryId:p.id,fromIndex:p.index,overIndex:p.index,
       startX:p.x, x:p.x, y:p.y, depth:(this._depth&&this._depth[p.id])||0, parentId:null, moveSet,
-      origSectionId:(root&&root.sectionId!=null)?root.sectionId:null, dropSectionId:undefined,
-      /* PP-EXT V2.9 §6: the inclusion band the drag STARTED in — same baseline role as origSectionId, so
-         picking a row up without crossing the divider is not mistaken for an include/exclude decision. */
-      origInclusion:this.inclBand(root||{}), dropInclusion:undefined};
+      origSectionId:(root&&root.sectionId!=null)?root.sectionId:null, dropSectionId:undefined};
     this.setState({rowDrag:this._rowDrag, menu:null});
   }
   /* PP-EXT V2.6b: the ONE vertical-geometry pass both panes use. Returns `yTop` (indexed by the flattened
@@ -7274,23 +7316,19 @@ class Component extends DCLogic {
     return y<L[0].top ? {id:L[0].id, pos:0} : {id:L[L.length-1].id, pos:L.length-1};
   }
   /* PP-EXT (owner 2026-08-14): PURE — which section band, if any, the CURRENT row drag would drop INTO.
-     Deliberately a function of the RESOLVED drop target (`rd.dropSectionId` / `rd.dropInclusion`, which
-     `resolveRowInsert` decides in one pass alongside `index`/`atEnd`) and the painted geometry
+     Deliberately a function of the RESOLVED drop target (`rd.dropSectionId`, which `resolveRowInsert`
+     decides in one pass alongside `index`/`atEnd`) and the painted geometry
      (`_secLayout`), never of the raw cursor: whatever slots the resolver grows — including the
      bottom-most-in-section slot `atEnd` names — the indicator renders them correctly with no change here,
      and the outline can never claim a band the drop would not actually hit.
      Returns null unless the drop would CHANGE the band, so picking a row up inside its own section lights
      nothing. IO-free → unit-tested. */
-  sectionDropBand(layout, rd, inclMode){
+  /* PP-EXT (owner 2026-09-10): the `inclMode` parameter is gone with the inclusion bands — a band is a
+     section again, and only a section. */
+  sectionDropBand(layout, rd){
     if(!rd || !layout || !layout.length) return null;
-    let targetId;
-    if(inclMode){
-      if(rd.dropInclusion===undefined || rd.dropInclusion===rd.origInclusion) return null;
-      targetId = (rd.dropInclusion==='included') ? this.INCL_BAND_IN() : this.INCL_BAND_OUT();
-    }else{
-      if(rd.dropSectionId===undefined || rd.dropSectionId===rd.origSectionId) return null;
-      targetId = rd.dropSectionId;
-    }
+    if(rd.dropSectionId===undefined || rd.dropSectionId===rd.origSectionId) return null;
+    const targetId = rd.dropSectionId;
     for(let i=0;i<layout.length;i++) if(layout[i].id===targetId) return layout[i];
     return null;
   }
@@ -7348,7 +7386,7 @@ class Component extends DCLogic {
     if(depth>0 && prev){ let anc=prev; while(anc && (depthOf[anc.id]||0)>=depth){ anc=(anc.parentId!=null)?byId[anc.parentId]:null; } parentId=anc?anc.id:null; }
     return {index:overIndex, depth, parentId};
   }
-  reorderRows(ids,to,parentId,sectionId,inclusion){
+  reorderRows(ids,to,parentId,sectionId){
     /* PP-EXT: `to` indexes the VISIBLE rows (archived may be hidden) — anchor on the first visible non-moving
        task at/after `to`, then splice against the full array so hidden tasks keep their positions. When called
        from drag-to-nest, `parentId` re-parents the moving roots (their subtrees ride along via
@@ -7376,27 +7414,14 @@ class Component extends DCLogic {
     }else{
       for(let i=to;i<vis.length;i++){ if(!ids.includes(vis[i].id)){ anchorId=vis[i].id; break; } }
     }
-    /* PP-EXT V2.9 §6: under Group by: Inclusion the drop writes `included` instead of `sectionId`, inside
-       this SAME commit — one drag stays one undo step, matching the V2.6b re-section rule. Turning a row on
-       also clears any snooze, so the two paths cannot disagree with setIncludedOn/Off. */
-    const reinclude = inclusion!==undefined;
+    /* PP-EXT (owner 2026-09-10): the V2.9 §6 `reinclude` arm is DELETED with Group by: Inclusion. A row
+       drag re-sections and reorders; inclusion is written by the row's own checkbox (`taskInclControl`),
+       which the 2026-08-20 ruling already made the single gesture for it. */
     this.commit(tasks=>{
       const moving=tasks.filter(t=>ids.includes(t.id));
       if(reparent) moving.forEach(t=>{ t.parentId = parentId; }); /* PP-EXT: descendants keep pointing here → carried along */
       if(resection){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
         tasks.forEach(t=>{ if(roots.has(t.id)) t.sectionId=sectionId; }); }
-      /* PP-EXT V2.11: excluding writes `null` (unpressed), not `false` — "Off" is retired. The snooze that
-         `setIncludedOff` adds for inherited work is applied here too, so a cross-divider drag and the
-         popover cannot disagree about what "move this out of today" means. */
-      if(reinclude){ const roots=new Set(moving.filter(t=>t.parentId==null).map(t=>t.id));
-        const on=(inclusion==='included');
-        tasks.forEach(t=>{ if(!roots.has(t.id)) return;
-          if(on){ t.included=true; t.includedExplicit=true; t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null; /* PP-EXT (owner 2026-08-19) */ }
-          /* PP-EXT (owner 2026-08-20): mirrors setIncludedOff, INCLUDING the removal of its auto-snooze
-             tail. Missing this would leave the drag and the popover disagreeing about what "move this
-             out of today" means — which is the drift the two paths were deliberately paired to avoid. */
-          else { t.included=null; t.includedExplicit=false; } }); }
-          /* /PP-EXT */
       for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); }
       const afterIndex=afterId==null ? -1 : tasks.findIndex(t=>t.id===afterId);
       let ti = anchorId==null ? (afterIndex<0 ? tasks.length : afterIndex+1) : tasks.findIndex(t=>t.id===anchorId);
@@ -7568,10 +7593,8 @@ class Component extends DCLogic {
          among the siblings it already lives with. Moving a row into another section and then nesting it
          there is two gestures now, deliberately: each one says one thing.
          `projectRowDrop` is unchanged and stays pure — this is about which intent we hand it. */
-      const bandNow=(this.effectiveGroupBy()==='inclusion')
-        ? (res.sectionId===this.INCL_BAND_IN() ? 'included' : 'excluded')
-        : (res.sectionId===undefined ? undefined : res.sectionId);
-      const bandWas=(this.effectiveGroupBy()==='inclusion') ? rd.origInclusion : rd.origSectionId;
+      const bandNow=(res.sectionId===undefined ? undefined : res.sectionId);
+      const bandWas=rd.origSectionId;
       const crossBand = res.sectionPos!=null && bandNow!==undefined && bandNow!==bandWas;
       const steps=(!crossBand && Math.abs(dx)>this.ROW_NEST_DEADZONE) ? Math.round((dx-Math.sign(dx)*this.ROW_NEST_DEADZONE)/this.ROW_NEST_STEP) : 0;
       const vis=this._visTasks||this.state.tasks;
@@ -7580,20 +7603,16 @@ class Component extends DCLogic {
          row's section is its root's by definition (tasksBySection), so stamping it would write a field
          nothing reads. `undefined` means "leave sectionId alone", distinct from `null` = No section. */
       const hit=(drop.parentId==null && res.sectionPos!=null) ? {id:res.sectionId, pos:res.sectionPos} : null;
-      /* PP-EXT V2.9 §6: under Group by: Inclusion the bands are not sections, so the SAME resolved band
-         writes `included` instead of `sectionId`. Dragging a row across the divider is therefore the same
-         gesture as dragging it into a section, on a surface the user already knows. */
-      const inclMode=(this.effectiveGroupBy()==='inclusion');
-      const dropSectionId = (hit && !inclMode) ? hit.id : undefined;
-      const dropInclusion = (hit && inclMode) ? (hit.id===this.INCL_BAND_IN()?'included':'excluded') : undefined;
+      /* PP-EXT (owner 2026-09-10): the Group-by-Inclusion branch that wrote `included` from a band drop
+         is deleted with the mode — a band is a section, so a band drop re-sections and nothing else. */
+      const dropSectionId = hit ? hit.id : undefined;
       const secChanged = dropSectionId!==undefined && dropSectionId!==rd.origSectionId;
-      const inclChanged = dropInclusion!==undefined && dropInclusion!==rd.origInclusion;
       /* PP-EXT: `atEnd` is part of the drag's identity, not decoration — "bottom of section A" and "top of
          section B" share an index, so without it a move between the two would read as no move at all. */
-      if(oi!==rd.overIndex || res.atEnd!==rd.atEnd || drop.depth!==rd.depth || drop.parentId!==rd.parentId || secChanged || inclChanged) this.rowDragMoved=true;
+      if(oi!==rd.overIndex || res.atEnd!==rd.atEnd || drop.depth!==rd.depth || drop.parentId!==rd.parentId || secChanged) this.rowDragMoved=true;
       rd.overIndex=oi; rd.atEnd=res.atEnd; rd.bandEmpty=res.bandEmpty;
       rd.depth=drop.depth; rd.parentId=drop.parentId; rd.dropParentId=drop.parentId;
-      rd.dropSectionId=dropSectionId; rd.dropInclusion=dropInclusion;
+      rd.dropSectionId=dropSectionId;
       this.setState({rowDrag:Object.assign({},rd)}); /* PP-EXT: re-render every move so the ghost follows smoothly */
       return;
     }
@@ -7717,7 +7736,7 @@ class Component extends DCLogic {
     if(this.secPending) this.secPending=null;
     if(this._rowDrag){
       const rd=this._rowDrag; this._rowDrag=null; this.rowPending=null;
-      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex, rd.dropParentId, rd.dropSectionId, rd.dropInclusion); }
+      if(this.rowDragMoved){ this._suppressRowClick=true; this.reorderRows(rd.ids, rd.overIndex, rd.dropParentId, rd.dropSectionId); }
       this.rowDragMoved=false; this.setState({rowDrag:null}); return;
     }
     if(this.rowPending){ this.rowPending=null; }
@@ -9105,10 +9124,10 @@ class Component extends DCLogic {
     if(this._visSrcRef!==this.state.tasks || this._visCol!==this.state.collapsed
        || this._visSort!==this.state.sort || this._visFilt!==this.state.colFilters || this._visChips!==this.state.chips
        /* PP-EXT V2.6: the projection now depends on the sections themselves, on which are collapsed, and on
-          the group mode. Without these keys a rename/reorder/delete/collapse leaves a stale _visSections and
-          the headers keep painting the old names. All three are replaced by reference in their mutators. */
+          the Included filter. Without these keys a rename/reorder/delete/collapse leaves a stale
+          _visSections and the headers keep painting the old names. All are replaced in their mutators. */
        || this._visSecs!==this.state.sections || this._visSecCol!==this.state.collapsedSections
-       || this._visGroupBy!==this.state.groupBy
+       || this._visInclOnly!==this.state.inclOnly /* PP-EXT (owner 2026-09-10): the Included filter changes both the rows AND which sections survive */
        || this._visHorizon!==this.state.horizon || this._visSearchQ!==this.state.searchQuery /* PP-EXT (owner 2026-08-25) */
        /* PP-EXT (owner 2026-08-31): display-only calendar events live OUTSIDE `state.tasks`, so none of
           the keys above changes when an import adds one. Without this key an import that touched no task
@@ -9119,7 +9138,7 @@ class Component extends DCLogic {
        || this._visCalEv!==this.calEventTasks()){
       this._visSrcRef=this.state.tasks; this._visCol=this.state.collapsed; /* PP-EXT: collapse changes re-filter too */
       this._visSort=this.state.sort; this._visFilt=this.state.colFilters; this._visChips=this.state.chips; /* PP-EXT Phase 7: sort/filter cache keys (mutators replace these refs) */
-      this._visSecs=this.state.sections; this._visSecCol=this.state.collapsedSections; this._visGroupBy=this.state.groupBy; /* PP-EXT V2.6 */
+      this._visSecs=this.state.sections; this._visSecCol=this.state.collapsedSections; this._visInclOnly=this.state.inclOnly; /* PP-EXT V2.6; (owner 2026-09-10) */
       this._visHorizon=this.state.horizon; this._visSearchQ=this.state.searchQuery; /* PP-EXT (owner 2026-08-25) */
       const visible=this.visibleTasks();
       /* PP-EXT V2.3: section grouping is a render projection only. The persisted task array keeps manual/tree
@@ -12961,6 +12980,7 @@ class Component extends DCLogic {
         : null;
       merged.push({id:b.taskId,title:b.note,start:b.start,end:b.end,type:'fixed',
         kids:(pinnedFam&&pinnedFam.length)?pinnedFam:undefined,
+        fixTop:!!b.fixTop, fixBot:!!b.fixBot, /* PP-EXT (owner 2026-09-10): the red inside-facing edges */
         dragPin:kb.byId[b.taskId]?this.hasDragPinToday(kb.byId[b.taskId], B):false}); /* PP-EXT: pinned task block (dragPin ⇒ draggable + unpin) */
     });
     merged.sort(bySlot);
@@ -13752,6 +13772,13 @@ class Component extends DCLogic {
       /* A fixed WINDOW is not the app's placement decision and not the user's either — it is a setting,
          so it gets no rail at all; the dashed outline is its whole treatment. */
       const rail = ty.window ? '' : ('inset 3px 0 0 '+(locked ? (c.dragPin?'var(--tl-rail-pinned)':'var(--tl-rail-fixed)') : 'var(--tl-rail-auto)')); /* PP-EXT (22, 25c) */
+      /* PP-EXT (owner 2026-09-10): the pinned EDGES — see TL_PIN_EDGE_PX. Listed BEFORE the rail so the
+         red owns the two corners it shares with it: the rail says who placed the block, this says which
+         instant is nailed down, and at a corner the nailed instant is the more specific claim. */
+      const pinEdges=[];
+      if(c.fixTop) pinEdges.push('inset 0 '+this.TL_PIN_EDGE_PX+'px 0 var(--tl-pin-edge)');
+      if(c.fixBot) pinEdges.push('inset 0 -'+this.TL_PIN_EDGE_PX+'px 0 var(--tl-pin-edge)');
+      const fixEdgeAttr = (c.fixTop&&c.fixBot) ? 'both' : (c.fixTop?'top':(c.fixBot?'bottom':null));
       /* PP-EXT (V4.2): the EDGE handle — a HIT_MIN_PX-tall strip along the block's BOTTOM edge that
          drags the task's allotted minutes. Design constraints it satisfies, each for a stated reason:
            · BOTTOM edge, not left/right. 04b's ✕/⧉ hit column already owns the left edge and the ▶
@@ -13830,6 +13857,7 @@ class Component extends DCLogic {
       const blockEl = h('div',{key:'b'+i,title:tipModel?undefined:tip,
         'data-tl-block':'1','data-tl-day':String(B),'data-tl-kind':kind,
         'data-tl-ov':String(ov.left), /* PP-EXT (12): the layout's own answer, so an e2e failure reads as "the rule said 0.5" and not as a pixel mystery */
+        'data-tl-fixedge':fixEdgeAttr, /* PP-EXT (owner 2026-09-10): which edge(s) carry the red rule — addressable, so e2e never matches on a colour */
         'data-tl-task':(c.id!=null?String(c.id):''),
         onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B)):null, /* PP-EXT: drag to pin (this day) */
         /* PP-EXT (owner 2026-08-04): a non-draggable block (a fixed appointment with no drag-pin, or a
@@ -13851,7 +13879,7 @@ class Component extends DCLogic {
           /* PP-EXT (V4.3): while a gesture sits ON the priority snap-to-original, ring the block instead of
            shadowing it — "let go here and this goes back to being the app's decision" is the one thing
            about the snap a user cannot otherwise see before committing to the release. */
-        textOverflow:'ellipsis',boxShadow:(((dragging&&bd.atOrig)||(edging&&ed.atOrig))?'0 0 0 2px #1a73e8':(dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)'))+(rail?(', '+rail):''), /* PP-EXT (V4.1): + locked/auto left rail; (25c) a window has none, and 'none' is not a legal shadow layer */
+        textOverflow:'ellipsis',boxShadow:(((dragging&&bd.atOrig)||(edging&&ed.atOrig))?'0 0 0 2px #1a73e8':(dragging?'0 4px 12px rgba(0,0,0,0.35)':'0 1px 3px rgba(0,0,0,0.15)'))+(pinEdges.length?(', '+pinEdges.join(', ')):'')+(rail?(', '+rail):''), /* PP-EXT (V4.1): + locked/auto left rail; (25c) a window has none, and 'none' is not a legal shadow layer; (owner 2026-09-10) + the pinned edges */
           cursor:canDrag?(dragging?'grabbing':'grab'):'default',
           opacity:dragging?0.9:1, zIndex:dragging?6:(ov.z?ov.z:'auto'), /* PP-EXT (12): later-in-cluster paints over earlier; clamped under Points (4) and the now-line (5) */
           /* PP-EXT (25b), CUT 2026-08-20 (Task 23): lock is no longer signalled by border weight OR
@@ -15971,12 +15999,9 @@ class Component extends DCLogic {
      that and row alignment is load-bearing. */
   sectionHeaderRow(sec, si, totalW, secCount){
     const h=React.createElement;
-    /* PP-EXT V2.9 §6: an inclusion band is a DIVISION, not a section — it cannot be renamed, reordered, or
-       deleted, because nobody made it. It behaves like `No section` in every one of those respects, so it
-       reuses the same `isNone` guards rather than growing a parallel set. Its collapse state comes from the
-       PROJECTION (Excluded defaults collapsed), not from the stored pref. */
-    const isIncl=(sec.id===this.INCL_BAND_IN()||sec.id===this.INCL_BAND_OUT());
-    const isNone=(sec.id==null)||isIncl;
+    /* PP-EXT (owner 2026-09-10): the V2.9 §6 inclusion-band branch is deleted with the bands. Every
+       header here is a real section or the No-section bucket again. */
+    const isNone=(sec.id==null);
     const collapsed=(sec.collapsed!=null)?!!sec.collapsed:this.isSectionCollapsed(sec.id);
     const editing=this.state.secEdit===sec.id && !isNone;
     const hov=this.state.hoverSection===this.secKey(sec.id);
@@ -16005,10 +16030,8 @@ class Component extends DCLogic {
             padding:'1px 5px',minWidth:0,width:'170px',outline:'none'}})
       : h('span',{key:'secname',style:{whiteSpace:'nowrap',cursor:isNone?'default':'text'},
           onClick:isNone?null:(e=>{e.stopPropagation(); this.startSectionEdit(sec.id);}),
-          title:isIncl?(sec.id===this.INCL_BAND_IN()?'On today’s list — drag a row below the divider to exclude it'
-                                                    :'Not on today’s list — drag a row above the divider to include it')
-                :(isNone?'Tasks not in any section':'Click to rename')},
-          isIncl?sec.name:(sec.id==null?'No section':sec.name));
+          title:isNone?'Tasks not in any section':'Click to rename'},
+          isNone?'No section':sec.name);
 
     /* PP-EXT V2.6b: drag feedback. A section being dragged dims; the slot it would land in gets an accent
        top rule.
@@ -16037,14 +16060,9 @@ class Component extends DCLogic {
            of it is the least legible signal available. renderSectionDropBand outlines the whole band
            instead — a different SHAPE, which is what the owner asked for. */
         background:'var(--sec-head-bg)',
-        /* PP-EXT V2.9 §6: the inclusion division reads HEAVIER than a section header — it is a higher-order
-           split, and if it looked the same the two structures would be indistinguishable at a glance.
-           Height stays TAG_SECTION_H regardless, because sectionGeometry reserves exactly that and row
-           alignment between the panes is load-bearing. */
-        borderTop:isSecTarget?('3px solid '+this._accent)
-          :(isIncl?('2px solid '+this._accent):(si?'1px solid var(--sec-head-border)':'none')),
+        borderTop:isSecTarget?('3px solid '+this._accent):(si?'1px solid var(--sec-head-border)':'none'),
         borderBottom:'1px solid var(--sec-head-border)',
-        color:isIncl?'var(--text)':(isNone?'var(--text-faint)':'var(--tag-text)'),fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
+        color:isNone?'var(--text-faint)':'var(--tag-text)',fontSize:'10px',fontWeight:750,letterSpacing:'0.45px',
         textTransform:'uppercase',position:'relative'}},
       /* collapse caret is always visible — it is the section's primary affordance, not a hover extra */
       h('div',{key:'car',title:collapsed?'Expand section':'Collapse section',
@@ -16065,12 +16083,14 @@ class Component extends DCLogic {
     );
   }
   /* PP-EXT (owner 2026-08-25, filter-bar redesign): one row. Search takes the leftover width; everything
-     else is fixed and flush. Two systems on purpose (spec decision 1) — the horizon/chip/group row is the
+     else is fixed and flush. Two systems on purpose (spec decision 1) — the horizon/chip row is the
      RAPID path (fixed, frequent, one click, no typing), the search field is the EXPRESSIVE path. They are
      never both authoritative: `searchActive()` suspends the rest at READ time, so nothing is overwritten
      and "restore" is the absence of a write.
-     Horizon and Group are BOTH segmented controls, sharing one idiom for "pick exactly one of N" — that
-     is what makes Section/Incl read as a single grouped control rather than two loose pills.
+     PP-EXT (owner 2026-09-10): the Group segment is gone — sections always group, so there is no longer
+     a choice to present. Horizon remains the bar's one segmented control; Included joined the chips,
+     which is the right idiom for it: a chip is an independent on/off, and that is exactly what makes it
+     composable with the rest instead of exclusive with them.
      The search placeholder IS the grammar. There is no help popover and no `?` affordance by design: the
      empty state is the discoverability mechanism.
      The bar still spans the FULL board width (above both panes, so sheet rows stay aligned with the Gantt
@@ -16085,7 +16105,10 @@ class Component extends DCLogic {
     const anyActive=this.hasFilters()||!!(effSort&&effSort.key);
     /* PP-EXT B0: pp-chip base class supplies the shared chip shape/transition; per-chip inline
        style still overrides color/border for the active-vs-accent state (dynamic, not tokenizable). */
+    /* PP-EXT (owner 2026-09-10): `data-pp-chip` + `data-active` are the stable e2e hooks — the repo rule
+       is to address a control by its attribute and never by its label text. */
     const mkChip=(key,label,on,onClick,title,extra)=>h('span',{key,onClick,title,className:'pp-chip',
+      'data-pp-chip':key,'data-active':on?'1':null,
       style:Object.assign({cursor:'pointer',userSelect:'none',fontWeight:600,padding:'3px 10px',borderRadius:'11px',
         border:'1px solid '+(on?this._accent:'var(--divider)'),color:on?'var(--on-accent)':'var(--text-mut2)',
         background:on?this._accent:'var(--chip-bg)',whiteSpace:'nowrap'},extra||{})},label);
@@ -16105,9 +16128,12 @@ class Component extends DCLogic {
 
     const horizonSeg=seg('horizon', this.HORIZONS(), this.state.horizon, k=>this.setHorizon(k),
       'How far ahead you are looking — a task shows if it reaches into the window, or if you included it. Click the active notch to clear.');
-    const groupBy=this.effectiveGroupBy();
-    const groupSeg=seg('group', [{k:'section',l:'Section'},{k:'inclusion',l:'Incl'}], groupBy, k=>this.setGroupBy(k),
-      'Group by — Section shows headers; Incl splits today’s list above/below a divider (drag a row across it to include or exclude)');
+    /* PP-EXT (owner 2026-09-10): the Group segment is GONE — sections always group. What stood in its
+       place is a FILTER: *"Included should include only included tasks and subtasks."* It composes with
+       every other filter in this bar, which a mode never could. */
+    const inclChip=mkChip('incl','Included', !!this.state.inclOnly, ()=>this.toggleInclOnly(),
+      'Show only the tasks you have included today — an excluded subtask is hidden even under an included parent, and an excluded parent stays for the included subtasks it holds',
+      searching?{opacity:0.45,pointerEvents:'none'}:null);
 
     /* Search: preview while typing (the sheet does NOT change), Enter applies, ✕ clears. */
     const draft=this.state.searchText||'';
@@ -16132,7 +16158,7 @@ class Component extends DCLogic {
           boxShadow:'0 6px 18px rgba(0,0,0,0.18)',whiteSpace:'nowrap'}},
         previewN+' match'+(previewN===1?'':'es')+' · Enter to filter'):null);
 
-    const addSecBtn=(groupBy==='section'&&!searching)?mkChip('addsec','+ Section',false,()=>this.newSectionInline(),'Create a new section (opens named for editing)'):null;
+    const addSecBtn=(!searching)?mkChip('addsec','+ Section',false,()=>this.newSectionInline(),'Create a new section (opens named for editing)'):null;
     const keyLabel=k=>(byKcol[k]&&byKcol[k].l)||({tags:'Tags',calendar:'Calendar',priority:'Priority'}[k])||k;
     const sep=(key)=>h('span',{key,style:{width:'1px',height:'16px',background:'var(--divider)',margin:'0 2px'}});
     const lbl=(key,txt)=>h('span',{key,style:{fontSize:'10px',fontWeight:700,letterSpacing:'0.4px',textTransform:'uppercase',color:'var(--text-mut)'}},txt);
@@ -16148,7 +16174,8 @@ class Component extends DCLogic {
       sep('s2'),
       ...this.SMART_CHIPS().map(c=>mkChip('sc-'+c.k, c.l, chips.includes(c.k), ()=>this.toggleChip(c.k), 'Show only: '+c.l,
         searching?{opacity:0.45,pointerEvents:'none'}:null)),
-      sep('s3'), lbl('glbl','Group'), groupSeg, addSecBtn,
+      inclChip,
+      sep('s3'), lbl('glbl','Sections'), addSecBtn,
       ...(searching?[]:filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear'))),
       anyActive
         ? mkChip('clr','Clear all', false,
@@ -16199,7 +16226,7 @@ class Component extends DCLogic {
      pointer-events:none so it never intercepts the drag it is describing. */
   renderSectionDropBand(){
     const rd=this.state.rowDrag; if(!rd || !this.rowDragMoved) return null;
-    const band=this.sectionDropBand(this._secLayout, rd, this.effectiveGroupBy()==='inclusion');
+    const band=this.sectionDropBand(this._secLayout, rd);
     if(!band) return null;
     const h=React.createElement; const acc=this._accent;
     return h('div',{key:'ppdropband','data-drop-band':String(band.id==null?'':band.id),
@@ -17218,8 +17245,7 @@ class Component extends DCLogic {
     const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
     /* PP-EXT V2.6: the section block adds up to ~210px (label + divider + the 168px scroll cap), so the
        vertical clamp has to grow with it or the menu runs off the bottom on a short viewport. */
-    const grouped=this.effectiveGroupBy()==='section';
-    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-(grouped?590:380)));
+    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-590)); /* PP-EXT (owner 2026-09-10): the section block is unconditional now, so the tall clamp always applies */
     /* ● when every selected task's subtree ROOT already sits in this section, ○ otherwise. */
     const rootSecOf=id=>{ const r=this.state.tasks.find(x=>x.id===this.sectionRootId(this.state.tasks,id)); return r?(r.sectionId||null):null; };
     const secMarkOf=sid=>(tasks.length && tasks.every(t=>rootSecOf(t.id)===sid)) ? '●' : '○';
@@ -17254,11 +17280,11 @@ class Component extends DCLogic {
       divider,
       /* PP-EXT V2.6: section assignment. This is the ONLY way to move a task between sections, so it lives
          in the row menu next to the other whole-task operations. Assignment resolves to the subtree root
-         (setTaskSectionMulti), matching how tasksBySection groups. Hidden under Group by: None, where
-         sections aren't on screen to move things between. */
-      this.effectiveGroupBy()==='section' ? divider : null,
-      this.effectiveGroupBy()==='section' ? label('Section') : null,
-      this.effectiveGroupBy()==='section' ? h('div',{style:{maxHeight:'168px',overflowY:'auto'}},
+         (setTaskSectionMulti), matching how tasksBySection groups.
+         PP-EXT (owner 2026-09-10): no longer conditional — sections are always the grouping. */
+      divider,
+      label('Section'),
+      h('div',{style:{maxHeight:'168px',overflowY:'auto'}},
         ...this.sectionsInOrder().map(s=>h('div',{key:'sec-'+s.id},
           row([ic(secMarkOf(s.id)),h('span',{style:{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},s.name)],
             ()=>this.setTaskSectionMulti(ids,s.id)))),
@@ -17266,7 +17292,7 @@ class Component extends DCLogic {
           ()=>this.setTaskSectionMulti(ids,null))),
         h('div',{key:'sec-new'},row([ic('+'),'New section…'],
           ()=>{ const s=this.newSectionInline(); this.setTaskSectionMulti(ids,s.id); }))
-      ) : null,
+      ),
       divider,
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
       /* PP-EXT (owner 2026-08-12): "There is no way to switch something from a milestone to a task and

@@ -63,19 +63,9 @@ test('sectionDropBand is indifferent to #114\'s atEnd/bandEmpty — the band is 
     + 'because rowDropDeco draws no rule when bandEmpty');
 });
 
-test('sectionDropBand reads the INCLUSION bands under Group by: Inclusion', () => {
-  const c = make();
-  const IN = c.INCL_BAND_IN(), OUT = c.INCL_BAND_OUT();
-  const L = [
-    { id:IN,  top:0,  headerBottom:24, bottom:96 },
-    { id:OUT, top:96, headerBottom:120, bottom:144 },
-  ];
-  const band = c.sectionDropBand(L, { origInclusion:'included', dropInclusion:'excluded' }, true);
-  assert.equal(band.id, OUT);
-  assert.equal(c.sectionDropBand(L, { origInclusion:'excluded', dropInclusion:'excluded' }, true), null);
-  /* and it must not fall through to the section branch in inclusion mode */
-  assert.equal(c.sectionDropBand(L, { origSectionId:null, dropSectionId:'s1', dropInclusion:undefined }, true), null);
-});
+/* PP-EXT (owner 2026-09-10): the Group-by-Inclusion case is DELETED with the mode. `sectionDropBand`
+   takes no `inclMode` argument any more - a band is a section, and only a section. The old test is
+   removed rather than skipped: a skipped test for a deleted mode reads as a claim it is coming back. */
 
 test('sectionDropBand is pure and total — no drag, no layout, unknown id all resolve to null', () => {
   const c = make();
