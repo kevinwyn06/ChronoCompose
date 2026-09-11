@@ -913,6 +913,24 @@ The set is built over `state.tasks`, not over the list being filtered: `visibleT
 rows hidden by a collapsed parent by the time `filterTasks` runs, and a collapsed parent holding included
 work must not vanish because the evidence for it was folded away.
 
+**Only work that is still owed (owner 2026-09-11).** *"'Included' and 'Focus mode' task lists should only
+include tasks with non zero time. In particular, if a task is marked as complete for today, even if it is
+recurring, it should be taken off the list."* Both halves are one question — does this task still ask
+something of today — so both live in `inclBand`, the only predicate the two surfaces share. `hasWorkToday`
+vetoes on `requestedMinutes(t, today) === 0` (a deliberate `planned:0` — a dated marker, a top-hover
+deadline line — asks for nothing; an unestimated task keeps its `DEFAULT_TASK_MINUTES` and stays) and on
+`doneForToday`.
+
+`doneForToday` asks completion of TODAY's occurrence via `occInDay`, deliberately not
+`occPct(t, currentOccIdx(t))` — the shape Focus's own `taskDone` used. `currentOcc` prefers the first
+occurrence with work LEFT in it, so the instant you ticked today's box it walked on to tomorrow's and
+reported the task unfinished again; that is the whole "even if it is recurring" half of the report. Do not
+substitute `allotOf` for `requestedMinutes` here: the allotment is computed FROM inclusion, so reading it
+would close a loop.
+
+Nothing is dropped silently — Focus still shows the vetoed rows in its counted "Not in today" band, and
+the sheet shows them the moment the Included chip is off.
+
 ### Two parallel systems, never both authoritative
 
 The chip/horizon path keeps the existing `state.chips` / `state.colFilters` / `state.inclOnly`
@@ -1072,6 +1090,45 @@ objection it recorded (a circle drawn INSIDE the bar) is honoured rather than re
 The leading dot also answers the report more directly than as a handle: during a drag from anywhere, the
 end you can aim at is shown on every other bar. The drop always worked — the whole row is the target —
 but nothing on screen said where to let go.
+
+### An arrow is anchored on the bar, not on the occurrence list (owner 2026-09-11)
+
+Owner: *"arrows should be rerendered when dates change."* `renderArrows` runs on every paint and always
+did; what had drifted was WHICH occurrence it measured. It read `_occById` raw — `occs[0]` for a target,
+the matching `idx` for a source — and the bars loop does two things to that list before painting it: it
+drops a repeat's past and completed occurrences, then MERGES what survives into runs. So `occs[0]` is
+routinely an occurrence drawn nowhere, and editing a repeat's dates re-rendered the arrow faithfully onto
+the invisible one.
+
+The second half only a live gesture shows. A recurring bar previews its drag through `forceUpdate` alone
+(`onMouseMove` returns early for repeats instead of remapping `state.tasks`), so `_occById` is unchanged
+for the whole gesture by design — the block slid and the arrow stayed. Non-recurring drags remap the task
+array and were already live.
+
+`arrowOccOf(task, occHint)` is both fixes in one place: project the painted occurrences into runs, pick
+the run the edge names (`runOccIdxs`, so a dep on occurrence 5 anchors on the run that holds it), then
+apply the live drag shift using the identical expression `ganttBlock` uses — so the arrow and the bar
+cannot land on different days. `predEnd`/`tgtStart` read it; `ganttBarRightX` still owns the pixel.
+
+Note for whoever tests this: the `d` attribute is in SVG **user** units and the board runs at `zoom:0.8`,
+so adding the svg's client x to a raw `M` coordinate compares two spaces and reads 25% long. Map through
+`getScreenCTM()`.
+
+### A fully merged repeat is not asked which occurrences a drag meant (owner 2026-09-11)
+
+Owner: *"Rescheduling a recurring block: if all occurances are merged together, then dragging the start or
+end should not have a popup for if its an individual or bulk change."* The scope prompt exists to resolve
+an ambiguity; when every occurrence the chart PAINTS has merged into one run there is none — "this run",
+"this and following" and "all occurrences" all move the same, only, block, so the question is a click that
+cannot change the outcome.
+
+`isWholeSeriesRun(taskId, runIdxs)` is the test, judged on the painted set (future and unfinished — the
+exact set the bars loop draws) because the merged block the user is holding is what the question is about.
+A run of one is deliberately NOT this case: nothing was merged, and a lone remaining occurrence is still
+distinguishable from the series it belongs to. The scope applied is **`all`**, not `this`: it moves the
+series WINDOW rather than writing a per-occurrence override for every member, so an unambiguous gesture
+leaves no residue. `applyScope(scope, sp)` takes an optional prompt so the drag can reach the same body
+without a round trip through the overlay.
 
 ## Subtask rows read as contained (owner report 2026-09-09)
 

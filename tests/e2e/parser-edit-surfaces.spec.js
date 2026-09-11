@@ -17,17 +17,26 @@ test('detail title and date picker both consume the shared parser shape', async 
   await boot(page, fixture);
   await page.locator('[data-task-id="parse-edit"] [data-task-name]').click();
 
+  /* The weekday is chosen RELATIVE to the browser's own clock rather than written in. Hard-coding
+     "Friday" made this spec calendar-dependent: run it on a Friday and the parse resolves to TODAY, the
+     re-date is a same-day move, the 2026-09-10 same-day de-timing rule correctly keeps the 10am end, and
+     the `end === null` assertion below fails for a reason that has nothing to do with the parser. Three
+     days out is never today under any weekday alignment. */
+  const day = await page.evaluate(() => {
+    const d = new Date(); d.setDate(d.getDate() + 3);
+    return { name: d.toLocaleDateString('en-US', { weekday: 'long' }), dow: d.getDay() };
+  });
   const title = page.locator('.pp-edit[contenteditable="true"]');
-  await title.fill('Call mom Friday');
+  await title.fill('Call mom ' + day.name);
   await title.press('Enter');
   /* REVERSED by the owner ruling of 2026-08-21, which ships with the When line. Task 16 kept the word
      because the highlight was the only proof the date had been taken — true while the title was the
      only place a parsed date was visible, and untrue once the detail panel gained an editable When
      line. The word is not deleted; it moved one line down, and the assertion below checks it is there. */
   await expect.poll(async () => (await stored(page)).name).toBe('Call mom');
-  await expect(page.locator('[data-qa="when-text"]')).toContainText(/Fri/, { timeout: 5000 });
+  await expect(page.locator('[data-qa="when-text"]')).toContainText(day.name.slice(0, 3), { timeout: 5000 });
   let task = await stored(page);
-  expect(new Date(task.start).getDay()).toBe(5);
+  expect(new Date(task.start).getDay()).toBe(day.dow);
   expect(task.end).toBeNull();
 
   await page.keyboard.press('Control+z');

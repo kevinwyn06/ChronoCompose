@@ -674,6 +674,20 @@ gesture that moved a task's dates and left a stale `included===true` behind, whi
 chore dragged out to next week stayed pinned to today. `onMouseUp` now runs the dragged task and its
 travelling subtree through `reDeriveInclusion` before `autoSchedule`.
 
+### …and a press is not work, either (owner ask, 2026-09-11)
+
+`pressedForToday` answers "did the user put this here". `inclBand` — the predicate the Included filter and
+Focus share — additionally asks whether there is anything left to do, on the owner's ask that those two
+lists *"only include tasks with non zero time"* and that a task *"marked as complete for today, even if it
+is recurring"* leaves them. `hasWorkToday(t)` = `!doneForToday(t) && requestedMinutes(t, today) > 0`.
+
+Both halves reuse definitions that already exist rather than adding opinions: `requestedMinutes` is THE
+statement of what one task asks day B for (so `planned` staying three-valued is what makes "no estimate"
+and "an estimate of nothing" different answers here), and `doneForToday` asks `occInDay` for TODAY's
+occurrence rather than `currentOcc`, which prefers the first occurrence with work left and therefore
+reports a just-ticked repeat as unfinished. Scope is those two lists only — `isActiveOn`, `isOptedOut` and
+the scheduler are untouched, so a zero-time dated marker still reserves and still draws.
+
 ## Routines replace the hardcoded meals (owner decision, 2026-08-19)
 
 Lunch and Dinner were two `addBusy` calls with no task behind them, so they could not be renamed, moved for

@@ -3286,8 +3286,40 @@ class Component extends DCLogic {
      filter now (`inclOnly`), not a division of the page. `inclBand` survives as its predicate, because
      "is this task on today's list" is still the question being asked, only of one task at a time. */
   inclBand(t){
+    /* PP-EXT (owner 2026-09-11): *"'Included' and 'Focus mode' task lists should only include tasks with
+       non zero time. In particular, if a task is marked as complete for today, even if it is recurring, it
+       should be taken off the list."* Both halves are one question — is there work left in this task TODAY
+       — and it is asked here because `inclBand` is the only predicate the two surfaces share (the Included
+       filter through `inclOnlyKeepSet`, Focus through its own `inclOf`). Asking it in either caller would
+       give the two lists a chance to disagree, which is the reason this predicate exists at all.
+       Nothing is lost: both surfaces still SHOW the vetoed rows — Focus in its counted "Not in today"
+       band, the sheet the moment the Included chip is off — so the standing tenet that the laziest path
+       never silently drops work is intact. */
+    if(!this.hasWorkToday(t)) return 'excluded';
     const st=this.inclState(t);
     return (st==='pressed'||st==='active') ? 'included' : 'excluded';
+  }
+  /* PP-EXT (owner 2026-09-11): "does this task still ask something of today?" — the veto `inclBand` reads.
+     The minutes come from `requestedMinutes`, which is THE definition of what one task asks day B for, so a
+     deliberate `planned:0` (a dated marker, a top-hover deadline line) asks for nothing and is off the
+     list, while an unestimated task keeps its DEFAULT_TASK_MINUTES and stays on. Do not substitute
+     `allotOf` here: the allotment is computed FROM inclusion, so reading it would close a loop. */
+  hasWorkToday(t){
+    if(!t) return false;
+    if(this.doneForToday(t)) return false;
+    return this.requestedMinutes(t, this.startOfToday()) > 0;
+  }
+  /* PP-EXT (owner 2026-09-11): completion asked of TODAY, which for a repeat is today's own occurrence.
+     Deliberately NOT `occPct(t, currentOccIdx(t))` — the shape Focus's own `taskDone` used: `currentOcc`
+     prefers the first occurrence with work LEFT in it, so the instant you ticked today's box it moved on
+     to tomorrow's and reported the task as unfinished again. That is exactly the "even if it is recurring"
+     half of the report. `occInDay` expands to the day itself, so it is independent of the render cache and
+     answers null in a gap — a repeat with no occurrence today is not "done today", it is simply not due. */
+  doneForToday(t){
+    if(!t) return false;
+    if(!t.recur) return (+t.pct||0) >= 100;
+    const o=this.occInDay(t, this.startOfToday());
+    return !!(o && o.idx!=null && this.occPct(t, o.idx) >= 100);
   }
   /* The one way this design could quietly lose work: `unpressed` means "I have not looked at this yet",
      `off` means "I decided against this". Both sit in the Excluded row, so if they render identically the
@@ -6344,8 +6376,34 @@ class Component extends DCLogic {
   /* ---------- recurrence edit scope ---------- */
   openScope(kind, taskId, occIdx, payload){ this.setState({scopePrompt:{kind,taskId,occIdx,payload:payload||{}}}); }
   closeScope(){ this.setState({scopePrompt:null}); }
-  applyScope(scope){
-    const sp=this.state.scopePrompt; if(!sp) return;
+  /* PP-EXT (owner 2026-09-11): *"Rescheduling a recurring block: if all occurances are merged together,
+     then dragging the start or end should not have a popup for if its an individual or bulk change."*
+     The prompt exists to let the user say which occurrences a drag applies to. When every occurrence the
+     chart PAINTS has been merged into one run (`mergeConsecutiveOccurrenceDays`), that question has one
+     answer three ways: "this run", "this and following" and "all occurrences" all move the same, only,
+     block. Asking is then a click that cannot change the outcome.
+     Judged on the PAINTED occurrences — future and unfinished, the exact set the bars loop draws — because
+     the merged block the user is holding is what the question is about. `all` is the scope applied, not
+     `this`: it moves the series WINDOW rather than writing a per-occurrence override for every member, so
+     an unambiguous gesture leaves no override residue behind.
+     A run of one is deliberately NOT this case: nothing has been merged, and a lone remaining occurrence
+     is still distinguishable from the series it belongs to. */
+  isWholeSeriesRun(taskId, runIdxs){
+    const t=(this.state.tasks||[]).find(x=>x.id===taskId);
+    if(!t || !t.recur) return false;
+    const occs=(this._occById&&this._occById[taskId])||[];
+    if(!occs.length) return false;
+    const todayStart=this.startOfToday();
+    const painted=occs.filter(o=>o.start>=todayStart && this.occPct(t,o.idx)<100);
+    if(painted.length<2) return false;
+    if(this.mergeConsecutiveOccurrenceDays(painted).length!==1) return false;
+    const held=new Set(runIdxs||[]);
+    return painted.every(o=>held.has(o.idx));
+  }
+  /* `sp` is normally the open prompt; the direct-apply path above hands one in so an unambiguous drag can
+     reach the same body without a round trip through the overlay. */
+  applyScope(scope, spArg){
+    const sp=spArg||this.state.scopePrompt; if(!sp) return;
     const {kind,taskId,occIdx,payload}=sp;
     /* PP-EXT (owner report 2026-09-09): both branches below read `_occById` UNGUARDED, and every other
        reader in this file guards it (currentOcc, occOnDay, mostRecentOccIdx, toggleDone) for the reason
@@ -7797,7 +7855,13 @@ class Component extends DCLogic {
     if(this.dragState){
       const d=this.dragState;
       if(d.recurring){
-        if(this.dragMoved) this.openScope('date',d.id,d.occIdx,{mode:d.mode,deltaMs:(d.deltaMs||0),runOccIdxs:[...(d.runOccIdxs||[d.occIdx])]});
+        if(this.dragMoved){
+          const payload={mode:d.mode,deltaMs:(d.deltaMs||0),runOccIdxs:[...(d.runOccIdxs||[d.occIdx])]};
+          /* PP-EXT (owner 2026-09-11): a fully merged series offers no scope choice — apply it. See
+             `isWholeSeriesRun`. */
+          if(this.isWholeSeriesRun(d.id, payload.runOccIdxs)) this.applyScope('all',{kind:'date',taskId:d.id,occIdx:d.occIdx,payload});
+          else this.openScope('date',d.id,d.occIdx,payload);
+        }
       } else if(!this.dragMoved){
         if(this.history.length) this.history.pop();
         /* PP-EXT (V1.3): a click (no drag) on a date EDGE opens the calendar+NL popup for that edge —
@@ -15270,7 +15334,11 @@ class Component extends DCLogic {
       due.length? due.map(habitRow) : h('div',{style:{fontSize:'12.5px',color:'var(--text-faint)'}},'No habits scheduled today.'));
     /* Task checklist — every plan task, stripped to a checkbox + name. Complete inline; click the row to open
        the detail window (full edit). Incomplete first, then completed (struck through). */
-    const taskDone=t=> t.recur ? this.occPct(t,this.currentOccIdx(t))>=100 : t.pct>=100;
+    /* PP-EXT (owner 2026-09-11): `doneForToday`, not `occPct(currentOccIdx)` — see the helper. The old
+       expression walked to the NEXT occurrence the moment today's was ticked, so a recurring task the user
+       had just finished reported itself unfinished and stayed at the top of the list. The row's tick and
+       the band it is filed under now read the same predicate. */
+    const taskDone=t=>this.doneForToday(t);
     const planTasks=(this.state.tasks||[]).filter(t=>!t.archivedAt)
       .slice().sort((a,b)=>(taskDone(a)?1:0)-(taskDone(b)?1:0));
     const taskRow=t=>{ const done=taskDone(t); const pcol=this.PCOL[t.priority]||'var(--pri-default)';
@@ -17165,16 +17233,58 @@ class Component extends DCLogic {
     return out;
   }
   /* /PP-EXT */
+  /* PP-EXT (owner 2026-09-11): *"arrows should be rerendered when dates change."*
+     An arrow is an assertion about two BARS, so it has to be anchored on the occurrence that is actually
+     painted — and `renderArrows` was reading `_occById` raw: `occs[0]` for a target, the matching `idx` for
+     a source. Two ways that disagrees with the chart:
+
+       • the bars loop hides a repeat's past and completed occurrences and then MERGES the survivors into
+         runs, so `occs[0]` is routinely an occurrence that is drawn nowhere. Edit a repeat's dates and the
+         arrow re-rendered faithfully — onto the old, invisible occurrence.
+       • a RECURRING bar drag previews through `forceUpdate` alone (`onMouseMove` returns early for repeats
+         rather than remapping `state.tasks`), so `_occById` is by design unchanged for the whole gesture.
+         Non-recurring drags do remap and were already live; repeats left the arrow pinned while the block
+         slid out from under it.
+
+     Both are fixed by asking the same two questions the bar asks, in the same order: project the painted
+     occurrences into runs, pick the run this edge names, then apply the live drag shift — the identical
+     expression `ganttBlock` uses, so the arrow and the bar cannot land on different days. */
+  arrowOccOf(t, occHint){
+    if(!t) return null;
+    const occs=(this._occById&&this._occById[t.id])||[];
+    if(!occs.length) return null;
+    let list=occs;
+    if(t.recur){
+      const todayStart=this.startOfToday();
+      const painted=occs.filter(o=>o.start>=todayStart && this.occPct(t,o.idx)<100);
+      list=this.mergeConsecutiveOccurrenceDays(painted.length?painted:occs);
+    }
+    if(!list.length) return null;
+    const holds=(o,i)=>o.runOccIdxs ? o.runOccIdxs.indexOf(i)>=0 : o.idx===i;
+    let o=(occHint!=null ? list.find(x=>holds(x,occHint)) : null) || list[0];
+    const d=this.dragState;
+    if(d && d.recurring && d.id===t.id && holds(o,d.occIdx)){
+      const dShift=Math.round((d.deltaMs||0)/this.DAY);
+      let st=o.start, en=o.end;
+      if(d.mode==='move'){ st=this.addLocalDays(st,dShift); en=this.addLocalDays(en,dShift); }
+      else if(d.mode==='start'){ st=Math.min(this.addLocalDays(en,-1),this.addLocalDays(st,dShift)); }
+      else if(d.mode==='end'){ en=Math.max(this.addLocalDays(st,1),this.addLocalDays(en,dShift)); }
+      o=Object.assign({},o,{start:st,end:en});
+    }
+    return o;
+  }
+  /* /PP-EXT */
   renderArrows(tasks,totalW,bodyH){
     const h=React.createElement;
     const byId={}; const idx={}; tasks.forEach((t,i)=>{byId[t.id]=t;idx[t.id]=i;});
     /* PP-EXT (owner 2026-09-09b): the bar's TRAILING EDGE, not `xOf(end)` — see `ganttBarRightX`. An
        arrow leaves the side of the bar it belongs to, so the 14px stub is 14px of clear air rather than
        14px spent crossing the bar's own final column. */
-    const predEnd=(pid,occ)=>{ const occs=this._occById[pid]||[]; let o=null; if(occ!=null) o=occs.find(x=>x.idx===occ); if(!o) o=occs[0]; const p=byId[pid];
+    const predEnd=(pid,occ)=>{ const p=byId[pid]; const o=this.arrowOccOf(p,occ);
       const s=o?o.start:(p?p.start:null), e=o?o.end:(p?p.end:null);
       return this.ganttBarRightX(!!(p&&p.allDay), s, e); };
-    const tgtStart=(tid)=>{ const occs=this._occById[tid]||[]; const o=occs[0]; const t=byId[tid]; return this.xOf(o?o.start:(t?t.start:0)); };
+    const tgtStart=(tid)=>{ const t=byId[tid]; const o=this.arrowOccOf(t,null)||(this._occById[tid]||[])[0];
+      return this.xOf(o?o.start:(t?t.start:0)); };
     /* PP-EXT (owner report 2026-09-09): collect every edge FIRST, then route. Lanes and fan-out are both
        facts about the whole set — an edge cannot know on its own whether it shares a corridor with
        another — which is why the old inline single pass could only ever draw them on top of each other. */

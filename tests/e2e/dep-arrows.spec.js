@@ -26,12 +26,23 @@ const fixture = () => ({
 
 const BAR = name => `[title^="${name} ·"]`;
 
-async function bootGantt(page, data) {
+async function bootGantt(page, data, leadBar) {
   await page.setViewportSize({ width: 1600, height: 900 });
   await bootSurface(page, { view: 'gantt' }, data || fixture());
   await page.locator('[data-gantt-task-id]').first().waitFor({ state: 'attached', timeout: 15000 });
-  await page.locator(BAR('Draft the spec')).first().waitFor({ state: 'visible', timeout: 15000 });
+  await page.locator(BAR(leadBar || 'Draft the spec')).first().waitFor({ state: 'visible', timeout: 15000 });
 }
+
+/* The arrow's departure point in CLIENT pixels. The `d` attribute is in SVG USER units and the app runs
+   the board at `zoom:0.8`, so adding the svg's client x to a raw `M` coordinate compares two different
+   spaces (and reads 25% long). `getScreenCTM` is the mapping between them, zoom included. */
+const arrowStartClient = page => page.evaluate(() => {
+  const p = document.querySelector('path[data-dep-edge]');
+  const m = p.getAttribute('d').match(/^M([-\d.]+),([-\d.]+)/);
+  const pt = p.ownerSVGElement.createSVGPoint();
+  pt.x = Number(m[1]); pt.y = Number(m[2]);
+  return pt.matrixTransform(p.getScreenCTM()).x;
+});
 
 const depsOf = (page, id) => page.evaluate(tid => {
   const t = JSON.parse(localStorage.getItem('pp-tasks') || '[]').find(x => x.id === tid);
@@ -95,6 +106,60 @@ test.describe('dependency arrows 2026-09-09', () => {
       expect(m, 'path starts with a horizontal run: ' + d).toBeTruthy();
       expect(Math.abs(Number(m[3]) - Number(m[1]))).toBeGreaterThanOrEqual(10);
     });
+  });
+
+  /* Owner, 2026-09-11: "arrows should be rerendered when dates change."
+   *
+   * The unit layer pins WHICH occurrence an arrow anchors to (tests/owner-2026-09-11-spotfix.test.js).
+   * What only a real pointer can show is the second half: a RECURRING bar previews its drag through
+   * `forceUpdate` alone — `state.tasks` and `_occById` are untouched for the whole gesture by design — so
+   * "the arrow keeps up with the block" is a claim about what a live drag repaints, and a dispatched
+   * MouseEvent would not start that drag at all. */
+  test('an arrow out of a repeat leaves the bar the chart actually paints', async ({ page }) => {
+    await bootGantt(page, {
+      tasks: [
+        task('r', 'Standup', { start: '-6d', end: '-5d', allDay: true, priority: 1, planned: 30,
+          recur: { kind: 'week', n: 1, label: 'Weekly', until: '+21d', overrides: {}, shifts: [] } }),
+        task('b', 'Write it up', { start: '+9d', end: '+10d', priority: 1, planned: 120, deps: ['r'] }),
+      ],
+    }, 'Standup');
+    await page.locator('path[data-dep-edge]').first().waitFor();
+    const bar = await page.locator('[data-gantt-bar-id="r"]').first().boundingBox();
+    // The bars loop hides a repeat's PAST occurrences, so the anchor must be the first PAINTED one —
+    // which is what `.first()` returns, the anchored occurrence having already been dropped.
+    expect(await arrowStartClient(page)).toBeCloseTo(bar.x + bar.width, 0);
+  });
+
+  test('dragging a recurring bar drags its arrow with it', async ({ page }) => {
+    await bootGantt(page, {
+      tasks: [
+        /* Two days wide on purpose: inside a one-column bar `[data-gantt-bar-body]` is narrower than the
+           two 7px edge grips beside it, so the press lands on the START grip and the gesture under test
+           is quietly not the one being run. */
+        task('r', 'Standup', { start: '+1d', end: '+3d', allDay: true, priority: 1, planned: 30,
+          recur: { kind: 'week', n: 1, label: 'Weekly', until: '+21d', overrides: {}, shifts: [] } }),
+        task('b', 'Write it up', { start: '+9d', end: '+10d', priority: 1, planned: 120, deps: ['r'] }),
+      ],
+    }, 'Standup');
+    await page.locator('path[data-dep-edge]').first().waitFor();
+    const before = await arrowStartClient(page);
+    const bar = page.locator('[data-gantt-bar-id="r"]').first();
+    const box = await bar.boundingBox();
+    const columns = Number(await bar.getAttribute('data-gantt-columns'));
+    const day = box.width / columns;
+
+    const target = await bar.locator(':scope > [data-gantt-bar-body]').first().boundingBox();
+    await page.mouse.move(target.x + target.width / 2, target.y + target.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(target.x + target.width / 2 + day, target.y + target.height / 2, { steps: 12 });
+    const during = await arrowStartClient(page);
+    const moved = await bar.boundingBox();
+    expect(moved.x - box.x, 'the block previews').toBeCloseTo(day, 0);
+    expect(during - before, 'and the arrow departs from where the block now is, not where it was')
+      .toBeCloseTo(day, 0);
+    expect(during).toBeCloseTo(moved.x + moved.width, 0);
+    await page.mouse.up();
+    await page.keyboard.press('Escape');
   });
 
 });

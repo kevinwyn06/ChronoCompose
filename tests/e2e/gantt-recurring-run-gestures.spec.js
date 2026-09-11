@@ -3,6 +3,17 @@ const { bootSurface, task } = require('./_seed');
 
 test.use({ timezoneId: 'America/Vancouver' });
 
+/* REVISED 2026-09-11 (owner: *"if all occurances are merged together, then dragging the start or end
+   should not have a popup for if its an individual or bulk change"*).
+
+   This file used to prove that EVERY recurring drag raises the scope prompt, and it used a fixture whose
+   occurrences all merge into one block to prove it — which is precisely the case the owner says must not
+   ask. So the fixture keeps its job and swaps its expectation: a fully merged run commits straight to the
+   series, and a repeat that paints SEPARATE blocks (the second fixture below) still asks, because there
+   the choice is real. The PREVIEW assertions are unchanged in both — how the block follows the pointer is
+   a different question from what the release commits, and it was always the harder half to get right. */
+
+/* Three consecutive days: the chart merges them into ONE block, so there is nothing to choose between. */
 async function bootRun(page) {
   await bootSurface(page, { view: 'gantt' }, { tasks: [
     task('run', 'Three-day run', {
@@ -20,17 +31,24 @@ async function bootRun(page) {
   const bar = page.locator('[data-gantt-bar-id="run"]').first();
   await expect(bar).toBeVisible();
   await expect(bar).toHaveAttribute('data-gantt-run-occurrences', '0,1,2');
-  const dates = await page.evaluate(() => {
-    const t = JSON.parse(localStorage.getItem('pp-tasks'))[0];
-    const add = (ms, n) => { const d = new Date(ms); d.setDate(d.getDate() + n); return d.getTime(); };
-    /* 2026-09-09: an OCCURRENCE's end is the anchor plus the rule's own length — `t.end` is the series
-       window's end and is a different quantity (and may be null). Every assertion in this file is about
-       occurrence boundaries, so they are derived here rather than from the window. */
-    const dur = (t.recur && t.recur.durMs != null) ? t.recur.durMs : (t.end - t.start);
-    return { starts: [0, 1, 2, 3].map(n => add(t.start, n)),
-             ends:   [0, 1, 2, 3].map(n => add(t.start, n) + dur) };
-  });
-  return { bar, dates };
+  return bar;
+}
+
+/* Two-day occurrences four days apart: nothing is adjacent, so the chart paints three separate blocks and
+   "this one" and "all of them" are different sentences again. The occurrence is two days wide on purpose —
+   a one-column bar leaves `[data-gantt-bar-body]` narrower than the two 7px edge grips beside it, so the
+   press lands on the START grip and the gesture under test is quietly not the one being run. */
+async function bootSeparate(page) {
+  await bootSurface(page, { view: 'gantt' }, { tasks: [
+    task('sep', 'Every fourth day', {
+      start: '+1d', end: '+3d', allDay: true,
+      recur: { kind: 'day', n: 4, label: 'Every 4 days', until: '+9d', overrides: {}, shifts: [] },
+    }),
+  ] });
+  const bar = page.locator('[data-gantt-bar-id="sep"]').first();
+  await expect(bar).toBeVisible();
+  await expect(bar).toHaveAttribute('data-gantt-run-occurrences', '0');
+  return bar;
 }
 
 /* An off-screen drag and a broken drag both read as "the bar did not move", so assert the precondition
@@ -45,7 +63,8 @@ async function expectDragOnScreen(page, x, direction, day, surface) {
   expect(x + direction * day, why).toBeLessThan(view.x + view.width);
 }
 
-async function dragOneDay(page, bar, surface, direction, scope = 'This run') {
+/** Drag one day and release. Returns nothing; the caller asserts what the release committed. */
+async function dragOneDay(page, bar, surface, direction) {
   const before = await bar.boundingBox();
   const columns = Number(await bar.getAttribute('data-gantt-columns'));
   const day = before.width / columns;
@@ -70,67 +89,82 @@ async function dragOneDay(page, bar, surface, direction, scope = 'This run') {
     expect(preview.width - before.width).toBeCloseTo(direction * day, 0);
   }
   await page.mouse.up();
-  await expect(page.getByText('This run', { exact: true })).toBeVisible();
-  await expect(page.getByText('All occurrences', { exact: true })).toBeVisible();
-  await page.getByText(scope, { exact: true }).click();
 }
 
-async function overrides(page) {
-  return page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks'))[0].recur.overrides || {});
+const stored = (page, i) => page.evaluate(n => JSON.parse(localStorage.getItem('pp-tasks'))[n], i || 0);
+const plusDays = (page, ms, n) =>
+  page.evaluate(([m, k]) => { const d = new Date(m); d.setDate(d.getDate() + k); return d.getTime(); }, [ms, n]);
+
+async function expectNoPrompt(page) {
+  await expect(page.getByText('Edit repeating task', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('This run', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('All occurrences', { exact: true })).toHaveCount(0);
 }
 
-test('body drag previews and commits every occurrence in the merged run as one scope action', async ({ page }) => {
-  const { bar, dates } = await bootRun(page);
+// ---------------------------------------------------------------------------
+// One merged block ⇒ no question to ask.
+// ---------------------------------------------------------------------------
+
+test('a body drag on a fully merged run commits to the series without asking', async ({ page }) => {
+  const bar = await bootRun(page);
+  const before = await stored(page);
   await dragOneDay(page, bar, 'body', 1);
-  const ov = await overrides(page);
-  expect(Object.keys(ov)).toEqual(['0', '1', '2']);
-  expect(ov[0].start).toBe(dates.starts[1]); expect(ov[0].end).toBe(dates.ends[1]);
-  expect(ov[1].start).toBe(dates.starts[2]); expect(ov[1].end).toBe(dates.ends[2]);
-  expect(ov[2].start).toBe(dates.starts[3]);
-  expect(ov[2].end).toBe(dates.ends[3]);
+  await expectNoPrompt(page);
+  const saved = await stored(page);
+  expect(saved.start).toBe(await plusDays(page, before.start, 1));
+  expect(saved.recur.durMs).toBe(86400000, 'a move is not a resize');
+  expect(saved.recur.overrides || {}).toEqual({},
+    'the series WINDOW moved — an unambiguous gesture leaves no per-occurrence residue');
 });
 
-/* REVISED 2026-09-09 (owner ruling: a repeat's start/end are the SERIES WINDOW). "All occurrences"
-   still moves the whole series by exactly one day — but `end` is now the last day the series may fire
-   rather than the anchor occurrence's other edge, and the occurrence's own length lives on the rule. So
-   the assertions read as DELTAS against the stored row, which is true under either shape and is what
-   "shifts the series once" actually claims. */
-test('body drag All occurrences shifts the series once without run overrides', async ({ page }) => {
-  const { bar } = await bootRun(page);
-  const before = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks'))[0]);
-  await dragOneDay(page, bar, 'body', 1, 'All occurrences');
-  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks'))[0]);
-  const plusOneDay = (ms) => page.evaluate(m => { const d = new Date(m); d.setDate(d.getDate() + 1); return d.getTime(); }, ms);
-
-  expect(saved.start).toBe(await plusOneDay(before.start));
-  // the occurrence length is untouched — a move is not a resize
-  expect(saved.recur.durMs).toBe(86400000);
-  // No per-occurrence overrides: "All occurrences" moves the SERIES, which is the whole point of the
-  // gesture and the reason this spec exists.
-  expect(saved.recur.overrides || {}).toEqual({});
-  // The window END is deliberately NOT asserted here. `before` is read from `pp-tasks`, which still
-  // holds the seeded LEGACY row until the app's first write — the window conversion happens in
-  // `normalizeTask` on load — so the two sides of a delta comparison are in different shapes and the
-  // subtraction is meaningless. What the window end does under every scope is pinned in
-  // tests/repeat-series-window.test.js, against the model rather than against a stale row.
-});
-
-test('left-edge run resize commits only the first occurrence boundary', async ({ page }) => {
-  const { bar, dates } = await bootRun(page);
+test('the left edge of a merged run moves the series start, still without asking', async ({ page }) => {
+  const bar = await bootRun(page);
+  const before = await stored(page);
   await dragOneDay(page, bar, 'start', -1);
-  const ov = await overrides(page);
-  expect(Object.keys(ov)).toEqual(['0']);
-  const prior = await page.evaluate(ms => { const d = new Date(ms); d.setDate(d.getDate() - 1); return d.getTime(); }, dates.starts[0]);
-  expect(ov[0].start).toBe(prior);
-  expect(ov[0].end).toBe(dates.ends[0]);
+  await expectNoPrompt(page);
+  const saved = await stored(page);
+  expect(saved.start).toBe(await plusDays(page, before.start, -1));
+  expect(saved.recur.overrides || {}).toEqual({});
 });
 
-test('right-edge run resize commits only the last occurrence boundary', async ({ page }) => {
-  const { bar, dates } = await bootRun(page);
+test('the right edge of a merged run moves the series end, still without asking', async ({ page }) => {
+  const bar = await bootRun(page);
+  const before = await stored(page);
   await dragOneDay(page, bar, 'end', 1);
-  const ov = await overrides(page);
-  expect(Object.keys(ov)).toEqual(['2']);
-  expect(ov[2].start).toBe(dates.starts[2]);
-  const next = await page.evaluate(ms => { const d = new Date(ms); d.setDate(d.getDate() + 1); return d.getTime(); }, dates.ends[2]);
-  expect(ov[2].end).toBe(next);
+  await expectNoPrompt(page);
+  const saved = await stored(page);
+  expect(saved.start).toBe(before.start, 'the leading edge is untouched by a trailing-edge drag');
+  expect(saved.recur.overrides || {}).toEqual({});
+  /* The stored window END is deliberately not compared against `before`: `before` is the seeded LEGACY
+     row, and the window conversion happens in `normalizeTask` on load, so the two sides of that
+     subtraction are in different shapes. What "the series end moved a day" MEANS on screen is that the
+     series fires once more, which the painted run states directly. */
+  await expect(page.locator('[data-gantt-bar-id="run"]').first())
+    .toHaveAttribute('data-gantt-run-occurrences', '0,1,2,3');
+});
+
+// ---------------------------------------------------------------------------
+// Separate blocks ⇒ the choice is real, so the prompt stays.
+// ---------------------------------------------------------------------------
+
+test('a repeat that paints separate blocks still asks which occurrences the drag meant', async ({ page }) => {
+  const bar = await bootSeparate(page);
+  await dragOneDay(page, bar, 'body', 1);
+  await expect(page.getByText('Edit repeating task', { exact: true })).toBeVisible();
+  await expect(page.getByText('This occurrence only', { exact: true })).toBeVisible();
+  await expect(page.getByText('All occurrences', { exact: true })).toBeVisible();
+  await page.getByText('This occurrence only', { exact: true }).click();
+  const saved = await stored(page);
+  expect(Object.keys(saved.recur.overrides || {})).toEqual(['0'],
+    'and the answer lands on the one occurrence the user was holding');
+});
+
+test('choosing All occurrences on a separate-block repeat still moves the series', async ({ page }) => {
+  const bar = await bootSeparate(page);
+  const before = await stored(page);
+  await dragOneDay(page, bar, 'body', 1);
+  await page.getByText('All occurrences', { exact: true }).click();
+  const saved = await stored(page);
+  expect(saved.start).toBe(await plusDays(page, before.start, 1));
+  expect(saved.recur.overrides || {}).toEqual({});
 });
