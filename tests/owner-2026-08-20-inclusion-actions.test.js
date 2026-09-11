@@ -182,23 +182,30 @@ test('tick: ticking is ONE commit, so one undo takes it back', () => {
   });
 });
 
-test('tick: unticking opens the snooze window and mutates NOTHING', () => {
+/* SUPERSEDED 2026-09-11. The 2026-08-20 contract was that unticking could not act, because "not today",
+   "not until Thursday" and "not until it matters" are three answers and the app cannot pick. The owner has
+   now picked, for the checkbox specifically: *"When ticking the checkbox of an included task, immediately
+   make it excluded and unticked until it's triggered. Have a seperate button for a scheduled snooze."*
+   So the box writes the open-ended variant in one commit, and the three durations are still offered —
+   on `taskSnoozeBtn`, which is where a click that has to choose between them belongs. */
+test('tick: unticking takes the task off today until its own triggers fire — one commit, no menu', () => {
   withNow(FIXED_NOW, () => {
     const c = make();
     const B = c.startOfToday();
     const t = activeTask(c, { id:'p1', start:B, end:B+DAY, included:true, onListSince:c.ymdOf(B) });
     c.state.tasks = [t];
-    const before = JSON.stringify(c.state.tasks);
     const hist = c.history.length;
 
-    // openInclPick anchors the popover off the clicked element's rect.
     const ev = { stopPropagation(){}, currentTarget:{ getBoundingClientRect:()=>({left:10,bottom:20}) } };
     c.untickOnToday(ev, 'p1');
 
-    assert.ok(c.state.inclPick, 'the snooze window is open');
-    assert.strictEqual(c.state.inclPick.id, 'p1');
-    assert.strictEqual(JSON.stringify(c.state.tasks), before, 'and not one field was written');
-    assert.strictEqual(c.history.length, hist, 'nothing to undo, because nothing happened');
+    const got = c.state.tasks.find(x=>x.id==='p1');
+    assert.ok(!c.state.inclPick, 'no window: the off position of a box is not a question');
+    assert.strictEqual(got.snoozeIndef, true, 'off until it starts, falls due, or its last dep is done');
+    assert.strictEqual(got.snoozeUntil, null, 'no date, because none was asked for');
+    assert.strictEqual(got.onListSince, null, 'and it has left the list, which is what the field records');
+    assert.strictEqual(got.included, true, 'the press is untouched — a woken task returns to what it was');
+    assert.strictEqual(c.history.length, hist + 1, 'one gesture, one undo entry');
   });
 });
 

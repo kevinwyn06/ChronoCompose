@@ -545,8 +545,19 @@ today**, completing it or un-completing it. The old behaviour advanced — a sec
 NEXT occurrence, which on a yearly series silently marked one twelve months out as done with no way back
 but undo. The target is deliberately not `currentOcc`: that skips completed occurrences, so reading the
 target from it would walk to next year's the instant this year's was done and hand the fast-forward
-straight back. The catch-up branch (clearing every missed occurrence in one click) is unchanged — acting
-on more than one is what that click means.
+straight back.
+
+**Amended 2026-09-11 (owner report): one click means "done for today".** The catch-up branch used to
+RETURN before the target was looked at, so a repeat with missed occurrences took two clicks to finish
+today — and the first one read as destructive, because clearing the backlog is what the missed-occurrence
+carve-out above was keeping the task on today FOR: the allotment vanished on that click while the circle
+stayed empty (*"it just clears the allocated time"*). Completing now sweeps the backlog with it in the
+same commit, so one undo takes the whole gesture back; un-completing releases the target only, because
+un-ticking today says nothing about work already cleared. The combining is scoped to TODAY's own
+occurrence, asked through `occInDay` — the same predicate `doneForToday` reads, so the circle and the
+Included filter cannot disagree. On a day the repeat does not fall on there is nothing to complete FOR
+today and the ruling above applies unchanged: the click clears the backlog and reaches no further, which
+is the guard that keeps this from restoring the fast-forward.
 
 ## Overlapping fixed blocks are charged once (owner report, 2026-08-19)
 
@@ -734,16 +745,27 @@ reads as `new` (today brought it back), not as inherited work.
    the same breath, making the snooze verbs inert on exactly the work people use them on.
 
 `snoozeActive(t, B, now)` is the ONE predicate every surface asks (`isOptedOut`, `inclState`,
-`autoIncludedToday`, `onListNow`). It replaced four hand-rolled copies of "snoozeUntil ahead, or
+`autoIncludedToday`, `onListNow`, and — since 2026-09-11 — `isActiveOn`'s today branch). It replaced four hand-rolled copies of "snoozeUntil ahead, or
 snoozeIndef with no wake" — which is how a dated snooze and an open-ended one came to be answered
 differently by different surfaces. The four original wake rungs are unchanged, `hasStartTime` gate
 included: dropping that gate would wake an indefinite snooze on any task whose window merely started at
 some point in the past, which is nearly all of them.
 
+**The scheduler reads it too (owner report, 2026-09-11).** Owner: *"pressing snooze today clears the
+allocated time as expected, but pressing snooze indefinitely doesn't do anything even though there's
+absolutely no trigger and the indicator shows snoozed."* `isActiveOn`'s today branch tested
+`t.snoozeUntil` directly, so it saw only the DATED variant; an indefinite snooze carries no date, fell
+through to `pressedForToday`, and an `included===true` task kept its slice of the day while every
+indicator painted it snoozed. That branch now asks `snoozeActive`, which subsumes the old test and keeps
+the date-arriving carve-out with it. Which off-state a snooze IS is `snoozeIsOpenEnded` — no date, not a
+by-name day snooze — and it is user-facing: the inclusion checkbox writes that variant and renders it as
+an unticked box, while 💤 means a scheduled snooze (`architecture/ui-runtime.md`).
+
 Current invariants:
 
 - Archived and unpressed tasks do not allot or render as active work today; user pressing is never gated
   by the date window.
+- An ACTIVE snooze of either form removes the task from today, on every surface, through `snoozeActive`.
 - Point tasks reserve no duration but split allocatable runs at their clock.
 - No row is ever allotted more than `max(0, demand − spent)`; surplus stays unallocated rather than being
   redistributed.

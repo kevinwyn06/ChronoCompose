@@ -86,7 +86,14 @@ test('circle: no occurrence beyond today is ever touched, however many times it 
   });
 });
 
-test('circle: the catch-up branch survives — missed occurrences still clear in one click', () => {
+/* AMENDED 2026-09-11 (owner report): *"I'll click on a task, and instead of completing it for today, it
+   just clears the allocated time, and then clicking again completes it for today. But shouldn't it just
+   complete it on the first click?"*
+   Catch-up used to consume the click, so a repeat with a backlog took two to finish today — and the first
+   one read as destructive, because clearing the backlog is what was keeping the task on today at all (see
+   the missed-occurrence carve-out below), so the allotment vanished while the circle stayed empty. One
+   click now means "done for today" and sweeps the backlog with it, in the same commit. */
+test('circle: one click completes TODAY and clears the backlog with it', () => {
   withNow(FIXED_NOW, () => {
     const c = comp();
     const today = c.startOfToday();
@@ -95,6 +102,7 @@ test('circle: the catch-up branch survives — missed occurrences still clear in
     c._horizon = today + 30 * DAY;
     c._occById = {};
 
+    const hist = c.history.length;
     c.toggleDone('standup');
 
     const after = get(c, 'standup');
@@ -102,8 +110,50 @@ test('circle: the catch-up branch survives — missed occurrences still clear in
     assert.equal(missed.length > 0, true, 'the fixture really does have missed occurrences');
     assert.equal(missed.every(o => c.occPct(after, o.idx) >= 100), true,
       'every missed occurrence is cleared, because clearing a backlog is what that click means');
-    assert.equal(pctOfTarget(c, 'standup'), 0,
-      'and today’s is NOT swept up with them — the catch-up click is about the past only');
+    assert.equal(pctOfTarget(c, 'standup'), 100, 'and today’s is done on that same click');
+    assert.equal(c.doneForToday(after), true, 'which is the predicate every surface reads');
+    assert.equal(c.history.length, hist + 1, 'one gesture, one undo entry');
+  });
+});
+
+test('circle: un-ticking today releases today only, never the backlog the user already cleared', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    const t = repeating(c, 'standup', 'day', today - 4 * DAY);
+    c._horizon = today + 30 * DAY;
+    c._occById = {};
+
+    c.toggleDone('standup');
+    c.toggleDone('standup');
+
+    const after = get(c, 'standup');
+    assert.equal(pctOfTarget(c, 'standup'), 0, 'today is un-ticked, as a toggle must be');
+    const missed = c.expandTask(after, today + 30 * DAY).filter(o => o.start < today);
+    assert.equal(missed.every(o => c.occPct(after, o.idx) >= 100), true,
+      'un-ticking today says nothing about last week, so the backlog stays cleared');
+  });
+});
+
+/* The 2026-08-24 ruling still holds on a day the repeat does not fall on: there is nothing to complete FOR
+   today, so the click clears the backlog and reaches no further. This is the guard that keeps the change
+   above from becoming the fast-forward that ruling was written against — see
+   owner-2026-08-25-yearly-completion for the same case from the display side. */
+test('circle: with no occurrence today, the click still clears the backlog and nothing else', () => {
+  withNow(FIXED_NOW, () => {
+    const c = comp();
+    const today = c.startOfToday();
+    const t = repeating(c, 'renewal', 'year', today - 3 * DAY);
+    c._horizon = today + 400 * DAY;
+    c._occById = {};
+    assert.equal(c.occInDay(get(c, 'renewal'), today), null, 'the fixture has no occurrence today');
+
+    c.toggleDone('renewal');
+
+    const after = get(c, 'renewal');
+    const missed = c.expandTask(after, today + 400 * DAY).filter(o => o.start < today);
+    assert.equal(missed.every(o => c.occPct(after, o.idx) >= 100), true, 'the missed one is cleared');
+    assert.equal(pctOfTarget(c, 'renewal'), 0, 'and next year is not touched by that click');
   });
 });
 

@@ -123,7 +123,7 @@ and day-hover glow stay.
 **2026-08-12 — the PRESSED depth is deleted too; only ACTIVE depth remains.** V2.1 made inclusion a depth
 channel and V2.9 left it as "the only visual the inclusion model has". On a real workspace most rows are
 included, so the inset shadow meant to mark a state became the sheet's background texture, competing with
-striping, hover and selection. Inclusion is now read from `taskInclControl`'s explicit ☑/☐/💤/▶ glyph.
+striping, hover and selection. Inclusion is now read from `taskInclControl`'s explicit ☑/☐/💤 glyph.
 Active depth was kept at the time, on the argument that it marks the running timer — transient,
 single-row, and not something the inclusion glyph duplicates. The sheet row and `planCard` share this
 channel (V2.11 parity), so both changed together. The generalisation, which the hatch already
@@ -441,9 +441,27 @@ Sections are kept for Included and dropped for Excluded rather than nested under
 print a section holding both kinds twice, which is V2.9 §6's rule and the density failure that killed
 sections-as-tags.
 
-**V2.11 — the cards ARE the row.** Ten shared builders (`taskDisp`, `taskDoneCircle`, `taskDueRecurChip`,
-`taskInlineTags`, `taskDepChips`, `taskInclControl`, `taskFlowCell`, `taskTimerBtn`, `taskAddTimeBtn`,
-`taskDescToggle`) are the single definition of every list-row control, and both `renderSheet`'s row and
+**The inclusion checkbox is a checkbox (owner 2026-09-11).** Owner: *"When ticking the checkbox of an
+included task, immediately make it excluded and unticked until it's triggered. Have a seperate button for
+a scheduled snooze."* `taskInclControl` now acts in BOTH directions and opens no menu in either: ticking is
+`tickOnToday`, unticking is `untickOnToday` → `snoozeIndefinitely`, which is off until the work itself asks
+again (it starts, it falls due, or its last dependency finishes). The 2026-08-20 asymmetry — unticking
+opens the window because three durations are three different answers — was right about the answers and
+wrong about the control; the durations moved to **`taskSnoozeBtn`**, a 💤 sibling in the same actions cell
+on the sheet row and on line 3 of the card, which opens the same `inclActionRows` menu. That button
+replaces the card's old 💤 shortcut, which snoozed until tomorrow without asking, so the two surfaces can
+no longer offer different snooze gestures.
+
+The glyphs split with the controls: **💤 means a SCHEDULED snooze**, and the open-ended state the checkbox
+writes renders as a plain unticked ☐ whose tooltip names its wake triggers. `snoozeIsOpenEnded` is that
+distinction and `snoozeUntilLabel` is the sentence every surface prints — `new Date(null)` had been
+rendering "Invalid Date" wherever a dateless snooze was described, which the untick makes the common case.
+A deliberately narrow scope note: the menu still exists, and it is still the only place "Turn on" and a
+date live, so the popover and the detail-panel field are unchanged apart from that label.
+
+**V2.11 — the cards ARE the row.** Eleven shared builders (`taskDisp`, `taskDoneCircle`, `taskDueRecurChip`,
+`taskInlineTags`, `taskDepChips`, `taskInclControl`, `taskSnoozeBtn`, `taskFlowCell`, `taskTimerBtn`,
+`taskAddTimeBtn`, `taskDescToggle`) are the single definition of every list-row control, and both `renderSheet`'s row and
 `planCard` call them, so parity holds by construction rather than by two copies agreeing. Cards carry the
 row's gestures too (click → details, double-click → activate, right-click → row menu) while mousedown
 still arms the card drag. Two things stay sheet-only on purpose: the **row-drag grip** and the **subtask

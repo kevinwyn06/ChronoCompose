@@ -2990,7 +2990,21 @@ class Component extends DCLogic {
     /* /PP-EXT */
     if(B===this.startOfToday()){
       if(this.isActiveTask(t)) return true; /* stronger pressed: running and pulled to now */
-      if(t.snoozeUntil!=null && this.startOfToday()<t.snoozeUntil) return false;
+      /* ==== PP-EXT (owner report 2026-09-11): AN OPEN-ENDED SNOOZE REMOVES THE TIME TOO ====
+         Owner, verbatim: *"pressing snooze today clears the allocated time as expected, but pressing
+         snooze indefinitely doesn't do anything even though there's absolutely no trigger and the
+         indicator shows snoozed."*
+
+         This line read `snoozeUntil` directly, so it saw only the DATED variant. An indefinite snooze
+         carries no date, fell straight through to `pressedForToday`, and an `included===true` task kept
+         its slice of the day — while `isOptedOut` and `inclState`, which both went through `snoozeActive`,
+         painted the row 💤. The scheduler and the indicator were answering the same question from two
+         different definitions, which is the exact drift the 2026-09-09 "one predicate" ruling created
+         `snoozeActive` to end; this was the one call site it never reached.
+         `snoozeActive` also subsumes what was here: a dated snooze is active until its day, minus the wake
+         reasons (the task's own date arriving) that must outrank it. */
+      if(this.snoozeActive(t, B, Date.now())) return false;
+      /* ==== /PP-EXT ==== */
       /* PP-EXT (owner report 2026-08-25): a repeat with nothing due inside the lead window is not today's
          business, and that outranks a sticky `included===true` — a press is a decision about WHEN to do
          the work, not a claim that eleven-months-away work is due now. It sits BELOW the running-timer
@@ -3441,7 +3455,24 @@ class Component extends DCLogic {
     t.included=true; t.includedExplicit=true;
     t.snoozeUntil=null; t.snoozeIndef=false; t.snoozedAt=null;
     if(t.onListSince==null) t.onListSince=this.ymdOf(this.startOfToday()); }); }
-  untickOnToday(e, id){ if(e && e.stopPropagation) e.stopPropagation(); this.openInclPick(e, id); }
+  /* ==== PP-EXT (owner report 2026-09-11): UNTICKING IS A GESTURE TOO ====
+     Owner, verbatim: *"When ticking the checkbox of an included task, immediately make it excluded and
+     unticked until it's triggered. Have a seperate button for a scheduled snooze."*
+
+     The 2026-08-20 asymmetry above said unticking cannot act because "not today", "not until Thursday"
+     and "not until it matters" are three different answers. That reasoning holds for the ANSWERS and not
+     for the checkbox: a tick box has two positions, and the owner has now named which state the off
+     position writes — off until the work itself asks again. So the box toggles, in one commit, and the
+     three DURATIONS moved to a control of their own (`taskSnoozeBtn`), where choosing between them is the
+     whole point of the click.
+
+     `snoozeIndefinitely` is that state and not a new field: it removes the task from today, survives the
+     inheritance that made a bare unpress a visible no-op, and ends on the task's own triggers — it
+     starts, it falls due, or its last dependency finishes (`snoozeWakeReason`). `included` is deliberately
+     untouched, exactly as every other snooze variant leaves it, so a woken task returns to whatever it was
+     before rather than to "never chosen". */
+  untickOnToday(e, id){ if(e && e.stopPropagation) e.stopPropagation(); this.snoozeIndefinitely(id); }
+  /* ==== /PP-EXT ==== */
   /* ==== /PP-EXT ==== */
   /* PP-EXT (owner 2026-08-19): "not now", open-ended. Distinct from snoozeToday (which expires at
      midnight) and from setIncludedOff (which unpresses — "not chosen" rather than "not yet"). */
@@ -3452,6 +3483,22 @@ class Component extends DCLogic {
      The pass exists for transitions NOBODY observed, chiefly a window closing at midnight while the app
      was shut. A snooze is observed at the instant it happens, so it is recorded then, exactly as
      `tickOnToday` records an arrival rather than waiting to be noticed. */
+  /* PP-EXT (owner 2026-09-11): is the snooze on this task the OPEN-ENDED one — no day to print, ending on
+     one of the task's own triggers? The distinction is now user-facing (the checkbox writes this variant
+     and renders it as an unticked box, while a scheduled snooze keeps 💤), so it gets one definition that
+     every surface reads. A day-snooze names a day, so it is scheduled however it was written. */
+  snoozeIsOpenEnded(t){
+    if(!t || !t.snoozeIndef || t.snoozeUntil!=null) return false;
+    return !this.isDaySnoozed(t, this.startOfToday());
+  }
+  /* The sentence a snooze prints. `snoozeUntil` is null for both the open-ended variant and a by-name day
+     snooze, and `new Date(null)` renders "Invalid Date" — which three surfaces were showing. */
+  snoozeUntilLabel(t){
+    if(this.snoozeIsOpenEnded(t)) return 'Off until it starts, falls due, or its last dependency is done';
+    if(t && t.snoozeUntil!=null)
+      return 'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+    return 'Snoozed today';
+  }
   snoozeIndefinitely(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeIndef=true; t.snoozedAt=Date.now(); t.onListSince=null; } }); }
   snoozeToday(id){ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.snoozeUntil=this.startOfToday()+this.DAY; t.snoozedAt=Date.now(); t.onListSince=null; } }); }
   /* PP-EXT Track B: returns false (no commit) on an unparseable phrase, so the popover input can leave
@@ -6482,11 +6529,34 @@ class Component extends DCLogic {
       const setDone=(idxs,done)=>this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t||!t.recur) return; t.recur.overrides=t.recur.overrides||{};
         idxs.forEach(oi=>{ const o={...(t.recur.overrides[oi]||{})}; if(done){o.pct=100;o.completion=o.completion||Date.now();}else{o.pct=0;o.completion=null;} t.recur.overrides[oi]=o; }); });
       const overdue=occs.filter(o=>o.start<todayStart && this.occPct(tt,o.idx)<100).map(o=>o.idx);
-      if(overdue.length){ setDone(overdue,true); return; }
+      /* PP-EXT (owner report 2026-09-11): *"I'll click on a task, and instead of completing it for today,
+         it just clears the allocated time, and then clicking again completes it for today. But shouldn't
+         it just complete it on the first click?"*
+
+         Catch-up used to CONSUME the click: `if(overdue.length) return` fired before the target was even
+         looked at, so a repeat carrying missed occurrences took two clicks to finish today. The first one
+         looked like it had done nothing useful and often looked destructive — clearing the backlog is what
+         `recurBeyondLeadToday` was keeping the task on today FOR, so the row's allotment vanished (see the
+         missed-occurrence carve-out in owner-2026-08-24-recur-toggle-lead) while the circle stayed empty,
+         which is exactly the "it just clears the allocated time" the owner saw.
+
+         ONE CLICK MEANS "done for today", and a backlog behind today does not change what that click
+         means. Completing sweeps the missed occurrences with it, in the SAME commit, so one undo takes the
+         whole gesture back. Uncompleting is deliberately narrow — it releases only the target, because
+         un-ticking today is not a statement about work the user already cleared.
+         The combining is scoped to TODAY's own occurrence, asked through `occInDay` — the same predicate
+         `doneForToday` reads, so the circle and "is this done for today" cannot disagree. On a day the
+         repeat does not fall on there is nothing to complete FOR today, and the 2026-08-24 ruling still
+         holds there in full: the click clears the backlog, and only a second one may reach the next
+         occurrence (see owner-2026-08-25-yearly-completion). */
       /* PP-EXT (owner report 2026-08-25): same wider reach as `currentOcc`, so the circle acts on the
          occurrence the row is DISPLAYING. Without it a yearly repeat whose next occurrence sits outside
          `_horizon` had no target at all, and once catch-up had cleared its missed occurrence the circle
          became a dead control — a click that did nothing, on a row that showed a live date. */
+      const todayOcc=this.occInDay(tt, todayStart);
+      if(todayOcc && todayOcc.idx!=null && this.occPct(tt,todayOcc.idx)<100){
+        setDone(overdue.concat([todayOcc.idx]), true); return; }
+      if(overdue.length){ setDone(overdue,true); return; }
       let target=occs.find(o=>o.start>=todayStart);
       if(!target && tt.recur) target=this.occReach(tt).find(o=>o.start>=todayStart);
       if(target) setDone([target.idx], this.occPct(tt,target.idx)<100);
@@ -9938,9 +10008,9 @@ class Component extends DCLogic {
       /* PP-EXT (owner 2026-08-19): an indefinite snooze has no date to print — it ends on an EVENT, so
          the label names the events rather than a day that does not exist. */
       h('div',{key:'s',style:{fontSize:'12px',color:'var(--text-faint2)',padding:'4px 10px'}},
-        (t.snoozeIndef && t.snoozeUntil==null)
+        this.snoozeIsOpenEnded(t)
           ? 'Snoozed — until it starts, falls due, or its last dependency is done'
-          : 'Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'})),
+          : this.snoozeUntilLabel(t)),
       /* PP-EXT (owner 2026-08-20): the way back is the TICK verb, not a second include path. A task
          coming off a snooze is arriving on the list, so it must be stamped the same way the checkbox
          stamps one — otherwise an undated task woken from a snooze would sit on today with a null key
@@ -14991,34 +15061,64 @@ class Component extends DCLogic {
        control at all (it opens the inclusion popover). 'active' is a strictly stronger form of 'pressed',
        so it stays in the checkbox family and is distinguished only by the accent colour below plus the
        existing active ring/wash. The timer is toggled by taskTimerBtn and nothing else. */
-    const glyph = st==='snoozed' ? '💤' : (st==='active'||st==='pressed') ? '☑' : '☐';
+    /* PP-EXT (owner 2026-09-11): the off position the CHECKBOX writes is the open-ended one, so it must
+       render as an unticked box rather than as 💤 — a box that reports the state the click just made.
+       💤 stays the badge of a SCHEDULED snooze, which is now a separate control (`taskSnoozeBtn`), so the
+       two states the user can reach are told apart by which of the two glyphs is showing. */
+    const openEnded = this.snoozeIsOpenEnded(t);
+    const glyph = (st==='snoozed' && !openEnded) ? '💤' : (st==='active'||st==='pressed') ? '☑' : '☐';
     const color = st==='snoozed' ? 'var(--warn)' : st==='active' ? this._accent
       : st==='pressed' ? 'var(--success)' : 'var(--text-faint2)';
-    const title = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString()+' · click to change')
-      : st==='active' ? 'Pressed into today · timer running · click to change inclusion'
-      : st==='pressed' ? 'On today · click to snooze it'
+    const title = st==='snoozed'
+      ? (openEnded ? "Off today until it starts, falls due, or its last dependency is done · click to put it back on today"
+         : this.snoozeUntilLabel(t)+' · click to put it back on today')
+      : st==='active' ? 'Pressed into today · timer running · click to take it off today'
+      : st==='pressed' ? "On today · click to take it off until it's relevant again"
       : 'Not on today · click to add it';
     /* PP-EXT (owner 2026-08-12): "ticking a task from unincluded to included should not bring up a
        confirmation popup." An unpressed row's popover held exactly ONE action — "Press into today" — so
        it was a menu with no choice in it, i.e. a confirmation dialog for a checkbox tick. Clicking ☐ now
        just includes the task.
-       The popover survives for the other states because there it genuinely offers alternatives (snooze
-       today, snooze until…, take out of today) and the destination is not obvious from the glyph. So the
-       rule is: a click that has one possible outcome performs it; a click with several opens the menu.
-       Both paths still route through the same mutators, so undo behaves identically either way. */
+       The rule is: a click that has one possible outcome performs it; a click with several opens the menu.
+       PP-EXT (owner 2026-09-11): the several now live on their own control, so NO state of this checkbox
+       opens a menu. Every path still routes through the same mutators, so undo behaves identically. */
     /* PP-EXT (owner 2026-08-20): the two directions route through `tickOnToday` / `untickOnToday`.
-       Ticking is one commit and no menu; unticking opens the snooze window and writes nothing until a
-       variant is picked. A snoozed row also opens the window, because there the menu genuinely offers a
-       choice (change the snooze, or turn it back on) rather than confirming an obvious one. */
-    const onClick = (st==='unpressed')
-      ? (e=>{ e.stopPropagation(); this.tickOnToday(t.id); })
-      : (e=>this.untickOnToday(e, t.id));
+       PP-EXT (owner 2026-09-11): BOTH directions are now one commit and no menu — the box is a box. Every
+       state has one obvious destination from here (on today, or off it until the work asks again), which
+       is the 2026-08-12 rule applied in the direction it had not reached yet; the menu survives on
+       `taskSnoozeBtn`, where the click genuinely chooses between durations. Unticking from a DATED snooze
+       is not a special case: the box is already showing 💤, so its one remaining move is back on. */
+    const onClick = (st==='pressed'||st==='active')
+      ? (e=>this.untickOnToday(e, t.id))
+      : (e=>{ e.stopPropagation(); this.tickOnToday(t.id); });
     /* `data-incl-glyph` is a test hook with a reason: a card also carries a 💤 shortcut on line 3, so a
        selector written against the glyph or the title alone matches two elements and a spec that clicks
        "the checkbox" may click the other one. */
     return h('span',{onClick, onMouseDown:e=>e.stopPropagation(), 'data-incl-glyph':t.id,
       title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph);
   }
+  /* ==== PP-EXT (owner 2026-09-11): THE SCHEDULED-SNOOZE BUTTON ====
+     Owner, verbatim: *"Have a seperate button for a scheduled snooze."* The checkbox writes the one
+     off-state that needs no further information; a snooze with a DATE needs one, and asking for it is this
+     control's entire job. It opens the same `inclActionRows` menu the popover always did — so "today",
+     "until…" and the way back ("Turn on") are still one list on one surface — and it is the same builder on
+     the sheet row and on the card, for the same reason every other control here is shared.
+     The card already carried a 💤 shortcut on line 3 that snoozed until tomorrow with no choice offered;
+     it is this button now, so the two surfaces stop offering different snooze gestures. */
+  taskSnoozeBtn(t){
+    const h=React.createElement;
+    if(this.isMilestone(t)) return null;
+    const st=this.inclState(t);
+    const scheduled = st==='snoozed' && !this.snoozeIsOpenEnded(t);
+    return h('span',{'data-snooze-btn':t.id,
+      onMouseDown:e=>e.stopPropagation(),
+      onClick:e=>{ e.stopPropagation(); this.openInclPick(e, t.id); },
+      title:(st==='snoozed'? this.snoozeUntilLabel(t)+' · click to change it' : 'Snooze · pick a day'),
+      style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',alignItems:'center',
+        justifyContent:'center',cursor:'pointer',fontSize:'12px',lineHeight:1,flex:'none',userSelect:'none',
+        opacity:scheduled?1:0.55}},'💤');
+  }
+  /* ==== /PP-EXT ==== */
   /* `planned → allotted`, flush right. Planned is editable in place; allotted is computed. */
   /* PP-EXT (owner 2026-08-20, Task 27): Planned and Allotted are TWO columns. They were one cell with an
      arrow between them, which meant one width, one hide toggle and one position for two different
@@ -15102,8 +15202,6 @@ class Component extends DCLogic {
     const undecided=this.isUndecided(t);
     const d=this.taskDisp(t);
     const descOpen=!!(this.state.cardDescOpen||{})[t.id];
-    const st=this.inclState(t);
-    const snoozed=st==='snoozed';
     /* PP-EXT (owner 2026-08-12): the PRESSED depth is gone here too — the card and the sheet row share
        this channel by design (V2.11 card↔row parity), so dropping it on one surface only would put them
        back out of step.
@@ -15153,10 +15251,9 @@ class Component extends DCLogic {
         ...this.taskDepChips(t)),
       /* Line 3 — planned→allotted, snooze, timer, add-time. */
       h('div',{key:'a',style:{display:'flex',alignItems:'center',gap:'5px',minWidth:0}},
-        h('span',{key:'z',title:snoozed?'Snoozed — click to press back into today':'Snooze until tomorrow',
-          onMouseDown:e=>e.stopPropagation(),
-          onClick:e=>{e.stopPropagation(); snoozed?this.tickOnToday(t.id):this.snoozeToday(t.id);},
-          style:{cursor:'pointer',flex:'none',opacity:snoozed?1:0.55}},'💤'),
+        /* PP-EXT (owner 2026-09-11): the shared scheduled-snooze button, not a card-local shortcut that
+           snoozed until tomorrow without asking — see taskSnoozeBtn. */
+        this.taskSnoozeBtn(t),
         this.taskTimerBtn(t), this.taskAddTimeBtn(t),
         h('div',{key:'f',style:{flex:1,minWidth:0}}, this.taskFlowCell(t))),
       /* The description editor, on card-local state so a card's height can never offset the Gantt's rows. */
@@ -16576,7 +16673,7 @@ class Component extends DCLogic {
     const flowCell=this.taskFlowCell(t);
     const timerBtn=this.taskTimerBtn(t);
     const addTimeBtn=this.taskAddTimeBtn(t);
-    const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,timerBtn,addTimeBtn);
+    const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,this.taskSnoozeBtn(t),timerBtn,addTimeBtn);
     /* PP-EXT (owner 2026-08-15): the % Done cell. A slim bar carrying the same green-done / base-remainder
        rule as the Gantt, with the numeral drawn ON it rather than beside it — so the whole row height and
        the whole cell width are one hit target, satisfying the HIT_MIN_PX tenet without a small control.
@@ -17736,7 +17833,9 @@ class Component extends DCLogic {
     const inclCtl = this.isMilestone(t)
       ? h('span',{style:{fontSize:'13px',color:'var(--text-faint2)'}},'— (milestone)')
       : (()=>{ const st=this.inclState(t);
-          const statusTxt = st==='snoozed' ? ('Snoozed until '+new Date(t.snoozeUntil).toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'}))
+          /* PP-EXT (owner 2026-09-11): `snoozeUntilLabel`, because the checkbox now writes the DATELESS
+             variant on every untick and `new Date(null)` printed "Invalid Date" on this line. */
+          const statusTxt = st==='snoozed' ? this.snoozeUntilLabel(t)
             : st==='active' ? 'Pressed into today · timer running' /* PP-EXT (owner 2026-08-12): the depth
                 channel this described was removed for pressed; say what is actually true. */
             : st==='pressed' ? 'Pressed into today'

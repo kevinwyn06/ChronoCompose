@@ -485,8 +485,12 @@ test.describe('the next day inherits the day before', () => {
     expect(today['i-later'], 'today: next week\'s work is not').toBeUndefined();
 
     /* "Not today." Snooze, not exclusion — V2.11's division of labour: unpressing a task that
-       inheritance is currently re-including would be a no-op, so it snoozes instead. */
-    await page.locator('[data-card-id="i-snooze"] [title="Snooze until tomorrow"]').click();
+       inheritance is currently re-including would be a no-op, so it snoozes instead.
+       PP-EXT (owner 2026-09-11): through the scheduled-snooze BUTTON and its menu. The card's old 💤
+       shortcut snoozed until tomorrow without asking; a snooze that expires is exactly what this test
+       needs (it checks the task comes back tomorrow), so it picks the "today" duration explicitly. */
+    await page.locator('[data-snooze-btn="i-snooze"]').click();
+    await page.getByText('Snooze · today', { exact: true }).click();
     expect((await allottedByTask(page))['i-snooze'], 'today: a snoozed task is off the day')
       .toBeUndefined();
 

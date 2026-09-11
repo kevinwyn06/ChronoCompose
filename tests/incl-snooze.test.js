@@ -156,7 +156,11 @@ test('clicking an UNPRESSED row control includes it directly, opening no popover
   assert.ok(e.stopped, 'the click does not also fall through to the row (which would open details)');
 });
 
-test('a PRESSED row control still opens the menu, because there the click has several outcomes', () => {
+/* PP-EXT (owner report 2026-09-11): *"When ticking the checkbox of an included task, immediately make it
+   excluded and unticked until it's triggered. Have a seperate button for a scheduled snooze."*
+   The box now acts in BOTH directions and opens no menu in either. The menu did not disappear — it moved
+   to `taskSnoozeBtn`, where choosing between durations is what the click is for, which is asserted below. */
+test('a PRESSED row control takes the task off today immediately, and opens no menu', () => {
   const c = make();
   const B = c.startOfToday();
   const t = activeTask(c, { id: 'p1', start: B, end: B + DAY, included: true, planned: 60 });
@@ -165,13 +169,53 @@ test('a PRESSED row control still opens the menu, because there the click has se
 
   const before = c.history.length;
   inclClick(c, t)(fakeEvt());
-  assert.ok(c.state.inclPick, 'the popover opened');
-  assert.strictEqual(c.state.tasks[0].included, true, 'and nothing was mutated by merely opening it');
-  assert.strictEqual(c.history.length, before, 'opening a menu is not an undoable step');
 
-  // The menu earns its place: it offers more than one action here.
+  assert.ok(!c.state.inclPick, 'no menu — the off position of a checkbox is not a question');
+  assert.strictEqual(c.state.tasks[0].snoozeIndef, true, "off until it's relevant, which is the state named");
+  assert.strictEqual(c.state.tasks[0].snoozeUntil, null, 'and it carries no date');
+  assert.strictEqual(c.state.tasks[0].included, true,
+    'the press itself is untouched, like every other snooze variant — a woken task returns to what it was');
+  assert.strictEqual(c.inclState(c.state.tasks[0]), 'snoozed', 'the row reports it straight away');
+  assert.strictEqual(c.history.length, before + 1, 'one gesture, one undo entry');
+});
+
+test('the checkbox and the separate snooze button divide the work between them', () => {
+  const c = make();
+  const B = c.startOfToday();
+  const t = activeTask(c, { id: 'p1', start: B, end: B + DAY, included: true, planned: 60 });
+  c.state.tasks = [t];
+
+  // The scheduled snooze is a control of its own, and IT is what opens the durations menu.
+  const btn = c.taskSnoozeBtn(t);
+  assert.ok(btn && btn.props && btn.props.onClick, 'the row carries a snooze button');
+  const before = c.history.length;
+  btn.props.onClick(fakeEvt());
+  assert.ok(c.state.inclPick, 'it opens the menu');
+  assert.strictEqual(c.state.inclPick.id, 'p1');
+  assert.strictEqual(c.history.length, before, 'and opening a menu is still not an undoable step');
   const rows = c.inclActionRows(t, () => {});
-  assert.ok(rows.length > 1, 'a pressed row has several possible outcomes, so a menu is the right shape');
+  assert.ok(rows.length > 1, 'which earns its shape: there is more than one duration to pick');
+});
+
+/* The untick writes the state the owner named, and that state must actually remove the time — the second
+   half of the same report: *"pressing snooze indefinitely doesn't do anything even though there's
+   absolutely no trigger and the indicator shows snoozed."* */
+test('an open-ended snooze removes the task from today, not just from the indicator', () => {
+  const c = make();
+  const B = c.startOfToday();
+  // No start CLOCK and a window that opened before today, so no wake trigger can fire: the state the
+  // owner described as "absolutely no trigger".
+  const t = activeTask(c, { id: 'p1', start: B - 2 * DAY, end: B + 4 * DAY, included: true,
+    includedExplicit: true, planned: 60, pct: 10 });
+  c.state.tasks = [t];
+  assert.strictEqual(c.isActiveToday(c.state.tasks[0]), true, 'premise: it is on today');
+
+  c.snoozeIndefinitely('p1');
+  const got = c.state.tasks[0];
+  assert.strictEqual(c.snoozeActive(got, B, Date.now()), true, 'the snooze really is active');
+  assert.strictEqual(c.inclState(got), 'snoozed', 'the indicator says so');
+  assert.strictEqual(c.isActiveToday(got), false, 'and the scheduler agrees — no slice of today');
+  assert.strictEqual(c.isOptedOut(got), true);
 });
 
 test('the two paths agree: the direct tick and the menu action write the same thing', () => {
