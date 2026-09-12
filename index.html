@@ -1118,6 +1118,32 @@ class Component extends DCLogic {
     const planned = (typeof t.planned==='number' && t.planned>0) ? t.planned*60000 : null;
     t.recur.durMs = stated!=null ? stated : (planned!=null ? planned : period);
     n++; }); return n; }
+  /* PP-EXT (owner report 2026-09-12: "why is lunch and dinner not scheduled"): the OTHER end of the same
+     mis-derivation. `migrateRecurWindow` computes `durMs = t.end - t.start`, so a legacy repeat stored
+     with `end === start` became a repeat whose every occurrence lasts zero minutes. The period invariant
+     above cannot see these — zero is inside every period — which is why CURRENT.md carried `Lunch`,
+     `Dinner`, `journal` and `Team Meeting` as an open item after that sweep.
+     Repaired ONLY on positive evidence, in `migrateRecurOccLength`'s order and for its reasons: the
+     `//planned-duration` line Todoist writes, else the task's own `planned` minutes. There is NO third
+     rung here, and that asymmetry is the point — the sibling clamps to the period because a too-long
+     occurrence is unrenderable and something must be chosen, whereas a zero-length occurrence is a legal,
+     drawable shape (`isScheduled` says so, and a same-day repeat has always meant one). Clamping a
+     lengthless daily routine to its period would silently turn it into a 24-hour block. With no evidence,
+     the row is left exactly as it is; `isFixedOn` now draws it as ordinary flexible work either way.
+     A replacement that would break the period invariant is declined rather than written, so this pass can
+     never hand `migrateRecurOccLength` something to undo. PURE (mutates `tasks`), idempotent — a repaired
+     row is non-zero and invisible to the next run. */
+  migrateRecurZeroOccLength(tasks){ let n=0; (tasks||[]).forEach(t=>{
+    if(!t || !t.recur || t.recur.durMs!==0) return;
+    const m=String(t.description||'').match(/\/\/planned-duration:\s*(\d{1,2}):(\d{2})/);
+    const stated = m ? (+m[1]*60 + +m[2])*60000 : null;
+    const planned = (typeof t.planned==='number' && t.planned>0) ? t.planned*60000 : null;
+    const repl = stated!=null ? stated : planned;
+    if(repl==null || repl<=0) return;                   /* no evidence — zero is a legal shape, leave it */
+    const period=this.recurPeriodMs(t.recur);
+    if(period!=null && repl>period) return;             /* would break the period invariant — leave it */
+    t.recur.durMs = repl;
+    n++; }); return n; }
   /* PP-EXT: one-time cleanup for the pin removal. The parser used to stamp a bare day with a 9am
      placeholder and mark it startClock:false; bare days are now plain midnight, so collapse those
      starts and drop the flag back to null (derive). pinStart/pinEnd no longer exist because every
@@ -1164,6 +1190,16 @@ class Component extends DCLogic {
          order it prefers replacements in. */
       if(!done['recur-occurrence-length-repair']){
         const fixed=this.migrateRecurOccLength(tasks); done['recur-occurrence-length-repair']=1;
+        this.lsSet('pp-migrations', JSON.stringify(done));
+        if(fixed){ this.saveTasks(tasks);
+          const ops=this.gcalRepairRepeatOps(tasks); if(ops.length) this.gcalEnqueue(ops); } }
+      /* PP-EXT (owner report 2026-09-12): the zero-length half of the same mis-derivation, which the
+         period invariant could not detect — a separate flag because the pass above already ran and
+         recorded itself done in every workspace that has opened this app since 2026-09-09. Re-pushes for
+         the same reason it does: the linked Google event states the length, and nothing else would ever
+         correct an occurrence the repair just changed. */
+      if(!done['recur-zero-occurrence-length']){
+        const fixed=this.migrateRecurZeroOccLength(tasks); done['recur-zero-occurrence-length']=1;
         this.lsSet('pp-migrations', JSON.stringify(done));
         if(fixed){ this.saveTasks(tasks);
           const ops=this.gcalRepairRepeatOps(tasks); if(ops.length) this.gcalEnqueue(ops); } }
@@ -3962,7 +3998,19 @@ class Component extends DCLogic {
             : (t.end!=null ? Math.max(0, t.end-t.start) : null);
     return d==null ? null : t.start + d; }
   hasEndTime(t){ const e=this.anchorEndMs(t); if(e==null) return false;
-    return t.endClock!=null ? !!t.endClock : this.hasClock(e); }
+    if(t.endClock!=null) return !!t.endClock;
+    /* PP-EXT (owner report 2026-09-12): a DERIVED end that lands on the start instant is not an end
+       clock. `anchorEndMs` returns `t.start + 0` for a zero-length occurrence, so `hasClock` was reading
+       the START's clock and reporting it as a written end — a 12:30pm daily routine claimed to end at
+       12:30pm. `clockSpanMinutes` already answered null for this shape, so the two were contradicting
+       each other; they now agree.
+       Below the explicit flag on purpose. `endClock` records what the user WROTE on that edge, and a
+       deliberate 00:00–00:00 span is a real thing to have written (tests/block45-start-end-columns);
+       this branch only governs the case where the flag is null and the answer is being INFERRED from a
+       timestamp that was never an edge of its own. */
+    if(e===t.start) return false;
+    /* /PP-EXT */
+    return this.hasClock(e); }
   /* A fixed appointment has a written start clock and a real span that fits one day, on its start day. */
   isFixedOn(t, B){
     if(this.isMilestone(t)) return false;
@@ -3977,6 +4025,22 @@ class Component extends DCLogic {
     /* /PP-EXT */
     const oc=this.occForDay(t, B);
     if(oc.start==null || oc.end==null) return false;
+    /* PP-EXT (owner report 2026-09-12: "why is lunch and dinner not scheduled"): a ZERO-LENGTH
+       occurrence is not an appointment, and saying it is made the task VANISH. This predicate is the
+       fork both consumers read — `fixedBlocksToday` draws what it calls fixed, `buildDayTimeline`'s
+       `flex` filter packs what it does not — so answering `true` here routed the task away from the
+       packer, and then `fixedBlocksToday`'s own `if(b>a)` guard dropped the degenerate interval on the
+       floor. Drawn by neither, it still took its minutes off the pool: the owner's Lunch and Dinner read
+       "0:30 allotted" while the timeline showed nothing at either clock.
+       The shape is reachable by one click: `recur.durMs:0` is legal and deliberate (see `isScheduled`),
+       a zero-span task derives as Flexible (`clockSpanMinutes` is null for `end <= start`) and packs
+       fine — until the Time-needed chip is pressed to Exact, which sets `uncompressable:true` and lands
+       here. So this is the structural half of the fix; `migrateRecurZeroOccLength` repairs the lengths
+       that were wrong to begin with, and the coverage net in `_buildDayTimelineInner` catches any
+       FUTURE route to the same "allotted but drawn nowhere" state.
+       `> this.DAY` below is the same test at the other end; both now bound the span from one side. */
+    if(oc.end<=oc.start) return false;
+    /* /PP-EXT */
     if(this.startOfDay(oc.start)!==B) return false;
     if(oc.end-oc.start > this.DAY) return false;
     return this.isActiveOn(t, B);
@@ -4029,6 +4093,16 @@ class Component extends DCLogic {
     const oc=this.occOnDay(t, B);
     if(!oc || oc.end==null) return (B!=null?B:this.startOfToday())+this.DAY; /* PP-EXT: dateless/non-occurring task — due = end of the day it's scheduled into (today) */
     if(t.allDay) return oc.end;
+    /* PP-EXT (owner report 2026-09-12): a ZERO-LENGTH occurrence states no deadline. Taken literally it
+       hands `buildDayTimeline`'s `fill` a hard `en0` equal to the task's own `notBefore` boundary, so
+       every candidate slot measures zero minutes and the task can never be placed anywhere — which is
+       how fixing `isFixedOn` alone would have moved Lunch from "silently gone" to "permanently
+       Unscheduled". End-of-day is the existing rule for an occurrence with no stated end, and that is
+       the right reading here: a lengthless occurrence names an instant to START at, not a deadline to
+       finish by. Written as a comparison rather than as `hasEndTime`, because an explicit `endClock`
+       still means the user wrote that clock — it just does not make an instant into a span. */
+    if(oc.end<=oc.start) return this.startOfDay(oc.start)+this.DAY;
+    /* /PP-EXT */
     return this.hasEndTime(t) ? oc.end : this.startOfDay(oc.end)+this.DAY;
   }
   notBeforeMsOf(t, B){
@@ -10728,6 +10802,7 @@ class Component extends DCLogic {
        re-import it straight over the local repair. Idempotent: once a length is inside its own period the
        pass cannot see it. */
     this.migrateRecurOccLength(one);
+    this.migrateRecurZeroOccLength(one); /* PP-EXT (owner report 2026-09-12): same reason, other end */
     return t;
   }
   /* merge a pulled snapshot into local tasks. Row-level LWW: newer updatedAt wins; a tie keeps local
@@ -13123,6 +13198,33 @@ class Component extends DCLogic {
       if(rem>0.5) segs.push({id:task.id,title:task.title,goal:task.goal,origin:task.origin,start:null,end:null,
         durationMin:Math.round(rem),type:'unscheduled',
         reason:(task.dueMs!=null && task.dueMs<winEnd)?'no room before due':'day full'}); }); /* PP-EXT: why it didn't fit */
+    /* PP-EXT (owner report 2026-09-12): THE COVERAGE NET — a task that holds minutes of day B is drawn
+       somewhere, or it is NAMED. Everything above divides the day between two sets: `fixedBlocks` draws
+       what `isFixedOn` claims, `flex` packs the rest and reports its own leftovers as `unscheduled`. A
+       task that falls out of BOTH keeps its allotment and appears nowhere at all — not on the timeline,
+       not in Unscheduled — so the day is quietly over-committed by minutes with no visible owner.
+       This has now happened twice by two unrelated routes. V5/F1 (see tests/v5-allot-visible.test.js)
+       got there through a poisoned allotment source: a hidden task was allotted 0, so `flexAllot`
+       returned 0, so it dropped out of `flex` — "it never packed AND never showed up in Unscheduled".
+       The 2026-09-12 report got there through `isFixedOn`, which claimed a zero-length occurrence as an
+       appointment that `fixedBlocksToday` then declined to emit. Two causes, one symptom, and the
+       symptom is the dangerous part because it is SILENT.
+       So the guard is placed at the symptom rather than at either cause: whatever new route arrives, the
+       minutes surface as an Unscheduled row the owner can see. The membership tests are `flex`'s own,
+       verbatim, minus the two that mean "drawn elsewhere" (`isFixedOn`, a whole drag-pin — both of which
+       are in `seen` when they really did draw). Reserving nothing is not a failure: a Point, a completed
+       task and a container parent all legitimately hold no minutes, and `amt<=0.5` passes over them. */
+    (()=>{ const seen={};
+      fixedBlocks.forEach(b=>{ if(b.taskId!=null) seen[b.taskId]=1; });
+      flex.forEach(f=>{ seen[f.id]=1; });
+      TL.forEach(t=>{
+        if(seen[t.id] || !this.isActiveOn(t, B) || this.isPointOn(t, B)) return;
+        if(this.hasBudgetedParent(t, kb) || this.isContainerParent(t, kb.kids)) return;
+        const amt=(kb.kids[t.id]&&kb.kids[t.id].length)?this.famAllot(t.id,kb.kids,kb.byId,B):this.flexAllot(t.id);
+        if(amt<=0.5) return;
+        segs.push({id:t.id,title:t.name,goal:t.goal,origin:amt,start:null,end:null,
+          durationMin:Math.round(amt),type:'unscheduled',reason:'not placed'}); }); })();
+    /* /PP-EXT */
     const bySlot=(a,b)=>{ if(!a.start && !b.start) return 0; if(!a.start) return 1; if(!b.start) return -1; return a.start-b.start; };
     segs.sort(bySlot);
     let merged=[];

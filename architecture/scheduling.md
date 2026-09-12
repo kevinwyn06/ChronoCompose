@@ -699,6 +699,42 @@ occurrence rather than `currentOcc`, which prefers the first occurrence with wor
 reports a just-ticked repeat as unfinished. Scope is those two lists only — `isActiveOn`, `isOptedOut` and
 the scheduler are untouched, so a zero-time dated marker still reserves and still draws.
 
+## The coverage net: drawn, or named (owner report, 2026-09-12)
+
+*"Why is lunch and dinner not scheduled"* — both rows read `0:30` allotted and drew nothing.
+
+`isFixedOn` is the fork both halves of the renderer read: `fixedBlocksToday` draws what it calls fixed,
+`buildDayTimeline`'s `flex` filter packs what it does not. It bounded an occurrence's span from ABOVE
+(`> DAY`) and not from below, so a zero-length occurrence was claimed as an appointment, routed away from
+the packer, and then dropped by `fixedBlocksToday`'s own `if(b>a)` guard. The pool allotted it anyway.
+
+The shape reaching it is `recur.durMs: 0` — legal and deliberate (`isScheduled`), and minted by
+`shapeRecurWindow` whenever a typed rule states neither a clock range nor a duration. Such a task derives
+as Flexible and packs fine, so the trigger is one press of the Time-needed chip, on any clocked repeat
+with no stated length. Three related reads were fixed together, each where it is told:
+
+| Reader | Was | Now |
+|---|---|---|
+| `isFixedOn` | zero span accepted as an appointment | rejected — bounded from below too |
+| `hasEndTime` | `anchorEndMs` = `start+0`, so the START clock read as a written END | a DERIVED end landing on the start is no end clock; an explicit `endClock` still wins |
+| `dueMsOf` | deadline == the task's own `notBefore`, so no slot ever measured > 0 | end-of-day, the existing no-stated-end rule |
+
+**The net itself is the durable part.** This symptom has arrived twice by unrelated routes — V5/F1
+(`tests/v5-allot-visible.test.js`) through a poisoned allotment source, this report through `isFixedOn` —
+and it is dangerous precisely because it is silent: the day is over-committed by minutes with no visible
+owner. So `_buildDayTimelineInner` closes with a guard at the SYMPTOM: a task that holds minutes of day B
+and was drawn by neither half is emitted `type:'unscheduled'`, `reason:'not placed'`.
+
+The rule for anyone extending the timeline: **a task removed from one of the two drawing paths must be
+added to the other, and the net is what proves it.** Its membership tests are `flex`'s own, minus the two
+that mean "drawn elsewhere" (`isFixedOn`, a whole drag-pin); holding no minutes is not a failure, so
+Points, completed tasks and container parents pass through untouched.
+
+`migrateRecurZeroOccLength` repairs the data end — the zero-length half of the `migrateRecurWindow`
+mis-derivation that `migrateRecurOccLength` cannot see, since zero is inside every period. Evidence only
+(`//planned-duration`, else `planned`), with no clamp-to-period third rung: a lengthless daily routine
+clamped to its period would become a 24-hour block. Runs in `migrateIncomingRow` too.
+
 ## Routines replace the hardcoded meals (owner decision, 2026-08-19)
 
 Lunch and Dinner were two `addBusy` calls with no task behind them, so they could not be renamed, moved for
@@ -770,6 +806,8 @@ Current invariants:
 - No row is ever allotted more than `max(0, demand − spent)`; surplus stays unallocated rather than being
   redistributed.
 - "Is this appointment-shaped?" is `clockSpanMinutes(t, B) != null`, never `hasStartTime && hasEndTime`.
+- A ZERO-LENGTH occurrence is not an appointment: `isFixedOn` bounds the span from below as well as above.
+- Every task holding minutes of day B is DRAWN or NAMED — see "The coverage net" below.
 - Fixed tasks pass both the same-day and at-most-one-day guards.
 - Ghost draw width may depend on zoom; scheduling span must not.
 - Overlapping fixed blocks are attributed once, via `netBusyClaim`: the fixed set plus the pool never
