@@ -735,6 +735,13 @@ mis-derivation that `migrateRecurOccLength` cannot see, since zero is inside eve
 (`//planned-duration`, else `planned`), with no clamp-to-period third rung: a lengthless daily routine
 clamped to its period would become a 24-hour block. Runs in `migrateIncomingRow` too.
 
+**Clocked repeats only (regression fix, same day).** As shipped in v0.13.4 the repair also lengthened
+UNTIMED repeats, and `hasEndTime` then read their `start + durMs` — midnight plus a duration — as a written
+end clock, so `dueMsOf` gave every flexible daily repeat a 1:00am-style hard deadline and none of them
+packed. Two rules now hold: an untimed repeat's occurrence is its whole day and its length lives in
+`planned`, so `hasEndTime` never infers an end clock for a repeat whose anchor has no clock (an explicit
+`endClock` still wins); and `migrateRecurZeroOccLength` skips any repeat without a start clock.
+
 ## Routines replace the hardcoded meals (owner decision, 2026-08-19)
 
 Lunch and Dinner were two `addBusy` calls with no task behind them, so they could not be renamed, moved for

@@ -1135,6 +1135,12 @@ class Component extends DCLogic {
      row is non-zero and invisible to the next run. */
   migrateRecurZeroOccLength(tasks){ let n=0; (tasks||[]).forEach(t=>{
     if(!t || !t.recur || t.recur.durMs!==0) return;
+    /* PP-EXT (owner report 2026-09-12, after v0.13.4): only a CLOCKED repeat has an occurrence to lengthen.
+       The four rows this was written for are routines at a time of day; an untimed repeat's length lives
+       in `planned`, and copying it into `durMs` took every flexible daily repeat off the timeline and
+       re-pushed each one to Google as a midnight block. */
+    if(!this.hasStartTime(t)) return;
+    /* /PP-EXT */
     const m=String(t.description||'').match(/\/\/planned-duration:\s*(\d{1,2}):(\d{2})/);
     const stated = m ? (+m[1]*60 + +m[2])*60000 : null;
     const planned = (typeof t.planned==='number' && t.planned>0) ? t.planned*60000 : null;
@@ -4009,6 +4015,14 @@ class Component extends DCLogic {
        this branch only governs the case where the flag is null and the answer is being INFERRED from a
        timestamp that was never an edge of its own. */
     if(e===t.start) return false;
+    /* /PP-EXT */
+    /* PP-EXT (owner report 2026-09-12, after v0.13.4: "now nothing is scheduled properly"): for a REPEAT
+       the end is never written — it is `t.start + recur.durMs`, arithmetic on the anchor. When the anchor
+       has no clock, that sum is midnight plus a duration (1:00am for a 60-minute occurrence), and reading
+       its clock as a written end made `dueMsOf` hand the packer a 1:00am hard deadline: every untimed
+       daily repeat went to Unscheduled, "no room before due", on a day that opens at 7:30am. An untimed
+       repeat's occurrence is its day; its length lives in `planned`. Below the explicit flag, as above. */
+    if(t.recur && !this.hasStartTime(t)) return false;
     /* /PP-EXT */
     return this.hasClock(e); }
   /* A fixed appointment has a written start clock and a real span that fits one day, on its start day. */
