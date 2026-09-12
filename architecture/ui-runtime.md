@@ -762,12 +762,25 @@ blocks"* / *"Get rid of the priority coloring."* The scope is the **timeline onl
 calendar, the dashboards and the priority picker / P1–P4 filter chips all still read `PCOL`, because on a
 picker the colour *is* the control's meaning rather than decoration.
 
-`SECCOL` is eight hues assigned by **position in `sectionsInOrder`**, wrapping past eight. It is deliberately
-a palette-by-order and **not** a `color` field on the section: the hue stays a pure projection of data the
-app already syncs, so there is no new column, no migration, and no way for two devices to disagree about a
-colour. The cost, stated plainly: reordering sections re-colours them. A task with no section — and one
-whose `sectionId` points at a deleted section — is neutral (`var(--pri-default)`) rather than borrowing
-whichever section happens to sit first.
+**Stored at creation (owner 2026-09-12).** *"Give each section a color at instantiation time. Don't have it
+change if I delete a [section]."* The first cut assigned `SECCOL` by position in `sectionsInOrder`, so
+deleting or reordering a section re-coloured every section after it. A section now carries a `color`
+string, picked once by `pickSectionColor` (the least-used `SECCOL` hue, palette order breaking ties, so a
+freed hue is reused before any is doubled) in `addSectionTo` and `migrateSectionsFromTags`. It rides inside
+the `sections.data` jsonb, so no migration was needed. Legacy sections are frozen with the hue they already
+wore (their order position) by `ensureSectionColors` — once at startup through `backfillSectionColors`, and
+on every sections pull so the frozen value is pushed back. `sectionHue` reads `color` and falls back to
+order position only for a section not yet backfilled. A task with no section — and one whose `sectionId`
+points at a deleted section — takes the reserved `SECCOL_NONE` rather than borrowing whichever section
+happens to sit first.
+
+**Focus-mode timeline (owner 2026-09-12).** `renderDayColumn` takes two options only Focus passes.
+`fromNow` starts the column at the later of the day start and now (keeping at least
+`FOCUS_TL_MIN_SPAN_MIN` visible, and dropping the start-bound handle, which is off-canvas). `fill` makes the
+column a flex slot that never scrolls: the body's slot is measured by `observeFocusTLHeight` (kept apart
+from `_tlAvailH`, which belongs to the scrolling Today/multi-day wrappers) and fed back as `availH`, so the
+Unscheduled box is subtracted before the day is fitted. That box is bounded to `FOCUS_UNSCHED_MAX` single-line
+rows plus a "+N more unscheduled" count. Cover: `tests/e2e/owner-2026-09-12-focus-timeline-fit.spec.js`.
 
 `rootSectionId(t, byId, defById)` is now the single answer to "which section is this task in?", shared by
 `tasksBySection` and the timeline's `taskHue`, so the colour and the grouping cannot disagree about where a

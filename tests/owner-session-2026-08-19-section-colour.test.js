@@ -22,7 +22,9 @@ test('the palette gives each section in order its own hue', () => {
   hues.forEach(x => assert.match(x, /^#[0-9a-f]{6}$/i, 'a real colour, not a token that may not exist'));
 });
 
-test('hue follows section ORDER, not creation or id', () => {
+// Superseded 2026-09-12: a section now stores its colour at creation. This order rule survives only as
+// the fallback for a legacy section that has no stored colour yet (these fixtures have none).
+test('a legacy section with no stored colour falls back to its ORDER position', () => {
   const c = make();
   withSections(c, ['Work', 'Home']);
   const first = c.sectionHue('s0');

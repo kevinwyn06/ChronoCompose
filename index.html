@@ -557,6 +557,8 @@ class Component extends DCLogic {
     this.PIN_SNAP = 15;          // PP-EXT: minutes a dragged timeline block snaps to (calendar timeline views drag in 15-min steps)
     this.PIN_MAGNET = 10;        // PP-EXT: within this many minutes a dragged block snaps to a neighbour block's edge
     this.TL_PXPM = 1.15;         // PP-EXT: drawer timeline vertical scale (px per minute; used by render + block drag)
+    this.FOCUS_TL_MIN_SPAN_MIN = 60; // PP-EXT (owner 2026-09-12): Focus timeline starts at max(dayStart, now) but always shows at least this much day
+    this.FOCUS_UNSCHED_MAX = 4;      // PP-EXT (owner 2026-09-12): Focus timeline's Unscheduled rows before "+N more" (keeps the panel scroll-free)
     /* PP-EXT (owner 2026-08-20, Task 12): the day-bound handles. The snap matches PIN_SNAP because both
        are the same gesture in the user's hands — dragging something to a time in a timeline — and two
        different grids on one surface is a difference nobody can feel but everybody trips over. The
@@ -721,6 +723,8 @@ class Component extends DCLogic {
        section ORDER off this palette rather than stored on the section, which keeps the colour a pure
        projection of data the app already syncs — no `color` field, no migration 0014, and no way for two
        devices to disagree about a colour. The cost, stated plainly: reordering sections re-colours them.
+       SUPERSEDED (owner 2026-09-12): the colour is now stored on the section at creation (see
+       normalizeSection / pickSectionColor); order position is only the legacy fallback in sectionHue.
        Eight hues, each distinguishable from its neighbours in both themes; the list wraps. */
     this.SECCOL = ['#3b82f6','#16a34a','#d946ef','#f59e0b','#0ea5e9','#ef4444','#8b5cf6','#14b8a6'];
     /* The No-section bucket gets a RESERVED hue rather than the neutral `--pri-default`. Neutral was the
@@ -1923,6 +1927,7 @@ class Component extends DCLogic {
     /* PP-EXT (31): usage tracker. Session header first, then a flush on every way a tab can go away —
        visibilitychange covers a backgrounded/closed tab, pagehide covers navigation and BFCache. Without
        both, a session that ends by closing the window loses whatever the debounce still held. */
+    this.backfillSectionColors(); /* PP-EXT (owner 2026-09-12): freeze each section's hue before anything can reorder or delete one */
     this.initRoutines(); /* PP-EXT (owner 2026-08-19): seed the routines for a new workspace, migrate an existing one */
     this.trackSessionStart();
     this._onTrackHide=()=>{ try{ if(document.visibilityState==='hidden') this.trackFlush(true); }catch(e){ this.trackFlush(true); } };
@@ -4487,7 +4492,10 @@ class Component extends DCLogic {
     if(sectionId==null) return this.SECCOL_NONE;
     const defs=this.sectionsInOrder();
     const i=defs.findIndex(s=>s.id===sectionId);
-    return i<0 ? this.SECCOL_NONE : this.SECCOL[i % this.SECCOL.length];
+    if(i<0) return this.SECCOL_NONE;
+    /* PP-EXT (owner 2026-09-12): the stored colour wins; order position is only the legacy fallback for a
+       section not yet backfilled (e.g. a row pulled from a device running the old build). */
+    return defs[i].color || this.SECCOL[i % this.SECCOL.length];
   }
   /* The hue for a TASK: its root section's. */
   taskHue(t){
@@ -5113,12 +5121,40 @@ class Component extends DCLogic {
     return Object.keys(map||{}).map(id=>this.normalizeSection(Object.assign({}, map[id], {id})))
       .sort((a,b)=> (a.order-b.order) || (a.id<b.id?-1:a.id>b.id?1:0));
   }
-  normalizeSection(s){ s=s||{}; return { id: s.id||('sec_'+Math.random().toString(36).slice(2,8)),
-    name: s.name||'New section', order: (+s.order||0) }; }
+  /* PP-EXT (owner 2026-09-12): a section's timeline hue is STORED on it (`color`), chosen once when the
+     section is created. Owner: "Give each section a color at instantiation time. Don't have it change if I
+     delete a [section]." The 2026-08-19 order-derived hue re-coloured every later section whenever one
+     was deleted or moved. `color` rides inside the `sections.data` jsonb, so no migration is needed. */
+  normalizeSection(s){ s=s||{}; const o={ id: s.id||('sec_'+Math.random().toString(36).slice(2,8)),
+    name: s.name||'New section', order: (+s.order||0) };
+    if(typeof s.color==='string' && s.color) o.color=s.color;
+    return o; }
+  /* Pure: the palette hue a NEW section gets — the least-used hue among `sections`, palette order breaking
+     ties, so a fresh workspace walks the palette exactly as the order-derived rule used to. */
+  pickSectionColor(sections){
+    const used={}; (sections||[]).forEach(s=>{ if(s&&s.color) used[s.color]=(used[s.color]||0)+1; });
+    let best=this.SECCOL[0], bestN=Infinity;
+    this.SECCOL.forEach(c=>{ const n=used[c]||0; if(n<bestN){ best=c; bestN=n; } });
+    return best;
+  }
+  /* Pure: freeze a colour onto every legacy section that has none, using the hue it is ALREADY painted with
+     (its order position), so the backfill is invisible and deterministic across devices. */
+  ensureSectionColors(sections){
+    const ordered=(sections||[]).slice().sort((a,b)=>((+a.order||0)-(+b.order||0))||(a.id<b.id?-1:a.id>b.id?1:0));
+    if(ordered.every(s=>s.color)) return sections||[];
+    const idx={}; ordered.forEach((s,i)=>idx[s.id]=i);
+    return (sections||[]).map(s=>s.color ? s : Object.assign({}, s, {color:this.SECCOL[idx[s.id] % this.SECCOL.length]}));
+  }
+  /* Startup: persist the backfill through saveSections so the frozen colours reach the backend too. */
+  backfillSectionColors(){
+    const cur=this.state.sections||[]; const next=this.ensureSectionColors(cur);
+    if(next!==cur) this.saveSections(next);
+  }
+  /* /PP-EXT */
   /* Pure: append a section at the end of the current order. Returns the new list. */
-  addSectionTo(sections, name){ const list=(sections||[]).slice();
+  addSectionTo(sections, name){ const list=this.ensureSectionColors(sections).slice();
     const max=list.reduce((m,s)=>Math.max(m,+s.order||0), -1);
-    list.push(this.normalizeSection({name:name||'New section', order:max+1})); return list; }
+    list.push(this.normalizeSection({name:name||'New section', order:max+1, color:this.pickSectionColor(list)})); return list; } /* PP-EXT (owner 2026-09-12): + colour at creation */
   addSection(name){ const list=this.addSectionTo(this.state.sections, name); this.snapshotSections(); this.saveSections(list);
     return list[list.length-1]; }
   /* PP-EXT (owner 2026-08-19): the five routines, as ORDINARY tasks. Owner: "Instead of having lunch and
@@ -5315,7 +5351,7 @@ class Component extends DCLogic {
     list.forEach(t=>{ if(!isRoot(t)) return; const tag=this.normalizeTag(t.labels&&t.labels[0]); if(!tag) return;
       if(count[tag]==null){ count[tag]=0; order.push(tag); } count[tag]++; });
     const promoted=order.filter(tag=>count[tag]>=th);
-    const sections=promoted.map((tag,i)=>this.normalizeSection({name:tag, order:i}));
+    const sections=promoted.map((tag,i)=>this.normalizeSection({name:tag, order:i, color:this.SECCOL[i % this.SECCOL.length]})); /* PP-EXT (owner 2026-09-12): colour at creation */
     const idByTag={}; promoted.forEach((tag,i)=>idByTag[tag]=sections[i].id);
     let changed=0;
     /* PP-EXT (owner 2026-08-13): only ever ASSIGN a section, never clear one. Previously this wrote
@@ -11582,7 +11618,7 @@ class Component extends DCLogic {
          the PRE-merge sections, so the ops enqueued back to the backend were computed against a stale
          picture: a section this device had an older copy of would be re-pushed over the newer remote row,
          undoing on the backend what the merge had just correctly accepted locally. */
-      const merged=this.sectionsFromMap(map);
+      const merged=this.ensureSectionColors(this.sectionsFromMap(map)); /* PP-EXT (owner 2026-09-12): freeze legacy rows' colours and push them back */
       this._syncApplying=true;
       try{ this.saveSections(merged); } finally{ this._syncApplying=false; }
       this.syncAckTable('sections', Object.keys(remoteMap));
@@ -13876,7 +13912,13 @@ class Component extends DCLogic {
     const h=React.createElement; const data=this.buildDayTimeline(B);
     const kb=this.buildKids(this.state.tasks); /* PP-EXT: draggability = leaf, non-subtask blocks */
     const isToday=(B===this.startOfToday());
-    const startHour=new Date(data.dayStart).getHours();
+    /* PP-EXT (owner 2026-09-12): `opts.fromNow` (Focus mode) starts the column at the day start or the
+       current time, whichever is LATER — the part of today already behind you is not shown. Clamped so at
+       least FOCUS_TL_MIN_SPAN_MIN of day remains visible late in the evening. */
+    const vStart=(opts.fromNow && isToday)
+      ? Math.max(data.dayStart, Math.min(this.state.nowTick||Date.now(), data.dayEnd-this.FOCUS_TL_MIN_SPAN_MIN*60000))
+      : data.dayStart;
+    const startHour=new Date(vStart).getHours();
     /* PP-EXT (owner 2026-08-20, Task 12): while a day-bound handle is being dragged, TL_BOUND_PAD_MIN of
        room opens in the drag direction — the reported "even worse when trying to expand" was that there
        was no canvas beyond the bound to drag into, so both the cursor and the preview ran off the clipped
@@ -13888,9 +13930,9 @@ class Component extends DCLogic {
     const dbDrag = (this._edgeDrag && this._edgeDrag.kind==='daybound' && this._edgeDrag.day===B)
       ? this._edgeDrag : null;
     const pad = dbDrag ? this.TL_BOUND_PAD_MIN*60000 : 0;
-    const dStart = (dbDrag && dbDrag.which==='start') ? Math.max(B, data.dayStart-pad) : data.dayStart;
+    const dStart = (dbDrag && dbDrag.which==='start') ? Math.max(B, vStart-pad) : vStart;
     const dEnd   = (dbDrag && dbDrag.which==='end')   ? Math.min(B+this.DAY, data.dayEnd+pad) : data.dayEnd;
-    const totalMin=(data.dayEnd-data.dayStart)/60000;
+    const totalMin=(data.dayEnd-vStart)/60000;
     const padMin=((dEnd-dStart)/60000)-totalMin;
     /* PP-EXT: fit the timeline to the measured available height (no scroll until an Unscheduled list overflows).
        Falls back to the fixed TL_PXPM scale before the container is measured. `_curColPx` feeds the block-drag
@@ -13913,6 +13955,7 @@ class Component extends DCLogic {
     const topOf=ms=>((ms-dStart)/60000)*px;
     const labels=[]; if(showLabels) for(let hh=startHour; hh<=new Date(dEnd).getHours(); hh++){
       const ms=new Date(dStart); ms.setHours(hh,0,0,0);
+      if(ms.getTime()<dStart) continue; /* PP-EXT (owner 2026-09-12): a fromNow column starts mid-hour */
       labels.push(h('div',{key:'l'+hh,style:{position:'absolute',top:topOf(ms.getTime())+'px',left:0,fontSize:'10px',color:'var(--text-mut2)',fontWeight:600}},((hh%12)||12)+(hh<12?'a':'p'))); }
     /* PP-EXT (V4.1): hour LINES. Every 6th is drawn stronger, which gives the column a readable
        morning/midday/evening rhythm at any zoom; they are pointerEvents:none so they can never intercept
@@ -14306,14 +14349,26 @@ class Component extends DCLogic {
           whiteSpace:'nowrap'}},
         this.fmtClockMins(dbDrag.val))) : null;
     const unsched=data.chunks.filter(c=>!c.start);
-    return h('div',{style:{position:'relative'}},
-      /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
-         scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
-      h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, padEl, ...blocks, ...points, hoverEl, nowLine, showLabels?boundHandle('start'):null, showLabels?boundHandle('end'):null, dbPreview), /* PP-EXT (Group 2): + carets + top-hover; (owner 2026-08-19): + day-bound handles; (owner 2026-08-20, Task 12): + the expand room */
-      unsched.length? h('div',{style:{margin:'8px 4px 4px',padding:'8px',background:'var(--tl-unsched-box-bg)',border:'1px solid var(--tl-unsched-box-border)',borderRadius:'8px'}}, /* PP-EXT (22) */
+    /* PP-EXT (owner 2026-09-12): `opts.fill` (Focus mode) — the column fills its panel and NEVER scrolls.
+       The body is a flex:1 slot whose measured height (`opts.fillRef`) comes back in as `availH`, so the
+       Unscheduled box below is subtracted before the day is fitted. The box itself is bounded: one line per
+       task, at most FOCUS_UNSCHED_MAX rows, then a "+N more" count — counted, never silently dropped. */
+    const fill=!!opts.fill;
+    const uShown=fill ? unsched.slice(0, this.FOCUS_UNSCHED_MAX) : unsched;
+    const uMore=unsched.length-uShown.length;
+    const uLine=fill ? {whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'} : {whiteSpace:'normal'};
+    const body=h('div',{style:{position:'relative',height:H+'px',overflow:'hidden'}}, ...labels, ...grid, padEl, ...blocks, ...points, hoverEl, nowLine, (showLabels && vStart===data.dayStart)?boundHandle('start'):null, showLabels?boundHandle('end'):null, dbPreview); /* PP-EXT (owner 2026-09-12): no start handle when the column starts at now — the bound is off-canvas; (Group 2): + carets + top-hover; (owner 2026-08-19): + day-bound handles; (owner 2026-08-20, Task 12): + the expand room */
+    /* PP-EXT: overflow:hidden clips the bottom hour label's descender so the fitted body can't force a
+       scrollbar; only an Unscheduled list (below) grows the column and triggers the shared scroll. */
+    const unschedEl = unsched.length? h('div',{'data-tl-unsched':String(unsched.length),style:{margin:'8px 4px 4px',padding:'8px',background:'var(--tl-unsched-box-bg)',border:'1px solid var(--tl-unsched-box-border)',borderRadius:'8px',flex:'none'}}, /* PP-EXT (22) */
         h('div',{style:{fontSize:'11.5px',fontWeight:600,color:'var(--warn)',marginBottom:'5px'}},'⚠ Unscheduled'),
-        ...unsched.map((c,i)=>h('div',{key:'u'+i,style:{fontSize:'11px',color:'var(--text-2)',padding:'2px 0',whiteSpace:'normal'}},
-          c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:'')))) : null); /* PP-EXT: why it didn't fit */
+        ...uShown.map((c,i)=>h('div',{key:'u'+i,title:fill?(c.title+(c.reason?' · '+c.reason:'')):undefined,style:Object.assign({fontSize:'11px',color:'var(--text-2)',padding:'2px 0'},uLine)},
+          c.title+' · '+this.fmtDur(c.durationMin)+(c.reason?' · '+c.reason:''))), /* PP-EXT: why it didn't fit */
+        uMore>0 ? h('div',{key:'umore',style:{fontSize:'11px',color:'var(--text-faint)',padding:'2px 0'}},'+'+uMore+' more unscheduled') : null) : null;
+    if(fill) return h('div',{style:{position:'relative',flex:1,minHeight:0,display:'flex',flexDirection:'column'}},
+      h('div',{ref:opts.fillRef,'data-tl-fill':'1',style:{flex:1,minHeight:0,overflow:'hidden'}}, body),
+      unschedEl);
+    return h('div',{style:{position:'relative'}}, body, unschedEl);
   }
   /* ==== PP-EXT: multi-day timeline views (4-Day / Week) + Today + Schedule ==== */
   /* Shared left hour gutter (multi-day). availH = the timeline body height so it aligns with the columns'
@@ -14341,6 +14396,15 @@ class Component extends DCLogic {
     read();
     if(!el._tlRo){ el._tlRo=new ResizeObserver(read); el._tlRo.observe(el); }
   }
+  /* PP-EXT (owner 2026-09-12): Focus mode's own measurement. Kept apart from `_tlAvailH`/`_tlScrollEl`,
+     which belong to the scrolling Today/multi-day wrappers — this slot never scrolls. */
+  observeFocusTLHeight(el){
+    if(!el || typeof ResizeObserver==='undefined') return;
+    const read=()=>{ const hh=el.clientHeight; if(hh && Math.abs((this._focusTlH||0)-hh)>1){ this._focusTlH=hh; this.forceUpdate(); } };
+    read();
+    if(!el._focusRo){ el._focusRo=new ResizeObserver(read); el._focusRo.observe(el); }
+  }
+  /* /PP-EXT */
   dayHeaderLabel(B){ const d=new Date(B);
     return {dow:['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()], dom:d.getDate(),
       mon:['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getMonth()]}; }
@@ -15632,8 +15696,12 @@ class Component extends DCLogic {
       (planTasks.length && !inclTasks.length)?h('div',{key:'focus-none-in',style:{fontSize:'12.5px',color:'var(--text-faint)'}},'Nothing is in today yet.'):null,
       exclBand);
     const B=this.startOfToday();
-    const rightCol=h('div',{style:{flex:'20 1 0',minWidth:0,display:'flex',flexDirection:'column',overflow:'auto',padding:'16px 16px 16px 0'}},
-      this.renderDayColumn(B, {showLabels:true}));
+    /* PP-EXT (owner 2026-09-12): "start at either the day start time or the current time, whichever is more
+       restrictive … fill the panel but ensure it does not need any scroll, even if there are unscheduled
+       tasks." fromNow + fill; the height is measured on the body slot, never on the whole column. */
+    const focusAvailH=(this._focusTlH && this._focusTlH>40) ? this._focusTlH : null;
+    const rightCol=h('div',{'data-focus-timeline':'1',style:{flex:'20 1 0',minWidth:0,minHeight:0,display:'flex',flexDirection:'column',overflow:'hidden',padding:'16px 16px 16px 0'}},
+      this.renderDayColumn(B, {showLabels:true, fromNow:true, fill:true, availH:focusAvailH, fillRef:el=>this.observeFocusTLHeight(el)}));
     const divider=h('div',{style:{flex:'0 0 1px',background:'var(--divider)'}});
     return h('div',{style:{display:'flex',flex:1,minWidth:0,minHeight:0}},
       leftCol, divider, midCol, divider, taskCol, divider, rightCol);
