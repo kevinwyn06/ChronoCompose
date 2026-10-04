@@ -45,7 +45,9 @@ test('loadDemo adds LABELED demo tasks with fresh (non-stable) ids; clearDemo re
   const demo = c.state.tasks.filter(t => t.demo);
   assert.ok(demo.length > 0, 'demo seed loaded');
   demo.forEach(t => assert.ok(!/^t\d+$/.test(t.id), 'demo ids are regenerated, not the stable t1..t7 (no cross-account collision)'));
-  assert.equal(c.state.firstRunSeen, true, 'loading the demo also dismisses the first-run coach');
+  // UI revamp block 11b (reverses V0.2): loading the demo no longer marks the first run seen, so clearing
+  // the demo brings the welcome back instead of leaving an empty workspace with no guidance.
+  assert.equal(c.state.firstRunSeen, false, 'loading the demo does not consume the first-run welcome');
 
   c.clearDemo();
   assert.equal(c.hasDemoTasks(), false, 'demo cleared');

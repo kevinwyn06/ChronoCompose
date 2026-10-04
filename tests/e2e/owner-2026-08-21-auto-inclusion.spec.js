@@ -78,7 +78,7 @@ test('a quick-added "today at 4pm" is a marker at 4pm on BOTH the timeline and t
     localStorage.setItem('pp-prefs', JSON.stringify(p));
   });
   await page.reload();
-  await expect(page.getByText('Schedule · next 7 days')).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('[data-pp-planhead="schedule"]') /* UI revamp block 2: the view's title moved into the pane header (Agenda) */).toBeVisible({ timeout: 15000 });
   const schedMarker = page.locator(`[data-sched-point="${t.id}"]`);
   await expect(schedMarker).toHaveCount(1, { timeout: 10000 });
   await expect(schedMarker).toContainText('◆');

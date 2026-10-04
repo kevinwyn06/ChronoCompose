@@ -103,6 +103,8 @@ test('legacy deletes still flush and retain the tombstone until Google accepts t
 test('Settings describes always-two-way sync and keeps backfill explicit', () => {
   const c = make();
   c.state.settingsTab = 'integrations';
+  // UI revamp block 11b: the calendar controls exist only when signed in (signed out they cannot connect).
+  c.state.sync = Object.assign({}, c.state.sync, { connected: true });
   const text = textOf(c.renderSettings());
   assert.doesNotMatch(text, /Two-way sync \(beta\)|one-way/i);
   assert.match(text, /local changes.*push to Google/i);

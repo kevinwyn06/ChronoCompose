@@ -25,10 +25,10 @@ const fixture = () => ({
   ],
 });
 
-/* `ganttBlock` titles the bar body `"<name> · <n>d · click for details"`; the %-done hit box carries
+/* `ganttBlock` tags the bar body `data-gantt-tip="<name> · …"`; the %-done hit box carries
    its own `% done:` title. Both are the only per-node identity the DOM offers here (PR #102 removed
    the bar label), which `gantt-gestures.spec.js` documents at length. */
-const BAR = '[title^="Ship the release ·"]';
+const BAR = '[data-gantt-tip^="Ship the release ·"]';
 /* Both %-done targets carry this title — the on-bar band and the caret below the bar both start the same
    `startPctDrag`. `GRAB` picks out the band specifically. */
 const PCT = '[title^="% done:"]';

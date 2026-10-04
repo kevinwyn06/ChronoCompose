@@ -8,11 +8,9 @@
  * mousedown path entirely — `startBarDrag`, which owns the date-editing drags — so nothing in the
  * suite covered the same disambiguation there.
  *
- * Bars are addressed by their `title` prefix. That is deliberate and not laziness: PR #102 REMOVED the
- * `[data-ganttname]` label node (bars no longer letter their task's name), so the tooltip is once again
- * the only per-bar identity the DOM carries. `gantt-labels.spec.js` on `dev` asserts exactly that
- * absence, so a future re-introduction of an in-bar label would be a deliberate change made in both
- * files rather than a silent drift.
+ * Bars are addressed by their `data-gantt-tip` prefix — the drawn tooltip's machine-readable twin, which
+ * starts with the task name. UI revamp block 7 retired the bar's native `title` (it doubled the drawn
+ * tooltip) and brought name labels back (`[data-gantt-label]`); `gantt-labels.spec.js` pins that contract.
  *
  * Real pointer input throughout: the threshold under test is a property of hit-testing and pointer
  * capture, and a dispatched MouseEvent would skip both.
@@ -35,8 +33,8 @@ async function bootGantt(page) {
   await page.locator(BAR).first().waitFor({ state: 'visible', timeout: 15000 });
 }
 
-/* `ganttBlock` titles the bar body `"<name> · <n>d · click for details"`. */
-const BAR = '[title^="Ship the release ·"]';
+/* `ganttBlock` tags the bar body `data-gantt-tip="<name> · <start> → <end> · <planned>"`. */
+const BAR = '[data-gantt-tip^="Ship the release ·"]';
 
 /** The centre of the bar body — away from its edge handles, which own a different drag mode. */
 async function barCentre(page) {
@@ -77,9 +75,10 @@ test.describe('Gantt bar: click vs drag vs right-click', () => {
     await page.mouse.move(p.x, p.y);
     await page.mouse.down({ button: 'right' });
     await page.mouse.up({ button: 'right' });
-    /* 'Clear start → ghost' is unique to the BAR menu — the row menu and the detail panel have no such
-       entry — so it separates the two outcomes rather than merely proving something opened. */
-    await expect(page.getByText('Clear start → ghost')).toBeVisible();
+    /* 'Clear start date' is unique to the BAR menu — the row menu and the detail panel have no such
+       entry — so it separates the two outcomes rather than merely proving something opened.
+       (UI revamp block 6 renamed it from the jargon 'Clear start → ghost'; the bar menu is role=menu.) */
+    await expect(page.locator('[data-pp-menu="bar"]').getByText('Clear start date')).toBeVisible();
     await expect(detail(page), 'a right-press is not a click on the bar').toHaveCount(0);
   });
 });

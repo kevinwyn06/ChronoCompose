@@ -50,7 +50,7 @@ const fixture = () => ({
   ],
 });
 
-const BAR = '[title^="Ship the release ·"]';
+const BAR = '[data-gantt-tip^="Ship the release ·"]';
 
 async function bootGantt(page, data) {
   await bootSurface(page, { view: 'gantt' }, data || fixture());
@@ -86,7 +86,7 @@ test.describe('a legacy fractional timestamp is healed on load', () => {
     });
     await page.goto('/index.html');
     await page.locator('[data-task-id]').first().waitFor({ state: 'attached', timeout: 15000 });
-    const healthyBar = page.locator('[title^="Healthy task ·"]').first();
+    const healthyBar = page.locator('[data-gantt-tip^="Healthy task ·"]').first();
     await healthyBar.waitFor({ state: 'visible', timeout: 15000 });
 
     /* Confirm the fixture really was poisoned, or this test proves nothing.

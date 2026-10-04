@@ -22,7 +22,7 @@ const fixture = () => ({
 
 async function openSheet(page) {
   await page.locator('[data-task-id="a"] [data-task-name]').click();
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible({ timeout: 15000 }); /* UI revamp block 4: the dialog itself, not a label inside it */
 }
 
 const stored = (page) => page.evaluate(() =>
@@ -42,6 +42,7 @@ test('the When line REPLACES Start, Due and Duration rather than joining them', 
   await expect(sidebar.getByText('Due', { exact: true })).toHaveCount(0);
   /* Ruling 8: Planned is not repeated outside the When block; the sub-line carries it. */
   await expect(sidebar.getByText('Planned', { exact: true })).toHaveCount(0);
+  await expect(sidebar.locator('[data-field="planned"]')).toHaveCount(0);
   await expect(page.locator('[data-qa="when-sub"]')).toContainText('45m planned');
   await expect(page.locator('[data-qa="when-chip"]')).toHaveText('all day');
 });

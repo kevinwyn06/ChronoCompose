@@ -52,12 +52,27 @@ async function sheetGeometry(page, colKey) {
 
 for (const view of ['today', 'schedule']) {
   for (const { w, h } of WIDTHS) {
-    test(`${view} view at ${w}x${h}: the first-run sheet opens exactly to its content edge`, async ({ page }) => {
+    test(`${view} view at ${w}x${h}: the first-run sheet opens to its content edge (≥1440) or yields 55% to the plan pane (<1440)`, async ({ page }) => {
       await page.setViewportSize({ width: w, height: h });
       /* No `viewSplit` in prefs — this is the FIRST-RUN width, which is what F13 is about.
          A user who has dragged the splitter was never the broken case. */
       await boot(page, { prefs: { mainView: view } });
       await page.locator('[data-colk="planned"]').waitFor({ state: 'visible', timeout: 15000 });
+
+      /* UI revamp block 2 (audit finding 12) supersedes F13 BELOW 1440px: there the first-run default
+         gives the plan pane at least 55% of the board, so the sheet opens compressed and scrolls
+         horizontally instead of opening to its content edge. The content edge stays the MAXIMUM. */
+      if (w < 1440) {
+        const geo = await page.evaluate(() => {
+          const sheet = document.querySelector('[data-sheet-pane]').getBoundingClientRect();
+          const plan = document.querySelector('[data-plan-pane]').getBoundingClientRect();
+          return { sheet: sheet.width, plan: plan.width, board: plan.right - sheet.left };
+        });
+        expect(geo.plan / geo.board, `the ${view} pane gets at least 55% at ${w}px`).toBeGreaterThanOrEqual(0.55 - 0.01);
+        const g = await sheetGeometry(page, 'actions');
+        expect(g.cellRight, `the sheet never opens past its last column at ${w}px`).toBeGreaterThan(g.paneLeft);
+        return;
+      }
 
       for (const k of CLIPPABLE) {
         const g = await sheetGeometry(page, k);

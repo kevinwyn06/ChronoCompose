@@ -25,9 +25,9 @@ const fixture = () => ({
   ],
 });
 
-/* `ganttBlock` titles the bar body "<name> · <n>d · click for details". */
-const BAR_A = '[title^="Draft the spec ·"]';
-const BAR_B = '[title^="Build the thing ·"]';
+/* `ganttBlock` tags the bar body data-gantt-tip="<name> · <start> → <end> · <planned>". */
+const BAR_A = '[data-gantt-tip^="Draft the spec ·"]';
+const BAR_B = '[data-gantt-tip^="Build the thing ·"]';
 const BARRIER = '[data-dep-barrier="dep-b"]';
 
 /* The B bar is drawn ~10 days out, which at the default day width puts its CENTRE at x≈1282 — three

@@ -23,7 +23,7 @@ const stored = (page, id) => page.evaluate((tid) => {
 const midnight = (page) => page.evaluate(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); });
 
 test.describe('a bar drag into the future takes the task off today', () => {
-  const BAR = '[title^="Ship the release ·"]';
+  const BAR = '[data-gantt-tip^="Ship the release ·"]';
 
   test('dragging next week clears the creation-default press', async ({ page }) => {
     await bootSurface(page, { view: 'gantt' }, {

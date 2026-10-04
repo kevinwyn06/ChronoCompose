@@ -18,6 +18,9 @@ const day = (y, m, d, h, mi) => new Date(y, m, d, h || 0, mi || 0, 0, 0).getTime
 function summaryRig() {
   const c = make();
   c.state.tasks = [];
+  // UI revamp block 11b: a workspace still on its first-run welcome gets no summary over it; these tests
+  // are about the hour floor, so the welcome is already behind them.
+  c.state.firstRunSeen = true;
   c._notify = { fired: {}, summaryDay: null };
   c.saveNotify = () => {};
   c.notifyOn = () => true;
@@ -97,7 +100,10 @@ function whenWindow(text) {
 }
 
 test('When line: every spelling of a day range stores BOTH edges', () => {
-  const A = day(2026, 8, 10), B = day(2026, 8, 13); // Sep 10 → Sep 12 inclusive (end is exclusive)
+  /* UI revamp block 4: the When line stores a bare-date range's end as the INCLUSIVE day on a non-all-day
+     task (Sep 12, at its midnight) — the encoding the sheet, the picker and `dueMsOf` read. The parser's
+     exclusive next-midnight end made the task due a day late and read back as Sep 13 everywhere but here. */
+  const A = day(2026, 8, 10), B = day(2026, 8, 12);
   withNow(NOW, () => {
     [
       'from sept 10 to sept 12',   // the shape that already worked — the control

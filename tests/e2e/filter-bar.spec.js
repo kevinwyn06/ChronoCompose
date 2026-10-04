@@ -26,6 +26,12 @@ const FIXTURE = {
 };
 
 const BAR = '[data-pp-filterbar="1"]';
+/* UI revamp block 2: Horizon, the chips and Clear all live in the Filter popover. */
+const POP = '[data-pp-filterpop="1"]';
+const openFilters = async (page) => {
+  await page.locator('[data-pp-filterbtn]').click();
+  await expect(page.locator(POP)).toBeVisible();
+};
 const ROW = '[data-task-id]';
 const NAME = '[data-task-name="1"]';
 
@@ -43,6 +49,7 @@ test('the retired controls are gone from the bar', async ({ page }) => {
 
 test('the horizon slider filters, spares dateless work, and clears on the active notch', async ({ page }) => {
   await boot(page, FIXTURE);
+  await openFilters(page);
   const seg = page.locator('[data-pp-seg="horizon"]');
   await expect(seg.locator('[data-seg-key]')).toHaveCount(6);
   await expect(page.locator('[data-task-id="far"]')).toHaveCount(1);
@@ -61,6 +68,7 @@ test('the horizon slider filters, spares dateless work, and clears on the active
 
 test('a wider horizon admits the mid task and still excludes the far one', async ({ page }) => {
   await boot(page, FIXTURE);
+  await openFilters(page);
   const seg = page.locator('[data-pp-seg="horizon"]');
   await seg.locator('[data-seg-key="3m"]').click();
   await expect(page.locator('[data-task-id="mid"]')).toHaveCount(1);
@@ -75,13 +83,14 @@ test('a wider horizon admits the mid task and still excludes the far one', async
 test('there is no group control left, and Included is a chip beside the other filters', async ({ page }) => {
   await boot(page, FIXTURE);
   await expect(page.locator('[data-pp-seg="group"]')).toHaveCount(0);
-  const chip = page.locator('[data-pp-filterbar] [data-pp-chip="incl"]');
+  await openFilters(page);
+  const chip = page.locator(`${POP} [data-pp-chip="incl"]`);
   await expect(chip).toHaveCount(1);
   await expect(chip).not.toHaveAttribute('data-active', '1');
   await chip.click();
   await expect(chip).toHaveAttribute('data-active', '1');
   /* And it is a filter like any other, so Clear all reaches it. */
-  await page.locator('[data-pp-filterbar] [data-pp-chip="clr"]').click();
+  await page.locator(`${POP} [data-pp-chip="clr"]`).click();
   await expect(chip).not.toHaveAttribute('data-active', '1');
 });
 
@@ -108,4 +117,67 @@ test('the check header cycles priority sort', async ({ page }) => {
   await expect(names).toHaveText(['Someday task', 'Mid task', 'Near task']);
   await header.click();                                    // cleared — manual order restored
   await expect(names).toHaveText(['Near task', 'Mid task', 'Someday task']);
+});
+
+/* UI revamp block 2: the toolbar split, against a live mount — what the mock DOM cannot reach is the
+   popover's real focus handling, the outside click, and where the controls actually sit on screen. */
+test('the bar holds search, Filter, List|Selection and + Section; the view switch sits over the plan pane', async ({ page }) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await boot(page, FIXTURE);
+  const bar = page.locator(BAR);
+  await expect(bar.locator('[data-pp-search="1"]')).toHaveCount(1);
+  await expect(bar.locator('[data-pp-filterbtn]')).toHaveCount(1);
+  await expect(bar.locator('[data-surface-btn]')).toHaveCount(2);
+  await expect(bar.locator('[data-pp-chip="addsec"]')).toBeVisible();
+  await expect(bar.locator('[data-pp-seg="horizon"]'), 'Horizon is behind Filter').toHaveCount(0);
+  await expect(bar.locator('[data-view-key]'), 'the view switch left the sheet toolbar').toHaveCount(0);
+
+  const sw = page.locator('[data-pp-planhead] [data-pp-viewswitch]');
+  await expect(sw.locator('[role="tab"]')).toHaveText(['Gantt', 'Day', '4-Day', 'Week', 'Month', 'Agenda']);
+  const sheet = await page.locator('[data-sheet-pane]').boundingBox();
+  const swBox = await sw.boundingBox();
+  expect(swBox.x, 'the switch is in the RIGHT pane').toBeGreaterThan(sheet.x + sheet.width);
+  /* The two strips share one height, so sheet rows stay level with Gantt rows. */
+  const barBox = await bar.boundingBox();
+  const headBox = await page.locator('[data-pp-planhead]').boundingBox();
+  expect(Math.abs(barBox.height - headBox.height)).toBeLessThan(1);
+  expect(Math.abs(barBox.y - headBox.y)).toBeLessThan(1);
+});
+
+test('the Filter badge counts active filters, so a hidden filter is never silently on', async ({ page }) => {
+  await boot(page, FIXTURE);
+  const btn = page.locator('[data-pp-filterbtn]');
+  await expect(btn.locator('[data-pp-filtercount]')).toHaveCount(0);
+  await openFilters(page);
+  await page.locator('[data-pp-seg="horizon"] [data-seg-key="1w"]').click();
+  await page.locator(`${POP} [data-pp-chip="incl"]`).click();
+  await expect(btn.locator('[data-pp-filtercount]')).toHaveText('2');
+  await page.keyboard.press('Escape');
+  await expect(page.locator(POP)).toHaveCount(0);
+  await expect(btn.locator('[data-pp-filtercount]'), 'still counted with the popover closed').toHaveText('2');
+});
+
+test('the popover takes focus, closes on Escape back to its button, and on an outside click', async ({ page }) => {
+  await boot(page, FIXTURE);
+  await openFilters(page);
+  const focusedInPop = await page.evaluate(() => !!document.activeElement.closest('[data-pp-filterpop]'));
+  expect(focusedInPop, 'focus moved into the popover').toBe(true);
+  await page.keyboard.press('Escape');
+  await expect(page.locator(POP)).toHaveCount(0);
+  await expect(page.locator('[data-pp-filterbtn]')).toBeFocused();
+
+  await openFilters(page);
+  const head = await page.locator('[data-pp-planhead]').boundingBox();
+  await page.mouse.click(head.x + head.width - 40, head.y + head.height + 200);
+  await expect(page.locator(POP)).toHaveCount(0);
+});
+
+test('"Archived tasks (N)" in the popover opens the archive', async ({ page }) => {
+  await boot(page, { seedOnce: true, tasks: [...FIXTURE.tasks, T('old', 'Old task', { archivedAt: Date.now() - 86400000 })] });
+  await openFilters(page);
+  const link = page.locator('[data-pp-archived-link]');
+  await expect(link).toHaveText('Archived tasks (1)');
+  await link.click();
+  await expect(page.locator(POP)).toHaveCount(0);
+  await expect(page.getByText('Old task').first()).toBeVisible();
 });

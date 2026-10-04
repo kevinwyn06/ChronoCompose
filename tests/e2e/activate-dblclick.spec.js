@@ -41,7 +41,7 @@ const running = (page) => page.evaluate(() => {
   try { return Object.keys(JSON.parse(localStorage.getItem('pp-run') || '{}')); } catch (e) { return ['UNPARSEABLE']; }
 });
 
-test.describe('V2.4 — activation is a gesture on the row, not on a click', () => {
+test.describe('V2.4 → UI revamp block 6 — the timer lives on the play button, not on a click or a double-click', () => {
   test('a plain single click selects and opens details without starting anything', async ({ page }) => {
     /* Load-bearing rather than vacuous: this is the assertion that would go red if activation were
        ever moved onto the single click (the shape an earlier handoff wrongly claimed shipped), and it
@@ -52,25 +52,33 @@ test.describe('V2.4 — activation is a gesture on the row, not on a click', () 
     expect(await running(page), 'a single click is not an activation').toEqual([]);
   });
 
-  test('a trusted double-click on a row activates the task', async ({ page }) => {
+  /* UI revamp block 6 (decision 11) SUPERSEDES the V2.4 gesture: a double-click no longer starts a timer —
+     on the title it edits the name in place (tests/e2e/sheet-keyboard.spec.js), anywhere else on the row
+     it does nothing extra. The timer stays on the row's play button. These two cases keep the file's
+     original guarantee — the observable is still `pp-run`, read after real pointer input — pointed at the
+     new contract. */
+  test('a trusted double-click on a row starts no timer', async ({ page }) => {
     await boot(page);
-    /* Real pointer input, not a dispatched `dblclick`: the whole defect lived in which element the
-       browser saw under the cursor for the SECOND press, which a synthetic event never asks. */
     await rows(page).nth(0).dblclick();
-    await expect
-      .poll(() => running(page), { message: 'double-click starts the task\'s timer' })
-      .toEqual(['e2e-1']);
+    await page.waitForTimeout(300);
+    expect(await running(page), 'off the title: nothing starts').toEqual([]);
+    /* Off the title the second press is consumed, so the detail the first click opened may still be up. */
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[data-pp-dialog="detail"]')).toHaveCount(0);
+    await rows(page).nth(1).locator('[data-task-name]').dblclick();
+    await expect(page.locator('[data-pp-inline-title]'), 'on the title it edits in place').toBeVisible();
+    expect(await running(page), 'double-click is not an activation any more').toEqual([]);
   });
 
-  test('double-clicking another row switches which task is active', async ({ page }) => {
+  test('the play button is where a timer starts, and starting another switches which task is active', async ({ page }) => {
     await boot(page);
-    await rows(page).nth(0).dblclick();
-    await expect.poll(() => running(page)).toEqual(['e2e-1']);
-    await rows(page).nth(1).dblclick();
-    /* V2.4's single-timer default: activating the second task stops the prior active one, so `pp-run`
-       holds exactly one id — the switch, not an accumulation. */
-    await expect
-      .poll(() => running(page), { message: 'the prior active task stops' })
-      .toEqual(['e2e-2']);
+    const play = (i) => rows(page).nth(i).locator('[data-cellk="actions"] span[title="Start timer"]');
+    await rows(page).nth(0).hover();
+    await play(0).click();
+    await expect.poll(() => running(page), { message: 'the play button starts the task' }).toEqual(['e2e-1']);
+    await rows(page).nth(1).hover();
+    await play(1).click();
+    /* V2.4's single-timer default survives: starting the second task stops the prior one. */
+    await expect.poll(() => running(page), { message: 'the prior active task stops' }).toEqual(['e2e-2']);
   });
 });

@@ -54,7 +54,7 @@ test.describe('Overview left pane: the rehoming', () => {
        NOT replacing the right panel" is precisely this assertion: a rehoming that swallowed the whole
        board would satisfy every other check in this file. */
     const left = await paneBox(page);
-    const gantt = await page.locator('[role="tab"][title="Gantt"]').boundingBox();
+    const gantt = await page.locator('[data-pp-viewswitch] [data-view-key="gantt"]').boundingBox();
     expect(gantt, 'the scheduling view toggle is still offered').toBeTruthy();
     const viewport = page.viewportSize();
     expect(left.width, 'the left pane does not eat the board')
@@ -63,12 +63,20 @@ test.describe('Overview left pane: the rehoming', () => {
       .toBeGreaterThan(200);
   });
 
-  test('the Plan tab is gone and its two surfaces are reachable from Overview', async ({ page }) => {
+  /* UI revamp block 1: the retired Dashboard "Plan" tab (Selection/Matrix) stays retired, but the NAME
+     Plan now belongs to the one top nav, where it presents dashMode 'overview'. So the guard moves from
+     "no Plan tab" to "the top nav is exactly Plan · Focus · Review · Journal, no Overview, and Plan is
+     the board that hosts both surfaces". */
+  test('the old Plan tab is gone and its two surfaces are reachable from Plan (Overview)', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await boot(page, { tasks: busy() });
 
+    const nav = page.locator('[data-topnav] [role="tab"]');
+    await expect(nav, 'one top nav, four pages').toHaveText(['Plan', 'Focus', 'Review', 'Journal']);
+    await expect(page.getByRole('tab', { name: 'Overview', exact: true }),
+      'Overview is presented as Plan').toHaveCount(0);
     await expect(page.getByRole('tab', { name: 'Plan', exact: true }),
-      'the Dashboard tab is retired').toHaveCount(0);
+      'the board is the Plan tab').toHaveAttribute('aria-selected', 'true');
 
     /* Real pointer input on each surface button, and the pane content changes to match. */
     /* V5 block 32: 'matrix' dropped from this sweep — the surface is retired and its button is gone. */

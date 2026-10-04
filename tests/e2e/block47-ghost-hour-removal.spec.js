@@ -16,11 +16,11 @@ async function bootGantt(page) {
 test('half-dated bars are solid, dateless rows are empty, and wide zoom never becomes Hour', async ({page}) => {
   await bootGantt(page);
 
-  const titles=await page.locator('[title]').evaluateAll(els=>els.map(el=>el.getAttribute('title')||''));
+  const titles=await page.locator('[data-gantt-tip]').evaluateAll(els=>els.map(el=>el.getAttribute('data-gantt-tip')||''));
   expect(titles.some(t=>t.startsWith('Dateless task')), 'fully dateless task draws no bar').toBe(false);
 
   for(const name of ['Start only','Due only']){
-    const body=page.locator(`[title^="${name}"]`).first();
+    const body=page.locator(`[data-gantt-tip^="${name}"]`).first();
     await expect(body, name+' bar renders').toBeVisible();
     const paint=await body.evaluate(el=>{
       const s=getComputedStyle(el);
@@ -31,7 +31,7 @@ test('half-dated bars are solid, dateless rows are empty, and wide zoom never be
     expect(paint.right, name+' has no dotted right edge').not.toBe('dotted');
   }
 
-  const datedBar=page.locator('[title^="Dated task"]').first();
+  const datedBar=page.locator('[data-gantt-tip^="Dated task"]').first();
   const beforeZoom=await datedBar.boundingBox();
 
   const row=page.locator('[data-gantt-task-id]').first();

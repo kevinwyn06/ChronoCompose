@@ -20,7 +20,12 @@ const FIXTURE = {
 };
 
 const SEARCH = '[data-pp-search="1"]';
-const PREVIEW = '[data-pp-search-preview="1"]';
+/* UI revamp block 2: the preview tooltip is gone — search filters live, and the field shows the count. */
+const COUNT = '[data-pp-search-count]';
+const openFilters = async (page) => {
+  await page.locator('[data-pp-filterbtn]').click();
+  await expect(page.locator('[data-pp-filterpop="1"]')).toBeVisible();
+};
 const ROW = '[data-task-id]';
 
 test('s focuses the search field, and is inert while typing in a row', async ({ page }) => {
@@ -42,19 +47,32 @@ test('s focuses the search field, and is inert while typing in a row', async ({ 
   await expect(quick).toHaveValue('s');
 });
 
-test('typing previews without changing the sheet; Enter applies', async ({ page }) => {
+/* UI revamp block 2: `/` is the search key the field advertises; `s` still works (above). */
+test('/ focuses the search field and is not typed into it', async ({ page }) => {
+  await boot(page, FIXTURE);
+  await page.keyboard.press('/');
+  await expect(page.locator(SEARCH)).toBeFocused();
+  await expect(page.locator(SEARCH)).toHaveValue('');
+});
+
+/* UI revamp block 2 (supersedes "preview, then Enter"): the sheet filters as you type, after a short
+   debounce; Enter still applies at once. */
+test('typing filters live; the field shows the match count; Enter applies at once', async ({ page }) => {
   await boot(page, FIXTURE);
   const rows = page.locator(ROW);
-  const before = await rows.count();
+  await expect(rows).toHaveCount(3);
 
   await page.keyboard.press('s');
   await page.keyboard.type('report');
-  await expect(page.locator(PREVIEW)).toContainText('2 matches');
-  await expect(rows).toHaveCount(before);          // the sheet must NOT move while typing
+  await expect(rows).toHaveCount(2);                // no Enter — the debounce applied it
+  await expect(page.locator(COUNT)).toHaveText('2');
 
-  await page.keyboard.press('Enter');
-  await expect(rows).toHaveCount(2);
-  await expect(page.locator(PREVIEW)).toHaveCount(0);
+  await page.locator(SEARCH).fill('milk');
+  await page.locator(SEARCH).press('Enter');
+  await expect(rows).toHaveCount(1);
+
+  await page.locator(SEARCH).fill('zzzz');
+  await expect(page.locator(COUNT)).toHaveText('No match');
 });
 
 test('a tag token filters, and negation excludes', async ({ page }) => {
@@ -77,6 +95,7 @@ test('the horizon and the Included chip are parked while a search runs', async (
   await page.keyboard.type('report');
   await page.keyboard.press('Enter');
   /* Parked, NOT removed: the user has to be able to see what is coming back. */
+  await openFilters(page);
   await expect(page.locator('[data-pp-seg="horizon"]')).toHaveCount(1);
   await expect(page.locator('[data-pp-chip="incl"]')).toHaveCount(1);
   await expect(page.locator('[data-pp-seg="horizon"]')).toHaveCSS('pointer-events', 'none');
@@ -86,8 +105,10 @@ test('the horizon and the Included chip are parked while a search runs', async (
 test('Escape clears the search and restores the pre-search horizon', async ({ page }) => {
   await boot(page, FIXTURE);
   const notch = '[data-pp-seg="horizon"] [data-seg-key="1m"]';
+  await openFilters(page);
   await page.locator(notch).click();
   await expect(page.locator(`${notch}[data-active="1"]`)).toHaveCount(1);
+  await page.keyboard.press('Escape');               // close the popover
 
   await page.keyboard.press('s');
   await page.keyboard.type('report');
@@ -97,6 +118,7 @@ test('Escape clears the search and restores the pre-search horizon', async ({ pa
   await page.keyboard.press('s');
   await page.keyboard.press('Escape');
   await expect(page.locator(SEARCH)).toHaveValue('');
+  await openFilters(page);
   await expect(page.locator(`${notch}[data-active="1"]`)).toHaveCount(1);
   await expect(page.locator(ROW)).toHaveCount(3);
 });

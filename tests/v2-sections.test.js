@@ -478,7 +478,8 @@ const geo = c => {
     { id:null,     name:'No section', tasks:[T('n1')] },
   ];
   const g = c.sectionGeometry(bands);
-  return { g, count:5, H:c.TAG_SECTION_H, R:c.rowH };
+  /* UI revamp block 6: the EMPTY section's header is the thin line (E), every other header is H. */
+  return { g, count:5, H:c.TAG_SECTION_H, E:c.SECTION_EMPTY_H, R:c.rowH };
 };
 const at = (c, y) => { const { g, count } = geo(c); return c.resolveRowInsert(y, g.yTop, g.secLayout, count); };
 
@@ -501,8 +502,8 @@ test('bottom-of-section: it is DISTINCT from the top of the next section, which 
 });
 
 test('bottom-of-section: the LAST section\'s bottom row resolves to the end of the visible list', () => {
-  const c = make(); const { H, R, count } = { ...geo(c), ...{} };
-  const r = at(c, 4*H + 5*R - 1); /* lower half of the No-section bucket\'s only row */
+  const c = make(); const { H, E, R, count } = { ...geo(c), ...{} };
+  const r = at(c, 3*H + E + 5*R - 1); /* lower half of the No-section bucket\'s only row */
   assert.equal(r.sectionId, null, 'No section is the last bucket');
   assert.equal(r.index, 5);
   assert.equal(r.index, count, 'past every visible row');
@@ -510,11 +511,11 @@ test('bottom-of-section: the LAST section\'s bottom row resolves to the end of t
 });
 
 test('bottom-of-section: the boundary between the last DECLARED section and No section', () => {
-  const c = make(); const { H, R } = geo(c);
-  const bottomOfS2 = at(c, 3*H + 4*R - 1);
+  const c = make(); const { H, E, R } = geo(c);
+  const bottomOfS2 = at(c, 2*H + E + 4*R - 1);
   assert.deepEqual([bottomOfS2.sectionId, bottomOfS2.index, bottomOfS2.atEnd], ['s2', 4, true],
     'bottom-most in s2, even though index 4 is also No section\'s first row');
-  const topOfNone = at(c, 3*H + 4*R + 2);
+  const topOfNone = at(c, 2*H + E + 4*R + 2);
   assert.deepEqual([topOfNone.sectionId, topOfNone.index, topOfNone.atEnd], [null, 4, false],
     'No section is a valid drop target but nothing is ordered AFTER it as a section');
 });
@@ -569,4 +570,18 @@ test('bottom-of-section: the resolved slot really lands the row bottom-most, thr
   const ids = c.tasksBySection(c.state.tasks).find(s => s.id === 's1').tasks.map(t => t.id);
   assert.deepEqual(ids, ['a1', 'a2', 'b1'], 'bottom-most in s1, not first in s2');
   assert.equal(c.history.length, before + 1, 'still one undo step');
+});
+
+test('UI revamp block 6: an empty section collapses to a thin header on both panes, and stays a drop target', () => {
+  const c = make(); const { g, H, E, R } = geo(c);
+  assert.ok(E > 0 && E < H, 'the thin header is a real, shorter line');
+  const band = g.secLayout.find((b) => b.id === 'sEmpty');
+  assert.equal(band.headerBottom - band.top, E, 'the empty band reserves only the thin header');
+  assert.equal(band.empty, true);
+  assert.equal(g.secLayout.find((b) => b.id === 's1').headerBottom - g.secLayout[0].top, H, 'a populated header is unchanged');
+  assert.equal(g.bodyH, 3*H + E + 5*R, 'the sheet and the Gantt both read this one geometry');
+  const r = at(c, band.top + E/2);
+  assert.equal(r.sectionId, 'sEmpty', 'a drop on the thin line still files into the empty section');
+  const collapsed = c.sectionGeometry([{ id:'s1', name:'A', tasks:[{ id:'a' }], collapsed:true }]);
+  assert.equal(collapsed.secLayout[0].headerBottom, H, 'a collapsed section that HOLDS tasks keeps the full header');
 });

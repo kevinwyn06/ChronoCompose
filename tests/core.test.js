@@ -345,21 +345,29 @@ test('V2.4: activateTask on a running-but-not-active task makes it active', () =
   assert.ok(c.isRunning(b.id), 'and is still running');
 });
 
-test('V2.4: rowDblClick activates a task, and never a milestone or an archived one', () => {
+/* UI revamp block 6 (decision 11) supersedes V2.4's double-click-to-activate: a double-click on the TITLE
+   edits it inline, anywhere else it does nothing extra, and it never starts a timer — the timer stays on
+   the play button. */
+test('rowDblClick never starts a timer; on the title it opens the inline editor', () => {
   const c = make();
-  const ev = () => ({ preventDefault(){}, stopPropagation(){} });
+  const onTitle = { closest: (sel) => (sel === '[data-pp-title]' ? {} : null) };
+  const offTitle = { closest: () => null };
+  const ev = (target) => ({ preventDefault(){}, stopPropagation(){}, target });
   const a = activeTask(c, { spent:0 });
   const mile = activeTask(c, { type:'Milestone' });
   const arch = activeTask(c, { archivedAt: Date.now() });
   c.state.tasks = [a, mile, arch];
-  c.rowDblClick(ev(), a.id);
-  assert.equal(c.activeTaskId(), a.id, 'double-click made it active');
-  c.rowDblClick(ev(), mile.id);
-  assert.equal(c.activeTaskId(), a.id, 'a milestone has no timer, so active is unchanged');
-  c.rowDblClick(ev(), arch.id);
-  assert.equal(c.activeTaskId(), a.id, 'an archived task does not activate');
-  c.rowDblClick(ev(), 'nope');
-  assert.equal(c.activeTaskId(), a.id, 'an unknown id is a no-op');
+  c.rowDblClick(ev(offTitle), a.id);
+  assert.equal(c.activeTaskId(), null, 'a double-click off the title starts nothing');
+  assert.equal(c.state.inlineEdit, null, 'and opens no editor');
+  c.rowDblClick(ev(onTitle), a.id);
+  assert.equal(c.activeTaskId(), null, 'a double-click on the title starts no timer either');
+  assert.deepEqual(c.state.inlineEdit, { id: a.id }, 'it edits the title in place');
+  c.state.inlineEdit = null; c._inlineLive = null;
+  c.rowDblClick(ev(onTitle), arch.id);
+  assert.equal(c.state.inlineEdit, null, 'an archived task is not edited in place');
+  c.rowDblClick(ev(onTitle), 'nope');
+  assert.equal(c.state.inlineEdit, null, 'an unknown id is a no-op');
 });
 
 test('V2.4: orderingSeam puts the active task first', () => {

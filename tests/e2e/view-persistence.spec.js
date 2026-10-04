@@ -14,7 +14,9 @@
 const { test, expect } = require('@playwright/test');
 const { bootSurface } = require('./_seed');
 
-const tab = (page, label) => page.locator(`[role="tab"][title="${label}"]`);
+/* UI revamp block 2: addressed by view key — "Today" is labelled Day in the pane header now. */
+const KEY = { Gantt: 'gantt', Today: 'today' };
+const tab = (page, label) => page.locator(`[data-pp-viewswitch] [role="tab"][data-view-key="${KEY[label]}"]`);
 
 test.describe('the view you left on is the view you come back to', () => {
   test('a real tab click survives a reload', async ({ page }) => {

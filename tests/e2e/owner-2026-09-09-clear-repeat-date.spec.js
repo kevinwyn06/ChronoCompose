@@ -22,7 +22,7 @@ test('Clear on a repeat\'s End cell visibly clears the series window', async ({ 
   await expect(endCell).not.toHaveText('—', { useInnerText: true });
 
   await endCell.click();
-  await expect(page.getByText('DUE · WHOLE SERIES', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText('End · Whole series'); /* UI revamp block 4: one name for the end edge */
   await page.getByRole('button', { name: 'Clear' }).click();
 
   await expect(page.locator('[data-task-id="rep"] [data-cellk="end"]')).toHaveText('—');

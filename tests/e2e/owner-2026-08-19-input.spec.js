@@ -17,7 +17,7 @@ const fixture = () => ({ seedOnce: true, tasks: [task('a', 'Write', { start: '0d
 
 async function openSheet(page) {
   await page.locator('[data-task-id="a"] [data-task-name]').click();
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible(); /* UI revamp block 4 */
 }
 
 /* The sheet's When input. Addressed by its own `data-qa` hook, not by input order: the task sheet ROW
@@ -46,7 +46,7 @@ test('Escape reverts a field and leaves it, without closing the sheet', async ({
   await expect(whenBox(page)).toHaveCount(0, { timeout: 3000 });
   await expect(page.locator('[data-qa="when-text"]')).toHaveText(before);
   // one press = one layer: the sheet the field lives in is still open
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible(); /* UI revamp block 4 */
 });
 
 test('Escape in a field records no undo entry — the value is unchanged after a reload', async ({ page }) => {
@@ -71,10 +71,10 @@ test('a second Escape still closes the sheet — the field rung takes exactly on
 
   await openWhen(page);
   await page.keyboard.press('Escape');           // rung 0: leaves the field
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible(); /* UI revamp block 4 */
 
   await page.keyboard.press('Escape');           // the ladder continues as before
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-pp-dialog="detail"]')).toHaveCount(0); /* UI revamp block 4 */
 });
 
 /* Owner, 2026-08-19: "enter doesn't have, one needs to press enter then done."
@@ -92,7 +92,7 @@ test('Enter in the TIME field applies and closes the picker', async ({ page }) =
   await boot(page, clockedFixture());
 
   await page.locator('[data-task-id="a"] [data-cellk="start"]').click();
-  await expect(page.getByText('START', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText(/^Start/); /* UI revamp block 4: sentence-case header */
 
   await timeBox(page).fill('15:00');
   await page.keyboard.press('Enter');
@@ -122,7 +122,7 @@ test('blur still commits to the draft without closing, so Tab still works', asyn
   await page.keyboard.press('Tab');
 
   // the card is still open — this is the only way to set a time and then adjust the date
-  await expect(page.getByText('START', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText(/^Start/); /* UI revamp block 4: sentence-case header */
 });
 
 /* Owner, 2026-08-19: "I'll think 'okay this task is 10pm, I want it to be 9pm instead' and type 9 only
@@ -135,7 +135,7 @@ test('a task at 10pm, typing 9, becomes 9pm', async ({ page }) => {
 
   const cell = page.locator('[data-task-id="a"] [data-cellk="start"]');
   await cell.click();
-  await expect(page.getByText('START', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText(/^Start/); /* UI revamp block 4: sentence-case header */
 
   await timeBox(page).fill('9');
   await page.keyboard.press('Enter');

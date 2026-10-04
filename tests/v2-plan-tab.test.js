@@ -21,7 +21,9 @@ test('the scheduling view toggle no longer offers Selection or Matrix', () => {
   const c = make();
   const seg = c.renderViewToggle('gantt', () => {});
   const keys = seg.children[0].map(v => v.props.key);
-  assert.deepEqual(keys, ['gantt', 'day4', 'week', 'month', 'schedule', 'today']);
+  // UI revamp block 2: the switch moved to the plan pane's header and is ordered by granularity
+  // (Gantt · Day · 4-Day · Week · Month · Agenda). The keys are unchanged; only the order and labels moved.
+  assert.deepEqual(keys, ['gantt', 'today', 'day4', 'week', 'month', 'schedule']);
 });
 
 // V5 block 32 — the Eisenhower matrix is RETIRED (owner: the quadrants never touch inclusion or
@@ -68,7 +70,11 @@ test('choosing a tab stamps dashModeV so the next boot does not remap it', () =>
   const props = { accent: '#3b82f6', showCriticalPath: true };
   const first = new Cls(props);
   first.setState = function (o) { Object.assign(this.state, o); };
-  first.renderDashModeTabs().children[0][1].props.onClick(); // Focus, now the second tab
+  // Focus, the second tab. UI revamp block 11a wrapped the tablist in a <nav> landmark, so the tab is found
+  // by its key rather than by its position in the tree.
+  const tabs = (n) => (n == null || typeof n !== 'object') ? [] : Array.isArray(n) ? n.flatMap(tabs)
+    : [].concat(n.props && n.props['data-topnav-tab'] ? [n] : [], tabs(n.children));
+  tabs(first.renderDashModeTabs()).find((n) => n.props['data-topnav-tab'] === 'focus').props.onClick();
   const second = new Cls(props);
   assert.equal(second.state.dashMode, 'focus', 'the chosen tab survives a reboot as itself');
 });

@@ -11,9 +11,104 @@ Overlay coordinates pass through measured UI-scale helpers because the app runs 
 Gantt and sheet rows share explicit height/box-model rules; visible structural changes require a Design
 push after implementation. Timers persist in `pp-run`; Pomodoro state is ephemeral in `pp-pomo`.
 
+### Design system (UI revamp block 11a, 2026-10-04)
+
+Everything in the shell renders at 0.8× (`--pp-shell-zoom`, `SHELL_ZOOM`). The scales below are chosen by
+what they RENDER at, and the zoom itself is not touched.
+
+- **Type.** `--fs-1` 13 (caption) · `--fs-2` 14 (label) · `--fs-3` 14 (body) · `--fs-4` 15 · `--fs-5` 18 ·
+  `--fs-6` 22 CSS px. These render at 10.4 / 11.2 / 11.2 / 12 / 14.4 / 17.6px. That puts the floor at 10px or
+  more for captions and 11px or more for labels and body text. `--fs-2` and `--fs-3` have the same value
+  but keep separate names, so the two roles can be tuned apart later. Inline `fontSize` values are literal
+  px on the same scale (13/14/15/18/22). The unit layer reads them, and it cannot resolve a `var()`. Nothing
+  is set below 13px and nothing is fractional. Display numerals of 24px and up (clocks, the Pomodoro ring)
+  sit outside the scale. Column heads and Gantt bar labels (`GANTT_LABEL_FS`) use the caption step.
+  `tests/ui-revamp-a11y.test.js` scans the whole file for any size off the scale.
+- **Radii.** `--r-1` 4 (chip, input) · `--r-2` 6 (button) · `--r-3` 10 (menu, card, popover) · `--r-4` 16
+  (dialog) · `--r-pill`. Circles stay `50%`. Literal radii were mapped onto these: 1–4 → r-1, 5–7 → r-2,
+  8–12 → r-3, 14–16 → r-4, 999 → pill.
+- **Shadows.** `--sh-1` (bars, cards, timeline blocks) · `--sh-2` (menus, popovers, toasts, drag cards) ·
+  `--sh-3` (dialogs, the first-run card). They are tuned per theme. Rings and inset rails (selection,
+  pinned edges, the critical inset) are not elevation, so they keep their own values.
+- **Buttons** (`.pp-btn`). The base is Secondary. Modifiers: `--primary` (accent fill with `--on-accent`
+  ink), `--outline` (the pressed state of a primary toggle, such as the Focus hero's Stop), `--ghost`,
+  `--danger`, `--icon` (square), `--block`. Sizes are `--sm` 24, md 30 (default) and `--lg` 36 CSS px. md and
+  lg meet `HIT_MIN_PX` on their own box. `--sm` keeps its 24px look and extends a transparent `::before` to
+  a 30px hit box. `BTN_LG_PX` mirrors `--lg`, so the unit layer can check the hero's buttons. `.pp-tbtn` is
+  the legacy name for Secondary md and shares the rule. `.pp-tool` (toolbar), `.pp-search` and
+  `.pp-iconbtn` (the template's ⚙) are 30px. Segmented is `.pp-seg`/`.pp-seg-btn`: 24px look, 30px hit box.
+  The common buttons now come from this set: quick add's Add, the date picker's Done and Clear, the % popover's
+  Set, first-run and coach, the demo banner, the Focus hero's Start/Stop/Done, Review's and the Journal's
+  arrows, Month's Today and "+ Add habit". The Pomodoro keeps its phase-coloured pair.
+- **Contrast.** Every text token (`--text*`, `--btn-text`, `--tag-text`, `--link`, `--danger*`, `--warn`,
+  `--success`, `--due-*`, `--gantt-label`, `--tl-win-fg`) clears 4.5:1 against every RESTING surface token
+  in both themes. That covers bg, top, sheet, alt, gantt, side, card, menu, chip, button, input, field, tag,
+  section band and weekend. Hover washes are transient and are not in the set. The unit test computes this
+  from the hex. The faint pair is no longer below the floor. It still steps down from muted, so "faint"
+  now means quieter, not illegible. Placeholders use `--text-faint2`, not the browser's #757575. Out-of-month
+  Month cells dim to 0.75, not 0.45. The owner-ruled invariants are untouched: the timeline hue and the
+  saturation floor (`theme-tokens.spec`), the section band ratio (≥ 1.12, checked in the unit test) and
+  the pinned red edges.
+- **Focus.** One ring for everything that takes focus: `:focus-visible{outline:var(--focus-w) solid
+  var(--focus-ring)!important; outline-offset:var(--focus-gap)}`. `--focus-w` and `--focus-gap` are 2.5px.
+  Chromium snaps an outline to whole device pixels, so a 2px outline inside the 0.8 shell drew ONE pixel.
+  2.5px renders as 2. The rule is `!important` so the dozen inline `outline:'none'` styles cannot hide it.
+  Fields inside rows and tight cells (`.pp-num`, `.pp-sel`, row inputs, contenteditable, menu items) draw the
+  ring inside (`calc(-1 * var(--focus-w))`). Only two focus rules switch it off. The dialog card hosts the
+  trap, and its fields carry the ring. The search input's box draws the ring through `:focus-within`.
+- **Names.** `installA11yNames()` runs once in the constructor and wraps `React.createElement`. A control
+  with a `title` and no visible letters or digits (‹ › ✕ ▲ ▼ ▶ ■ ⋯ ⚙ 💤, or nothing) gets `aria-label` =
+  its title. So does a field with only a title or placeholder. Words win over the title (label in name),
+  and an explicit `aria-label` or `aria-labelledby` always wins. `a11yAutoName` is the pure rule. A Settings
+  row hands its label to its switch or field (`withA11yLabel`). The switch's hit box is 46×30 around the
+  same 40×22 track.
+- **Structure.** `<html lang="en">`. The top bar has `role="banner"` and the board has `role="main"`. These
+  are role attributes on the Design template's divs, not new elements, so they need a Design push. The page
+  tabs sit in a `<nav aria-label="Primary">` with `display:contents`.
+- **Narrow windows.** The sheet's Actions column is `position:sticky; right:0` (`STICKY_ACTIONS_STYLE`). Row
+  cells inherit the row's own paint, and the header cell paints `--top-bg`. At 1024px, or at 200% zoom, the
+  sheet compresses over its middle columns instead of clipping the timer and add-time controls away.
+  `tests/e2e/a11y-sweep.spec.js` checks the rendered type floor on every main surface, a visible ring on
+  real Tab presses, and that Actions and the plan header's Today / ‹ › are unclipped at 1024px and 800px.
+
+### Truthful settings and the first minute (UI revamp block 11b, 2026-10-04)
+
+- **Settings, signed out.** The Google Calendar section shows one line ("Sign in to your account to connect
+  Google Calendar.") and a Sign in button (`data-settings-signin` → `focusSyncSignIn`, the email field
+  `data-settings-email`). Connect, Backfill, Import, the import window and the poll interval render only when
+  `state.sync.connected`, because `gcalConnect` needs the account session. `gcalBackfillNote(connected, n)` says
+  "All dated tasks are already on Google" only when the calendar is connected. Developer copy (config.js,
+  `tools/static-server.mjs`, `.telemetry/`) lives in code comments, not in the UI. Journal weather is under
+  General › Journal. The tabs are a tab set: `role=tablist` with a name, one Tab stop (the selected tab),
+  `settingsTabKey` maps ←/→ (wrapping), Home and End, and one `role=tabpanel` (`#pp-settings-panel`)
+  labelled by the selected tab.
+- **Top-bar right slot.** The Design template's `{{ drawertoggle }}` slot sits just left of the gear and used to
+  render nothing; it now renders `renderTopRight()` = [sync status][timer pill]. No new placeholder, so no
+  Design push. `renderTopContext()` is the nav only. `syncStatusModel(sync, configured)` is PURE over the
+  existing sync state (no request): Local only · Sign in to sync / Syncing… / Synced / Sync error / Sign in again
+  to sync. The status is a quiet button that opens Settings on Integrations; its name never contains
+  "Settings", so the gear stays the only control with that name.
+- **One date language.** `LOCALE` ('en-US') in the named constants and `fmtDate(msOrDate, opts)` are the only
+  route to `toLocaleDateString`; `tests/ui-revamp-truth.test.js` fails on any other `toLocale*String` call and on
+  `Intl.DateTimeFormat` used for anything but the time zone. The owner's zh-CN machine had painted "10月4日".
+- **First run.** A new workspace is seeded with its routines, so "no tasks" was never true and the welcome
+  never showed. `workTaskCount()` counts active non-routine tasks; `firstRunModal`, `firstRunStep` and the
+  welcome use it (the non-modal "No tasks yet" card keeps the literal count). The morning summary does not
+  open over the welcome. Load demo no longer marks the first run seen, so Clear demo brings the welcome back.
+  The demo files into Work / Study / Personal (reusing same-named sections; the ones it creates are listed in
+  `pp-prefs.demoSectionIds` and removed by Clear demo once empty) and carries no tag chips.
+- **Small fixes.** The light toast has its own edge and lift (`--toast-border`, `--toast-sh`). The habit ⋯ menu
+  closes on an outside press (a transparent fixed catcher) and on Escape (a ladder rung right after the detail
+  menu; focus returns to its ⋯). Review's partial-week line reads "vs this time last week". The detail's
+  Project row reads ChronoCompose (`PROJECT` keeps its name).
+
 Pointer gestures (owner-set 2026-08-04). **Sheet row:** single click selects and opens the detail panel;
-ctrl/cmd-click toggles selection; shift-click selects a range; **double-click makes the task active**;
-right-click opens the row context menu. **Gantt bar, milestone, and collapsed recurrence strip:** a click
+ctrl/cmd-click toggles selection; shift-click selects a range **in screen order** (the rendered
+projection — sections, sort, collapse — via `selRangeIds`), ctrl/cmd+shift-click adds that range;
+**double-click on the title edits it inline** (UI revamp block 6, decision 11 — it no longer starts a
+timer; the timer lives on the play button); right-click opens the row context menu. A click on empty sheet
+space or a section header's own surface clears the selection; the **Gantt's empty lane** selects its row
+but never opens the detail (`rowClick(e,id,{noDetail:true})`) and has no double-click. **Gantt bar, milestone, and collapsed recurrence strip:** a click
 without a drag opens details; dragging the body moves it, dragging an edge sets a date, a no-drag click on
 an edge opens the date picker; right-click opens the bar menu. **Scheduled block (Today timeline and
 Schedule chips):** a click without a drag opens details; dragging pins THAT block — only the dragged chunk
@@ -22,6 +117,15 @@ opens details anywhere** — bars and blocks route their no-drag click through t
 one gesture cannot both drag and open. The inclusion popover on the row status glyph is strictly
 inclusion/exclusion and carries no time-tracking action.
 
+Keyboard (UI revamp block 6; block 7 adds the bar menu's keyboard path below). Sheet rows (`data-pp-row`, `role=row`, `aria-selected`) are a roving tab
+stop — `rovingRowId` gives exactly one row `tabIndex 0`. A focused row owns the row keys in `rowKey`:
+↑/↓/Home/End move and select (Ctrl moves focus only, Shift extends), Space toggles, Enter opens, F2
+renames inline, Shift+F10 / the context-menu key open the row menu. The row and bar menus are `role=menu`
+(`menuProps`/`menuKeyDown`: focus to the first item, arrows, Enter/Space; Esc closes through `onKey` and
+`closeMenu` returns focus to the row). The row menu's **Dates and progress…** item opens the BAR menu for that task (`openBarMenuFromRow`) — anchored under its bar when the bar is on screen — so Shift+F10 → that item → Enter reaches dates, progress, repeat and shape without a pointer; Escape returns focus to the row (`_barMenuReturn`). `?` opens the shortcut sheet (`SHORTCUTS()`, a Dialog); F6 moves
+focus to the toast's Undo. Two or more selected rows swap the sheet toolbar for the bulk-action bar
+(`renderBulkBar`, same `PLAN_STRIP_H`).
+
 Two mechanics that gesture map depends on, both fixed 2026-08-12 after the e2e layer caught them:
 
 - **The row's double-click does NOT come from the browser's `dblclick`.** The first click opens the
@@ -29,9 +133,12 @@ Two mechanics that gesture map depends on, both fixed 2026-08-12 after the e2e l
   on the overlay, not the row. The click target changes mid-sequence, Chromium resets its click count,
   and `dblclick` is never synthesised on the row. So `rowClick` records `{id, t, x, y}` in `_rowDblTag`
   and the modal's scrim AND card both run `detailDblFollowUp`, which consumes a one-shot press within
-  `ROW_DBLCLICK_MS` (400) and `ROW_DBLCLICK_PX` (6): it closes the detail and activates the task.
-  `rowDblClick` remains wired and still fires wherever no modal intervened; both routes share
-  `activateFromGesture`. Anything new that opens an overlay on a single click inherits this problem.
+  `ROW_DBLCLICK_MS` (400) and `ROW_DBLCLICK_PX` (6). Since UI revamp block 6 the tag also records whether
+  the first press was on the title line (`[data-pp-title]`): if so the follow-up closes the detail and
+  starts the inline title editor (`startInlineEdit`; Enter/blur save through `rename`, Esc cancels), and a
+  short `_suppressRowClickUntil` keeps the trailing click from reopening the detail; off the title the
+  press is consumed and the detail stays open. `rowDblClick` remains wired for surfaces where no modal
+  intervened. Anything new that opens an overlay on a single click inherits this problem.
 - **Every drag starter is primary-button only.** `startBarDrag` had no `e.button` guard, so a right press
   began a bar drag whose zero-distance release was read as a click: right-clicking a bar opened the
   detail panel instead of the bar menu, and `preventDefault` swallowed the context menu. `startBarDrag`,
@@ -47,6 +154,118 @@ without its own branch. Turning the setting on restores concurrency. `activateTa
 multitask timers alone. The active task is still *derived* (`activeTaskId()` = the most recent start in
 `pp-run`), so activation persists with no new field, and V2.1's ordering seam plus `notBefore` clamp
 already place it at the current time.
+
+A running timer is visible everywhere (UI revamp block 9). One model, `timerPillModel(running, tasks, now)`,
+names the ACTIVE task (`activeTaskId`'s rule) and its current segment's elapsed (`fmtElapsed`: `m:ss`, then
+`h:mm:ss`); it feeds four surfaces. **Top-bar pill** (`renderTimerPill`, `data-timer-pill`): rendered in the
+`{{ topcontext }}` slot right of the nav — no new Design placeholder — and absent when idle; dot, the name (a
+`<button>` that opens the detail), tabular elapsed, "+N" under multitask, and a `<button>` Stop sized
+`HIT_MIN_PX/SHELL_ZOOM`. **Tab title** (`docTitleFor` via `syncDocTitle` on mount/update): `▶ 0:12 · Name —
+ChronoCompose` while running, `APP_TITLE` otherwise (the document had no title before). **Running block**
+(today only, `runBlockModel`): the packer draws a running task from NOW for what is LEFT of its day, so the
+fill is PROGRESS — worked today ÷ (worked + still drawn) — as a `TL_RUN_BAR_PX` bar along the block's foot
+(`data-tl-run-fill`), plus the elapsed label (`data-tl-run-elapsed`; not on compact chips). **Pomodoro**: a
+session FOLLOWS the most recently started timer (`pomoBindRun`, applied in `startTimer` — phase and clock
+untouched), and with no session a running timer is MIRRORED (`pomoPanelModel` mode `mirror`): the task named,
+the ring counting its elapsed up against one focus interval, Start binding the session to that task without
+stopping it. Idle with nothing running is unchanged. **`T`** stops the timer the pill shows
+(`stopActiveTimer`); stop only, inert when idle, listed in `SHORTCUTS()`. Everything rides the existing 1 s
+run tick — no separate ticker. Sheet rows still get no ambient running paint (2026-08-13 ruling): the pill
+and the block are not a second channel on the row, they are the timer's only presence off it.
+
+**Focus is laid out around a "Now" hero (UI revamp block 10a; decision 9 kept Focus as its own tab).** Two
+columns: a WORK column and the existing from-now timeline (`data-focus-timeline`, unchanged). The work
+column stacks the hero, a habits strip, then the task list beside one Note|Scratchpad panel. From 1280px
+those two sit side by side, each scrolling on its own. Below 1280px they stack and the whole work column
+scrolls. The CSS classes are `.pp-focus-work`, `.pp-focus-lower` and `.pp-focus-pane`; the media query reads
+viewport px, so the shell zoom does not move the breakpoint.
+- **Hero model.** `focusNowModel(run, chunks, now, n, isRoutine)` is PURE. The hero is the RUNNING timer's
+  task; else the timeline block spanning now; else the next block today; else none. `next` lists the
+  following blocks, one per task, at most `FOCUS_NEXT_N`. Meals never qualify. Routines (`isRoutineTask`)
+  are never the idle hero and never "next up", but a running routine is still the hero.
+- **Hero rendering.** `renderFocusNow` draws `data-focus-hero=<running|current|next|none>`. It holds the
+  Pomodoro as its timer segment (`renderPomodoroPanel({inHero, taskId})`). Then come the name (opens the
+  task), spent-today/allotted as a bar and a sentence, Start/Stop (`data-focus-hero-toggle`,
+  `startTimer`/`stopTimer`, so the single-timer policy applies) and Done. Next up is the third segment.
+  The hero renders no `data-task-id`, so the task-list row queries are unaffected.
+- **Pomodoro colours are tokens.** A focus phase and the mirror use `--accent`; a break uses `--calm`. The
+  ring used to be a literal salmon red. Inside the hero the Pomodoro's own Start is outlined, because the
+  task's Start is the primary action. An idle Start binds to the hero's task, which replaces the old picker.
+  The gear is a `HIT_MIN_PX` button (`data-pomo-gear`). Called bare, the panel still renders a
+  self-contained card.
+- **Habits strip.** `renderFocusHabitStrip` puts today's habits on one row as `habitChip` toggles (shared
+  with the Today view; real buttons at `HIT_MIN_PX`/`SHELL_ZOOM`), with a done count and "+ Add habit".
+  With nothing due it is a single line. `habitDraftField(stateKey, qa)` is the inline name field
+  (owner 2026-08-24: Enter commits, Escape abandons, blank is a no-op). Focus and the Habits view both use
+  it, so neither creates an unnamed "New habit".
+- **Note | Scratchpad tabs.** `renderFocusNotes` shows one editor at a time. Note is today's journal entry
+  (`pp-journal`, `#pp-journal-editor`); Scratchpad is the running doc (`pp-scratch`, `#pp-scratch-editor`).
+  The tab persists as `focusNoteTab` in `pp-prefs` (default `scratch`). `gotoScratchpad` (`n`) selects the
+  Scratchpad tab.
+- **Music.** `renderMusicDock` is kept, but it renders only when `MUSIC_WIRED` is true (false until an
+  audio engine exists).
+
+**Habit consistency counts from creation.** `habitTrackStart(hb)` is the day tracking starts: `createdAt`,
+or an earlier deliberately ticked day, because a back-filled check opens the window. `habitConsistency`
+stops there. Today counts only once it is done, which is the streak's grace. The Habits view draws the
+days before the habit started as dashed "before" cells (`data-habit-cell`) and adds weekday ticks under
+the 14-day strip. It moves Delete behind a ⋯ menu (`data-habit-menu`) and shows `—` when there is nothing
+to score yet.
+
+### Review, Journal and Archive (UI revamp block 10b, 2026-10-04)
+
+**Review is a weekly review.** The page header carries `‹ This week ›` (`renderReviewWeekNav`,
+`state.reviewWeekOff`: weeks back from this one, never above 0; a "This week" button returns). Weeks run
+Sunday to Saturday, like `weekStartMs`. The Stats column is now "Week in review" (`renderReviewWeek`); the
+legacy `stats` page view renders the same thing. Habits and Needs planning stay beside it.
+
+- **One ledger.** `reviewTrackedByDay()` folds every task's `spentByDay`, plus a running timer's live part on
+  the day it started, into `{ymd: {total, bySec}}`. Archived tasks count; milestones do not. Every card and
+  the day grid read this one map, so a day reads the same everywhere. The old grid drew 35 days over a 14-day
+  ledger and showed real days as `0:00`.
+- **Equal-length comparison.** `reviewWeekData(off)` compares the week with the week before over the SAME
+  number of days. This week so far (Sunday to today, `n` days) is compared with the same `n` days of last week;
+  a past week is compared with the whole week before it. `perDay` is `null` for days still to come, never 0.
+  `reviewVsText` says which comparison it is.
+- **Time by section.** Minutes group by the root section (`rootSectionId`), drawn in `sectionHue`, the
+  Gantt/timeline colour. A Routines section is drawn in `--routine-edge`, as routines are elsewhere. Tags were
+  folded into sections, so the old "Time by tag" read everything as "untagged". `statsData` still returns
+  `byTag` for its old tests, but nothing renders it.
+- **Cards answer one question each**: How much did I track? · What did I finish? · Where did the time go? ·
+  Were my estimates right? · When did I work? Each gives an answer with units (`fmtHM`: "12h 40m") and a
+  delta against the comparison window (`fmtDeltaHM`). "Finished" counts completions stamped in the window: a
+  repeat counts each completed occurrence, and routines are counted apart. The estimate pairs finished
+  non-repeating tasks that had a Planned budget with all the time they took. Dropped: on-time rate (an
+  all-day end's due instant is ambiguous, so it cannot be computed truthfully), today's plan-vs-actual (that
+  is Today's job), and the overdue/to-plan counts.
+- **The day grid** (`reviewHeat`) shows `REVIEW_HEAT_WEEKS` whole weeks ending at the selected week, with
+  real data on every day up to today. Its steps are `REVIEW_HEAT_STEPS`, accent mixed into `--card-bg`, and the
+  lightest step stays legible on the light theme. Each week column is a ≥ `HIT_MIN_PX` button that opens that
+  week, and its total sits under it.
+- **Empty states.** A card with nothing in it explains what will appear there and how. When there is no data
+  at all, a lead card explains the page and there is no empty grid or "0:00 / 0:00" legend. Empty-state copy
+  uses `--text-mut`, not `--text-faint`, which fails AA on the light theme. An empty Habits column gives up
+  width and says what will appear in one top-aligned line.
+
+**Review queues leave routines out.** `reviewSkip(t)` is true for routines (`isRoutineTask`), Points
+(`isPointTask`), and clock-only tasks (a written start clock on a task that does not compress,
+`isUncompressable`). Their time is their clock, not a Planned budget. `reviewUnplanned()` (the `unplanned` chip
+minus archived work and `reviewSkip`) feeds Review's and the Journal's Needs planning. `agingTasks` (the "Still
+relevant?" prompt) and `statsData.unplanned` skip them as well.
+
+**The Journal opens on "Your day".** `journalDayModel(B)` merges `journalActuals` and `journalAutoLog` into one
+row per task: `done`, `worked` or `planned` (today only). Rows run done → worked → planned, most time first.
+Routines fold away: one with tracked time keeps its row, a ticked one without time is listed by name, and a
+planned-only one is dropped. The card (`data-journal-day`) leads the main column, always expanded, ahead of the
+prompts and the entry. It shows at most `JOURNAL_DAY_ROWS` done/worked rows and `JOURNAL_DAY_PLANNED_ROWS`
+planned rows before "+N more". Done and Actuals left the rail. The day arrows are real `<button>`s with
+labels, sized `HIT_MIN_PX / SHELL_ZOOM` so they render at 24px (`data-journal-nav`). There is no Shutdown flow
+in the app (Shutdown is a Todoist routine), so nothing links from it.
+
+**Archive.** `archiveRows()` gives each archived task the one date its row shows: `Done <completion>` for a
+completed task, `Archived <archivedAt>` for one never completed. Rows sort by that date, newest first. The date
+column is 150px and never wraps. Delete is a quiet text button rather than a red one on every row.
+"← Back to Plan" stays.
 
 The V2.3 sheet is a uniform task list rather than a field grid. Each normal row contains priority/done,
 task name, removable `@tag` chips plus an inline `@` input, the due/recur chip, a `planned → allotted`
@@ -83,8 +302,10 @@ is the one vertical-geometry pass, returning `_yTop` (indexed by the flattened t
 `_secLayout` (each band's full extent); the second exists because `_yTop` cannot answer "which section
 owns this Y", and an empty band owns Y-space but no row. `sectionAtY` resolves a drop into a band,
 including an empty or collapsed one. A row drag re-sections inside the same `commit()` as the reorder, so
-one drag is one undo step. `TAG_SECTION_H` is consumed by matching sheet headers and
-Gantt rails, and Gantt `_yTop` continues to index tasks only. Normal and milestone task rows retain the
+one drag is one undo step. The header height comes from `sectionHeaderH(sec)`: `TAG_SECTION_H` for a
+section with tasks (collapsed or not), the thin `SECTION_EMPTY_H` for an EMPTY one (UI revamp block 6 —
+"empty states collapse"; it is still a band in `_secLayout`, so still a drop target, and it shows "+ add").
+Both are consumed by matching sheet headers and Gantt rails, and Gantt `_yTop` continues to index tasks only. Normal and milestone task rows retain the
 same fixed row height; expanded description height is still measured into the Gantt Y offsets. Focus uses
 the same sections and uniform 52px task rows with `spent / allotted`, a progress fill, done, timer, and
 `+15` tracked-time actions.
@@ -162,8 +383,9 @@ on the one axis (vertical position relative to the bar) the legend had left free
 | Shape | Rounded rectangle | Ordinary task; whole-day width = inclusive start day → inclusive due day |
 | | Diamond (45° square) | Milestone (`type`); hollow = open, filled = done |
 | Fill | Red (`--danger`) | On the critical path — **off by default**, see below |
-| | **Green (`--success-strong`) from the left edge to `pct%`** | % done. A 100% bar is green edge to edge; a 0% bar has no green at all |
-| | Accent | The remainder. **Not** priority and **not** tag |
+| | **Section hue at full strength from the left edge to `pct%`** (UI revamp block 8) | % done. A 100% bar is the full hue edge to edge; a 0% bar has no fill at all |
+| | **Section hue, toned** (UI revamp blocks 7–8) | The remainder: the task's root section's colour (`taskHue`, the same hue the Day/Week/Agenda blocks are filled from; `SECCOL_NONE` with no section) mixed toward `--gantt-bg` by `ganttTone`. **Not** priority and **not** tag |
+| | Neutral `--routine-bg` | A routine (`isRoutineTask`) — see the block 8 section below |
 | Displaced | **Dashed `--warn` rule under the bar's full width** + a `»` glyph at its left | `autoSchedule` moved this bar forward because a predecessor is **overdue and unfinished** — not because the user dragged it. Tooltip names the amount: *"pushed Nd by an overdue predecessor"*. Driven by `_schedDisplaced` |
 | Transient | 2px `--bar-ring` | Selected |
 | | Warm row wash | A day is hovered in a calendar view |
@@ -225,6 +447,67 @@ The in-bar `n%` readout is unchanged (white with a text shadow, its own contrast
 fill's), as are the on-bar grab band, `pctGrabZone`, the caret below the bar, and `PCT_GRAB_PX` /
 `BAR_GRIP_PX` / `PCT_LABEL_MIN_W`.
 
+### Readable Gantt (UI revamp block 7, 2026-10-04)
+
+**Bars carry their names again.** The 2026-08-12 removal (see the note above `ganttBlock`) was about
+density: a daily repeat drew one label per occurrence. Both causes are now gone — Chain 6 block 44 merges
+consecutive occurrence days into one run, and **a repeat names only its first painted run** (`lab.show` from
+`renderGantt`). `ganttLabelPlan(name, w, room)` is the pure rule: inside when the whole name fits (leaving
+`GANTT_PCT_RESERVE_PX` for the n% readout), outside when the whole name fits in the `room` up to the next bar
+in the same row, otherwise whichever side shows more, and nothing below `GANTT_LABEL_MIN_PX`. A diamond has
+no inside. Labels are `pointerEvents:none`. An inside label is drawn ONCE in one ink (`ganttLabelInk`, UI revamp
+block 8 — block 7's two clipped copies read as a seam through the word). While the link dots show, an
+outside label steps past them.
+
+**One colour meaning.** A bar's remainder is its section hue (`ganttBarPaint` → `ganttHueOf`, one lookup
+context per render). Critical (opt-in) still outranks it; priority is the sheet's circle only. Block 8
+replaced the green done-fill with the hue itself (see below), which retired the green-on-green overlap
+block 7 had accepted.
+
+**Tooltip.** The native `title` on the bar body and diamond is retired: it would have doubled the drawn
+tooltip. `renderBarTip` draws "Name · Tue Oct 06 → Thu Oct 08 · 1:30 planned" (`barTipModel`: start through
+`fmtDT`, end through `fmtEnd`, planned through `fmtDur`; displacement and the description snippet as extra
+lines) as a fixed overlay anchored through `uiPt`. Its machine-readable twin is `data-gantt-tip` on the bar
+body, which starts with the name (then ` · occ n` on a repeat) — **e2e specs address bars by
+`[data-gantt-tip^="Name ·"]`**, not by `title`.
+
+**Row ↔ bar link.** One `hoverId`, as before: entering a bar writes `hoverId` and `barTip` in ONE setState
+(`barHoverEnter`), so the sheet row takes its hover fill; a hovered sheet row rings its bar with
+`--bar-hover-ring` (`data-gantt-hover="1"`). No mousemove-driven state.
+
+**Hit boxes.** A Gantt handle's box is `GANTT_HIT_PX` = ⌈`HIT_MIN_PX`/`SHELL_ZOOM`⌉ local px, so it RENDERS at
+24px. Each resize grip keeps its 7px inside part (`BAR_GRIP_PX`, so `pctGrabZone` is untouched) and gains a
+`BAR_GRIP_OUT_PX` extension outside the edge (`data-gantt-edge-ext`), live only while THIS bar is under the
+pointer (`barTip`) or dragging — at rest a press beside a bar still belongs to the empty lane. The link dots
+moved out past the extension (`left/right: calc(100% + BAR_GRIP_OUT_PX)`) so the two never share a pixel.
+
+**Feedback during the gesture.** `renderDragChip` floats a chip beside the pointer (raw client px through
+`uiPt`, `DRAG_CHIP_DX/DY`): during a Gantt drag it names the dates the release will write
+(`ganttDragChipText` — both ends for a move, only the moved edge for a resize, plus the day delta and "held
+by a dependency" when clamped); during a Day/Week/4-Day block drag it names the landing time
+(`blockDragChipText`). It appears only past the same 4px slop every gesture uses, and the drop's toast with
+Undo is unchanged.
+
+### A quiet Gantt (UI revamp block 8, 2026-10-04)
+
+Block 7's full-saturation hues made the chart loud next to the sheet. The rules now:
+
+- **Body = the hue toned toward the pane.** `ganttTone(hue, base)` mixes the section hue into `--gantt-bg`
+  at `GANTT_TONE` (0.55) — the same family as the Day/Week blocks' mix into `--tl-fill-base` — and steps
+  further toward the pane (never below `GANTT_TONE_MIN`) until the label ink clears `TEXT_AA` (4.5:1). The
+  pane colour is read from the live `--gantt-bg` token once per theme (`ganttToneBase`), so there is no
+  second copy of its hex; with no DOM (the unit layer) the hue is returned untoned. The hue itself rides on
+  `data-gantt-hue`, which is what tests compare against the timeline.
+- **Progress fill = the hue at full strength** (`pctFillPaint(pct, paint.fill)`), so done and remaining are
+  one colour at two strengths in every section. "Done" is simply a 100% fill; there is no green bar any
+  more. The sheet's own % Done track keeps `--success-strong`.
+- **One label ink.** `ganttLabelInk` takes the body's ink for the whole label; where the label crosses the
+  fill and that ink is below AA there, a 1–2px halo in the opposite ink (`data-gantt-label-halo`) carries
+  it instead of a second colour. A 100% bar's label takes the fill's ink. The in-bar n% readout takes the
+  surface ink too (it used to be fixed white, which failed on the light theme's paler bodies).
+- **Diamonds** are outlines, so they take the full hue (the toned body would vanish at 2px).
+- **Routines are neutral** on the Gantt as everywhere: `--routine-bg` body, `--routine-fg` ink.
+
 ### The `Time needed` column
 
 Owner, 2026-08-17: *"I wanted it as a column, not as something inside the detail panel."* `colDefs()`
@@ -270,7 +553,13 @@ rectangle is rendered pixels while column widths are local CSS pixels inside the
 with `uiScale()` rather than assuming 0.8. Hiding or resizing a column therefore moves the cap immediately;
 reordering leaves it unchanged. The sheet's lower bound is the responsive `SHEET_PANE_MIN_PX` (capped by
 28%), not the visible-column edge: on a wide board or after hiding columns, every position between that
-usable pixel floor and the last-column maximum remains reachable. Selection keeps its separate triage
+usable pixel floor and the last-column maximum remains reachable.
+
+UI revamp block 6: the maximum is no longer the bare column edge once the user has CHOSEN a width.
+`sheetMaxWidthPx()` adds `NAME_COL_GROW_PX` when a split is saved for the current key (or a drag is in
+flight), `clampSplitPct` allows the same allowance, and the Task column is the one flexible column
+(`colFlex`: `1 0 <w>px`), so the extra width goes to Task first while Actions stays flush right — still no
+trailing whitespace. An unsaved default still opens at the column edge. Selection keeps its separate triage
 floor and 28–78% clamp. The revised
 `sheet-default-width.spec.js` covers Today and Schedule at 1280, 1600, and 1920 pixels, real divider
 compression/persistence, the right-edge clamp, and real column resize/hide/reorder gestures.
@@ -463,7 +752,8 @@ date live, so the popover and the detail-panel field are unchanged apart from th
 `taskInlineTags`, `taskDepChips`, `taskInclControl`, `taskSnoozeBtn`, `taskFlowCell`, `taskTimerBtn`,
 `taskAddTimeBtn`, `taskDescToggle`) are the single definition of every list-row control, and both `renderSheet`'s row and
 `planCard` call them, so parity holds by construction rather than by two copies agreeing. Cards carry the
-row's gestures too (click → details, double-click → activate, right-click → row menu) while mousedown
+row's gestures too (click → details, right-click → row menu; double-click no longer activates — UI
+revamp block 6) while mousedown
 still arms the card drag. Two things stay sheet-only on purpose: the **row-drag grip** and the **subtask
 caret** — in the sheet a drag reorders and re-nests, on a card it includes/excludes, and one gesture
 cannot mean both. The card's description panel uses `state.cardDescOpen`, never `state.descOpen`,
@@ -529,8 +819,8 @@ part, are what the clearance rule protects.
 
 The percentage is drawn as small overlaid text **inside** the bar (`data-pct-label`), right-aligned,
 `pointerEvents:none`, dropped entirely below `PCT_LABEL_MIN_W` and at 0% rather than clipped. `ganttSideRow`
-— the old strip to the right of a bar that used to hold this readout — is deleted; nothing is drawn to a
-bar's right any more except the link dot.
+— the old strip to the right of a bar that used to hold this readout — is deleted. Since UI revamp block 7
+a bar's right holds the grip extension, the link dot and, when the name does not fit inside, the name.
 
 *History worth keeping:* the caret's drag gesture worked, and `tests/e2e/pct-drag.spec.js` proved it with
 real pointer input in both directions. The owner still could not use it. A 24×16 box, invisible until hover,
@@ -839,6 +1129,62 @@ Because the drag's px→minute conversion reads the scale the column rendered at
 after `uiPt`), changing the level changes that conversion; a body-drag lands on the same minute at both
 levels, and `tests/e2e/drawer-zoom.spec.js` holds that at the non-default level specifically.
 
+### Timeline legibility (UI revamp block 8, 2026-10-04)
+
+**Compact chips.** A block of `TL_COMPACT_MAX_MIN` (20) minutes or less — or one whose drawn height is under
+`TL_FULL_MIN_PX`, which is what a 45-minute block becomes in a Week column — renders as a one-line chip
+(`tlIsCompact`, `data-tl-compact="1"`): the name, then its start time, ellipsised, at least `TL_CHIP_H_PX`
+tall, no ▶ column unless it is running. Block and chip titles are `TL_BLOCK_FS` (14 local px), so they
+RENDER at ≥ `TL_TEXT_MIN_RENDER_PX` (11px) under the 0.8 shell. The start time is the `data-tl-chip-time`
+attribute drawn by a CSS `::after`, so the block's text — what the hover card, the specs (`timelineBlocks`)
+and assistive tech read as its title — is still exactly the name. Applies wherever `renderDayColumn` draws:
+Day, 4-Day, Week and the Focus side timeline.
+
+A chip is taller than its minutes, so it spills into whatever follows. `tlChipLayout` (pure, one pass down
+the column) keeps both readable: a chip never starts above the previous chip's bottom (a run of short
+blocks reads as a list — each names its own start time, so the nudge cannot misstate when it is), and a
+regular block a chip spills into keeps its TRUE top but pads its title below the spill, the chip painting
+above it at z 2 (under Points and the now-line). A block being dragged is placed exactly where the pointer
+puts it. The heights the layout returns are drawing, not accounting: a chip's box no longer equals its
+minutes, which is why it is marked `data-tl-compact`.
+
+**The visible range.** It used to be exactly the day window, so a Wakeup at the day start sat flush under
+the column header and a Shutdown near the end ran off the bottom of every Week column. `tlViewRange(B, win,
+items)` widens the window so the first and last block whose time the TASK states (a clock appointment or
+routine — `fixed` without a drag pin) or Point keeps `TL_RANGE_PAD_MIN` of room, snapped outward to
+`TL_RANGE_SNAP_MIN`, clamped to the day's midnights (`tlRangeItems`). Packed and dragged blocks never widen
+it — the packer only places inside the window, and a range that followed a drop would rescale the column
+under the pointer; a chip at the very end of the column lifts to stay inside it instead. Clock windows
+(Free time) are settings and never widen it either. The room outside the window gets a faint `--tl-outside`
+wash (`data-tl-outside`). A multi-day grid builds each day once and shares ONE range (`multiDayRange`,
+minutes from midnight) across its columns and the hour gutter (`renderHourGutter(availH, range)`), so the
+labels still sit on their lines. The day-bound handles stay on the bound's own line (they already did,
+since Task 12), and Focus's from-now column keeps its own start. Block drags are unaffected: the px→minute
+conversion is relative.
+
+**Routines are neutral** (`isRoutineTask`: the Routines section, an `@routines` tag, or a daily repeat at a
+clock time). The Routines section's palette slot happened to be `SECCOL[5]` red — the same red as danger
+and the current-block border — so every Wakeup/Lunch/Dinner read as an alarm. `tlSurface` now gives a
+routine `--routine-bg` / `--routine-fg` / `--routine-border` and a neutral rail; its pinned edges stay
+`--tl-pin-edge` red, because the owner's 2026-09-10 edge rule covers every clock-pinned block. The 📌 glyph
+names it (`data-tl-routine`). The neutral fill holds on the Gantt and the month calendar too. Red stays
+for danger and for pinned instants: critical path, pinned edges, the now-line.
+
+**Month.** `monthCellLines` decides a cell (pure): real work first, ranked by priority (P1 first) then
+planned duration (longest first); every routine folded into ONE "📌 N routines" line
+(`data-pp-month-routines`); display-only events last. At most `MONTH_MAX_LINES` rows: when the cell
+overflows, the routine line keeps its row, work gives way, and the last row is a real **"+N more"** button
+(`data-pp-month-more`) counting tasks. It opens the day list (`state.monthMore`, `data-pp-month-pop`),
+anchored to its cell by grid position: every work item (opens the task), the routines under their own
+label, the events, and "Open week" (sets `weekAnchor`, switches to Week). A scrim closes it on an outside
+press; Escape closes it as its own rung of the ladder, after the bar menu. The unlabelled count badge in
+the cell corner is gone; the cell's tooltip says "N tasks · M routines".
+
+**One "Exact" chip.** The sheet's Time-needed chip drew a decided Exact solid and a derived one outlined,
+so routines (which store the decision) looked like a different control. Exact is now always the accent
+outline on `--accent-soft`; decided vs derived is the italic face and `data-exact-src` (`set` | `derived`),
+as for Flexible.
+
 ### Boundary notifications (PR #126, 2026-08-16)
 
 There is now exactly **one** task notification type, `taskBoundary`. `deadlineRisk` is deleted outright
@@ -910,7 +1256,8 @@ where the arrow still says which number feeds which because a card has no column
 
 **Deleted this round**: the capacity readout, both the Today header figure and the per-day Week/4-Day
 strip (`CAP_STRIP_H` and the reserved height with it); the Today view's active-task banner, Pomodoro bar
-and music dock (Focus keeps the panel and the dock, and the pomo state machine is untouched); the
+and music dock (Focus keeps the panel and the dock, and the pomo state machine is untouched — since UI
+revamp block 10a the panel lives in Focus's Now hero and the dock renders only when `MUSIC_WIRED`); the
 alternating hour band; and the `+15 min` button, replaced by a box that SETS today's tracked minutes.
 
 ## The filter bar (2026-08-25 redesign)

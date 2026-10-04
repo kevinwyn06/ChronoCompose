@@ -15,7 +15,7 @@ test('the detail panel can turn a repeating task into a single one', async ({ pa
   ] });
 
   await page.locator('[data-task-id="ep"] [data-task-name]').click();
-  await expect(page.getByText('DESCRIPTION', { exact: true })).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible({ timeout: 15000 }); /* UI revamp block 4: the dialog itself, not a label inside it */
 
   const sel = page.locator('[data-qa="detail-repeat"]');
   await expect(sel).toBeVisible();

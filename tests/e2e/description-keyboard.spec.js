@@ -5,7 +5,10 @@ test.describe('keyboard-first task descriptions', () => {
   test.beforeEach(async ({ page }) => {
     await boot(page, { seedOnce:true, tasks:[task('desc-1', 'Description task', { start:'0d', end:'+1d' })] });
     await page.locator('[data-task-id="desc-1"] [data-task-name]').click();
-    await expect(page.getByText('DESCRIPTION', { exact:true })).toBeVisible();
+    /* UI revamp block 4: the description lives in the detail's Details disclosure, collapsed while empty. */
+    await expect(page.locator('[data-pp-dialog="detail"]')).toBeVisible();
+    await page.locator('[data-qa="detail-more"]').click();
+    await expect(page.locator('[data-qa="detail-desc"]')).toBeVisible();
   });
 
   test('has no formatting line, keeps shortcuts, and autoformats a dash marker', async ({ page }) => {
@@ -95,7 +98,7 @@ test.describe('keyboard-first task descriptions', () => {
     await expect(editor).toContainText('safe');
     await expect(editor).toContainText('link');
 
-    await page.getByText('DESCRIPTION', { exact:true }).click();
+    await page.locator('[data-qa="detail-desc"] .pp-label').click(); /* UI revamp block 4: the row label blurs the editor */
     await expect.poll(() => page.evaluate(() => localStorage.getItem('pp-tasks'))).toContain('safe');
     await page.reload();
     await page.locator('[data-task-id="desc-1"] [data-task-name]').click();

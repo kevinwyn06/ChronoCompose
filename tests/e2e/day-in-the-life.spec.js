@@ -297,7 +297,7 @@ test.describe('A day in the life', () => {
     expect(onGantt, 'the Gantt charges the same day the Today drawer drew').toEqual(afterDrag.charged);
 
     /* ── 22:30 · journal the day ──────────────────────────────────────────────────────────────*/
-    await page.locator('[role="button"][title="Journal"]').click();
+    await page.getByRole('tab', { name: 'Journal', exact: true }).click(); /* UI revamp block 1: top nav */
     const editors = page.locator('.pp-rich[contenteditable]');
     await expect(editors.first()).toBeVisible();
     const entry = editors.last();
@@ -314,8 +314,8 @@ test.describe('A day in the life', () => {
     await expect(page.locator('.pp-rich[contenteditable]').last())
       .toContainText('Tax return finally out of the way.');
 
-    /* Back to the board the way a user would: the sidebar, then the view the app remembered. */
-    await page.locator('[role="button"][title="Dash"]').click();
+    /* Back to the board the way a user would: the top nav's Plan tab, then the view the app remembered. */
+    await page.getByRole('tab', { name: 'Plan', exact: true }).click();
     await switchView(page, 'Today');
     await page.locator('[data-tl-block]').first().waitFor({ state: 'attached', timeout: 15000 });
     await expandDrawer(page); /* `_drawerZoom` is session-only by design, so it resets on reload */
@@ -360,7 +360,7 @@ test.describe('fixed (28a): the seam\'s rounding residue', () => {
     for (let i = 0; i <= idx; i++) await page.keyboard.press('j');
     await page.keyboard.press(' ');
 
-    await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await page.getByRole('tab', { name: 'Plan', exact: true }).click(); /* UI revamp block 1: Overview is shown as Plan */
     await switchView(page, 'Today');
     await page.locator('[data-tl-block]').first().waitFor({ state: 'attached', timeout: 15000 });
     await expandDrawer(page);

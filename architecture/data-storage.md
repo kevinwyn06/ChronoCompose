@@ -97,6 +97,9 @@ its `start` is at least `AGING_DAYS` (14) old, it has no recorded time, and it i
 or a milestone; undated tasks have no measurable age and are left to Extra/unplanned. Capped at
 `JOURNAL_AGING_MAX` (8): a review cue, not a backlog dump.
 
+`pp-prefs` also carries `demoSectionIds` (UI revamp block 11b): the ids of the sections Load demo had to
+create, so Clear demo can remove them again once nothing else lives in them.
+
 `pp-prefs` view state includes `groupBy` (`section` | `inclusion` | `none`), `planView` (the Plan tab's
 sub-view, which no longer includes `select` or `matrix`), and `collapsedSections` (band key → truthy when
 collapsed). The inclusion bands use the reserved keys `__incl_in` / `__incl_out`; **absence of a key is

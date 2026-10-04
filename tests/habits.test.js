@@ -64,7 +64,8 @@ test('habitConsistency: done scheduled / total scheduled over the window', () =>
   const now = Date.now();
   const today = c.startOfToday();
   const done = {}; for (let i = 0; i < 5; i++) done[c.ymdOf(today - i * DAY)] = true; // 5 of the last 10 days
-  const d = c.habitConsistency(habit(c, { done }), now, 10, {});
+  // Created well before the window, so every day of it counts (UI revamp block 10a: counting starts at creation).
+  const d = c.habitConsistency(habit(c, { done, createdAt: today - 30 * DAY }), now, 10, {});
   assert.equal(d.sched, 10, 'daily → every day scheduled');
   assert.equal(d.done, 5);
   assert.equal(d.pct, 50);

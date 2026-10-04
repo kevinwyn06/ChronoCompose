@@ -347,8 +347,11 @@ test('recurring appointments derive Exact only on their real occurrence day', ()
   const allotted = c.computeAllotted([appointment, first, second], monday);
   assert.deepEqual(
     [allotted.weekly.allotted, allotted.first.allotted, allotted.second.allotted],
-    [5, 58, 57],
-    'the absent appointment competes as a 5-minute flexible default; it does not reserve 60 minutes off the top');
+    /* UI revamp block 5 (owner walk 2026-10-04): this used to pin [5, 58, 57] — the absent appointment
+       competing as a 5-minute flexible default on a day it does not occur. The owner's rule is that a
+       repeat receives time only on its occurrence days, so on Monday it now holds nothing at all. */
+    [0, 60, 60],
+    'the absent appointment takes nothing on a day it does not occur, and reserves nothing off the top');
 
   const stored = Object.assign({}, appointment, { uncompressable: true });
   assert.equal(c.isUncompressable(stored, monday), true,

@@ -27,12 +27,42 @@ current extraction path returns one date per line. Keep regression fixtures in `
 do not broaden cue matching without adversarial cases for title-word collisions and deadline/start
 inversion.
 
-A single bare number plus duration unit (`30m`, `1.5h`) is a movable budget only when it is the sole
-temporal token. The parser masks that candidate before chrono extraction, then claims it only if no
-date, clock, recurrence, or repeat-until token won; otherwise it restores the candidate as title text.
-Unitless numbers and non-duration units remain ordinary text. The snooze parser accepts the same bare
-form, but any snooze resolving to today is floored forward to tomorrow so a sub-day duration has an
-observable effect.
+A single bare number plus duration unit (`30m`, `1.5h`) is a duration when it is the sole temporal token
+**or when it is written next to the date** (UI revamp block 5, 2026-10-04). The parser masks that
+candidate before chrono extraction, then claims it if no date, clock, recurrence, or repeat-until token
+won, or if one did and only spaces or a comma separate the two spans. Next to a date it reads exactly as
+`for <dur>` would: "Email advisor Friday 2pm 30m" is a 2:00–2:30pm block with `planned` 30, "Quiz prep
+1.5h tomorrow" a 90-minute budget on a bare day. Anywhere else it is restored as title text, so "Run 5m
+sprints tomorrow" keeps its title. Unitless numbers and non-duration units remain ordinary text. The
+snooze parser accepts the same bare form, but any snooze resolving to today is floored forward to
+tomorrow so a sub-day duration has an observable effect.
+
+## Quick-add correctness (UI revamp block 5, 2026-10-04)
+
+- **One shaping path.** `quickShape` (parse → `shapeParsedTask` → `whenInclusiveRange`) feeds both the
+  preview and `runQuickAdd`, and the chips come from `quickChips(task)`, a pure function of task fields.
+  The preview is `quickChips(quickShape(text))`; the saved task's chips are `quickChips(saved)`. The test
+  table asserts the two are equal. Chips are labelled **Starts / Due / Ends / Takes / Repeats / Until**.
+  The old preview read the raw parse, so "by Oct 20 at 5pm for 3h" previewed 5pm and saved 2pm.
+- **A typed day range ends on the day it names**, in quick add and the title bar as on the When line:
+  "Oct 10 to Oct 12" stores Oct 12 00:00 (read as end-of-day by `dueMsOf`/`endDayMs`), not Oct 13. The
+  title bar applies it only when the text itself was a day range, never to an end retained from the task.
+  A repeat's window keeps its exclusive series end. Stored data is not migrated.
+- **A month word is a date only when it reads as one.** A chrono result that is certain of the month and
+  of nothing else (no day, weekday, year, clock, or end) is dropped unless a cue sits in front of it
+  (`in`, `by`, `before`, `after`, `from`, `until`, `due`, `since`, `during`, `of`, `mid`/`early`/`late`).
+  "Call May about March budget" keeps its title; "Pay rent may 1" and "Dinner in may" are dates.
+- **A rule with no day named anchors on its first occurrence** (`_alignRecurDay`): "Gym every weekday
+  7am" typed on a Sunday starts Monday 7am. `_firstRecurOccurrence` does the same for a dateless
+  "every weekday". A day the user did name is kept.
+- **An explicit `at <clock>` is a start.** The At/By chooser no longer asks after "at 7am" / "at noon" /
+  "friday at 3pm". A bare clock with no `at` ("gym 7am") still asks. The recur chooser says "On
+  weekdays" for "every weekday".
+- **Adding closes quick add** and raises the toast "Added “X” · <When sentence>" with Undo.
+
+Known, not changed here: a bare clock that has already passed today ("gym at 7am" typed at 3pm) still
+lands on today, because the "naming today's date means today" re-read also catches clock-only spans, and
+the title bar's context merge (`owner-2026-08-25-context-aware-parse`) depends on that.
 
 ## URLs are claimed first (owner ask 2026-09-09)
 

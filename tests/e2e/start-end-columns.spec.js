@@ -17,8 +17,8 @@ test('Start and End cells distinguish bare dates from explicit clocks and open t
   await expect(clocked.locator('[data-cellk="end"] [data-date-clock]')).toBeVisible();
 
   await bare.locator('[data-cellk="start"]').click();
-  await expect(page.getByText('START', { exact:true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText(/^Start/); /* UI revamp block 4 */
   await page.keyboard.press('Escape');
   await bare.locator('[data-cellk="end"]').click();
-  await expect(page.getByText('DUE', { exact:true })).toBeVisible();
+  await expect(page.locator('[data-qa="dp-head"]')).toHaveText(/^End/); /* UI revamp block 4: "End", as the column says */
 });

@@ -145,6 +145,12 @@ test('the detail panel exposes every operation the row menu does', () => {
   c.renderVals();
 
   c.setState({ detailId: 't1' });
+  /* UI revamp block 4: the actions moved into the header's ⋯ menu and the diagnostics behind the Details
+     disclosure — still one click away each, so the parity check opens both before reading the text. */
+  const closed = textOf(c.renderDetail());
+  assert.match(closed, /Task actions|⋯/, 'the header carries the actions menu');
+  assert.match(closed, /Details/, 'the Details disclosure is offered');
+  c.setState({ detailMenu: true, detailMore: { id: 't1', open: true } });
   const detail = textOf(c.renderDetail());
 
   for (const [what, re] of [

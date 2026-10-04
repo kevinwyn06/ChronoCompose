@@ -86,6 +86,20 @@ async function seed(page, data = {}) {
           o.onListSince = dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate());
         }
       }
+      /* UI revamp block 10b: the per-day time ledger is keyed by `ymd` too, so a fixture can say "40 minutes
+         three days ago" as `spentByDay: {'-3d': 40}`. A key that is already a ymd passes through. */
+      if (o.spentByDay && typeof o.spentByDay === 'object') {
+        const by = {};
+        Object.keys(o.spentByDay).forEach((k) => {
+          const m = OFF.exec(k);
+          if (!m) { by[k] = o.spentByDay[k]; return; }
+          const dt = new Date(midnight + parseInt(m[1], 10) * DAYMS + 12 * 3600000); /* noon: DST-safe day */
+          const p2 = n => String(n).padStart(2, '0');
+          const key = dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate());
+          by[key] = (by[key] || 0) + o.spentByDay[k];
+        });
+        o.spentByDay = by;
+      }
       /* Recurrence bounds are dates too. Keep them relative for the same reason as task edges: a
          finite recurring-run gesture fixture must not become wholly past as the wall clock advances. */
       if (o.recur && typeof o.recur.until === 'string') {
@@ -463,9 +477,15 @@ async function drawnMinutes(page, cal) {
   return { byTask, total, a, b };
 }
 
-/** Click one of the six main-view tabs by its label ('Gantt' | '4-Day' | 'Week' | 'Today' | …). */
+/* UI revamp block 2: the view switch lives in the plan pane's header and is addressed by its VIEW KEY
+   (`data-view-key`). "Today" now reads Day and "Schedule" reads Agenda; both old and new labels map here
+   so specs written against either keep working. */
+const VIEW_KEY = { Gantt: 'gantt', Day: 'today', Today: 'today', '4-Day': 'day4', Week: 'week',
+  Month: 'month', Agenda: 'schedule', Schedule: 'schedule' };
+/** Click one of the six main-view tabs by its label ('Gantt' | 'Day' | '4-Day' | 'Week' | 'Month' | 'Agenda';
+    the old 'Today' / 'Schedule' still resolve). */
 async function switchView(page, label) {
-  await page.locator(`[role="tab"][title="${label}"]`).click();
+  await page.locator(`[data-pp-viewswitch] [data-view-key="${VIEW_KEY[label] || label}"]`).click();
 }
 
 /**

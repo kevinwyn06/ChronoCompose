@@ -244,9 +244,13 @@ test('both link dots carry a HIT_MIN_PX hit box that clears their resize grip', 
     assert.ok(findAll(dot, n => /50%/.test(String(styleOf(n).borderRadius || ''))).length,
       'the visible circle is drawn inside the hit box, not enlarged');
   });
-  // Overlapping either 7px grip is the C3 regression: each box starts at its own edge, outside the bar.
-  assert.strictEqual(styleOf(out).left, '100%', 'trailing box starts at the bar right edge');
-  assert.strictEqual(styleOf(inn).right, '100%', 'leading box starts at the bar left edge');
+  // Overlapping either grip is the C3 regression. UI revamp block 7 gave each grip a BAR_GRIP_OUT_PX
+  // extension outside the bar, so each dot box now starts past that extension rather than at the edge.
+  const off = 'calc(100% + ' + c.BAR_GRIP_OUT_PX + 'px)';
+  assert.strictEqual(styleOf(out).left, off, 'trailing box starts past the right grip extension');
+  assert.strictEqual(styleOf(inn).right, off, 'leading box starts past the left grip extension');
+  // …and the boxes render at HIT_MIN_PX under the 0.8 shell (GANTT_HIT_PX local px).
+  assert.ok(px(styleOf(out).width) * c.SHELL_ZOOM >= c.HIT_MIN_PX, 'rendered dot box ≥ HIT_MIN_PX');
 });
 
 // The %-done control has TWO targets as of the owner's 2026-08-15 instruction ("I would actually prefer
@@ -373,68 +377,61 @@ test('V4.4: toggleDrawerZoom flips between exactly the two levels and stays sess
   assert.ok(!('drawerZoom' in (c.state.prefs || {})), 'and not a persisted pref');
 });
 
-// ---- Gantt bars are ANONYMOUS again (owner 2026-08-12) ----
-// V5.27b drew every bar's task name as rendered text (inside the fill when wide and solid, otherwise
-// beside the bar). Four tests pinned that contract; they are RETIRED WITH IT rather than deleted
-// silently, and replaced by the inverse assertion below.
-//
-// Why it was reversed: the feature was designed against sparse fixtures, where one bar per row makes a
-// label clarifying. A real workspace repeats — a daily task drew one label per occurrence, so a single
-// row emitted the same name across the whole chart width and rows of recurring work became stacked
-// text (owner: "the name completely overwhelms the interface"). These very tests passed throughout,
-// because none of them rendered more than two occurrences of anything: the defect was density, and the
-// fixtures had none. That is the gap worth remembering, not the removed code.
-//
-// The replacement test asserts rendered text is ABSENT while the tooltip still carries the name, so a
-// future re-introduction has to be a deliberate change to this contract rather than an accident.
+// ---- Gantt bars carry their names again (UI revamp block 7, 2026-10-04) ----
+// History: V5.27b drew every bar's task name; the owner removed it on 2026-08-12 because a DAILY repeat
+// drew one label per occurrence and rows of recurring work became stacked text ("the name completely
+// overwhelms the interface"). Both causes are gone now: Chain 6 block 44 merges consecutive occurrence
+// days into one run, and `renderGantt` names only the FIRST painted run of a repeat (`lab.show`). The
+// audit (finding 11: "bars are anonymous and linked to nothing") brought the label back on that basis.
+// This test pins the new contract, and the density half lives in tests/ui-revamp-gantt.test.js.
 const textOf = n => {
   if (n == null || n === false) return '';
   if (Array.isArray(n)) return n.map(textOf).join('');
   if (typeof n !== 'object') return String(n);
   return textOf(n.children || []);
 };
-const nameNodes = root => findAll(root, n => n.props && n.props['data-ganttname'] != null);
-const titlesOf = root => findAll(root, n => n.props && n.props.title).map(n => n.props.title);
+const labelNodes = root => findAll(root, n => n.props && n.props['data-gantt-label'] != null);
+const tipsOf = root => findAll(root, n => n.props && n.props['data-gantt-tip']).map(n => n.props['data-gantt-tip']);
 
-test('no Gantt shape renders its task name as text; the tooltip still carries it', () => {
+test('every Gantt shape names its task — inside, beside, or (for a later repeat run) only in its tooltip', () => {
   const c = ganttReady();
 
-  // A wide solid bar — the case V5.27b labelled INSIDE the fill.
-  const wide = mkTask(c, { name: 'Quarterly board deck' });
-  // A bar floored at BAR_MIN_PX — the case V5.27b labelled OUTSIDE.
-  c.state.dayW = 6;
+  // A wide bar: the name fits inside.
+  const wide = mkTask(c, { name: 'Quarterly board deck', end: B0 + 6 * DAY });
+  // A one-day bar: the name does not fit inside, so it goes beside the bar.
   const narrow = mkTask(c, { id: 'n1', name: 'Renew passport', end: B0 + DAY });
-  c.state.dayW = 42;
   const ms = mkTask(c, { id: 'm1', name: 'Launch', type: 'Milestone' });
   const rt = mkTask(c, { id: 'r1', name: 'Standup', recur: { kind: 'day', n: 1, label: 'Daily' } });
+  const run = c.mergeConsecutiveOccurrenceDays(
+    [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.start + DAY + c.recurDurMs(rt) }])[0];
 
   const shapes = [
-    ['wide bar', c.ganttBlock(wide, 0, occOf(wide)), 'Quarterly board deck'],
-    ['narrow bar', c.ganttBlock(narrow, 0, occOf(narrow)), 'Renew passport'],
-    ['ghost bar', c.ganttBlock(wide, 0,
-      { idx: 0, start: wide.start, end: wide.end, ghost: true, ghostStart: true }), 'Quarterly board deck'],
-    ['milestone', c.ganttBlock(ms, 0, occOf(ms)), 'Launch'],
-    ['merged recurrence run', c.ganttBlock(rt, 0, c.mergeConsecutiveOccurrenceDays(
-      /* 2026-09-09: the sibling occurrence is derived from the RULE's own length. `rt.end` is now the
-         series window's end (null here — the series is unbounded), so building an occurrence from it
-         produced NaN edges and a shape this assertion could not read. */
-      [occOf(rt), { idx: 1, start: rt.start + DAY, end: rt.start + DAY + c.recurDurMs(rt) }])[0]), 'Standup'],
+    ['wide bar', c.ganttBlock(wide, 0, occOf(wide)), 'Quarterly board deck', 'inside'],
+    ['narrow bar', c.ganttBlock(narrow, 0, occOf(narrow)), 'Renew passport', 'outside'],
+    ['milestone', c.ganttBlock(ms, 0, occOf(ms)), 'Launch', 'outside'],
+    ['first repeat run', c.ganttBlock(rt, 0, run, { show: true, nextX: null }), 'Standup', 'inside'],
+    ['later repeat run', c.ganttBlock(rt, 0, run, { show: false, nextX: null }), 'Standup', null],
   ];
-
-  for (const [what, node, name] of shapes) {
-    assert.strictEqual(nameNodes(node).length, 0, what + ' draws no [data-ganttname] label');
-    assert.ok(!textOf(node).includes(name),
-      what + ' does not render the task name as text anywhere, got: ' + JSON.stringify(textOf(node)));
-    // Identification is not lost — it moved back to the tooltip (plus sheet row alignment).
-    assert.ok(titlesOf(node).some(ti => String(ti).includes(name)),
-      what + ' still names the task in a title tooltip');
+  for (const [what, node, name, mode] of shapes) {
+    const labs = labelNodes(node);
+    if (mode) {
+      assert.strictEqual(labs.length, 1, what + ' draws exactly one name label');
+      assert.strictEqual(labs[0].props['data-gantt-label'], mode, what + ' puts its name ' + mode);
+      assert.ok(textOf(node).includes(name), what + ' renders the name as text');
+    } else {
+      assert.strictEqual(labs.length, 0, what + ' draws no label — one label per repeat row');
+      assert.ok(!textOf(node).includes(name), what + ' does not repeat the name');
+    }
+    // The machine-readable tooltip still names it, so specs and screen readers lose nothing.
+    assert.ok(tipsOf(node).some(ti => String(ti).startsWith(name)), what + ' carries data-gantt-tip');
+    // The native `title` is retired from the bar itself — it doubled the drawn tooltip.
+    assert.ok(!findAll(node, n => n.props && n.props['data-gantt-tip'] && n.props.title).length,
+      what + ' carries no native title next to data-gantt-tip');
   }
+  assert.ok(!textOf(shapes[3][1]).includes('Daily'), 'a merged recurrence run is a plain bar with no hatch label');
 
-  assert.ok(!textOf(shapes[4][1]).includes('Daily'),
-    'a merged recurrence run is a plain bar with no hatch label');
-
-  // The V1.5 hover contract and the drag must survive the removal.
-  const dia = shapes[3][1];
+  // The V1.5 hover contract and the drag must survive.
+  const dia = shapes[2][1];
   assert.strictEqual(typeof dia.props.onMouseEnter, 'function', 'milestone still owns its hover state');
   assert.strictEqual(typeof dia.props.onMouseDown, 'function', 'and is still draggable');
 });
@@ -456,7 +453,8 @@ test('the %-done readout is overlaid INSIDE the bar, and the side row is gone (o
   const s = styleOf(lbl);
   // Inside the bar means positioned within it, not offset past its right edge the way the side row was.
   assert.ok(px(s.right) >= 0 && px(s.right) < c.BAR_MIN_PX, 'anchored inside the bar, got right=' + s.right);
-  assert.ok(px(s.fontSize) <= 10, 'small text, got ' + s.fontSize);
+  // UI revamp block 11a: small, but at the caption floor of the type scale (13 CSS px → 10.4 rendered), not under it.
+  assert.strictEqual(px(s.fontSize), 13, 'caption-size text, got ' + s.fontSize);
   // It must never eat the grab band underneath it — the band is the whole point of this change.
   assert.strictEqual(s.pointerEvents, 'none', 'the readout never takes pointer events');
 });

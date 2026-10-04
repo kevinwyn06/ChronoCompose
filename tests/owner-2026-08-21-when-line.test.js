@@ -218,7 +218,10 @@ test('applyWhenText: re-dating a repeat across a calendar day drops stale occurr
     c.commit(tasks => { const x = tasks.find(y => y.id === 't1');
       x.recur.overrides = { 0: { pct: 100 } }; x.recur.shifts = [{ idx: 2, ms: DAY }]; });
 
-    c.applyWhenText('t1', 'every weekday at 9am starting ' + new Date(day(c, 3)).toDateString());
+    /* UI revamp block 4: written "starting <day> at 9am". The old spelling ("at 9am starting <day>") left
+       "at 9am" unparsed — the clock was silently dropped — and a partial parse is now refused. */
+    const r = c.applyWhenText('t1', 'every weekday starting ' + new Date(day(c, 3)).toDateString() + ' at 9am');
+    assert.equal(r.ok, true, 'a clean parse applies');
     /* Occurrence overrides are indexed from the series anchor: moving the anchor to another calendar
        day changes which real occurrence every index names, so retaining them would transfer an old
        completion onto a newly dated occurrence. Same rule `setDate` applies — deliberately shared. */

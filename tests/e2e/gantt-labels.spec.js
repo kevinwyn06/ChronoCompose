@@ -1,21 +1,18 @@
-/* GANTT BARS ARE ANONYMOUS (owner 2026-08-12) — the reversal of V5 block 27b.
+/* GANTT BARS CARRY THEIR NAMES (UI revamp block 7, 2026-10-04) — the second reversal.
  *
- * Block 27b gave every bar its task's name as rendered text, and this file used to assert it four ways.
- * The owner reversed it after the first session on a real workspace, verbatim: *"The task name in the
- * gantt chart doesn't work, especially for recurring tasks where the name completely overwhelms the
- * interface. Just get rid of it."*
+ * History, kept because it is the reason for the density assertions below. V5 block 27b gave every bar
+ * its task's name; the owner removed it on 2026-08-12: *"The task name in the gantt chart doesn't work,
+ * especially for recurring tasks where the name completely overwhelms the interface."* The failure was
+ * DENSITY — a daily repeat drew one label per occurrence, so one row printed the same name across the
+ * whole chart — and the old fixture (one bar per row) could never see it.
  *
- * The old fixture is why the defect shipped, and it is worth being explicit about: it had four tasks,
- * one bar each. Under that shape a label reads as helpful. The failure mode is DENSITY — a recurring
- * task draws one bar per occurrence, so a single daily row emitted the same name across the entire
- * chart width, and a handful of such rows turned the surface into stacked text. Every assertion in the
- * old file passed the whole time, because nothing in it ever rendered a repeat.
- *
- * So this file now asserts the inverse contract, and the density case the old one lacked:
- *   • no `[data-ganttname]` node exists, and no bar renders its task's name as text;
- *   • identification is not lost — the name is still in each bar's `title`;
- *   • a daily recurring task, the exact shape that broke it, adds NO occurrences of its name to the
- *     rendered chart text when its consecutive occurrence days merge into one plain run.
+ * Both causes are gone now: Chain 6 block 44 merges consecutive occurrence days into ONE run, and a
+ * repeat names only its FIRST painted run however many it draws. The audit (finding 11, "bars are
+ * anonymous and linked to nothing") brought labels back on that basis. This file asserts:
+ *   • each shape paints its name — a wide bar inside, a one-day bar and a milestone beside themselves;
+ *   • the daily repeat — the exact shape that broke V5.27b — paints its name ONCE;
+ *   • identification is also machine-readable (`data-gantt-tip`), and the native `title` is gone from
+ *     the bar so the browser tooltip no longer doubles the drawn one.
  */
 const fs = require('fs');
 const path = require('path');
@@ -57,7 +54,7 @@ async function unhover(page) {
 
 async function bootGantt(page, theme) {
   await bootSurface(page, { view: 'gantt' }, fixture(theme));
-  /* Wait on the ROW, not on a label — the labels are what this file asserts are gone. */
+  /* Wait on the ROW, which every fixture shape has, then on the painted labels. */
   await page.locator('[data-gantt-task-id]').first().waitFor({ state: 'attached', timeout: 15000 });
   await page.waitForTimeout(150);
   await unhover(page);
@@ -74,69 +71,60 @@ async function ganttText(page) {
   });
 }
 
-/** Every `title` string in the Gantt, so we can prove identification survived the removal. */
-async function ganttTitles(page) {
-  return page.$$eval('[title]', (els) => els.map((e) => e.getAttribute('title')));
+/** Every `data-gantt-tip` string in the Gantt — the tooltip's machine-readable twin. */
+async function ganttTips(page) {
+  return page.$$eval('[data-gantt-tip]', (els) => els.map((e) => e.getAttribute('data-gantt-tip')));
 }
+const labelOf = (page, id) => page.locator(`[data-gantt-label-task="${id}"]`);
 
-test.describe('Gantt bars carry no name text', () => {
-  test('no bar, diamond or strip renders its task name as text', async ({ page }) => {
+test.describe('Gantt bars carry their names', () => {
+  test('each shape paints its name: inside a wide bar, beside a one-day bar and a milestone', async ({ page }) => {
     await bootGantt(page, 'dark');
+    expect(await page.locator('[data-ganttname]').count(), 'the V5.27b label node stays retired').toBe(0);
 
-    const labelNodes = await page.locator('[data-ganttname]').count();
-    expect(labelNodes, 'the [data-ganttname] label node is gone entirely').toBe(0);
+    await expect(labelOf(page, 'g-long')).toHaveAttribute('data-gantt-label', 'inside');
+    await expect(labelOf(page, 'g-short')).toHaveAttribute('data-gantt-label', 'outside');
+    await expect(labelOf(page, 'g-ms')).toHaveAttribute('data-gantt-label', 'outside');
+    for (const id of ['g-long', 'g-short', 'g-ms']) await expect(labelOf(page, id)).toBeVisible();
 
     const text = await ganttText(page);
-    /* Premise, so a `not.toContain` sweep can never pass by reading an empty string: the scroller's
-       innerText really does carry the chart's own text (the date header tiers). */
-    expect(text.length, 'ganttText read real painted text, not nothing').toBeGreaterThan(20);
-    expect(text, 'the date header is what it read').toMatch(/\d+\s+\w{3}/);
-
-    for (const [key, want] of Object.entries(NAMES)) {
-      expect(text, `"${want}" (${key}) is not painted on the Gantt`).not.toContain(want);
+    for (const key of ['long', 'short', 'ms', 'daily']) {
+      expect(text, `"${NAMES[key]}" is painted on the Gantt`).toContain(NAMES[key]);
     }
+    expect(text, 'the fully dateless row has no bar and so no label').not.toContain(NAMES.ghost);
   });
 
-  test('identification survives: every bar still names its task in a tooltip', async ({ page }) => {
+  test('identification is machine-readable too, and the bar has no native title', async ({ page }) => {
     await bootGantt(page, 'dark');
-    const titles = (await ganttTitles(page)).join(' | ');
+    const tips = (await ganttTips(page)).join(' | ');
     for (const want of [NAMES.long, NAMES.short, NAMES.ms, NAMES.daily]) {
-      expect(titles, `"${want}" is still reachable via a title tooltip`).toContain(want);
+      expect(tips, `"${want}" is in a data-gantt-tip`).toContain(want);
     }
-    expect(titles, 'the fully dateless row has no bar or tooltip under Chain 6 day geometry')
-      .not.toContain(NAMES.ghost);
+    expect(tips).not.toContain(NAMES.ghost);
+    const titled = await page.locator('[data-gantt-bar-body][title], [data-gantt-milestone-id][title]').count();
+    expect(titled, 'no native title on a bar body or diamond').toBe(0);
   });
 
-  test('a daily repeat adds no name text when its occurrence days merge', async ({ page }) => {
-    /* The density case the old fixture lacked. `g-daily` repeats every day across the whole chart;
-       Chain 6 block 44 now projects those consecutive days as one plain continuous bar. */
+  test('a daily repeat paints its name ONCE — the density case that removed labels in 2026-08', async ({ page }) => {
     await bootGantt(page, 'dark');
-
-    const bars = await page.locator('[data-gantt-task-id]').count();
-    expect(bars, 'the seeded rows rendered').toBeGreaterThan(0);
-
-    const text = await ganttText(page);
-    expect(text.length, 'ganttText read real painted text, not nothing').toBeGreaterThan(20);
-    const occurrences = text.split(NAMES.daily).length - 1;
-    expect(occurrences, 'the repeating task contributes zero name labels').toBe(0);
-
-    /* The repeat is still IDENTIFIABLE, just not by painted text. */
-    const titles = (await ganttTitles(page)).join(' | ');
-    expect(titles, 'the repeating task is still named in a tooltip').toContain(NAMES.daily);
-
-    const run = page.locator(`[title^="${NAMES.daily} · occ"]`);
+    const run = page.locator(`[data-gantt-tip^="${NAMES.daily} · occ"]`);
     await expect(run, 'daily occurrences render as one continuous future run').toHaveCount(1);
     const background = await run.evaluate(el => getComputedStyle(el).backgroundImage);
     expect(background, 'the merged run has no recurrence hatch').toBe('none');
 
+    await expect(labelOf(page, 'g-daily')).toHaveCount(1);
+    const text = await ganttText(page);
+    /* An inside label paints twice when it straddles a progress fill (two inks); the repeat here is 0%,
+       so its name appears exactly once in the painted text. */
+    expect(text.split(NAMES.daily).length - 1, 'the repeating task contributes one name').toBe(1);
     expect(text, 'the retired recurrence-strip rule chip is absent').not.toContain('Daily ·');
   });
 
-  test('the chart reads cleanly in both themes', async ({ page }) => {
+  test('the chart reads in both themes', async ({ page }) => {
     for (const theme of ['dark', 'light']) {
       await bootGantt(page, theme);
-      expect(await page.locator('[data-ganttname]').count(), `${theme}: no name labels`).toBe(0);
-      await page.screenshot({ path: shot(`gantt-anonymous-${theme}`), fullPage: false });
+      await expect(labelOf(page, 'g-long'), `${theme}: labels paint`).toBeVisible();
+      await page.screenshot({ path: shot(`gantt-labels-${theme}`), fullPage: false });
     }
   });
 });

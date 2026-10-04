@@ -24,7 +24,7 @@ const fixture = () => ({
   ],
 });
 
-const BAR = name => `[title^="${name} ·"]`;
+const BAR = name => `[data-gantt-tip^="${name} ·"]`;
 
 async function bootGantt(page, data, leadBar) {
   await page.setViewportSize({ width: 1600, height: 900 });
@@ -77,8 +77,12 @@ test.describe('dependency arrows 2026-09-09', () => {
     await bootGantt(page);
     const barA = await page.locator(BAR('Draft the spec')).first().boundingBox();
     await page.mouse.move(barA.x + barA.width / 2, barA.y + barA.height / 2);
-    // The trailing dot's box starts at the bar's right edge and is HIT_MIN_PX wide.
-    await page.mouse.move(barA.x + barA.width + 10, barA.y + barA.height / 2);
+    // The trailing dot's box starts past the right grip's outside extension (UI revamp block 7 gave the
+    // grip a HIT_MIN_PX target; the dot moved out by the extension's width) — press the dot itself.
+    const out = await page.locator('[data-dep-dot-out="a"]').first().boundingBox();
+    expect(out, 'the trailing dot is in the DOM once the bar is hovered').toBeTruthy();
+    expect(out.x, 'the dot box starts clear of the bar edge').toBeGreaterThan(barA.x + barA.width);
+    await page.mouse.move(out.x + out.width / 2, out.y + out.height / 2);
     await page.mouse.down();
     const barB = await page.locator(BAR('Build the thing')).first().boundingBox();
     await page.mouse.move(barB.x + barB.width / 2, barB.y + barB.height / 2, { steps: 12 });

@@ -80,7 +80,7 @@ test.describe('Gantt edge grips: a click opens the picker, a drag sets the date'
     await clickEdge(page, 'start');
 
     await expect(picker(page), 'the date picker is open').toHaveCount(2);
-    await expect(page.getByText(/^START/), 'and it is editing the START edge').toBeVisible();
+    await expect(page.locator('[data-qa="dp-head"]').filter({ hasText: /^Start/ }), 'and it is editing the START edge').toBeVisible();
     /* Separates the two possible outcomes rather than merely proving something opened: the bar BODY's
        no-drag click opens the detail panel, and an edge that fell through to the body would look like
        a pass to any weaker assertion. */
@@ -96,8 +96,8 @@ test.describe('Gantt edge grips: a click opens the picker, a drag sets the date'
     /* The caption is the only thing in the DOM that says which edge you are editing, and the two
        grips share every other attribute — so this is the assertion that the RIGHT grip is wired to
        the right mode, not merely that some picker opened. */
-    await expect(page.getByText(/^DUE/), 'the right grip edits the DUE edge').toBeVisible();
-    await expect(page.getByText(/^START/)).toHaveCount(0);
+    await expect(page.locator('[data-qa="dp-head"]').filter({ hasText: /^End/ }), 'the right grip edits the END edge (UI revamp block 4: sentence-case "End")').toBeVisible();
+    await expect(page.locator('[data-qa="dp-head"]').filter({ hasText: /^Start/ })).toHaveCount(0);
     await expect(detail(page)).toHaveCount(0);
   });
 

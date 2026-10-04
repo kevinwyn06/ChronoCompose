@@ -205,7 +205,11 @@ test('parseDateText: fractional hour duration', () => {
   assert.strictEqual(r.dur, 90);
 });
 
-test('parseDateText: a bare number and unit is a duration only when it is the sole temporal token', () => {
+// UI revamp block 5 (owner walk/audit 2026-10-04): this test used to pin "a bare duration counts only when
+// it is the SOLE temporal token" — so "meeting 3pm 30m" kept "30m" in the title and no budget. The rule is
+// now: sole, OR written next to the date/clock/rule (only spaces or a comma between). Not adjacent, it is
+// still title text — the last block below.
+test('parseDateText: a bare number and unit is a duration when it is sole or sits next to the date', () => {
   const c = make();
   const durationOnly = c.parseDateText('write report 30m', BASE);
   assert.strictEqual(durationOnly.dur, 30);
@@ -214,20 +218,25 @@ test('parseDateText: a bare number and unit is a duration only when it is the so
   assert.strictEqual(durationOnly.rest, 'write report');
   assert.deepStrictEqual(spansOf(c, 'write report 30m').map(x=>[x.kind,x.text]), [['duration','30m']]);
 
-  const clockWins = c.parseDateText('meeting 3pm 30m', BASE);
-  assert.strictEqual(clockWins.dur, null, 'a clock prevents the bare token becoming a duration');
-  assert.strictEqual(clockWins.startClock, true);
-  assert.strictEqual(new Date(clockWins.start).getHours(), 15);
-  assert.strictEqual(clockWins.rest, 'meeting 30m', 'the losing token remains ordinary title text');
+  const besideClock = c.parseDateText('meeting 3pm 30m', BASE);
+  assert.strictEqual(besideClock.dur, 30, 'next to a clock it reads as "for 30m"');
+  assert.strictEqual(besideClock.startClock, true);
+  assert.strictEqual(new Date(besideClock.start).getHours(), 15);
+  assert.strictEqual(besideClock.end, besideClock.start + 30 * 60000);
+  assert.strictEqual(besideClock.rest, 'meeting');
 
-  const dateWins = c.parseDateText('meeting tomorrow 30m', BASE);
-  assert.strictEqual(dateWins.dur, null, 'a date prevents the bare token becoming a duration');
-  assert.strictEqual(dateWins.rest, 'meeting 30m');
+  const besideDate = c.parseDateText('meeting tomorrow 30m', BASE);
+  assert.strictEqual(besideDate.dur, 30);
+  assert.strictEqual(besideDate.rest, 'meeting');
 
-  const recurrenceWins = c.parseDateText('review 30m every week', BASE);
-  assert.strictEqual(recurrenceWins.dur, null);
-  assert.strictEqual(recurrenceWins.recur.kind, 'week');
-  assert.strictEqual(recurrenceWins.rest, 'review 30m');
+  const besideRule = c.parseDateText('review 30m every week', BASE);
+  assert.strictEqual(besideRule.dur, 30);
+  assert.strictEqual(besideRule.recur.kind, 'week');
+  assert.strictEqual(besideRule.rest, 'review');
+
+  const apart = c.parseDateText('run 5m sprints tomorrow', BASE);
+  assert.strictEqual(apart.dur, null, 'a duration not next to the date stays a title word');
+  assert.strictEqual(apart.rest, 'run 5m sprints');
 });
 
 test('parseDateText: bare-duration arbitration preserves unitless and title-word collisions', () => {
@@ -885,15 +894,18 @@ test('quick-add date-only hint omits midnight while an explicit clock keeps it',
   const c=make(), midnight=new Date(2026,7,1,0,0,0,0).getTime();
   Object.assign(c.state,{quickOpen:true,quickText:'test today',quickChoice:'anchor'});
   c.ambigChoiceLabels=()=>null;
-  c.parseDateText=()=>({date:midnight,clock:false,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
-  let hints=walk(c.renderQuickAddPopup()).filter(n=>n.props && n.props['data-qa']==='quick-hint');
-  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01']);
+  // UI revamp block 5: the chips are built from the SHAPED task (start + startClock), labelled, and the
+  // value is the chip's second child. The rule this test exists for is unchanged.
+  const startChip=()=>walk(c.renderQuickAddPopup())
+    .filter(n=>n.props && n.props['data-qa']==='quick-chip' && n.props['data-kind']==='start')
+    .map(n=>n.children[1].children[0]);
+  c.parseDateText=()=>({date:midnight,start:midnight,startClock:null,clock:false,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
+  assert.deepStrictEqual(startChip(),['Sat Aug 01']);
 
-  c.parseDateText=()=>({date:midnight,clock:true,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
-  hints=walk(c.renderQuickAddPopup()).filter(n=>n.props && n.props['data-qa']==='quick-hint');
+  c.parseDateText=()=>({date:midnight,start:midnight,startClock:true,clock:true,end:null,dur:null,recur:null,priority:null,labels:[],matches:[]});
   // Task 13 (2026-08-20): the clock half is 12-hour now, through the one formatter. The rule this test
   // exists for is unchanged — a date-only parse omits the clock, an explicit one keeps it.
-  assert.deepStrictEqual(hints.map(n=>n.children[0]),['Sat Aug 01, 12:00am']);
+  assert.deepStrictEqual(startChip(),['Sat Aug 01, 12:00am']);
 });
 
 test('quick-add card uses a fixed viewport anchor so rows grow downward', () => {

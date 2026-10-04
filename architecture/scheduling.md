@@ -666,8 +666,18 @@ together so the row and the scheduler cannot disagree:
 included !== true            → not pressed
 includedExplicit === true    → pressed, whatever the dates say  (owner ruling 2026-09-09)
 start == null                → pressed (dateless / deadline-only: no start to be in the future)
+repeat, no occurrence on B   → not pressed  (UI revamp block 5, 2026-10-04; known rule kinds only)
 otherwise                    → pressed iff startOfDay(t.start) <= B
 ```
+
+**A repeat is pressed only on its occurrence days (2026-10-04).** The UX walk found a weekly "Lab
+meeting" (Mondays 10:00) packed into Sunday as a flexible 0:24 block: its creation-default
+`included:true` held as a press on every day of the series. The repeat row now asks `occOnDay(t, B)` —
+the honest accessor, null on a day the rule does not fire — and is not pressed there. That is the rule
+the second bullet below declined in 2026-09-10; the owner's walk asked for it. Unchanged: an explicit
+press (`includedExplicit`) still wins, an unreadable rule is never judged, and a missed flexible
+occurrence still carries one day through `isInheritedToday`. `occOnDay` on a cold memo now expands far
+enough to reach B (an unbounded series used to expand to one occurrence before the first render).
 
 `included===true` is not always a decision — `normalizeTask` writes it as the creation default for a
 dateless task, and `includedExplicit` is the provenance note. Judged on the START edge alone, deliberately:
@@ -931,6 +941,14 @@ triage, because both predicates failed together on the same input.
 **`ghostStart` replaces `isScheduled` as the "window opened today" test.** A *derived* start edge is not an
 opening. Without that clause a deadline-only task, whose ghost start is re-derived at today every day,
 would file as New every day until its deadline.
+
+**Deadline-only work is auto-included today (UI revamp block 11b, 2026-10-04).** `autoIncludedToday` gained a
+third arm: a task with NO start edge whose window (ghost start → deadline) covers today. Before it, the same
+clause above that keeps a deadline out of New also kept it out of today, every day: the other-day columns drew
+"Finish the report by Friday 2pm" on each day up to Friday, and each of those days, once it became today,
+dropped it. Filing is unchanged (`startsToday` still treats a ghost start as no opening). Snooze, done,
+milestones and a passed deadline still keep it out (the window check runs first). Unestimated work still asks
+for the 5-minute `DEFAULT_TASK_MINUTES` sliver per day; that owner rule was not changed.
 
 **A typed start clock with no stated end is a keep-clear Point.** Owner ruling 2026-08-21, verbatim:
 *"My default task duration for point tasks is wrong. test today at 4pm should be no duration, marker at

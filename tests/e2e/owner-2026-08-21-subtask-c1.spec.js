@@ -104,7 +104,7 @@ test('the Schedule view draws the same subtree as one lipped chip (S1)', async (
     localStorage.setItem('pp-prefs', JSON.stringify(p));
   });
   await page.reload();
-  await expect(page.getByText('Schedule · next 7 days')).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('[data-pp-planhead="schedule"]') /* UI revamp block 2: the view's title moved into the pane header (Agenda) */).toBeVisible({ timeout: 15000 });
 
   /* One sort position for the whole subtree. The agenda merges blocks, Points and the now-rule into one
      array sorted by `ms`, so a chip per scheduled child (S2) would dissolve the containment that won
@@ -132,7 +132,7 @@ test('a future day gets no active cue — there is no now-line to point at', asy
     localStorage.setItem('pp-prefs', JSON.stringify(p));
   });
   await page.reload();
-  await expect(page.getByText('Schedule · next 7 days')).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('[data-pp-planhead="schedule"]') /* UI revamp block 2: the view's title moved into the pane header (Agenda) */).toBeVisible({ timeout: 15000 });
 
   /* The seven-day agenda draws today AND six future days. If the cue were computed from anything other
      than the clock — the next incomplete child, say — every one of those days would carry one. */

@@ -23,12 +23,15 @@ test.describe('owner session 2026-09-09', () => {
     await expect(header).toBeVisible();
 
     await page.locator('[title="Delete section (its tasks move to No section)"]').first().click();
-    await expect(page.locator('text=Research')).toHaveCount(0);
+    /* UI revamp block 3: the delete is now announced — the undo toast names the section, so the
+       "header is gone" check is scoped to the sheet rather than the whole page. */
+    await expect(page.locator('[data-sheet-pane] >> text=Research')).toHaveCount(0);
+    await expect(page.locator('[data-pp-toast]')).toContainText('Section “Research” deleted');
 
     // The gesture under test: one trusted Ctrl+Z through the app's own key handler.
     await page.keyboard.press('Control+z');
 
-    await expect(page.locator('text=Research').first()).toBeVisible();
+    await expect(page.locator('[data-sheet-pane] >> text=Research').first()).toBeVisible();
     // The section is back AND the task is filed in it again — one undo, both stores.
     const filed = await page.evaluate(() => {
       const tasks = JSON.parse(localStorage.getItem('pp-tasks') || '[]');
