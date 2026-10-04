@@ -172,7 +172,7 @@ test.describe('the section header row reads as a header', () => {
 
   test('the new surface does not swallow inline rename', async ({ page }) => {
     await boot(page, 'dark');
-    const name = page.locator('div[data-section-id="s1"] span', { hasText: 'Research' }).first();
+    const name = page.locator('div[data-section-id="s1"] button', { hasText: 'Research' }).first();
     await name.click();
     await expect(page.locator('div[data-section-id="s1"] input')).toBeVisible();
   });

@@ -492,6 +492,23 @@ input,select,button{font-family:inherit}
 .pp-row:focus-visible{outline:var(--focus-w) solid var(--focus-ring);outline-offset:calc(-1 * var(--focus-w));border-radius:0}
 .pp-row .pp-quiet{opacity:0;transition:opacity var(--dur-fast) var(--ease-standard)}
 .pp-row:hover .pp-quiet,.pp-row:focus-within .pp-quiet,.pp-row[aria-selected="true"] .pp-quiet{opacity:1}
+/* PP-EXT (targets pass 1): HIT_MIN_PX on the Plan page. `.pp-hb` is a bare <button>: the reset that lets a
+   row control be a real, named button without changing how it looks. `.pp-hb` and `.pp-hba` (hit area only,
+   for a drag handle that is not a button) both get a transparent ::before that makes the HIT box 30 CSS px,
+   24 rendered under the 0.8 shell, around a small glyph. The glyph never grows. --hb-w / --hb-h size the
+   box and --hb-dx / --hb-dy shift it off a neighbour that is too close to share the space evenly. */
+.pp-hb,.pp-hba{position:relative;--hb-w:30px;--hb-h:30px;--hb-dx:0px;--hb-dy:0px} /* set per element, so a sized parent's values never inherit */
+
+.pp-hb::before,.pp-hba::before{content:"";position:absolute;left:50%;top:50%;width:var(--hb-w,30px);height:var(--hb-h,30px);
+  transform:translate(calc(-50% + var(--hb-dx,0px)),calc(-50% + var(--hb-dy,0px)))}
+.pp-hb{-webkit-appearance:none;appearance:none;margin:0;padding:0;border:0;background:none;font:inherit;color:inherit;
+  line-height:inherit;letter-spacing:inherit;text-align:inherit;text-transform:inherit;cursor:pointer}
+.pp-row .pp-num{height:30px} /* the Planned field: a 30px box (24 rendered); at rest its border is transparent */
+.pp-chipline button,.pp-chipline input{position:relative;z-index:1} /* the chip line's controls win over a title-line glyph's hit box */
+.pp-divider{position:relative;z-index:3}
+.pp-divider::before{content:"";position:absolute;top:0;bottom:0;left:-6px;right:-18px} /* 30px hit, mostly over the plan pane's edge: the sheet's last controls sit 9px or more inside it */
+.pp-search input{height:30px;margin:-1px 0} /* the field fills its 30px box, border included */
+/* /PP-EXT (targets pass 1) */
 .pp-inline-title{flex:1;min-width:0;height:24px;padding:0 6px;font-family:var(--font-ui);font-size:var(--fs-2);color:var(--text);
   background:var(--input-bg);border:1px solid var(--focus-ring);border-radius:var(--r-1);outline:none;box-shadow:0 0 0 1px var(--focus-ring)}
 mark.pp-hit{background:var(--accent-soft);color:var(--text-strong);border-radius:var(--r-1);box-shadow:inset 0 -2px 0 var(--accent);padding:0}
@@ -750,6 +767,7 @@ class Component extends DCLogic {
        (the %-done caret has only (rowH−barH)/2 px under the bar), the axis that carries the
        precision — horizontal, along the bar — still gets the full box. See product-vision.md. */
     this.HIT_MIN_PX = 24;            // minimum interactive target (local px, pre-zoom)
+    this.HIT_BOX_PX = Math.ceil(this.HIT_MIN_PX/this.SHELL_ZOOM); // PP-EXT (targets pass 2): a hit box in local px that RENDERS at HIT_MIN_PX (30 under the 0.8 shell) /* /PP-EXT */
     /* PP-EXT (UI revamp block 11a): the Actions column (timer, add time) sticks to the sheet's right edge, so
        a narrow window or 200% zoom compresses the sheet over the middle columns instead of clipping the
        controls away. `inherit` carries the row's own paint (stripe / hover / selection) under it. */
@@ -771,7 +789,11 @@ class Component extends DCLogic {
        EDGE — the progress boundary is the one place on the bar whose meaning is already "% done", so
        the zone is self-describing rather than a remembered rule.
        GRAB is the HALF-width, so the zone is 2× this wide. */
-    this.PCT_GRAB_PX = 12;           // half-width of the on-bar %-done grab band, centred on the fill edge
+    /* PP-EXT (targets pass 1): 12 → 15, half of GANTT_HIT_PX, so the band (2× this) renders at HIT_MIN_PX
+       under the 0.8 shell; at 24 it rendered at 19. A bar needs 2·BAR_GRIP_PX + 30 = 44px to hold one —
+       narrower bars keep the caret below as their %-done target, as before. */
+    this.PCT_GRAB_PX = 15;           // half-width of the on-bar %-done grab band, centred on the fill edge
+
     /* The owner's constraint, verbatim: "if you have the grab at ±n, make sure 0% and 100% have no drag
        range overlap with the edges of the bar for date dragging." At 0% the fill edge sits ON the left
        resize grip and at 100% on the right one, so an unclamped band would swallow the grip and make the
@@ -1098,6 +1120,9 @@ class Component extends DCLogic {
        and seeding paths still call `saveSections` directly and stay out of the history, like every other
        incoming write. */
     this._sectionsUndo = []; this._sectionsRedo = [];
+    /* PP-EXT (pomodoro pause on stop): a fourth stack for the running-timer map + Pomodoro session, only
+       ever PAIRED with the task commit of complete/delete/archive — see commitStoppingTimers. */
+    this._timersUndo = []; this._timersRedo = [];
     /* PP-EXT (UI revamp block 3): `_actSeq` counts history moves (every new action, undo and redo). A
        toast remembers the value it was raised at, so its Undo button can tell whether the step it names is
        still the top of the stack — and refuses rather than undoing something newer. */
@@ -2101,7 +2126,10 @@ class Component extends DCLogic {
          read `colDefs()`, and the cell writes through `setUncompressable` — the one mutator the detail
          panel's Time-needed control uses — so the two surfaces cannot drift. Visible by default. */
       {k:'exact',w:104,l:'Time needed'},
-      {k:'actions',w:104,l:'Actions',lock:true}
+      /* PP-EXT (targets pass 1): 156 = the four controls' 30/30/30/48px boxes plus the cell's padding. At
+         104 the row overflowed its own cell and the clip hid the On-today checkbox entirely. */
+      {k:'actions',w:156,l:'Actions',lock:true}
+
     ];
   }
   orderedCols(){
@@ -2190,12 +2218,12 @@ class Component extends DCLogic {
     if(hidden.length){
       items.push(h('div',{key:'hl',style:{fontSize:'14px',color:'var(--text-mut)',marginBottom:'8px'}},'Hidden columns — click to restore'));
       items.push(h('div',{key:'hc',style:{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'12px'}},
-        hidden.map(c=>h('div',{key:c.k,onClick:()=>this.setColHidden([c.k],false),
-          style:{fontSize:'14px',color:'var(--text-2)',background:'var(--input-bg)',border:'1px solid var(--divider)',
+        hidden.map(c=>h('button',{key:c.k,type:'button',className:'pp-hba',onClick:()=>this.setColHidden([c.k],false), /* PP-EXT (targets pass 2): a button, 30px-tall box */
+          style:{'--hb-w':'100%',fontFamily:'inherit',fontSize:'14px',color:'var(--text-2)',background:'var(--input-bg)',border:'1px solid var(--divider)',
             borderRadius:'var(--r-2)',padding:'3px 9px',cursor:'pointer'}}, '+ '+c.l))));
     }
-    items.push(h('div',{key:'rs',onClick:()=>this.resetCols(),
-      style:{fontSize:'14px',color:'var(--text-mut2)',cursor:'pointer',display:'inline-flex',alignItems:'center',gap:'5px'},
+    items.push(h('button',{key:'rs',type:'button',className:'pp-hb','data-reset-cols':'1',onClick:()=>this.resetCols(), /* PP-EXT (targets pass 2): a button, 30px-tall box */
+      style:{'--hb-w':'100%',fontSize:'14px',color:'var(--text-mut2)',cursor:'pointer',display:'inline-flex',alignItems:'center',gap:'5px'},
       onMouseEnter:e=>e.currentTarget.style.color='var(--text)',onMouseLeave:e=>e.currentTarget.style.color='var(--text-mut2)'},'↺ Reset columns'));
     return h('div',{key:'hcl',style:{paddingTop:'14px'}}, items);
   }
@@ -2280,6 +2308,7 @@ class Component extends DCLogic {
   /* ---------- lifecycle ---------- */
   componentDidMount(){
     this.syncDocTitle(); /* PP-EXT (UI revamp block 9): the document had no title at all */
+    this.tlRovingFix(); /* PP-EXT (targets pass 2) */
     this._onKey = (e)=>this.onKey(e);
     this._onMove = (e)=>this.onMouseMove(e);
     this._onUp = (e)=>this.onMouseUp(e);
@@ -2365,6 +2394,7 @@ class Component extends DCLogic {
      loop, which could only retime the scroll-vs-render race, never close it (jitter + burst-end drift). */
   componentDidUpdate(){
     this.syncDocTitle(); /* PP-EXT (UI revamp block 9): the tab title follows the running timer */
+    this.tlRovingFix(); /* PP-EXT (targets pass 2): one Tab stop per timeline view */
     if(this._zoomPinEl && this._zoomTarget!=null){
       const el=this._zoomPinEl; this._zoomPinEl=null;
       el.scrollLeft=Math.max(0, this._zoomTarget);
@@ -2377,12 +2407,13 @@ class Component extends DCLogic {
        action invalidates both redo stacks, exactly as `this.future=[]` already did for tasks. */
     this._pushKind('tasks'); } /* PP-EXT: named cap */
   /* PP-EXT (owner 2026-08-19): kind bookkeeping for the interleaved undo stacks. */
-  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[]; this._sectionsRedo=[];
+  _pushKind(kind){ this._undoKind.push(kind); this._redoKind=[]; this._boundsRedo=[]; this._sectionsRedo=[]; this._timersRedo=[]; /* PP-EXT (pomodoro pause on stop): + timers */
     this._actSeq++; /* PP-EXT (UI revamp block 3): a new action — see _actSeq */
     /* keep the order log in step with the capped stacks: drop the oldest entry of whichever kind fell off */
     while(this._undoKind.filter(k=>k==='tasks').length>this.history.length){ const i=this._undoKind.indexOf('tasks'); this._undoKind.splice(i,1); }
     while(this._undoKind.filter(k=>k==='bounds').length>this._boundsUndo.length){ const i=this._undoKind.indexOf('bounds'); this._undoKind.splice(i,1); }
-    while(this._undoKind.filter(k=>k==='sections').length>this._sectionsUndo.length){ const i=this._undoKind.indexOf('sections'); this._undoKind.splice(i,1); } }
+    while(this._undoKind.filter(k=>k==='sections').length>this._sectionsUndo.length){ const i=this._undoKind.indexOf('sections'); this._undoKind.splice(i,1); }
+    while(this._undoKind.filter(k=>k==='timers').length>this._timersUndo.length){ const i=this._undoKind.indexOf('timers'); this._undoKind.splice(i,1); } /* PP-EXT (pomodoro pause on stop) */ }
   /* PP-EXT (owner 2026-09-09): record the CURRENT section list before a user-facing section mutation
      replaces it. `paired` marks the record whose action also wrote the task store, so one Ctrl+Z undoes
      both halves — see `deleteSection`. Called by the mutator, never by `saveSections` itself: the sync
@@ -2422,6 +2453,15 @@ class Component extends DCLogic {
       if(rec.paired) this._undoTasks();
       this._redoKind.push('sections');
       this.saveSections(rec.list); return; }
+    /* PP-EXT (pomodoro pause on stop): a timers record — the stop a complete/delete/archive made. Paired, so
+       the task half is undone with it: one Ctrl+Z, the task back AND its timer and session running again. */
+    if(this._undoKind.length && this._undoKind[this._undoKind.length-1]==='timers'){
+      this._undoKind.pop(); const rec=this._timersUndo.pop()||{running:this.state.running, pomo:this.state.pomo, paired:false};
+      this._timersRedo.push(this._curTimers(rec.paired));
+      if(rec.paired) this._undoTasks();
+      this._redoKind.push('timers');
+      this._applyTimers(rec); return; }
+    /* /PP-EXT */
     this._undoTasks();
   }
   /* PP-EXT (owner 2026-09-09): the task half of `undo`, extracted so a paired section undo can run it
@@ -2452,6 +2492,14 @@ class Component extends DCLogic {
       if(rec.paired) this._redoTasks();
       this._undoKind.push('sections');
       this.saveSections(rec.list); return; }
+    /* PP-EXT (pomodoro pause on stop): mirror of the timers branch in `undo`. */
+    if(this._redoKind.length && this._redoKind[this._redoKind.length-1]==='timers'){
+      this._redoKind.pop(); const rec=this._timersRedo.pop()||{running:this.state.running, pomo:this.state.pomo, paired:false};
+      this._timersUndo.push(this._curTimers(rec.paired));
+      if(rec.paired) this._redoTasks();
+      this._undoKind.push('timers');
+      this._applyTimers(rec); return; }
+    /* /PP-EXT */
     this._redoTasks();
   }
   _redoTasks(){
@@ -2475,8 +2523,8 @@ class Component extends DCLogic {
      Action sites call `toast()` right after their `commit()`; typed edits do not, because the user can
      already see what they typed. */
   /* How many history steps exist, across all three stacks — the before/after of an undo or redo. */
-  _undoDepth(){ return this.history.length+this._boundsUndo.length+this._sectionsUndo.length; }
-  _redoDepth(){ return this.future.length+this._boundsRedo.length+this._sectionsRedo.length; }
+  _undoDepth(){ return this.history.length+this._boundsUndo.length+this._sectionsUndo.length+this._timersUndo.length; } /* PP-EXT (pomodoro pause on stop): + timers */
+  _redoDepth(){ return this.future.length+this._boundsRedo.length+this._sectionsRedo.length+this._timersRedo.length; }
   /* PURE: a name as it reads inside a toast — quoted, clipped. */
   toastName(name){
     let s=String(name==null?'':name).replace(/\s+/g,' ').trim()||'Untitled';
@@ -2846,6 +2894,7 @@ class Component extends DCLogic {
     /* PP-EXT (UI revamp block 6): a FOCUSED sheet row owns the row keys (roving tabindex) — ↑/↓ move,
        Space toggles, Enter opens, F2 renames, Shift+F10 / the context-menu key open the row menu. */
     if(!dlgTop && !this.isEditingTarget(e) && this.rowKeyTarget(e) && this.rowKey(e)) return;
+    if(!dlgTop && !this.isEditingTarget(e) && this.secHeadKeyTarget(e) && this.secHeadKey(e)) return; /* PP-EXT (targets pass 2) */
     if(!dlgTop && !this.isEditingTarget(e) && ((e.key==='F10' && e.shiftKey) || e.key==='ContextMenu')
        && (this.state.selectedIds||[]).length && !this.state.menu){
       e.preventDefault(); this.openRowMenuKbd(this.state.selectedIds[this.state.selectedIds.length-1]); return;
@@ -3556,12 +3605,16 @@ class Component extends DCLogic {
     try{ document.execCommand(cmd,false,''); }catch(_){}
     this.setCaretOffset(el,offset); commit(this.sanitizeHtml(el.innerHTML)); }
   richField(fieldKey, initialHtml, commit, opts){ const h=React.createElement; opts=opts||{};
-    const tbBtn=(label,cmd,title)=>h('button',{key:cmd,title:title,type:'button',
+    /* PP-EXT (targets pass 2): a 30px hit box (.pp-hba) around the 25px look, and a keyboard press works
+       too — the pointer path runs on mousedown so the editor keeps its selection, which a key press
+       (click with detail 0) cannot, so it puts the caret back in the editor first. */
+    const tbBtn=(label,cmd,title)=>h('button',{key:cmd,title:title,type:'button',className:'pp-hba','data-rich-cmd':cmd,
       onMouseDown:e=>this.genRichCmd(e,cmd,commit),
-      style:{minWidth:'26px',height:'25px',padding:'0 7px',fontSize:'14px',fontWeight:700,cursor:'pointer',
+      onClick:e=>{ if(e.detail!==0) return; const el=this._genEl; if(el && el.focus){ try{ el.focus(); }catch(_e){} } this.genRichCmd(e,cmd,commit); },
+      style:{minWidth:'26px',height:'25px',padding:'0 7px',fontSize:'14px',fontWeight:700,cursor:'pointer','--hb-w':'max(100%, 32px)', /* PP-EXT (targets pass 2): 32 on a 32px pitch, so whole-pixel snapping cannot take it under 24 rendered */
         background:'var(--input-bg)',color:'var(--text-2)',border:'1px solid var(--divider)',borderRadius:'var(--r-2)',
         transition:'background var(--dur-fast) var(--ease-standard)'}},label);
-    const toolbar=h('div',{style:{display:'flex',gap:'5px',marginBottom:'8px',flexWrap:'wrap',flex:'none'}},
+    const toolbar=h('div',{style:{display:'flex',gap:'6px',marginBottom:'8px',padding:'0 3px',flexWrap:'wrap',flex:'none'}}, /* PP-EXT (targets pass 2): gap 5 → 6, and 3px in from the pane's clipping edge so B's box is whole */
       tbBtn('B','bold','Bold'), tbBtn('I','italic','Italic'), tbBtn('U','underline','Underline'),
       tbBtn('• List','insertUnorderedList','Bullet list'), tbBtn('1. List','insertOrderedList','Numbered list'));
     const editor=h('div',{key:'rf'+fieldKey, className:'pp-rich', contentEditable:true, suppressContentEditableWarning:true,
@@ -4409,9 +4462,13 @@ class Component extends DCLogic {
       onBlur:e=>{ const m=this.parseDurationText(e.target.value);
         if(m==null){ e.target.value=shown; return; }   /* unreadable: leave the day alone */
         if(Math.round(m)!==Math.round(today)) this.setSpentToday(t.id, m); },
-      style:{height:this.HIT_MIN_PX+'px',width:'48px',padding:'0 5px',textAlign:'center',
-        borderRadius:'var(--r-1)',fontSize:'13px',fontWeight:700,flex:'none',
-        color:'var(--text-mut2)',background:'var(--chip-bg)',border:'1px solid var(--divider)',
+      /* PP-EXT (targets pass 1): the field is 30px tall (24 rendered) but LOOKS 24: 3px of transparent
+         border above and below, the chip paint clipped to the padding box, and its 1px outline drawn as an
+         inset shadow. The vertical radius is 3px larger so the visible corners stay --r-1. */
+      style:{height:this.GANTT_HIT_PX+'px',width:'48px',padding:'0 5px',textAlign:'center',
+        borderRadius:'var(--r-1) / calc(var(--r-1) + 3px)',fontSize:'13px',fontWeight:700,flex:'none',
+        color:'var(--text-mut2)',background:'var(--chip-bg)',backgroundClip:'padding-box',
+        border:'3px solid transparent',borderLeftWidth:0,borderRightWidth:0,boxShadow:'inset 0 0 0 1px var(--divider)',
         outline:'none',fontVariantNumeric:'tabular-nums'}});
   }
   isRunning(id){ const key=(id&&id.id!==undefined?id.id:id); return !!(this.state.running && this.state.running[key]); }
@@ -4429,7 +4486,10 @@ class Component extends DCLogic {
     const r=Object.assign({}, this.state.running, {[id]:{startedAt:now, beat:now}});
     this.setState({running:r, nowTick:now}); this.saveRun(r);
     /* PP-EXT (UI revamp block 9): a Pomodoro session follows the task timer you just started — see pomoBindRun. */
-    if(this.state.pomo){ const np=this.pomoBindRun(this.state.pomo, id); if(np!==this.state.pomo){ this.setState({pomo:np}); this.savePomo(np); } } }
+    if(this.state.pomo){ let np=this.pomoBindRun(this.state.pomo, id);
+      /* PP-EXT (pomodoro pause on stop): a focus phase paused by its timer stopping resumes when a timer starts */
+      if(np.phase==='work' && np.pausedRemaining!=null) np=this.pomoResume(np, now);
+      if(np!==this.state.pomo){ this.setState({pomo:np}); this.savePomo(np); } } }
   /* PP-EXT V2.4: stop every running timer except `keepId`. Each stop goes through stopTimerAt so spent /
      spentByDay / undo stay identical to a manual stop; the snapshot is taken first because stopTimerAt
      rewrites state.running underneath the loop. */
@@ -4452,16 +4512,45 @@ class Component extends DCLogic {
      auto-pause both credit up to now — a running timer counts wall-clock even across a closed tab / sleep. */
   stopTimerAt(id, ts){ const run=this.state.running||{}; const r=run[id]; if(!r) return;
     const end=Math.min(Math.max(ts, r.startedAt), Date.now());
-    const add=Math.max(0,(end-r.startedAt)/60000);
     /* accumulate fractional minutes (fmtDur rounds for display); rounding on every stop lost time
        across many short sessions. */
     /* PP-EXT: credit both the lifetime total and the per-day ledger (keyed by the segment's START day —
        a session running across midnight lumps to its start day, matching the single-credit model; see getSpentOn). */
-    const dk=this.ymdOf(r.startedAt);
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(t){ t.spent=(t.spent||0)+add;
-      const by=Object.assign({}, t.spentByDay); by[dk]=(by[dk]||0)+add; t.spentByDay=by; } });
+    this.commit(tasks=>this.creditRun(tasks, id, r, end)); /* PP-EXT (pomodoro pause on stop): shared credit */
     const nr=Object.assign({}, this.state.running); delete nr[id];
-    this.setState({running:nr}); this.saveRun(nr); }
+    this.setState({running:nr}); this.saveRun(nr);
+    this.pomoOnTimerStop(id); /* PP-EXT (pomodoro pause on stop): every stop path ends here */ }
+  /* PP-EXT (pomodoro pause on stop): credit one running segment, up to `end`, into a commit's task copy.
+     Lifetime total and the per-day ledger, keyed by the segment's START day (see getSpentOn). */
+  creditRun(tasks, id, r, end){ const add=Math.max(0,(end-r.startedAt)/60000); const dk=this.ymdOf(r.startedAt);
+    const t=tasks.find(x=>x.id===id); if(!t) return;
+    t.spent=(t.spent||0)+add; const by=Object.assign({}, t.spentByDay); by[dk]=(by[dk]||0)+add; t.spentByDay=by; }
+  /* PP-EXT (pomodoro pause on stop): completing, deleting or archiving a task ends its timer — an orphan in
+     pp-run kept crediting a task that was gone and kept the 1 s tick and the pill alive. ONE ACTION, ONE
+     UNDO: the stop rides inside the action's own commit (the time credited in the same task snapshot), and
+     the timer/Pomodoro half is a PAIRED `timers` record on the interleaved undo log — the same mechanism
+     `deleteSection` uses for its section half. One Ctrl+Z restores the task, its running timer (original
+     startedAt, so no time is lost or double-counted) and the session exactly as they were. With nothing
+     running among `ids` this is a plain commit, one entry, as before. */
+  commitStoppingTimers(ids, fn){
+    const run=this.state.running||{}; const hit=(ids||[]).filter(id=>run[id]);
+    if(!hit.length){ this.commit(fn); return; }
+    const before={running:Object.assign({}, run), pomo:this.state.pomo||null};
+    const now=Date.now();
+    this.commit(tasks=>{ hit.forEach(id=>this.creditRun(tasks, id, run[id], Math.max(now, run[id].startedAt))); fn(tasks); });
+    const nr=Object.assign({}, run); hit.forEach(id=>delete nr[id]);
+    this.setState({running:nr}); this.saveRun(nr);
+    hit.forEach(id=>{ this.trackAction('timer.stop',{ id }); this.pomoOnTimerStop(id); });
+    this.snapshotTimers(before, true); }
+  /* Push a timers record (the state BEFORE the action). Paired: its undo also runs the task half. */
+  snapshotTimers(rec, paired){
+    this._timersUndo.push({running:rec.running, pomo:rec.pomo, paired:!!paired});
+    if(this._timersUndo.length>this.HISTORY_MAX) this._timersUndo.shift();
+    this._pushKind('timers'); }
+  _curTimers(paired){ return {running:Object.assign({}, this.state.running||{}), pomo:this.state.pomo||null, paired:!!paired}; }
+  _applyTimers(rec){ const r=Object.assign({}, rec.running||{}); this.setState({running:r, pomo:rec.pomo||null, nowTick:Date.now()});
+    this.saveRun(r); this.savePomo(rec.pomo||null); }
+  /* /PP-EXT */
   /* PP-EXT: heartbeat across ALL running timers, called from the 1s run tick and once on mount. Timers persist
      across sleep / a closed tab (owner choice) — there is no inactivity auto-stop; this only refreshes the
      persisted beat every TIMER_BEAT_MS so pp-run stays current. */
@@ -4541,8 +4630,39 @@ class Component extends DCLogic {
   pomoPhaseDur(phase, s){ s=s||this.pomoCfg(); const m = phase==='break'?s.break : phase==='long'?s.long : s.work; return Math.max(1, +m||1)*60000; }
   /* PURE: the live state of a session at `now` — current phase, elapsed/remaining, and whether the phase is done. */
   pomoState(pomo, now, s){ if(!pomo||!pomo.phase) return null; s=s||this.pomoCfg();
-    const durMs=this.pomoPhaseDur(pomo.phase, s); const elapsedMs=Math.max(0, now-(pomo.phaseStart||now));
+    const durMs=this.pomoPhaseDur(pomo.phase, s);
+    /* PP-EXT (pomodoro pause on stop): a paused phase is frozen at what it had left — it never finishes */
+    if(pomo.pausedRemaining!=null){ const rem=Math.max(0, Math.min(durMs, +pomo.pausedRemaining||0));
+      return { phase:pomo.phase, cycle:pomo.cycle||0, durMs, elapsedMs:durMs-rem, remainingMs:rem, done:false, paused:true }; }
+    /* /PP-EXT */
+    const elapsedMs=Math.max(0, now-(pomo.phaseStart||now));
     return { phase:pomo.phase, cycle:pomo.cycle||0, durMs, elapsedMs, remainingMs:Math.max(0, durMs-elapsedMs), done: elapsedMs>=durMs }; }
+  /* PP-EXT (pomodoro pause on stop): THE FOCUS PHASE PAUSES WHEN ITS TASK'S TIMER STOPS. Before this a session
+     bound to a task kept counting down after the task's timer was stopped — the ring said "focusing" while
+     nothing was being timed. Owner-facing rule (a judgement call, see ui-runtime.md):
+     - the bound task's timer stopping, by ANY path (they all end in stopTimerAt), pauses a running FOCUS
+       phase: the remaining time is kept in `pausedRemaining`, nothing is reset, no pomodoro is counted;
+     - a break is not bound to a task timer (its own roll stops the timer), so it keeps running;
+     - a standalone session (taskId null) is not touched by some other timer stopping;
+     - starting a timer again resumes the phase (startTimer → pomoResume), as does the panel's Resume.
+     PURE: pause/resume return a new session (or the same one when there is nothing to do). */
+  pomoPause(pomo, now, s){ if(!pomo || pomo.pausedRemaining!=null) return pomo;
+    const st=this.pomoState(pomo, now, s); return Object.assign({}, pomo, {pausedRemaining:st.remainingMs}); }
+  pomoResume(pomo, now, s){ if(!pomo || pomo.pausedRemaining==null) return pomo;
+    const durMs=this.pomoPhaseDur(pomo.phase, s||this.pomoCfg());
+    const rem=Math.max(0, Math.min(durMs, +pomo.pausedRemaining||0));
+    const np=Object.assign({}, pomo, {phaseStart: now-(durMs-rem)}); delete np.pausedRemaining; return np; }
+  /* Called from stopTimerAt. `_pomoApplying` marks the session's OWN timer moves (roll to break, Stop), which
+     are not the user stopping the task and must not leave a pause behind. */
+  pomoOnTimerStop(id){ const p=this.state.pomo; if(!p || this._pomoApplying) return;
+    if(p.phase!=='work' || p.taskId==null || String(p.taskId)!==String(id) || p.pausedRemaining!=null) return;
+    const np=this.pomoPause(p, Date.now()); this.setState({pomo:np}); this.savePomo(np); }
+  /* The paused panel's Resume: restart the bound task's timer (startTimer resumes the phase), or — with no
+     task left to time — just let the clock run again. */
+  resumePomodoro(){ const p=this.state.pomo; if(!p || p.pausedRemaining==null) return;
+    const tid=p.taskId; if(tid!=null && this.state.tasks.find(t=>t.id===tid && !t.archivedAt)){ this.startTimer(tid); return; }
+    const np=this.pomoResume(p, Date.now()); this.setState({pomo:np}); this.savePomo(np); }
+  /* /PP-EXT */
   /* PURE: the next session after a phase completes. work → break (or long every `cycles` work sessions);
      break/long → work. `phaseStart` restarts at `now` (a closed tab pauses the cycle rather than skipping many). */
   pomoAdvance(pomo, s, now){ s=s||this.pomoCfg(); const cyc=pomo.cycle||0; let phase, cycle;
@@ -4553,11 +4673,16 @@ class Component extends DCLogic {
   /* Bind the task timer to the phase: work → its timer runs; break/long → paused. No-op when standalone (no task). */
   applyPomoTimer(pomo){ const tid=pomo&&pomo.taskId; if(!tid || !this.state.tasks.find(t=>t.id===tid)) return;
     const work=pomo.phase==='work';
+    this._pomoApplying=true; /* PP-EXT (pomodoro pause on stop): the session's own move, not a user stop */
+    try{
     if(work && !this.isRunning(tid)) this.startTimer(tid);
-    else if(!work && this.isRunning(tid)) this.stopTimer(tid); }
+    else if(!work && this.isRunning(tid)) this.stopTimer(tid);
+    } finally { this._pomoApplying=false; } /* /PP-EXT */ }
   startPomodoro(taskId){ const now=Date.now(); const pomo={ taskId: taskId||null, phase:'work', phaseStart:now, cycle:0 };
     this.setState({pomo}); this.savePomo(pomo); this.applyPomoTimer(pomo); }
-  stopPomodoro(){ const p=this.state.pomo; if(p && p.taskId && p.phase==='work' && this.isRunning(p.taskId)) this.stopTimer(p.taskId);
+  stopPomodoro(){ const p=this.state.pomo;
+    this._pomoApplying=true; /* PP-EXT (pomodoro pause on stop) */
+    try{ if(p && p.taskId && p.phase==='work' && this.isRunning(p.taskId)) this.stopTimer(p.taskId); } finally { this._pomoApplying=false; }
     this.setState({pomo:null}); this.savePomo(null); }
   /* Manual skip → jump to the next phase now (undo-free; it's ephemeral session state, not a task mutation). */
   skipPomoPhase(){ const p=this.state.pomo; if(!p) return; const next=this.pomoAdvance(p, this.pomoCfg(), Date.now());
@@ -4663,12 +4788,12 @@ class Component extends DCLogic {
     clearTimeout(this._summaryT); this._summaryT=setTimeout(()=>this.closeSummary(), this.SUMMARY_TTL_MS); }
   closeSummary(){ clearTimeout(this._summaryT); this.setState({summary:null}); }
   /* Pure-ish snapshot for the popup: today's counts + the tasks that still need planning (Phase 7 'unplanned'). */
-  morningSummaryData(now){ now=now||Date.now(); const byId={}; (this.state.tasks||[]).forEach(t=>byId[t.id]=t);
+  morningSummaryData(now){ now=now||Date.now();
     const live=(this.state.tasks||[]).filter(t=>!t.archivedAt && !this.isMilestone(t));
     const activeToday=live.filter(t=>this.isActiveToday(t));
     const done=activeToday.filter(t=>(+t.pct||0)>=100).length;
     const overdue=live.filter(t=>(+t.pct||0)<100 && this.dueMsOf(t, this.startOfToday())<now).length;
-    const unplanned=live.filter(t=>this.matchChip(t,'unplanned',byId));
+    const unplanned=this.reviewUnplanned(); /* PP-EXT (needs-planning one predicate): the summary listed routines on later days */
     return { day:this.startOfDay(now), activeCount:activeToday.length, doneCount:done, overdueCount:overdue,
       unplanned:unplanned.slice(0,8).map(t=>t.name), unplannedTotal:unplanned.length }; }
 
@@ -5786,7 +5911,8 @@ class Component extends DCLogic {
     ids=this.expandSubtrees(ids); /* PP-EXT: archiving a parent archives its subtree */
     const now=Date.now();
     const names=this.state.tasks.filter(t=>ids.includes(t.id)&&!t.archivedAt).map(t=>t.name); /* PP-EXT (UI revamp block 3) */
-    this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=now; }); });
+    /* PP-EXT (pomodoro pause on stop): an archived task stops being timed — in the same undo step */
+    this.commitStoppingTimers(ids, tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.archivedAt=now; }); });
     this.setState({selectedIds:[]});
     if(names.length) this.toast(this.toastCount('Archived', names)); /* PP-EXT (UI revamp block 3) */
   }
@@ -6032,7 +6158,11 @@ class Component extends DCLogic {
      and gets all five routines; anything else is an existing workspace and gets the narrowed migration. */
   initRoutines(){
     if(this.lsGet('pp-mig-routines')) return;
-    if(!this.lsGet('pp-tasks')){ this.seedRoutines(); this.lsSet('pp-mig-routines', '1'); return; }
+    /* PP-EXT (fresh-workspace routines): "no persisted tasks" means no stored ROWS (loadTasks' own
+       definition), not an absent key — the constructor's `recur-series-window` migration saves `[]`
+       unconditionally, so on a first boot the key already exists and this used to take the Lunch/Dinner
+       migration path instead of seeding all five. */
+    if(!this.loadTasks()){ this.seedRoutines(); this.lsSet('pp-mig-routines', '1'); return; } /* /PP-EXT */
     this.migrateRoutines();
   }
   /* /PP-EXT */
@@ -6200,8 +6330,10 @@ class Component extends DCLogic {
   newSectionInline(){ const s=this.addSection('New section'); this.startSectionEdit(s.id); return s; }
   startSectionEdit(id){ this.setState({secEdit:id}); }
   commitSectionEdit(id, value){ const n=String(value==null?'':value).trim();
-    if(n) this.renameSection(id,n); this.setState({secEdit:null}); }
-  cancelSectionEdit(){ this.setState({secEdit:null}); }
+    if(n) this.renameSection(id,n); this.setState({secEdit:null}); this.secEditReturn(); }
+  cancelSectionEdit(){ this.setState({secEdit:null}); this.secEditReturn(); }
+  /* PP-EXT (targets pass 2): a rename started from the keyboard hands focus back to its header. */
+  secEditReturn(){ const k=this._secEditReturn; this._secEditReturn=null; if(k!=null) this.focusSecHead(k, true); }
   /* Collapse is a view pref (persisted per workspace), keyed by section id — same posture as
      state.collapsed for subtasks. A collapsed section keeps its header row, so both panes still
      reserve TAG_SECTION_H and row alignment is unaffected. */
@@ -6574,10 +6706,12 @@ class Component extends DCLogic {
     const rows=this.agingTasks(); const B=this.startOfToday();
     if(!rows.length) return h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-mut)'}}, /* PP-EXT (UI revamp block 10b) */
       'Nothing has been sitting untouched for '+this.AGING_DAYS+'+ days. Good.');
-    return h('div',{'data-aging-list':'1',style:{display:'flex',flexDirection:'column',gap:'5px'}},
+    return h('div',{'data-aging-list':'1',style:{display:'flex',flexDirection:'column',gap:0}}, /* PP-EXT (targets pass 2): 0, the rows are 30px */
       ...rows.map(t=>{ const days=Math.max(0, Math.round((B-this.startOfDay(t.start))/this.DAY));
-        return h('div',{key:t.id,'data-aging-task':t.id,onClick:()=>this.openDetail(t.id),
-          style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer',fontSize:'14px'}},
+        /* PP-EXT (targets pass 2): a button, 30px tall; the list's 5px gap goes, so the rows sit on a 30px pitch */
+        return h('button',{type:'button',key:t.id,'data-aging-task':t.id,onClick:()=>this.openDetail(t.id),title:'Open “'+t.name+'”',
+          style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer',fontSize:'14px',minHeight:this.HIT_BOX_PX+'px',width:'100%',
+            textAlign:'left',background:'none',border:'none',padding:0,font:'inherit',color:'inherit'}},
           h('span',{style:{flex:1,minWidth:0,color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name),
           h('span',{style:{fontSize:'14px',color:'var(--text-mut2)',fontVariantNumeric:'tabular-nums'}},'open '+days+'d · no time logged')); }));
   }
@@ -6587,8 +6721,8 @@ class Component extends DCLogic {
     const h=React.createElement;
     const list=this.journalPromptList(); const open=!!this.state.journalPromptsOpen; const edit=!!this.state.journalPromptsEdit;
     const hdr=h('div',{style:{display:'flex',alignItems:'center',gap:'8px'}},
-      h('div',{onClick:()=>this.toggleJournalPrompts(),'data-prompts-toggle':'1',
-        style:{display:'flex',alignItems:'center',cursor:'pointer',userSelect:'none',minHeight:this.HIT_MIN_PX+'px',
+      h('button',{type:'button',className:'pp-hb','aria-expanded':open,onClick:()=>this.toggleJournalPrompts(),'data-prompts-toggle':'1', /* PP-EXT (targets pass 2): a disclosure button, 30px box */
+        style:{display:'flex',alignItems:'center',cursor:'pointer',userSelect:'none',minHeight:this.HIT_MIN_PX+'px','--hb-w':'100%',
           fontSize:'14px',fontWeight:600,color:'var(--text-mut2)',fontFamily:'var(--font-cond)'}}, /* PP-EXT (visual revamp): sentence-case condensed label */
         h('span',{style:{marginRight:'6px',fontSize:'13px',display:'inline-block',transform:open?'rotate(90deg)':'none',
           transition:'transform var(--dur-fast) var(--ease-standard)'}},'›'),
@@ -7321,7 +7455,7 @@ class Component extends DCLogic {
        not reopen the detail over the inline editor it just started. Time-boxed, so it can never eat a
        later, real click. */
     if(this._suppressRowClickUntil && Date.now()<this._suppressRowClickUntil){ this._suppressRowClickUntil=0; return; }
-    this._rowFocusId=id; /* PP-EXT (UI revamp block 6): the roving tab stop follows the last row touched */
+    this._rowFocusId=id; this._secFocusKey=null; /* PP-EXT (UI revamp block 6): the roving tab stop follows the last row touched; (targets pass 2) and leaves any header */
     /* PP-EXT: shift-click selects the inclusive range from the anchor row to the clicked row.
        PP-EXT (UI revamp block 6): the range is taken over SCREEN order — the rendered projection, with its
        sections, sort and collapse — not over storage order, which picked up rows that were not between the
@@ -7456,12 +7590,19 @@ class Component extends DCLogic {
     if(e.ctrlKey && !arrow && k!==' ') return false;
     if(k==='F2'){ e.preventDefault(); this.startInlineEdit(id); return true; }
     if(k==='Enter'){ e.preventDefault(); this.openDetail(id); return true; }
-    if(k===' '){ e.preventDefault(); this._rowFocusId=id; this.toggleSelect(id); return true; }
+    if(k===' '){ e.preventDefault(); this._rowFocusId=id; this._secFocusKey=null; this.toggleSelect(id); return true; }
     if(arrow){ e.preventDefault(); this.rowFocusMove(id, k, !!e.shiftKey, !!e.ctrlKey); return true; }
     return false;
   }
   rowFocusMove(id, key, extend, focusOnly){
     const rows=this.selVisRows(); const i=rows.findIndex(t=>t.id===id); if(i<0) return;
+    /* PP-EXT (targets pass 2): a plain ↑/↓ steps onto a section header when one is next in screen order.
+       Shift (extend) and Ctrl (focus only) build a row selection, so they keep walking rows. */
+    if(!extend && !focusOnly && (key==='ArrowUp'||key==='ArrowDown')){
+      const nx=this.sheetNavNext(this.sheetNavStops(), {k:'row',id}, key);
+      if(nx && nx.k==='sec'){ this.landOnSecHead(nx.key); return; }
+    }
+    this._secFocusKey=null; /* /PP-EXT */
     const ni = key==='Home' ? 0 : key==='End' ? rows.length-1
       : Math.max(0, Math.min(rows.length-1, i+(key==='ArrowDown'?1:-1)));
     const nid=rows[ni].id;
@@ -7476,6 +7617,232 @@ class Component extends DCLogic {
     this.scrollRowIntoView(nid);
     this.focusTaskRow(nid);
     this.focusRowSoon(nid);
+  }
+  /* PP-EXT (targets pass 2): SECTION HEADERS in the sheet's keyboard model. Pass 1 made a header's caret,
+     name and ▲ ▼ ✕ real buttons, but (decision 31) not Tab stops, so collapse, rename, reorder and delete
+     had no keyboard path. Now the arrow keys walk headers as well as rows: ↑ from a section's first row
+     lands on its header, ↓ from a header enters its first row (or the next header when it is collapsed or
+     empty). Landing on a header clears the row selection, so Delete there can only mean the section.
+     On a focused header: Enter / Space collapse or expand (on an empty section, add a task to it), ← / →
+     collapse / expand, F2 renames, Alt+↑ / Alt+↓ move it, Delete removes it (the same undoable delete as ✕,
+     with its Undo toast), and Shift+F10 / the context-menu key open the section menu with all of these.
+     `sheetNavStops` walks the same cached projection the sheet renders, in screen order. */
+  sheetNavStops(sections){
+    const out=[];
+    (sections||this._visSections||[]).forEach(sec=>{
+      if(!sec.flat) out.push({k:'sec',key:this.secKey(sec.id)});
+      if(sec.collapsed) return;
+      (sec.tasks||[]).forEach(t=>{ if(!t.rowHidden) out.push({k:'row',id:t.id}); });
+    });
+    return out;
+  }
+  /* PURE: the stop an arrow (or Home/End) reaches from `from` ({k:'sec',key} | {k:'row',id}); null at an end. */
+  sheetNavNext(stops, from, key){
+    const i=(stops||[]).findIndex(s=>from.k==='sec' ? (s.k==='sec' && s.key===from.key) : (s.k==='row' && s.id===from.id));
+    if(i<0) return null;
+    const ni = key==='Home' ? 0 : key==='End' ? stops.length-1
+      : Math.max(0, Math.min(stops.length-1, i+(key==='ArrowDown'?1:-1)));
+    return ni===i ? null : stops[ni];
+  }
+  secOfKey(key){ return (this._visSections||[]).find(s=>!s.flat && this.secKey(s.id)===key) || null; }
+  secHeadEl(key){
+    if(key==null || typeof document==='undefined' || !document.querySelector) return null;
+    try{ return document.querySelector('[data-pp-sechead="'+String(key).replace(/"/g,'\\"')+'"]'); }catch(_e){ return null; }
+  }
+  /* `soft`: only take focus when nothing else holds it (after a rename's field unmounts, say). */
+  focusSecHead(key, soft){
+    this._secFocusKey=key; this._rowFocusId=null;
+    try{ setTimeout(()=>{ try{
+      const a=document.activeElement;
+      if(soft && a && a!==document.body && !(a.closest && a.closest('[data-pp-sechead]'))) return;
+      const el=this.secHeadEl(key); if(!el) return;
+      el.focus({preventScroll:true}); if(el.scrollIntoView) el.scrollIntoView({block:'nearest'});
+    }catch(_e){} },0); }catch(_e){}
+  }
+  landOnSecHead(key){
+    this._secFocusKey=key; this._rowFocusId=null;
+    this.setState({selectedIds:[], menu:null, selCursor:null});
+    this.focusSecHead(key);
+  }
+  landOnRow(id){
+    this._secFocusKey=null; this._rowFocusId=id; this._selAnchor=id;
+    this.setState({selectedIds:[id], menu:null, selCursor:null});
+    this.scrollRowIntoView(id); this.focusTaskRow(id); this.focusRowSoon(id);
+  }
+  sheetNavGo(from, key){
+    const nx=this.sheetNavNext(this.sheetNavStops(), from, key); if(!nx) return;
+    if(nx.k==='sec') this.landOnSecHead(nx.key); else this.landOnRow(nx.id);
+  }
+  secHeadKeyTarget(e){
+    const t=e && e.target;
+    return (t && t.hasAttribute && t.hasAttribute('data-pp-sechead')) ? t.getAttribute('data-pp-sechead') : null;
+  }
+  secHeadKey(e){
+    const key=this.secHeadKeyTarget(e); if(key==null) return false;
+    const s=this.state;
+    if(s.menu||s.barMenu||s.colMenu||s.datePick||s.pctPop||s.inclPick||s.scopePrompt||s.filterPop||s.secEdit!=null) return false;
+    const sec=this.secOfKey(key); if(!sec) return false;
+    const k=e.key, id=sec.id, isNone=(id==null), empty=this.sectionIsEmpty(sec);
+    const collapsed=(sec.collapsed!=null)?!!sec.collapsed:this.isSectionCollapsed(id);
+    if((k==='F10' && e.shiftKey) || k==='ContextMenu'){ e.preventDefault(); this.openSecMenuKbd(key); return true; }
+    if(e.altKey && (k==='ArrowUp'||k==='ArrowDown')){ e.preventDefault(); this.moveSectionKbd(key, k==='ArrowUp'?-1:1); return true; }
+    if(e.altKey || e.metaKey || e.ctrlKey) return false;
+    if(k==='ArrowUp'||k==='ArrowDown'||k==='Home'||k==='End'){ e.preventDefault(); this.sheetNavGo({k:'sec',key}, k); return true; }
+    if(k==='ArrowLeft'||k==='ArrowRight'){ e.preventDefault();
+      if(!empty && collapsed===(k==='ArrowRight')){ this.toggleSectionCollapse(id, collapsed); this.focusSecHead(key); } return true; }
+    if(k==='Enter'||k===' '){ e.preventDefault();
+      if(empty) this.addToSection(sec); else { this.toggleSectionCollapse(id, collapsed); this.focusSecHead(key); } return true; }
+    if(k==='F2'){ e.preventDefault(); if(!isNone){ this._secEditReturn=key; this.startSectionEdit(id); } return true; }
+    if(k==='Delete'||k==='Backspace'){ e.preventDefault(); if(!isNone) this.deleteSectionKbd(key); return true; }
+    return false;
+  }
+  moveSectionKbd(key, dir){
+    const sec=this.secOfKey(key); if(!sec || sec.id==null) return;
+    const order=this.sectionsInOrder(); const pos=order.findIndex(x=>x.id===sec.id); const to=pos+dir;
+    if(pos<0 || to<0 || to>=order.length) return;
+    this.reorderSection(sec.id, to); this.focusSecHead(key);
+  }
+  /* Delete from the keyboard: the ✕'s own undoable delete, then focus goes to the stop just above (or the
+     first stop), so the arrows keep working. */
+  deleteSectionKbd(key){
+    const sec=this.secOfKey(key); if(!sec || sec.id==null) return;
+    const st=this.sheetNavStops(); const i=st.findIndex(s=>s.k==='sec' && s.key===key);
+    const prev=i>0 ? st[i-1] : null;
+    this.deleteSection(sec.id);
+    try{ setTimeout(()=>{
+      const tgt = prev || this.sheetNavStops()[0]; if(!tgt) return;
+      if(tgt.k==='sec') this.focusSecHead(tgt.key); else this.landOnRow(tgt.id);
+    },0); }catch(_e){}
+  }
+  openSecMenuKbd(key){
+    const el=this.secHeadEl(key);
+    let x=240, y=200;
+    try{ if(el){ const r=el.getBoundingClientRect(); x=r.left+24; y=r.top+r.height; } }catch(_e){}
+    const mp=this.uiPt(x,y);
+    this._menuKbdAt=Date.now(); this._menuReturn=el;
+    this.setState({menu:{x:mp.x,y:mp.y,ids:[],sec:key,kbd:true}});
+  }
+  /* The section menu: the header's own actions as menu items (Shift+F10 on a header). */
+  renderSecMenu(m){
+    const h=React.createElement; const sec=this.secOfKey(m.sec); if(!sec) return null;
+    const vpc=this.uiViewport(); const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-250));
+    const id=sec.id, isNone=(id==null), empty=this.sectionIsEmpty(sec), key=m.sec;
+    const collapsed=(sec.collapsed!=null)?!!sec.collapsed:this.isSectionCollapsed(id);
+    const order=this.sectionsInOrder(); const pos=order.findIndex(x2=>x2.id===id);
+    const done=(fn)=>()=>{ this._menuReturn=null; this.setState({menu:null}); fn(); };
+    const row=(glyph,label,hint,onClick,extra)=>h('div',{key:label,onClick,role:'menuitem',tabIndex:-1,className:'pp-mi',
+      style:Object.assign({display:'flex',alignItems:'center',gap:'11px',padding:'8px 14px',cursor:'pointer',fontSize:'14px',color:'var(--text-2)'},extra||{})},
+      h('span',{'aria-hidden':'true',style:{width:'18px',display:'inline-flex',justifyContent:'center',color:'var(--text-mut2)',fontSize:'14px'}},glyph),
+      label, hint?h('span',{style:{marginLeft:'auto',fontSize:'14px',color:'var(--text-faint2)'}},hint):null);
+    const name=isNone?'No section':sec.name;
+    const menu=h('div',Object.assign(this.menuProps('section'),{'aria-label':'Section '+name,'data-pp-secmenu':key,
+      onMouseDown:e=>e.stopPropagation(), onClick:e=>e.stopPropagation(), onContextMenu:e=>e.preventDefault(),
+      style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
+        borderRadius:'var(--r-3)',boxShadow:'var(--sh-2)',padding:'6px 0',zIndex:2100,fontFamily:'inherit',outline:'none'}}),
+      h('div',{role:'presentation',style:{padding:'7px 14px 4px',fontSize:'14px',fontWeight:600,color:'var(--text-mut)',
+        whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},name),
+      empty ? row('+','Add a task','Enter',done(()=>this.addToSection(sec)))
+        : row(collapsed?'▸':'▾',collapsed?'Expand section':'Collapse section','Enter',done(()=>{ this.toggleSectionCollapse(id,collapsed); this.focusSecHead(key); })),
+      isNone?null:row('✎','Rename','F2',done(()=>{ this._secEditReturn=key; this.startSectionEdit(id); })),
+      (!isNone && pos>0)?row('▲','Move up','Alt+↑',done(()=>this.moveSectionKbd(key,-1))):null,
+      (!isNone && pos<order.length-1)?row('▼','Move down','Alt+↓',done(()=>this.moveSectionKbd(key,1))):null,
+      isNone?null:h('div',{role:'separator',style:{height:'1px',background:'var(--menu-hover)',margin:'5px 0'}}),
+      isNone?null:row('✕','Delete section','Del',done(()=>this.deleteSectionKbd(key)),{color:'var(--danger-strong)'}));
+    return h('div',{onMouseDown:e=>{e.stopPropagation();this._menuReturn=null;this.closeMenu();},onContextMenu:e=>{e.preventDefault();this.closeMenu();},
+      style:{position:'fixed',inset:0,zIndex:2050}}, menu);
+  }
+  /* /PP-EXT (targets pass 2) */
+  /* PP-EXT (targets pass 2): a timeline block or agenda chip that stands for a task is a keyboard stop.
+     Each timeline view (the Day column, the whole 4-Day / Week grid, the Agenda list, Focus's timeline) is
+     ONE Tab stop — a roving tabindex: tabIndex 0 on the last-focused block, else the first block at or
+     after now, -1 on the rest. ↑ / ↓ walk the day's blocks in time, ← / → jump to the nearest-in-time block
+     of the adjacent day that has any, Home / End the day's first / last. Enter / Space open the task, and
+     Shift+F10 / the context-menu key open its row menu; the block's own small controls (▶ ✕ ⧉ ↺ 💤) are
+     buttons but never Tab stops, decision 31's rule for a row.
+     Blocks RENDER at tabIndex -1 and carry `data-tl-nav` (start ms) + `data-tl-nav-day` (the column's
+     midnight); `tlRovingFix` (componentDidMount / componentDidUpdate) names the one stop per view in the DOM,
+     so a re-render never has to know about the other columns. */
+  blockKeyProps(id, label, day, start){
+    return {role:'button', tabIndex:-1, 'aria-label':String(label||'Task'),
+      'data-tl-nav':String(start==null?'':start), 'data-tl-nav-day':String(day==null?'':day),
+      onFocus:e=>{ if(e.target===e.currentTarget) this.tlRovingSet(e.currentTarget); },
+      onKeyDown:e=>{
+        if(e.target!==e.currentTarget) return;
+        if(!e.altKey && !e.ctrlKey && !e.metaKey && /^(ArrowUp|ArrowDown|ArrowLeft|ArrowRight|Home|End)$/.test(e.key)){
+          e.preventDefault(); e.stopPropagation();
+          const el=e.currentTarget; const items=this.tlNavItems(this.tlScopeOf(el));
+          const i=items.findIndex(x=>x.el===el); const j=this.tlNavNext(items, i, e.key);
+          if(j!=null && j!==i){ const t=items[j].el; this.tlRovingSet(t); try{ t.focus({preventScroll:true}); if(t.scrollIntoView) t.scrollIntoView({block:'nearest',inline:'nearest'}); }catch(_e){} }
+          return;
+        }
+        if(e.key==='Enter'||e.key===' '){ e.preventDefault(); e.stopPropagation(); this.openDetail(id); return; }
+        if((e.key==='F10' && e.shiftKey) || e.key==='ContextMenu'){ e.preventDefault(); e.stopPropagation();
+          const r=e.currentTarget.getBoundingClientRect(); const mp=this.uiPt(r.left+12, r.top+Math.min(r.height,24));
+          this._menuKbdAt=Date.now(); this._menuReturn=e.currentTarget;
+          this.setState({menu:{x:mp.x,y:mp.y,ids:[id],kbd:true}, selectedIds:[id]}); }
+      }};
+  }
+  /* The roving scope a block belongs to: Focus's timeline, else the plan pane's view. */
+  tlScopeOf(el){ return (el && el.closest && el.closest('[data-focus-timeline],[data-plan-pane]')) || (typeof document!=='undefined'?document.body:null); }
+  tlNavItems(scope){
+    if(!scope || !scope.querySelectorAll) return [];
+    return Array.prototype.slice.call(scope.querySelectorAll('[data-tl-nav]')).map(el=>({el,
+      day:Number(el.getAttribute('data-tl-nav-day'))||0, start:Number(el.getAttribute('data-tl-nav'))||0}));
+  }
+  /* PURE: the index an arrow (or Home / End) reaches from items[i]; items are {day, start}; null = stay. */
+  tlNavNext(items, i, key){
+    if(!items || i==null || i<0 || i>=items.length) return null;
+    const cur=items[i];
+    const ord=(a,b)=>(a.start-b.start)||(a.ix-b.ix);
+    const all=items.map((x,ix)=>Object.assign({ix},x));
+    const sameDay=all.filter(x=>x.day===cur.day).sort(ord);
+    const k=sameDay.findIndex(x=>x.ix===i);
+    if(key==='ArrowUp') return k>0 ? sameDay[k-1].ix : null;
+    if(key==='ArrowDown') return k<sameDay.length-1 ? sameDay[k+1].ix : null;
+    if(key==='Home') return sameDay[0].ix;
+    if(key==='End') return sameDay[sameDay.length-1].ix;
+    if(key==='ArrowLeft'||key==='ArrowRight'){
+      const days=Array.from(new Set(all.map(x=>x.day))).sort((a,b)=>a-b);
+      const di=days.indexOf(cur.day); const nd=days[di+(key==='ArrowRight'?1:-1)];
+      if(nd==null) return null;
+      const tod=cur.start-cur.day; let best=null;
+      all.filter(x=>x.day===nd).forEach(x=>{ const d=Math.abs((x.start-x.day)-tod);
+        if(!best || d<best.d || (d===best.d && x.start<best.x.start)) best={x,d}; });
+      return best ? best.x.ix : null;
+    }
+    return null;
+  }
+  /* PURE: which item is the view's one Tab stop — the remembered one, else the first at/after now, else the last. */
+  tlRovingPick(items, rememberKey, now){
+    if(!items || !items.length) return -1;
+    const key=x=>x.day+'|'+x.start;
+    if(rememberKey!=null){ const r=items.findIndex(x=>key(x)===rememberKey); if(r>=0) return r; }
+    let best=-1;
+    items.forEach((x,i)=>{ if(x.start>=now && (best<0 || x.start<items[best].start)) best=i; });
+    if(best>=0) return best;
+    let last=0; items.forEach((x,i)=>{ if(x.start>items[last].start) last=i; });
+    return last;
+  }
+  tlRovingSet(el){
+    const scope=this.tlScopeOf(el); if(!scope) return;
+    this.tlNavItems(scope).forEach(x=>x.el.setAttribute('tabindex', x.el===el?'0':'-1'));
+    this._tlRoveKey=(this._tlRoveKey||{});
+    this._tlRoveKey[scope.getAttribute && (scope.getAttribute('data-focus-timeline')!=null?'focus':'plan')]=el.getAttribute('data-tl-nav-day')+'|'+el.getAttribute('data-tl-nav');
+  }
+  tlRovingFix(){
+    try{
+      if(typeof document==='undefined' || !document.querySelectorAll) return;
+      const scopes=document.querySelectorAll('[data-focus-timeline],[data-plan-pane]');
+      const now=Date.now(); const mem=this._tlRoveKey||{};
+      Array.prototype.forEach.call(scopes, scope=>{
+        const items=this.tlNavItems(scope); if(!items.length) return;
+        const stops=items.filter(x=>x.el.getAttribute('tabindex')==='0');
+        if(stops.length===1) return;
+        const a=document.activeElement; const held=items.find(x=>x.el===a);
+        const pick=held ? items.indexOf(held) : this.tlRovingPick(items, mem[scope.getAttribute('data-focus-timeline')!=null?'focus':'plan'], now);
+        items.forEach((x,i)=>x.el.setAttribute('tabindex', i===pick?'0':'-1'));
+      });
+    }catch(_e){}
   }
   /* Open the row menu from the keyboard, anchored under the row's title rather than at a pointer. */
   openRowMenuKbd(id){
@@ -7678,7 +8045,8 @@ class Component extends DCLogic {
     ids=this.expandSubtrees(ids); /* PP-EXT: deleting a parent deletes its subtree */
     const names=this.state.tasks.filter(t=>ids.includes(t.id)).map(t=>t.name); /* PP-EXT (UI revamp block 3) */
     if(!names.length) return; /* PP-EXT (UI revamp block 3): nothing to delete ⇒ no empty undo entry, no toast */
-    this.commit(tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); } tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!ids.includes(this.depId(d))); }); }); this.setState({selectedIds:[],menu:null,detailId:null});
+    /* PP-EXT (pomodoro pause on stop): credit and end the timer in the delete's own undo step */
+    this.commitStoppingTimers(ids, tasks=>{ for(let i=tasks.length-1;i>=0;i--){ if(ids.includes(tasks[i].id)) tasks.splice(i,1); } tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>!ids.includes(this.depId(d))); }); }); this.setState({selectedIds:[],menu:null,detailId:null});
     this.toast(this.toastCount('Deleted', names)); /* PP-EXT (UI revamp block 3) */
   }
   /* ---------- recurrence edit scope ---------- */
@@ -7757,7 +8125,7 @@ class Component extends DCLogic {
         this.toast(this.dragToastMsg(rt?rt.name:'', mode, scope==='this'?'this occurrence':scope==='subsequent'?'this and later occurrences':'all occurrences')); }
     } else if(kind==='delete'){
       const scopeT=this.state.tasks.find(x=>x.id===taskId); const scopeNm=this.toastName(scopeT?scopeT.name:''); /* PP-EXT (UI revamp block 3) */
-      if(scope==='all'){ this.closeScope(); this.commit(tasks=>{ const i=tasks.findIndex(x=>x.id===taskId); if(i>=0) tasks.splice(i,1); tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>this.depId(d)!==taskId); }); }); this.setState({selectedIds:[],detailId:null});
+      if(scope==='all'){ this.closeScope(); /* PP-EXT (pomodoro pause on stop) */ this.commitStoppingTimers([taskId], tasks=>{ const i=tasks.findIndex(x=>x.id===taskId); if(i>=0) tasks.splice(i,1); tasks.forEach(t=>{ t.deps=(t.deps||[]).filter(d=>this.depId(d)!==taskId); }); }); this.setState({selectedIds:[],detailId:null});
         this.toast('Deleted '+scopeNm); /* PP-EXT (UI revamp block 3) */ return; }
       const occs=occsFor(taskId); const cur=occs.find(o=>o.idx===occIdx)||occs[0]||{start:0};
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===taskId); if(!t||!t.recur) return;
@@ -7793,7 +8161,7 @@ class Component extends DCLogic {
       /* Guarded like every other reader of the render cache (currentOcc, occOnDay, mostRecentOccIdx):
          `_occById` does not exist until the first paint, and this handler can run before one. */
       const occs=(this._occById&&this._occById[id])||this.expandTask(tt,this._horizon||tt.end);
-      const setDone=(idxs,done)=>{ this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t||!t.recur) return; t.recur.overrides=t.recur.overrides||{};
+      const setDone=(idxs,done)=>{ /* PP-EXT (pomodoro pause on stop): done ends its timer, same undo step */ this.commitStoppingTimers(done?[id]:[], tasks=>{ const t=tasks.find(x=>x.id===id); if(!t||!t.recur) return; t.recur.overrides=t.recur.overrides||{};
         idxs.forEach(oi=>{ const o={...(t.recur.overrides[oi]||{})}; if(done){o.pct=100;o.completion=o.completion||Date.now();}else{o.pct=0;o.completion=null;} t.recur.overrides[oi]=o; }); });
         /* PP-EXT (UI revamp block 3) */
         this.toast(done ? 'Completed '+this.toastName(tt.name) : 'Marked '+this.toastName(tt.name)+' not done'); };
@@ -7831,7 +8199,8 @@ class Component extends DCLogic {
       if(target) setDone([target.idx], this.occPct(tt,target.idx)<100);
       return; }
     let doneNow=null, archivedNow=false; /* PP-EXT (UI revamp block 3) */
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+    /* PP-EXT (pomodoro pause on stop): completing (and archiving its family) ends their timers, same undo step */
+    this.commitStoppingTimers((tt && !(tt.pct>=100)) ? this.expandSubtrees([id]) : [], tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       if(t.pct>=100){ t.pct=0; t.completion=null; doneNow=false; } else { const now=Date.now(); t.pct=100; t.completion=now; this.archiveDone(tasks,id,now); /* PP-EXT: archive-on-complete */ doneNow=true; archivedNow=!!t.archivedAt; }
     });
     /* PP-EXT (UI revamp block 3): completing usually archives, so the row vanishes — say where it went. */
@@ -7845,7 +8214,8 @@ class Component extends DCLogic {
       this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); t.recur.overrides=t.recur.overrides||{}; const o=t.recur.overrides[idx]||{};
         o.pct=pct; o.completion=pct>=100?(o.completion||Date.now()):null; t.recur.overrides[idx]={...o}; });
       return; }
-    this.commit(tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
+    /* PP-EXT (pomodoro pause on stop): reaching 100% completes, as toggleDone does — timer stop in the same undo step */
+    this.commitStoppingTimers((pct>=100 && tt && !(tt.pct>=100)) ? this.expandSubtrees([id]) : [], tasks=>{ const t=tasks.find(x=>x.id===id); if(!t) return;
       t.pct=pct; t.completion = pct>=100 ? (t.completion||Date.now()) : null;
       if(pct>=100) this.archiveDone(tasks,id,t.completion); /* PP-EXT: archive-on-complete */
     });
@@ -11170,8 +11540,8 @@ class Component extends DCLogic {
     const close=()=>this.closeQuick(); /* PP-EXT (UI revamp block 4) */
     /* PP-EXT V1.6: the native input remains the sole editor. A source-aligned, aria-hidden mirror
        paints parser-owned temporal spans behind it without receiving pointer or keyboard input. */
-    const inputMetrics={fontFamily:'inherit',fontSize:'14px',lineHeight:'28px',
-      letterSpacing:'inherit',padding:'0',height:'28px'};
+    const inputMetrics={fontFamily:'inherit',fontSize:'14px',lineHeight:this.HIT_BOX_PX+'px', /* PP-EXT (targets pass 2): 28 → HIT_BOX_PX, 24 rendered; the mirror shares it */
+      letterSpacing:'inherit',padding:'0',height:this.HIT_BOX_PX+'px'};
     const mirror=h('div',{'data-qa':'quick-highlight-mirror','aria-hidden':'true',
       style:Object.assign({},inputMetrics,{position:'absolute',inset:0,color:'transparent',
         pointerEvents:'none',overflow:'hidden',whiteSpace:'pre'})},
@@ -14191,8 +14561,9 @@ class Component extends DCLogic {
     const s=this.state.settings, g=this.state.gcal;
     const cfgId=(window.PP_CONFIG&&window.PP_CONFIG.googleClientId)||'';
     const secTitle=(t)=>h('div',{style:{fontSize:'var(--fs-2)',fontWeight:600,fontFamily:'var(--font-cond)',color:'var(--text-mut)',margin:'var(--sp-3) 0 var(--sp-0)'}},t); /* PP-EXT (visual revamp): sentence-case condensed label */
+    /* PP-EXT (targets pass 2): a 30px field (24 rendered); the -4px margins keep each settings row's height */
     const inp=(val,on,extra)=>h('input',{className:'pp-num',defaultValue:val,key:String(val),onBlur:e=>on(e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
-      style:Object.assign({width:'86px',border:'1px solid var(--divider)',textAlign:'left'},extra||{})});
+      style:Object.assign({width:'86px',border:'1px solid var(--divider)',textAlign:'left',height:this.HIT_BOX_PX+'px',margin:'-4px 0',boxSizing:'border-box'},extra||{})});
     const setRow=(label,ctrl)=>h('div',{style:{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'var(--sp-1) 0',borderBottom:'1px solid var(--modal-border)'}},
       h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-2)'}},label),this.withA11yLabel(ctrl,label)); /* PP-EXT (UI revamp block 11a) */
     /* PP-EXT C0: settings tab bar — splits the single scrolling drawer into 5 shorter panes so each
@@ -14205,12 +14576,12 @@ class Component extends DCLogic {
     const tabBar=h('div',{role:'tablist','aria-label':'Settings sections',style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'var(--r-3)',padding:'2px',margin:'var(--sp-2) 0 var(--sp-1)'}},
       TABS.map(t=>{ const active=tab===t[0];
         return h('div',{key:t[0],role:'tab',id:'pp-settings-tab-'+t[0],'data-settings-tab':t[0],'aria-controls':'pp-settings-panel','aria-selected':active,
-          tabIndex:active?0:-1,onClick:()=>this.setState({settingsTab:t[0]}),
+          tabIndex:active?0:-1,onClick:()=>this.setState({settingsTab:t[0]}),className:'pp-hba', /* PP-EXT (targets pass 2): a 30px-tall box over the 25px tab */
           onKeyDown:e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();this.setState({settingsTab:t[0]}); return;}
             const nx=this.settingsTabKey(TABS.map(x=>x[0]), t[0], e.key); if(nx==null) return;
             e.preventDefault(); this.setState({settingsTab:nx});
             try{ const el=document.getElementById('pp-settings-tab-'+nx); if(el) el.focus(); }catch(_e){} },
-          style:{flex:1,textAlign:'center',padding:'5px 4px',fontSize:'var(--fs-1)',fontWeight:600,borderRadius:'var(--r-2)',cursor:'pointer',
+          style:{flex:1,textAlign:'center',padding:'5px 4px',fontSize:'var(--fs-1)',fontWeight:600,borderRadius:'var(--r-2)',cursor:'pointer','--hb-w':'100%',
             color:active?'var(--on-accent)':'var(--text-mut2)',background:active?this._accent:'transparent'}}, t[1]); }));
     const paneGeneral=tab!=='general'?null:h(React.Fragment,{},
       row('Show years in dates', toggle(this.state.showYears,()=>this.setState(s2=>({showYears:!s2.showYears})))),
@@ -14225,8 +14596,8 @@ class Component extends DCLogic {
         h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'var(--r-3)',padding:'2px'}},
           [['comfy','Comfy'],['default','Default'],['compact','Compact']].map(it=>{
             const k=it[0], lbl=it[1], active=this.state.rowMode===k;
-            return h('div',{key:k,onClick:()=>this.setRowMode(k),
-              style:{padding:'5px 11px',fontSize:'14px',fontWeight:600,borderRadius:'var(--r-2)',cursor:'pointer',
+            return h('button',{key:k,type:'button',className:'pp-hb','aria-pressed':active,'data-row-mode':k,onClick:()=>this.setRowMode(k), /* PP-EXT (targets pass 2): a button, 30px-tall box */
+              style:{'--hb-w':'100%',padding:'5px 11px',fontSize:'14px',fontWeight:600,borderRadius:'var(--r-2)',cursor:'pointer',
                 color:active?'var(--on-accent)':'var(--text-mut2)',background:active?this._accent:'transparent'}},lbl);
           }))),
       /* PP-EXT C0: moved from the Data section — column visibility/reset is an appearance concern */
@@ -14313,7 +14684,7 @@ class Component extends DCLogic {
                 setRow('Email', h('input',{className:'pp-num',type:'email',defaultValue:sy.email,key:'syncemail','data-settings-email':'1', /* PP-EXT (UI revamp block 11b) */
                   onChange:e=>this.saveSync({email:e.target.value}),
                   onKeyDown:e=>{ if(e.key==='Enter'){ e.preventDefault(); this.syncSendMagicLink(); } },
-                  style:{width:'190px',border:'1px solid var(--divider)',textAlign:'left'}})),
+                  style:{width:'190px',border:'1px solid var(--divider)',textAlign:'left',height:this.HIT_BOX_PX+'px',margin:'-4px 0',boxSizing:'border-box'}})), /* PP-EXT (targets pass 2): 30px field */
                 h('div',{style:{display:'flex',gap:'7px',padding:'8px 0 2px'}},
                   h('button',{className:'pp-tbtn',onClick:()=>this.syncSendMagicLink(),disabled:!!sy.sending,
                     style:sy.sending?{opacity:0.5}:null}, sy.sending?'Sending…':(sy.sent?'Resend link':'Send magic link'))),
@@ -14330,7 +14701,7 @@ class Component extends DCLogic {
       !sy.connected ? h('div',{'data-settings-gcal-locked':'1',style:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'10px',padding:'2px 0 8px'}},
           h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}},
             this.syncConfigured() ? 'Sign in to your account to connect Google Calendar.' : 'Google Calendar needs cloud sync, which isn’t available in this build.'),
-          this.syncConfigured() ? h('button',{type:'button',className:'pp-btn pp-btn--sm','data-settings-signin':'1',onClick:()=>this.focusSyncSignIn()},'Sign in') : null)
+          this.syncConfigured() ? h('button',{type:'button',className:'pp-btn','data-settings-signin':'1',onClick:()=>this.focusSyncSignIn()},'Sign in') /* PP-EXT (targets pass 2): md, 30px — the sm box measured 23 here */ : null)
       : h(React.Fragment,{},
       /* Developer path: with googleClientId in config.js nothing is shown; without it, a field. */
       cfgId ? null
@@ -15813,7 +16184,7 @@ class Component extends DCLogic {
              that spec keep MEASURING the block and merely apportion it, so a drift in the block's
              height still fails the way it always did. */
           'data-tl-kid-min':String(Math.round((k.end-k.start)/60000)),
-          onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); },
+          onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); }, role:'button', tabIndex:-1, title:'Open “'+k.name+'”', /* PP-EXT (targets pass 2): a subtask line opens its task; the block is the Tab stop */
           style:{display:'flex',alignItems:'center',gap:'4px',fontSize:'14px',lineHeight:1.65,
             paddingLeft:(Math.max(0,k.depth-0)*8)+'px',
             fontWeight:on?700:500,
@@ -15873,11 +16244,14 @@ class Component extends DCLogic {
          its slot, and the click that followed a resize started a timer on the task just resized (which,
          being the active task, was then pulled to `now` and fell out of the day entirely). Keys, not
          re-ordering, are the fix: a keyed child is matched by key however many siblings precede it. */
-      const btn = (c.type==='meal' || (compact && !running)) ? null : h('div',{key:'tmr', /* PP-EXT (UI revamp block 8): a compact chip spends its width on the name; a running one keeps its ■ */onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
-        title:running?'Stop timer':'Start timer',
-        style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%',
+      /* PP-EXT (targets pass 2): ▶ is a real button (not a Tab stop: the block is, and its row menu has the
+         timer) with a 30px box. The box is shifted 4px in and down so it sits wholly inside the block, which
+         clips: right edge on the block's edge, top on its top. */
+      const btn = (c.type==='meal' || (compact && !running)) ? null : h('button',this.rowBtnProps({key:'tmr', /* PP-EXT (UI revamp block 8): a compact chip spends its width on the name; a running one keeps its ■ */onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),
+        title:running?'Stop timer':'Start timer','data-tl-timer':String(c.id),
+        style:{position:'absolute',top:'2px',right:'2px',width:'18px',height:'18px',borderRadius:'50%','--hb-dx':'-4px','--hb-dy':'4px',
           display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'13px',
-          background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}, running?'■':'▶'); /* PP-EXT (22) */
+          background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}), running?'■':'▶'); /* PP-EXT (22) */
       /* PP-EXT: unpin ✕ on drag-pinned blocks (clears the pin → repacks flexibly) */
       /* PP-EXT (04b, HIT_MIN_PX tenet): the ✕ used to BE its 16px glyph, inside a block whose height
          floors at 13px and whose text starts 4px later — the one control that undoes a mis-drop was
@@ -15888,11 +16262,12 @@ class Component extends DCLogic {
       /* PP-EXT (V4.3): the left controls are now a COLUMN of HIT_MIN_PX slots rather than one fixed
          position, because Reset can coexist with ✕/⧉ on the same block. Each keeps the full tenet-sized
          target; the block's left padding and the edge handle's inset both follow the slot COUNT. */
-      const leftCtl = (inner, title, onClick, slot, extra) => h('div',
-        Object.assign({key:'lc'+(slot||0),onClick:e=>{e.stopPropagation();onClick();},onMouseDown:e=>e.stopPropagation(),
+      /* PP-EXT (targets pass 2): each slot is a real button, HIT_BOX_PX wide (24 rendered), full block height. */
+      const leftCtl = (inner, title, onClick, slot, extra) => h('button',
+        this.rowBtnProps(Object.assign({key:'lc'+(slot||0),onClick:e=>{e.stopPropagation();onClick();},onMouseDown:e=>e.stopPropagation(),
           title,
-          style:{position:'absolute',top:0,bottom:0,left:((slot||0)*this.HIT_MIN_PX)+'px',width:this.HIT_MIN_PX+'px',zIndex:2,
-            display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}, extra||{}),
+          style:{position:'absolute',top:0,bottom:0,left:((slot||0)*this.HIT_BOX_PX)+'px',width:this.HIT_BOX_PX+'px',zIndex:2,'--hb-h':'100%','--hb-w':'100%',
+            display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}, extra||{})),
         h('span',{style:{width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',
           justifyContent:'center',fontSize:'13px',background:'var(--tl-ctl-bg)',color:'var(--tl-ctl-fg)'}}, inner)); /* PP-EXT (22) */
       /* PP-EXT (04b): regroup — offered on the FIRST non-pinned chunk of a task the day has split,
@@ -15988,8 +16363,8 @@ class Component extends DCLogic {
       const edgeH = canResize ? h('div',{key:'edge',onMouseDown:e=>this.edgePointerDown(e,c,B,{px}),
         'data-tl-edge':'1', 'data-tl-edge-task':(c.id!=null?String(c.id):''),
         title:'Drag to change how much time this task gets — the override sticks through re-scheduling · drag back to the original size to go auto again · hold Alt for free sizing', /* PP-EXT (V4.3) */
-        style:{position:'absolute',left:(nLeft*this.HIT_MIN_PX)+'px',right:0,bottom:0, /* PP-EXT (V4.3): clear the WHOLE left control column, however many slots it holds */
-          height:this.HIT_MIN_PX+'px',zIndex:3,cursor:'ns-resize',
+        style:{position:'absolute',left:(nLeft*this.HIT_BOX_PX)+'px',right:0,bottom:0, /* PP-EXT (V4.3): clear the WHOLE left control column, however many slots it holds */
+          height:this.HIT_BOX_PX+'px',zIndex:3,cursor:'ns-resize', /* PP-EXT (targets pass 2): HIT_BOX_PX, 24 rendered */
           display:'flex',alignItems:'flex-end',justifyContent:'center',paddingBottom:'2px'}},
         h('span',{style:{width:'26px',height:'3px',borderRadius:'var(--r-1)',pointerEvents:'none',
           background:edging?'var(--tl-grip-active)':'var(--tl-grip)'}})) : null; /* PP-EXT (22) */
@@ -16049,7 +16424,7 @@ class Component extends DCLogic {
         /* PP-EXT (owner 2026-08-04): a non-draggable block (a fixed appointment with no drag-pin, or a
            parent with children) still opens details on click; draggable ones go through the no-move
            branch in the block mouseup instead, so they don't open twice. */
-        onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
+        onClick:(canDrag||c.type==='meal')?null:(e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }), /* PP-EXT (targets pass 2): a meal/free-time block takes no click, so it carries no handler */
         /* PP-EXT (owner 2026-08-20, Task 18): hover opens the card. Keyed by (id, day, start) rather
            than by id alone, because a split task has several blocks on one day and only the one under
            the pointer should open — the same identity the drag path matches on. */
@@ -16057,6 +16432,7 @@ class Component extends DCLogic {
           this.setState({hoverBlock:{id:c.id,day:B,start:c.start}}); }):null,
         onMouseLeave:tipModel?(()=>{ const hb=this.state.hoverBlock;
           if(hb && hb.id===c.id && hb.day===B && hb.start===c.start) this.setState({hoverBlock:null}); }):null,
+        ...((c.id!=null && tkHere) ? this.blockKeyProps(c.id, c.title, B, c.start) : {}), /* PP-EXT (targets pass 2) */
         'data-tl-compact':compact?'1':null, /* PP-EXT (UI revamp block 8) */
         'data-tl-min':String(Math.round(((c.end-c.start)/60000+edgeDelta)*10)/10), /* the minutes the block stands for — a chip's HEIGHT no longer says */
         'data-tl-routine':ty.routine?'1':null,
@@ -16064,7 +16440,7 @@ class Component extends DCLogic {
           /* PP-EXT (UI revamp block 8): titles are TL_BLOCK_FS (renders ≥ TL_TEXT_MIN_RENDER_PX under the
              shell zoom); a compact chip is one line with no vertical padding and no timer column. */
           borderRadius:compact?'var(--r-2)':'var(--r-2)',
-          padding:(compact?('0 '+(btn?22:6)+'px 0 '):((3+padTop)+'px '+(runM?(26+runM.label.length*8):22)+'px 3px '))+ /* PP-EXT (UI revamp block 9): room for the elapsed label */ (nLeft?(nLeft*this.HIT_MIN_PX+3):7)+'px',
+          padding:(compact?('0 '+(btn?22:6)+'px 0 '):((3+padTop)+'px '+(runM?(26+runM.label.length*8):22)+'px 3px '))+ /* PP-EXT (UI revamp block 9): room for the elapsed label */ (nLeft?(nLeft*this.HIT_BOX_PX+3):7)+'px', /* PP-EXT (targets pass 2): HIT_BOX_PX slots */
           fontSize:this.TL_BLOCK_FS+'px',lineHeight:compact?((this.TL_CHIP_H_PX-2*this.TL_BLK_BORDER_PX)+'px'):1.3,
           /* PP-EXT (25c): a fixed window's label is lighter and letter-spaced — it names a region of the
              day, it is not the title of something to do. */
@@ -16144,8 +16520,8 @@ class Component extends DCLogic {
           const cur=this.timeParts(which==='start'?this.state.settings.dayStart:this.state.settings.dayEnd);
           this._edgeDrag={kind:'daybound', which, day:B, px, base:cur, val:cur, startClientY:e.clientY, moved:false};
           this.forceUpdate(); },
-        style:{position:'absolute', left:0, width:gut+'px', height:this.HIT_MIN_PX+'px', cursor:'ns-resize',
-          zIndex:6, top:(line - (which==='start'?0:this.HIT_MIN_PX))+'px',
+        style:{position:'absolute', left:0, width:gut+'px', height:this.HIT_BOX_PX+'px', cursor:'ns-resize', /* PP-EXT (targets pass 2): HIT_BOX_PX */
+          zIndex:6, top:(line - (which==='start'?0:this.HIT_BOX_PX))+'px',
           display:'flex', alignItems:which==='start'?'flex-start':'flex-end'}},
         h('div',{key:'bar',style:{position:'relative',width:'100%',height:'3px',borderRadius:'var(--r-1)',
           background:'var(--tl-point)',opacity:dbDrag&&dbDrag.which===which?1:0.75}},
@@ -16394,10 +16770,11 @@ class Component extends DCLogic {
          The target is HIT_MIN_PX square (the owner tenet: the glyph is 14px, the hit box is not). */
       (()=>{ const zoom=this.drawerZoomFactor(this.drawerZoomIsExpanded(this._drawerZoom));
         const expanded=this.drawerZoomIsExpanded(zoom);
-        const zBtn=h('div',{onClick:()=>this.toggleDrawerZoom(),
-          'data-tl-zoom':expanded?'expanded':'fit',
+        /* PP-EXT (targets pass 2): a real button and a Tab stop, with a 30px box around its 24px look. */
+        const zBtn=h('button',{type:'button',className:'pp-hba',onClick:()=>this.toggleDrawerZoom(),
+          'data-tl-zoom':expanded?'expanded':'fit','aria-pressed':expanded,
           title:expanded?'Fit the whole day to the pane':'Expand the day (taller hours, scrolls)',
-          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'var(--r-2)',display:'flex',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'var(--r-2)',display:'flex',padding:0,
             alignItems:'center',justifyContent:'center',fontSize:'14px',fontWeight:700,cursor:'pointer',
             userSelect:'none',background:'var(--sheet-bg)',border:'1px solid var(--divider)',color:'var(--text-2)'}},
           expanded?'⇱':'⇲');
@@ -16442,7 +16819,8 @@ class Component extends DCLogic {
     const mirror = pm.mode==='mirror';
     if(mirror) remFrac = pm.fill;
     const ringText = mirror ? runM.elapsed : cd(remainingMs);
-    const ringLabel = mirror ? 'Running' : pc.label;
+    const paused = !!(p && p.pausedRemaining!=null); /* PP-EXT (pomodoro pause on stop) */
+    const ringLabel = mirror ? 'Running' : paused ? 'Paused' : pc.label;
     /* /PP-EXT */
     const hit=Math.ceil(this.HIT_MIN_PX/this.SHELL_ZOOM);
 
@@ -16467,7 +16845,7 @@ class Component extends DCLogic {
     const R=opts.inHero?54:64, SW=opts.inHero?7:8, PAD=SW+4, SZ=R*2+PAD*2, CIR=2*Math.PI*R;
     const ring=h('div',{style:{position:'relative',width:SZ+'px',height:SZ+'px',flex:'none',display:'flex',alignItems:'center',justifyContent:'center'}},
       (p||mirror)?h('div',{style:{position:'absolute',inset:PAD+'px',borderRadius:'50%',background:pc.bg, /* PP-EXT (UI revamp block 9): + mirror */
-        animation:'ppPomoBreath 3.6s var(--ease-standard) infinite'}}):null,
+        animation:paused?'none':'ppPomoBreath 3.6s var(--ease-standard) infinite'}}):null, /* PP-EXT (pomodoro pause on stop): a paused ring is still */
       h('svg',{width:SZ,height:SZ,viewBox:'0 0 '+SZ+' '+SZ,style:{position:'absolute',transform:'rotate(-90deg)'}},
         h('circle',{cx:SZ/2,cy:SZ/2,r:R,fill:'none',stroke:'var(--pct-track)',strokeWidth:SW}),
         h('circle',{'data-pomo-arc':'1',cx:SZ/2,cy:SZ/2,r:R,fill:'none',stroke:pc.c,strokeWidth:SW,strokeLinecap:'round',
@@ -16487,7 +16865,7 @@ class Component extends DCLogic {
 
     /* One button vocabulary: solid = the phase colour with --on-accent ink; ghost = outlined in it. */
     const btn=(label,on,solid,attrs)=>h('button',Object.assign({type:'button',onClick:on,
-      style:{cursor:'pointer',fontWeight:700,fontSize:'14px',height:hit+'px',padding:'0 12px',flex:1,minWidth:0,whiteSpace:'nowrap',
+      style:{cursor:'pointer',fontWeight:700,fontSize:'14px',height:hit+'px',minHeight:hit+'px' /* PP-EXT (targets pass 2): flex:1 in the panel's COLUMN squashed a lone button to its text */,padding:'0 12px',flex:1,minWidth:0,whiteSpace:'nowrap',
         overflow:'hidden',textOverflow:'ellipsis',textAlign:'center',borderRadius:'var(--r-3)',
         background:solid?pc.c:'transparent',color:solid?'var(--on-accent)':pc.c,border:'1.5px solid '+pc.c,
         transition:'filter var(--dur-fast) var(--ease-standard)'},
@@ -16521,6 +16899,12 @@ class Component extends DCLogic {
       /* In the hero this is the SECOND action (the task's own Start is the primary), so it is outlined. */
       controls=btn('▶ Start focus', ()=>this.startPomodoro(pick), !opts.inHero,
         {'data-pomo-start':'1',title:pick?'Start a '+cfg.work+'-minute focus on this task':'Start a standalone '+cfg.work+'-minute focus'});
+    } else if(paused){
+      /* PP-EXT (pomodoro pause on stop): the task's timer stopped, so the focus phase waits for it */
+      controls=h('div',{style:{display:'flex',gap:'6px',width:'100%'}},
+        btn('▶ Resume',()=>this.resumePomodoro(),true,{'data-pomo-resume':'1',title:task?'Restart the timer on this task and resume the focus':'Resume the focus'}),
+        btn('Stop',()=>this.stopPomodoro(),false,{'data-pomo-stop':'1',title:'End the Pomodoro session'}));
+      /* /PP-EXT */
     } else {
       controls=h('div',{style:{display:'flex',gap:'6px',width:'100%'}},
         btn('Skip',()=>this.skipPomoPhase(),false,{'data-pomo-skip':'1',title:'Skip to the next phase'}),
@@ -16531,7 +16915,7 @@ class Component extends DCLogic {
       ? {display:'flex',flexDirection:'column',gap:'8px',alignItems:'center',width:(SZ+72)+'px',flex:'none',minWidth:0} /* PP-EXT (UI revamp block 11a): +16 so "Pomodoro · 25 min focus" fits at the raised type floor */
       : {display:'flex',flexDirection:'column',gap:'12px',alignItems:'center',padding:'16px',borderRadius:'var(--r-4)',
           background:'var(--sheet-bg)',border:'1px solid var(--divider)',boxShadow:'var(--sh-1)',width:'100%',minWidth:0};
-    return h('div',{style:rootStyle,'data-pomo-mode':pm.mode,'data-pomo-phase':phase},
+    return h('div',{style:rootStyle,'data-pomo-mode':pm.mode,'data-pomo-phase':phase,'data-pomo-paused':paused?'1':undefined}, /* PP-EXT (pomodoro pause on stop): data-pomo-paused */
       header, nameLine, ring, dots, controls, settingsPanel);
   }
   /* PP-EXT Phase 10: music dock — no audio engine yet. Controls surface a note explaining so.
@@ -16576,11 +16960,11 @@ class Component extends DCLogic {
         const canDrag=this.blockDraggable(c, kb);
         const dragging = bd && bd.moved && bd.id===c.id && bd.day===B && c.start===bd.origStart; /* PP-EXT (04): per-chunk, see renderDayColumn */
         const span=c.end-c.start; const st=dragging?bd.previewStart:c.start; const en=dragging?bd.previewStart+span:c.end;
-        const unpin = c.dragPin ? h('div',{onClick:e=>{e.stopPropagation();this.unpinBlock(c.id, B, c.start);},onMouseDown:e=>e.stopPropagation(), /* PP-EXT (04): unpins THIS block */
+        const unpin = c.dragPin ? h('button',this.rowBtnProps({onClick:e=>{e.stopPropagation();this.unpinBlock(c.id, B, c.start);},onMouseDown:e=>e.stopPropagation(), /* PP-EXT (04): unpins THIS block */
           title:'Unpin (return to flexible scheduling)',
           /* PP-EXT (04b, HIT_MIN_PX tenet): same enlargement as the timeline block's ✕ — the glyph is
-             unchanged, the hit box around it is now HIT_MIN_PX square. */
-          style:{flex:'none',cursor:'pointer',width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center'}},
+             unchanged, the hit box around it is now HIT_MIN_PX square. (targets pass 2): a button, 30px box. */
+          style:{flex:'none',cursor:'pointer',width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center'}}),
           h('span',{style:{width:'16px',height:'16px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
             fontSize:'13px',background:'var(--tl-ctl-bg)',color:'var(--tl-ctl-fg)'}}, '✕')) : null; /* PP-EXT (22) */
         /* PP-EXT (owner ruling 2026-08-21, S1): a subtree is ONE lipped chip with its children as
@@ -16599,7 +16983,7 @@ class Component extends DCLogic {
             return h('div',{key:'sk'+ki,'data-sched-kid':String(k.id),'data-sched-kid-depth':String(k.depth),
               'data-sched-kid-active':on?'1':'0',
               onMouseDown:e=>e.stopPropagation(),
-              onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); },
+              onClick:e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===k.id)) this.openDetail(k.id); }, role:'button', tabIndex:-1, title:'Open “'+k.name+'”', /* PP-EXT (targets pass 2): a subtask line opens its task; the block is the Tab stop */
               style:{display:'flex',alignItems:'center',gap:'5px',fontSize:'14px',lineHeight:1.65,
                 paddingLeft:(6+Math.max(0,k.depth)*10)+'px',fontWeight:on?700:500,
                 background:on?'var(--tl-kid-active-bg)':'transparent',borderRadius:on?'var(--r-1)':'0',
@@ -16622,7 +17006,8 @@ class Component extends DCLogic {
           title:canDrag?('Drag to pin at a time'+(c.goal?(' · Goal: '+c.goal):'')):(c.goal?('Goal: '+c.goal):c.title),
           onMouseDown:canDrag?(e=>this.blockPointerDown(e,c,B,{px:SCHED_PX})):null, /* PP-EXT: drag chip → pin (this day) */
           /* PP-EXT (owner 2026-08-04): same details-on-click rule as the Today timeline block above. */
-          onClick:canDrag?null:(e=>{ if(c.type==='meal') return; e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }),
+          onClick:(canDrag||c.type==='meal')?null:(e=>{ e.stopPropagation(); if((this.state.tasks||[]).some(t=>t.id===c.id)) this.openDetail(c.id); }), /* PP-EXT (targets pass 2): a meal/free-time block takes no click, so it carries no handler */
+          ...((c.type!=='meal' && c.id!=null && (this.state.tasks||[]).some(t=>t.id===c.id)) ? this.blockKeyProps(c.id, c.title, B, c.start) : {}), /* PP-EXT (targets pass 2) */
           style:{display:'flex',alignItems:'center',gap:'8px',
             margin:kidLines?'0':'4px 12px',padding:'5px 9px',borderRadius:kidLines?'0':'var(--r-2)',
             background:kidLines?'transparent':ty.bg,color:ty.fg,fontSize:'14px',fontWeight:600,
@@ -16640,9 +17025,10 @@ class Component extends DCLogic {
                the second has to say so, with the same marker the timeline uses. */
             +((kidLines&&c.cut)?('  \u00b7 CUT \u00b7 '+c.piece+' of '+c.pieces):'')),
           unpin,
-          c.type!=='meal'?h('div',{onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer',
+          c.type!=='meal'?h('button',this.rowBtnProps({onClick:e=>{e.stopPropagation();this.toggleTimer(c.id);},onMouseDown:e=>e.stopPropagation(),title:running?'Stop timer':'Start timer', /* PP-EXT (targets pass 2): a button with a 30px box */
+            'data-sched-timer':String(c.id),
             style:{flex:'none',cursor:'pointer',width:'18px',height:'18px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',
-              fontSize:'13px',background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}, running?'■':'▶'):null); /* PP-EXT (22) */
+              fontSize:'13px',background:running?'#ea4335':'var(--tl-ctl-bg)',color:running?'var(--on-accent)':'var(--tl-point)'}}), running?'■':'▶'):null); /* PP-EXT (22) */
         /* ONE chip, with the LIP on it — the same single-object rule C1 states for the timeline. */
         return kidLines
           ? h('div',{key:'scw'+i,'data-sched-family':String(c.id),
@@ -16880,11 +17266,14 @@ class Component extends DCLogic {
         ...lineEls,
         /* PP-EXT (UI revamp block 8): "+N more" is a real control — it opens the day's full list. Counted
            by task (a hidden routine line adds all its routines). */
-        hidden>0 ? h('button',{key:'more',type:'button','data-pp-month-more':String(c.dayStart),
+        /* PP-EXT (targets pass 2): a 30px hit box (.pp-hba), at least 30 wide, nudged down so it reaches no
+           higher than the gap above it — the chip above is the more-used target. The cell clips below. */
+        hidden>0 ? h('button',{key:'more',type:'button','data-pp-month-more':String(c.dayStart),className:'pp-hba',
           'aria-label':'Show all items on this day ('+hidden+' more)',
           'aria-expanded':this.state.monthMore===c.dayStart,
           onMouseDown:e=>e.stopPropagation(), onClick:e=>openMore(e, c.dayStart),
           style:{alignSelf:'flex-start',minHeight:compact?'14px':'18px',display:'inline-flex',alignItems:'center',flex:'none',
+            '--hb-w':'max(100%, 30px)','--hb-dy':(compact?'7px':'4px'),
             fontSize:compact?'13px':'14px',fontWeight:600,color:'var(--link)',background:'transparent',border:'none',
             padding:compact?'0 2px':'0 4px',cursor:'pointer',fontFamily:'inherit'}}, '+'+hidden+' more') : null); });
     /* PP-EXT (UI revamp block 8): the "+N" day list. Anchored to its cell by grid position (7 columns x
@@ -17080,13 +17469,34 @@ class Component extends DCLogic {
     return {curOcc, recIdx, dispPct, dispEnd: curOcc ? curOcc.end : t.end,
       done: dispPct>=100, pcol: this.PCOL[t.priority]||'var(--pri-default)'};
   }
+  /* PP-EXT (targets pass 1): the props of a ROW control — a real <button> (so it has a role, a name and
+     Enter/Space for free) that is NOT a Tab stop: decision 31, the row menu (Shift+F10) carries the row's
+     actions and the arrows move the selection. `.pp-hb` resets its look and gives it a 30px hit box.
+     A pointer press focuses a button, where the old div let focus fall through to the row; left there it
+     would strand the arrow keys on the control. So after the click, focus goes on to the nearest focusable
+     host (the row, or a card) — where a div would have put it — or is dropped. `extra` is merged into the
+     inline style, which is where the --hb-* variables go. */
+  rowBtnProps(p){
+    const onClick=p.onClick;
+    return Object.assign({type:'button',tabIndex:-1},p,{className:'pp-hb'+(p.className?(' '+p.className):''),
+      onClick:e=>{ if(onClick) onClick(e); this.rowBtnRefocus(e&&e.currentTarget); }});
+  }
+  rowBtnRefocus(el){
+    try{
+      if(!el || typeof document==='undefined' || document.activeElement!==el) return;
+      const host=el.parentElement && el.parentElement.closest ? el.parentElement.closest('[tabindex]') : null;
+      if(host && host.focus) host.focus({preventScroll:true}); else if(el.blur) el.blur();
+    }catch(_e){}
+  }
   /* Complete + priority in one control: click completes, right-click cycles priority. */
   taskDoneCircle(t, d){
     const h=React.createElement; d=d||this.taskDisp(t);
-    return h('div',{title:'Click to complete · right-click to change priority',
+    /* PP-EXT (targets pass 1): a button with a 30px hit box centred on the circle. On a sheet row that box
+       ends 2px short of the name cell, and the drag dot to its left keeps the cell's padding. */
+    return h('button',this.rowBtnProps({title:'Click to complete · right-click to change priority','data-done-circle':t.id,
       onMouseDown:e=>e.stopPropagation(),
       onClick:e=>{e.stopPropagation();this.toggleDone(t.id);}, onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
-      style:{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flex:'none'}},
+      style:{display:'flex',alignItems:'center',justifyContent:'center',flex:'none','--hb-dx':'-1.5px'}}),
       h('svg',{width:18,height:18,viewBox:'0 0 18 18'},
         h('circle',{cx:9,cy:9,r:7,fill:d.done?d.pcol:'none',stroke:d.pcol,strokeWidth:1.7}),
         d.done?h('path',{d:'M5.4 9.2 L7.8 11.5 L12.4 6.4',fill:'none',stroke:'var(--on-accent)',strokeWidth:1.7,strokeLinecap:'round',strokeLinejoin:'round'}):null));
@@ -17121,13 +17531,13 @@ class Component extends DCLogic {
     const links=this.taskLinks(t);
     if(!links.length) return null;
     const only=links.length===1;
-    return h('span',{'data-task-links':String(links.length),
+    return h('button',this.rowBtnProps({'data-task-links':String(links.length),
       onMouseDown:e=>e.stopPropagation(),
       onClick:e=>{ e.stopPropagation(); this.openTaskLinks(t.id); },
       title:(only?'Open ':'Open all '+links.length+' links: ')+links.map(l=>l.label).join(', '),
-      style:{display:'inline-flex',alignItems:'center',height:'18px',padding:'0 5px',cursor:'pointer',
-        fontSize:'13px',color:'var(--tag-text)',background:'var(--tag-bg)',
-        border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',whiteSpace:'nowrap',flex:'none'}},
+      style:{display:'inline-flex',alignItems:'center',height:'18px',padding:'0 5px',
+        fontSize:'13px',color:'var(--tag-text)',background:'var(--tag-bg)','--hb-w':'100%','--hb-h':'100%',
+        border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',whiteSpace:'nowrap',flex:'none'}}),
       only ? ('🔗 '+links[0].label) : ('🔗 '+links.length));
   }
   taskSnoozeDayChips(t){
@@ -17142,12 +17552,12 @@ class Component extends DCLogic {
             color:'var(--tag-text)',background:'var(--tag-bg)',border:'1px dashed var(--tag-border)',
             borderRadius:'var(--r-1)',paddingLeft:'4px',whiteSpace:'nowrap',flex:'none'}},
         '\U0001f4a4 '+k.slice(5),
-        h('span',{onMouseDown:e=>e.stopPropagation(),
+        h('button',this.rowBtnProps({onMouseDown:e=>e.stopPropagation(),
           onClick:e=>{ e.stopPropagation(); this.clearSnoozeDay(t.id, this.dayMsOfKey(k)); },
           title:'Put it back on '+k,
           style:{display:'inline-flex',alignItems:'center',justifyContent:'center',
-            width:this.HIT_MIN_PX+'px',height:'18px',cursor:'pointer',color:'var(--text-faint2)',
-            fontSize:'14px',lineHeight:1}},'\u00d7'))));
+            width:this.HIT_MIN_PX+'px',height:'18px',color:'var(--text-faint2)',
+            fontSize:'14px',lineHeight:1,'--hb-w':this.HIT_MIN_PX+'px','--hb-h':'18px'}}),'\u00d7'))));
   }
   /* The inverse of `ymdOf`, built from parts rather than Date.parse: "2026-08-20" parsed as a string is
      UTC, which lands on the previous day for anyone west of Greenwich. */
@@ -17162,9 +17572,9 @@ class Component extends DCLogic {
     return h('div',{style:{display:'flex',gap:'3px',alignItems:'center',minWidth:0,overflow:'hidden'}},
       ...(t.labels||[]).map(l=>h('span',{key:l,style:{display:'inline-flex',alignItems:'center',height:'18px',fontSize:'13px',color:'var(--tag-text)',
           background:'var(--tag-bg)',border:'1px solid var(--tag-border)',borderRadius:'var(--r-1)',paddingLeft:'4px',whiteSpace:'nowrap',flex:'none'}},
-        '@'+l,h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeLabel(t.id,l);},title:'Remove @'+l,
-          style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.HIT_MIN_PX+'px',height:'18px',cursor:'pointer',
-            color:'var(--text-faint2)',fontSize:'14px',lineHeight:1}},'×'))),
+        '@'+l,h('button',this.rowBtnProps({onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeLabel(t.id,l);},title:'Remove @'+l,
+          style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.HIT_MIN_PX+'px',height:'18px',
+            color:'var(--text-faint2)',fontSize:'14px',lineHeight:1,'--hb-w':this.HIT_MIN_PX+'px','--hb-h':'18px'}}),'×'))),
       h('input',{key:'rowtag-'+(t.labels||[]).join('|'),type:'text',placeholder:'@',title:'Add a tag',
         onMouseDown:e=>e.stopPropagation(),onClick:e=>e.stopPropagation(),
         onFocus:e=>e.currentTarget.style.width='72px',
@@ -17179,10 +17589,11 @@ class Component extends DCLogic {
     if(!byId){ byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x); }
     const seqOf=this._seqOf||{};
     return (t.deps||[]).map(dp=>{ const pid=this.depId(dp); const oc=this.depOcc(dp); const p=byId[pid]; if(!p) return null;
-      return h('span',{key:pid+'_'+oc,onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeDep(t.id,pid);},
+      return h('button',this.rowBtnProps({key:pid+'_'+oc,onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.removeDep(t.id,pid);},
         title:'Predecessor: '+p.name+(oc!=null?(' (occurrence '+(oc+1)+')'):'')+' · click to remove',
         style:{fontSize:'13px',color:'var(--text-mut)',background:'var(--input-bg)',border:'1px solid var(--divider)',borderRadius:'var(--r-1)',
-          padding:'0 var(--sp-0)',cursor:'pointer',whiteSpace:'nowrap'}}, '↳ '+(seqOf[pid]||'')+(oc!=null?('·'+(oc+1)):'')); });
+          padding:'0 var(--sp-0)',whiteSpace:'nowrap','--hb-w':'100%','--hb-h':'100%'}}), '↳ '+(seqOf[pid]||'')+(oc!=null?('·'+(oc+1)):'')); });
+
   }
   /* PP-EXT Track B: inclusion opens a popover rather than toggling, because pressed/snoozed/unpressed are
      independently meaningful states a single click cannot safely flip between. V2.11: four states, no ⊘. */
@@ -17229,8 +17640,10 @@ class Component extends DCLogic {
     /* `data-incl-glyph` is a test hook with a reason: a card also carries a 💤 shortcut on line 3, so a
        selector written against the glyph or the title alone matches two elements and a spec that clicks
        "the checkbox" may click the other one. */
-    return h('span',{onClick, onMouseDown:e=>e.stopPropagation(), 'data-incl-glyph':t.id,
-      title, style:{cursor:'pointer',fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}, glyph);
+    /* PP-EXT (targets pass 1): a button 30px wide, so the box fills its own hit slot in the Actions cell. */
+    return h('button',this.rowBtnProps({onClick, onMouseDown:e=>e.stopPropagation(), 'data-incl-glyph':t.id,
+      title, style:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:this.GANTT_HIT_PX+'px',
+        fontSize:'15px',lineHeight:1,userSelect:'none',flex:'none',color}}), glyph);
   }
   /* ==== PP-EXT (owner 2026-09-11): THE SCHEDULED-SNOOZE BUTTON ====
      Owner, verbatim: *"Have a seperate button for a scheduled snooze."* The checkbox writes the one
@@ -17245,13 +17658,14 @@ class Component extends DCLogic {
     if(this.isMilestone(t)) return null;
     const st=this.inclState(t);
     const scheduled = st==='snoozed' && !this.snoozeIsOpenEnded(t);
-    return h('span',{'data-snooze-btn':t.id,
+    /* PP-EXT (targets pass 1): a button; GANTT_HIT_PX wide (24 rendered) — the glyph has no box to keep. */
+    return h('button',this.rowBtnProps({'data-snooze-btn':t.id,
       onMouseDown:e=>e.stopPropagation(),
       onClick:e=>{ e.stopPropagation(); this.openInclPick(e, t.id); },
       title:(st==='snoozed'? this.snoozeUntilLabel(t)+' · click to change it' : 'Snooze · pick a day'),
-      style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',alignItems:'center',
-        justifyContent:'center',cursor:'pointer',fontSize:'14px',lineHeight:1,flex:'none',userSelect:'none',
-        opacity:scheduled?1:0.55}},'💤');
+      style:{width:this.GANTT_HIT_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',alignItems:'center',
+        justifyContent:'center',fontSize:'14px',lineHeight:1,flex:'none',userSelect:'none',
+        opacity:scheduled?1:0.55}}),'💤');
   }
   /* ==== /PP-EXT ==== */
   /* `planned → allotted`, flush right. Planned is editable in place; allotted is computed. */
@@ -17302,10 +17716,12 @@ class Component extends DCLogic {
   }
   taskTimerBtn(t){
     const h=React.createElement; const running=this.isRunning(t.id);
-    return h('span',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},
+    /* PP-EXT (targets pass 1): a button; the 24px disc is the look and a 30px ::before is the hit box, so the
+       disc keeps 3px of air either side for it. */
+    return h('button',this.rowBtnProps({'data-timer-btn':t.id,onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},
       title:running?'Stop timer':'Start timer',style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'inline-flex',
-        alignItems:'center',justifyContent:'center',borderRadius:'50%',cursor:'pointer',fontSize:'13px',fontWeight:800,flex:'none',
-        background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,border:'1px solid var(--divider)'}},running?'■':'▶');
+        alignItems:'center',justifyContent:'center',borderRadius:'50%',fontSize:'13px',fontWeight:800,flex:'none',margin:'0 3px',
+        background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,border:'1px solid var(--divider)'}}),running?'■':'▶');
   }
   /* PP-EXT (owner 2026-08-20, Task 26): was `taskAddTimeBtn`, a `+15` button. The alias survives only
      because both row surfaces call it by that name; the behaviour is `taskSpentBox`. */
@@ -17313,12 +17729,15 @@ class Component extends DCLogic {
   /* Description disclosure. `openSet`/`toggle` are injected because the sheet's panel is MEASURED for
      Gantt row alignment (`observeDescPanel` → `_descH` → `yOfRow`) while a card's is not — sharing the
      open-state would let a card's height silently offset the Gantt's rows. Same control, separate state. */
-  taskDescToggle(t, open, toggle){
+  /* PP-EXT (targets pass 1): a button. `dx` shifts its hit box right, off a subtask caret beside it. */
+  taskDescToggle(t, open, toggle, dx){
     const h=React.createElement;
-    return h('span',{onClick:e=>{e.stopPropagation();toggle();}, onMouseDown:e=>e.stopPropagation(),
-      title: open?'Hide description':'Show / edit description',
-      style:{cursor:'pointer',marginRight:'6px',fontSize:'14px',lineHeight:1,flex:'none',userSelect:'none',
-        color: (open||this.hasDesc(t.description))?this._accent:'var(--text-faint)'}}, '☰');
+    return h('button',this.rowBtnProps({onClick:e=>{e.stopPropagation();toggle();}, onMouseDown:e=>e.stopPropagation(),
+      title: open?'Hide description':'Show / edit description', 'data-desc-toggle':t.id, 'aria-expanded':open?'true':'false',
+      /* --hb-dy: the title line sits in the row's top half, so the box drops 5.5px to run from the row's top
+         edge down over the chip line (whose own controls stack above it) instead of into the row above. */
+      style:{marginRight:'6px',fontSize:'14px',lineHeight:1,flex:'none',userSelect:'none','--hb-dx':(dx||0)+'px','--hb-dy':'5.5px',
+        color: (open||this.hasDesc(t.description))?this._accent:'var(--text-faint)'}}), '☰');
   }
   /* Card-local description open state — deliberately NOT `state.descOpen` (see taskDescToggle). */
   toggleCardDesc(id){ const d=Object.assign({}, this.state.cardDescOpen||{});
@@ -17514,25 +17933,30 @@ class Component extends DCLogic {
     const taskRow=t=>{ const done=taskDone(t); const pcol=this.PCOL[t.priority]||'var(--pri-default)';
       const al=this.allotOf(t.id); const allotted=al.active?(+al.allotted||0):0; const spent=this.getSpentOn(t,todayMs);
       const progress=allotted>0?Math.max(0,Math.min(1,spent/allotted)):0; const running=this.isRunning(t.id);
-      return h('div',{key:t.id,'data-task-id':t.id,onClick:()=>this.openDetail(t.id),title:'Click to open & edit',
+      /* PP-EXT (targets pass 2): Focus's list has no row selection, so each row's controls are Tab stops:
+         the circle, the name (a button that opens the task) and ▶. Each has a 30px hit box; the row is 52px,
+         so nothing grows. A click on the row's own surface still opens the task. */
+      return h('div',{key:t.id,'data-task-id':t.id,'data-focus-row':t.id,onClick:()=>this.openDetail(t.id),title:'Click to open & edit',
         style:{display:'flex',alignItems:'center',gap:'8px',cursor:'pointer',padding:'7px 8px',height:'52px',borderRadius:'var(--r-3)',position:'relative',overflow:'hidden',
           background:'var(--sheet-bg)',border:'1px solid var(--divider)',
           transition:'background var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard)'}},
         h('div',{style:{position:'absolute',left:0,bottom:0,height:'3px',width:(progress*100)+'%',background:this._accent,opacity:0.38,pointerEvents:'none'}}),
-        h('div',{onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},title:done?'Mark incomplete':'Mark complete',
-          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',flex:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',
+        h('button',{type:'button',className:'pp-hba','data-focus-done':t.id,'aria-pressed':done,onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},title:done?'Mark incomplete':'Mark complete',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',flex:'none',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',padding:0,
             border:'2px solid '+(done?'var(--success-strong)':'var(--divider)'),background:done?'var(--success-strong)':'transparent',color:'var(--on-accent)',fontSize:'14px',
             transition:'background var(--dur-fast) var(--ease-standard),border-color var(--dur-fast) var(--ease-standard)'}}, done?'✓':''),
         h('span',{style:{width:'7px',height:'7px',borderRadius:'50%',flex:'none',background:done?'var(--divider)':pcol}}),
-        h('div',{style:{display:'flex',flexDirection:'column',gap:'2px',flex:1,minWidth:0}},
-          h('span',{style:{fontSize:'14px',fontWeight:550,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
+        h('button',{type:'button',className:'pp-hb','data-focus-open':t.id,onClick:e=>{e.stopPropagation();this.openDetail(t.id);},
+          'aria-label':'Open “'+(t.name||'(untitled)')+'”',
+          style:{display:'flex',flexDirection:'column',gap:'2px',flex:1,minWidth:0,alignSelf:'stretch',justifyContent:'center','--hb-w':'100%','--hb-h':'100%'}},
+          h('span',{style:{fontSize:'14px',fontWeight:550,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%',
             color:done?'var(--text-mut2)':'var(--text)',textDecoration:done?'line-through':'none'}}, t.name||'(untitled)'),
-          h('span',{style:{fontSize:'13px',color:'var(--tag-text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},
+          h('span',{style:{fontSize:'13px',color:'var(--tag-text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
             (t.labels||[]).map(x=>'@'+x).join('  '))),
         h('span',{style:{fontSize:'14px',fontWeight:700,color:'var(--text-num)',fontVariantNumeric:'tabular-nums',whiteSpace:'nowrap'}},
           this.fmtDur(spent)+' / '+(allotted?this.fmtDur(allotted):'—')),
-        h('span',{onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},title:running?'Stop timer':'Start timer',
-          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',
+        h('button',{type:'button',className:'pp-hba','data-focus-timer':t.id,onClick:e=>{e.stopPropagation();this.toggleTimer(t.id);},title:running?'Stop timer':'Start timer',
+          style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',borderRadius:'50%',display:'inline-flex',alignItems:'center',justifyContent:'center',padding:0,
             cursor:'pointer',fontSize:'13px',fontWeight:800,background:running?'var(--danger)':'var(--chip-bg)',color:running?'var(--on-accent)':this._accent,
             border:'1px solid var(--divider)',flex:'none'}},running?'■':'▶'),
         /* PP-EXT (owner 2026-08-20, Task 26): the shared box, not a second copy of the control — the
@@ -17566,10 +17990,10 @@ class Component extends DCLogic {
        column into two different KINDS of list rather than two groups of the same kind. It is also the
        collapse control — one affordance, so there is nothing to hunt for. */
     const exclBand=exclTasks.length?h('div',{key:'focus-excl',style:{display:'flex',flexDirection:'column',gap:'5px',marginTop:'6px'}},
-      h('div',{onClick:()=>this.setState({focusExclOpen:!exclOpen}),
+      h('button',{type:'button',className:'pp-hb','data-focus-excl-toggle':'1','aria-expanded':exclOpen,onClick:()=>this.setState({focusExclOpen:!exclOpen}), /* PP-EXT (targets pass 2): a real disclosure button */
         title:exclOpen?'Hide tasks that are not in today':'Show tasks that are not in today',
-        style:{display:'flex',alignItems:'center',gap:'7px',cursor:'pointer',userSelect:'none',
-          minHeight:this.HIT_MIN_PX+'px',borderTop:'2px solid '+this._accent,paddingTop:'7px',
+        style:{display:'flex',alignItems:'center',gap:'7px',cursor:'pointer',userSelect:'none',width:'100%','--hb-w':'100%','--hb-h':'100%',
+          minHeight:this.HIT_BOX_PX+'px',borderTop:'2px solid '+this._accent,paddingTop:'7px',
           fontSize:'14px',fontWeight:600,fontFamily:'var(--font-cond)',color:'var(--text-faint)'}}, /* PP-EXT (visual revamp): sentence-case condensed label */
         h('span',{style:{fontSize:'13px',width:'10px',display:'inline-block'}}, exclOpen?'▾':'▸'),
         h('span',{},'Not in today'),
@@ -17679,7 +18103,8 @@ class Component extends DCLogic {
     const main=h('div',{style:{flex:'3 1 280px',minWidth:0,display:'flex',flexDirection:'column',justifyContent:'center',gap:'8px'}},
       kicker,
       hero ? h('button',{type:'button','data-focus-hero-name':'1',title:'Open “'+name+'”',onClick:()=>t&&this.openDetail(t.id),
-          style:{textAlign:'left',background:'transparent',border:'none',padding:0,cursor:t?'pointer':'default',minWidth:0,
+          /* PP-EXT (targets pass 2): 30px tall (24 rendered) over the 26px line; the -2px margins keep the hero's height */
+          style:{textAlign:'left',background:'transparent',border:'none',padding:0,cursor:t?'pointer':'default',minWidth:0,minHeight:this.HIT_BOX_PX+'px',margin:'-2px 0',
             fontFamily:'var(--font-ui)',fontSize:'22px',fontWeight:700,lineHeight:1.2,color:'var(--text-strong)',
             whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, name)
         : h('div',{style:{fontSize:'15px',fontWeight:600,color:'var(--text-2)'}},'Nothing on today’s timeline from here on.'),
@@ -17886,8 +18311,10 @@ class Component extends DCLogic {
       return h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:'var(--sp-2)',padding:'var(--sp-1) var(--sp-3)',borderBottom:'1px solid var(--row-border)',
           transition:'background var(--dur-fast) var(--ease-standard)'}},
         h('span',{style:{flex:'none',width:'8px',height:'8px',borderRadius:'var(--r-pill)',background:pcol}}),
-        h('div',{onClick:()=>this.openDetail(t.id),title:'Open details',
-          style:{flex:1,minWidth:0,cursor:'pointer',display:'flex',flexDirection:'column',gap:'2px'}},
+        /* PP-EXT (targets pass 2): a button (the archive has no row selection, so it is a Tab stop), stretched
+           to the row's height, which the 30px Delete button already sets */
+        h('button',{type:'button',className:'pp-hb','data-archive-open':t.id,onClick:()=>this.openDetail(t.id),title:'Open details',
+          style:{flex:1,minWidth:0,cursor:'pointer',display:'flex',flexDirection:'column',justifyContent:'center',gap:'2px',alignSelf:'stretch',textAlign:'left','--hb-w':'100%','--hb-h':'100%'}},
           h('span',{style:{fontSize:'var(--fs-3)',fontWeight:600,color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name||'(untitled)'),
           (t.labels&&t.labels.length)?h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}},t.labels.join(' ')):null),
         /* PP-EXT (UI revamp block 10b): the label names WHICH date it is — "Done" only when the task was
@@ -17896,8 +18323,8 @@ class Component extends DCLogic {
         h('span',{'data-archive-date':r.kind,title:r.kind==='done'?'Completed '+fmtD(r.at)+' · archived '+fmtD(t.archivedAt):'Archived '+fmtD(r.at)+' · never completed',
           style:{flex:'none',fontSize:'var(--fs-2)',color:'var(--text-mut)',width:'150px',whiteSpace:'nowrap',fontVariantNumeric:'tabular-nums'}},(r.kind==='done'?'Done ':'Archived ')+fmtD(r.at)),
         h('span',{style:{flex:'none',fontSize:'var(--fs-2)',color:'var(--text-num)',fontVariantNumeric:'tabular-nums',width:'70px',textAlign:'right'}},spent>0?this.fmtDur(spent):'—'),
-        h('button',{className:'pp-btn',onClick:()=>this.unarchiveMulti([t.id]),
-          style:{flex:'none',height:'auto',fontSize:'var(--fs-2)',fontWeight:600,padding:'4px var(--sp-1)'}},'↩ Unarchive'),
+        h('button',{type:'button',className:'pp-btn','data-archive-unarchive':t.id,onClick:()=>this.unarchiveMulti([t.id]),
+          style:{flex:'none',height:this.HIT_BOX_PX+'px',fontSize:'var(--fs-2)',fontWeight:600,padding:'0 var(--sp-1)'}},'↩ Unarchive'), /* PP-EXT (targets pass 2): 30px, the row's own height */
         /* PP-EXT (UI revamp block 10b): Delete demoted to a quiet text button (finding 9: a red button on every row). */
         h('button',{type:'button','data-archive-delete':t.id,title:'Delete permanently',onClick:()=>{ if(confirm('Delete "'+(t.name||'this task')+'" permanently? This also deletes its linked Google Calendar event.')) this.deleteMulti([t.id]); },
           style:{flex:'none',height:Math.ceil(this.HIT_MIN_PX/this.SHELL_ZOOM)+'px',padding:'0 8px',border:'none',background:'transparent',borderRadius:'var(--r-2)',
@@ -17952,7 +18379,7 @@ class Component extends DCLogic {
     /* current backlog */
     const live=tasks.filter(t=>!t.archivedAt && !this.isMilestone(t));
     const overdue=live.filter(t=>(+t.pct||0)<100 && this.dueMsOf(t, today)<now).length;
-    const unplanned=live.filter(t=>this.matchChip(t,'unplanned',byId) && !this.reviewSkip(t)).length; /* PP-EXT (UI revamp block 10b) */
+    const unplanned=this.reviewUnplanned().length; /* PP-EXT (needs-planning one predicate) */
     const tags=Object.keys(byTag).map(k=>({tag:k,min:byTag[k]})).sort((a,b)=>b.min-a.min);
     return { days, buckets, byTag:tags, windowSpent, completedWin:buckets.reduce((a,b)=>a+b.completed,0),
       overdue, unplanned, accuracy:{planSum,spentSum,n:accN}, adherence:{allotted,actual} };
@@ -17980,11 +18407,14 @@ class Component extends DCLogic {
     if(this.isRoutineTask(t) || this.isPointTask(t)) return true;
     return this.hasStartTime(t) && this.isUncompressable(t, this.startOfDay(t.start));
   }
-  /* The tasks that need a Planned budget: the `unplanned` chip, less archived work and `reviewSkip`. */
+  /* The tasks that need a Planned budget: the `unplanned` chip, less archived work, milestones and `reviewSkip`.
+     PP-EXT (needs-planning one predicate): the ONE source for every "Needs planning" list — Review, the
+     Journal rail, the stats backlog count and the morning summary. The summary used to filter the bare chip
+     itself and so kept listing the seeded routines; no surface may build its own list again. */
   reviewUnplanned(){
     const tasks=this.state.tasks||[]; const byId={}; tasks.forEach(t=>byId[t.id]=t);
-    return tasks.filter(t=>!t.archivedAt && this.matchChip(t,'unplanned',byId) && !this.reviewSkip(t));
-  }
+    return tasks.filter(t=>!t.archivedAt && !this.isMilestone(t) && this.matchChip(t,'unplanned',byId) && !this.reviewSkip(t));
+  } /* /PP-EXT */
   /* "12h 40m" / "40m" / "0m". Review reads in hours and minutes; the sheet keeps h:mm. */
   fmtHM(min){ const m=Math.round(Math.max(0,+min||0)); const hh=Math.floor(m/60), mm=m%60;
     return hh ? (mm ? hh+'h '+mm+'m' : hh+'h') : mm+'m'; }
@@ -18273,20 +18703,26 @@ class Component extends DCLogic {
     /* PP-EXT (UI revamp block 10a): days before the habit existed are not misses (a dashed, empty cell), and
        the strip carries weekday ticks so a cell can be read without hovering it (pages audit finding 8). */
     const dayGrid=hb=>{ const from=this.habitTrackStart(hb); const cells=[], ticks=[];
+      const stopI=(()=>{ for(let j=0;j<=13;j++){ if(this.habitScheduledOn(hb,today-j*this.DAY)) return j; } return -1; })(); /* PP-EXT (targets pass 2): the strip's Tab stop — the latest scheduled day */
       for(let i=13;i>=0;i--){ const ms=today-i*this.DAY; const sched=this.habitScheduledOn(hb,ms);
       const done=sched&&this.habitDoneOn(hb,ms,byId); const isToday=i===0;
       const before=!done && from!=null && ms+this.DAY/2<from;
-      cells.push(h('div',{key:i,'data-habit-cell':before?'before':(sched?(done?'done':'missed'):'off'),
-        title:this.fmtDate(ms,{weekday:'short',month:'short',day:'numeric'})+(before?' · before this habit started':sched?(done?' · done':' · missed'):' · not scheduled'),
+      /* PP-EXT (targets pass 2): a scheduled day is a real toggle button. The 14 cells sit on an 18px pitch,
+         so a cell's hit box is the whole pitch wide (the gap included, no overlap) and 30px tall; the strip is
+         ONE Tab stop (today) and ← / → walk it (habitCellKey). An unscheduled day stays a plain cell. */
+      const cellTitle=this.fmtDate(ms,{weekday:'short',month:'short',day:'numeric'})+(before?' · before this habit started':sched?(done?' · done':' · missed'):' · not scheduled');
+      cells.push(h(sched?'button':'div',{key:i,'data-habit-cell':before?'before':(sched?(done?'done':'missed'):'off'),
+        title:cellTitle,
+        ...(sched?{type:'button',className:'pp-hb','aria-pressed':!!done,'aria-label':cellTitle,tabIndex:i===stopI?0:-1,'data-habit-day':String(i)}:{}),
         onClick:sched?()=>this.toggleHabitDone(hb.id,ms):null,
-        style:{width:'15px',height:'15px',borderRadius:'var(--r-1)',cursor:sched?'pointer':'default',boxSizing:'border-box',
+        style:{width:'15px',height:'15px',borderRadius:'var(--r-1)',cursor:sched?'pointer':'default',boxSizing:'border-box','--hb-w':'18px','--hb-h':this.HIT_BOX_PX+'px',
           background:done?this._accent:((sched||before)?'transparent':'var(--chip-bg)'),
           border:(before?'1px dashed var(--divider)':'1px solid '+(done?this._accent:(sched?'var(--text-faint)':'transparent'))),
           boxShadow:isToday?'0 0 0 2px var(--gantt-bg), 0 0 0 3px '+this._accent:'none'}}));
       ticks.push(h('span',{key:i,style:{width:'15px',textAlign:'center',fontSize:'13px',lineHeight:1,fontFamily:'var(--font-cond)',
         color:isToday?'var(--accent-strong)':'var(--text-faint)',fontWeight:isToday?700:500}}, DOW[new Date(ms).getDay()])); }
       return h('div',{style:{display:'flex',flexDirection:'column',gap:'4px'}},
-        h('div',{style:{display:'flex',gap:'3px'}}, ...cells),
+        h('div',{role:'group','aria-label':'Last 14 days of “'+hb.name+'”',onKeyDown:e=>this.habitCellKey(e),style:{display:'flex',gap:'3px'}}, ...cells),
         h('div',{'data-habit-ticks':'1','aria-hidden':'true',style:{display:'flex',gap:'3px'}}, ...ticks)); };
     const linkableFor=hb=>(this.state.tasks||[]).filter(t=>!t.archivedAt && !this.isMilestone(t) && (hb.taskIds||[]).indexOf(t.id)<0);
     const habitCard=hb=>{ const streak=this.habitStreak(hb,now,byId); const cons=this.habitConsistency(hb,now,30,byId); const wd=hb.schedule.kind==='weekdays';
@@ -18294,7 +18730,10 @@ class Component extends DCLogic {
         /* top: name + streak/consistency + delete */
         h('div',{style:{display:'flex',alignItems:'center',gap:'12px'}},
           h('input',{defaultValue:hb.name,key:'nm'+hb.name,onBlur:e=>{ const v=e.target.value.trim(); if(v&&v!==hb.name) this.updateHabit(hb.id,{name:v}); },
-            style:{flex:1,minWidth:0,fontSize:'14px',fontWeight:700,color:'var(--text)',background:'transparent',border:'none',borderBottom:'1px solid transparent',outline:'none'}}),
+            'aria-label':'Habit name','data-habit-name':hb.id,
+            /* PP-EXT (targets pass 2): a 30px field; the negative margins keep the card's line height */
+            style:{flex:1,minWidth:0,fontSize:'14px',fontWeight:700,color:'var(--text)',background:'transparent',border:'none',borderBottom:'1px solid transparent',outline:'none',
+              height:this.HIT_BOX_PX+'px',margin:'-5px 0',padding:'0 2px',boxSizing:'border-box'}}),
           h('span',{title:'Current streak',style:{fontSize:'14px',fontWeight:700,color:streak>0?this._accent:'var(--text-faint)'}},'🔥 '+streak),
           h('span',{title:'30-day consistency (from the day the habit started)',style:{fontSize:'14px',color:'var(--text-mut2)',fontVariantNumeric:'tabular-nums'}},cons.sched?cons.pct+'%':'—'), /* PP-EXT (UI revamp block 10a): nothing to measure yet is not 0% */
           /* PP-EXT (UI revamp block 10a): delete moved behind a ⋯ menu — it sat one slip from the stats. */
@@ -18316,18 +18755,23 @@ class Component extends DCLogic {
         /* cadence */
         h('div',{style:{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}},
           h('div',{style:{display:'flex',gap:'2px',background:'var(--chip-bg)',borderRadius:'var(--r-2)',padding:'2px'}},
-            [['daily','Daily'],['weekdays','Weekdays']].map(m=>h('div',{key:m[0],onClick:()=>this.updateHabit(hb.id,{schedule:{kind:m[0],days:hb.schedule.days}}),
-              style:{padding:'3px 10px',fontSize:'14px',fontWeight:600,borderRadius:'var(--r-1)',cursor:'pointer',
+            /* PP-EXT (targets pass 2): segmented buttons with a 30px-tall hit box over their 24px look */
+            [['daily','Daily'],['weekdays','Weekdays']].map(m=>h('button',{key:m[0],type:'button',className:'pp-hb','aria-pressed':hb.schedule.kind===m[0],'data-habit-sched':m[0],
+              onClick:()=>this.updateHabit(hb.id,{schedule:{kind:m[0],days:hb.schedule.days}}),
+              style:{'--hb-w':'100%',padding:'3px 10px',fontSize:'14px',fontWeight:600,borderRadius:'var(--r-1)',cursor:'pointer',
                 color:hb.schedule.kind===m[0]?'var(--on-accent)':'var(--text-mut2)',background:hb.schedule.kind===m[0]?this._accent:'transparent'}},m[1]))),
-          wd?h('div',{style:{display:'flex',gap:'3px'}}, DOW.map((d,i)=>{ const on=(hb.schedule.days||[]).indexOf(i)>=0;
-            return h('div',{key:i,onClick:()=>{ const days=(hb.schedule.days||[]).slice(); const j=days.indexOf(i); if(j>=0) days.splice(j,1); else days.push(i); this.updateHabit(hb.id,{schedule:{kind:'weekdays',days}}); },
+          /* PP-EXT (targets pass 2): weekday toggles are buttons on a 30px pitch, each box exactly the pitch */
+          wd?h('div',{role:'group','aria-label':'Days',style:{display:'flex',gap:'6px'}}, DOW.map((d,i)=>{ const on=(hb.schedule.days||[]).indexOf(i)>=0;
+            const DAYN=['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+            return h('button',{key:i,type:'button',className:'pp-hb','aria-pressed':on,'aria-label':DAYN[i],title:DAYN[i],
+              onClick:()=>{ const days=(hb.schedule.days||[]).slice(); const j=days.indexOf(i); if(j>=0) days.splice(j,1); else days.push(i); this.updateHabit(hb.id,{schedule:{kind:'weekdays',days}}); },
               style:{width:'24px',height:'24px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:'14px',fontWeight:700,
                 color:on?'var(--on-accent)':'var(--text-mut2)',background:on?this._accent:'var(--chip-bg)'}},d); })):null),
         /* 14-day grid + today check */
         h('div',{style:{display:'flex',alignItems:'center',gap:'12px'}},
           dayGrid(hb),
-          this.habitScheduledOn(hb,today)?h('button',{onClick:()=>this.toggleHabitDone(hb.id,today),
-            style:{marginLeft:'auto',fontSize:'14px',fontWeight:600,cursor:'pointer',padding:'4px 11px',borderRadius:'var(--r-2)',
+          this.habitScheduledOn(hb,today)?h('button',{type:'button',className:'pp-hba','data-habit-today':hb.id,onClick:()=>this.toggleHabitDone(hb.id,today), /* PP-EXT (targets pass 2): + a 30px-tall hit box */
+            style:{'--hb-w':'100%',marginLeft:'auto',fontSize:'14px',fontWeight:600,cursor:'pointer',padding:'4px 11px',borderRadius:'var(--r-2)',
               border:'1px solid '+(this.habitDoneOn(hb,today,byId)?this._accent:'var(--divider)'),
               background:this.habitDoneOn(hb,today,byId)?this._accent:'transparent',
               color:this.habitDoneOn(hb,today,byId)?'var(--on-accent)':'var(--text-mut2)'}}, (this.habitDoneOn(hb,today,byId)?'✓ Done today':'Mark today')):
@@ -18337,14 +18781,30 @@ class Component extends DCLogic {
           h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}},'Linked tasks:'),
           ...(hb.taskIds||[]).map(id=>{ const t=byId[id]; return h('span',{key:id,style:{display:'inline-flex',alignItems:'center',gap:'4px',fontSize:'14px',
             background:'var(--chip-bg)',border:'1px solid var(--divider)',borderRadius:'var(--r-3)',padding:'1px 4px 1px 8px',color:'var(--text-2)'}},
-            t?t.name:'(deleted)', h('span',{onClick:()=>this.updateHabit(hb.id,{taskIds:(hb.taskIds||[]).filter(x=>x!==id)}),style:{cursor:'pointer',color:'var(--text-faint)',padding:'0 3px'}},'✕')); }),
+            t?t.name:'(deleted)', h('button',{type:'button',className:'pp-hb',title:'Unlink “'+(t?t.name:'(deleted)')+'”', /* PP-EXT (targets pass 2): a button, 30px box */
+              onClick:()=>this.updateHabit(hb.id,{taskIds:(hb.taskIds||[]).filter(x=>x!==id)}),style:{cursor:'pointer',color:'var(--text-faint)',padding:'0 3px'}},'✕')); }),
           (()=>{ const opts=linkableFor(hb); return opts.length?h('select',{value:'',onChange:e=>{ if(e.target.value) this.updateHabit(hb.id,{taskIds:[...(hb.taskIds||[]),e.target.value]}); },
-            style:{fontSize:'14px',padding:'2px 4px',borderRadius:'var(--r-2)',border:'1px solid var(--divider)',background:'var(--sheet-bg)',color:'var(--text-2)'}},
+            'aria-label':'Link a task',
+            style:{fontSize:'14px',padding:'2px 4px',borderRadius:'var(--r-2)',border:'1px solid var(--divider)',background:'var(--sheet-bg)',color:'var(--text-2)',
+              height:this.HIT_BOX_PX+'px',margin:'-4px 0',boxSizing:'border-box'}}, /* PP-EXT (targets pass 2): 30px tall, margins keep the line */
             h('option',{value:''},'+ link a task'), ...opts.map(t=>h('option',{key:t.id,value:t.id},t.name))):null; })())); };
     return h('div',{style:{flex:1,minHeight:0,display:'flex',flexDirection:'column',background:'var(--gantt-bg)'}}, header,
       h('div',{style:{flex:1,overflow:'auto',padding:'16px',display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:'16px',alignContent:'start'}},
         ...habits.map(habitCard)));
   }
+  /* PP-EXT (targets pass 2): ← / → / Home / End walk a habit's 14-day strip; the focused cell becomes the
+     strip's one Tab stop. */
+  habitCellKey(e){
+    const k=e.key; if(!(k==='ArrowLeft'||k==='ArrowRight'||k==='Home'||k==='End')) return;
+    const grp=e.currentTarget; if(!grp || !grp.querySelectorAll) return;
+    const btns=Array.prototype.slice.call(grp.querySelectorAll('button[data-habit-day]'));
+    const i=btns.indexOf(e.target); if(i<0) return;
+    e.preventDefault();
+    const ni = k==='Home' ? 0 : k==='End' ? btns.length-1 : Math.max(0, Math.min(btns.length-1, i+(k==='ArrowRight'?1:-1)));
+    btns.forEach((b,j)=>b.setAttribute('tabindex', j===ni?'0':'-1'));
+    try{ btns[ni].focus(); }catch(_e){}
+  }
+  /* /PP-EXT */
   /* PP-EXT Phase 9: compact today's-habits checklist for the Today view (only habits scheduled today). */
   renderTodayHabits(){
     const h=React.createElement; const habits=(this.state.habits||[]); const today=this.startOfToday();
@@ -18387,7 +18847,9 @@ class Component extends DCLogic {
         style:{textAlign:'center',fontSize:'14px',color:r.kind==='done'?'var(--success-strong)':(r.kind==='worked'?'var(--accent-strong)':'var(--text-mut)')}},
         r.kind==='done'?'✓':(r.kind==='worked'?'⏱':'○')),
       h('button',{type:'button',onClick:()=>this.openDetail(r.id),title:'Open “'+(r.name||'')+'”',
-        style:{minWidth:0,textAlign:'left',background:'none',border:'none',padding:0,cursor:'pointer',font:'inherit',fontSize:'14px',
+        /* PP-EXT (targets pass 2): 30px tall (24 rendered); the -2px margins keep the 26px row, so on its 30px
+           pitch it meets its neighbours' boxes without overlapping them */
+        style:{minWidth:0,textAlign:'left',background:'none',border:'none',padding:0,cursor:'pointer',font:'inherit',fontSize:'14px',minHeight:this.HIT_BOX_PX+'px',margin:'-2px 0',
           color:'var(--text)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}, r.name||'(untitled)'),
       h('div',{style:{height:'10px',background:'var(--chip-bg)',borderRadius:'var(--r-2)',overflow:'hidden',position:'relative'}},
         r.allotted!=null?h('div',{style:{position:'absolute',left:0,top:0,height:'100%',width:Math.round(r.allotted/maxV*100)+'%',background:'var(--divider)'}}):null,
@@ -18427,7 +18889,7 @@ class Component extends DCLogic {
         h('div',{style:{display:'flex',flexDirection:'column'}},
           h('span',{style:{fontSize:'18px',fontWeight:700,color:'var(--text)'}}, wx.tempC+'°C'),
           h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}}, wd.l)),
-        isToday?h('span',{onClick:()=>this.fetchJournalWeather(B),title:'Refresh',style:{marginLeft:'auto',cursor:'pointer',fontSize:'14px',color:'var(--text-faint)'}},'↻'):null); }
+        isToday?h('button',{type:'button',className:'pp-hb',onClick:()=>this.fetchJournalWeather(B),title:'Refresh the weather',style:{marginLeft:'auto',cursor:'pointer',fontSize:'14px',color:'var(--text-faint)'}},'↻'):null); } /* PP-EXT (targets pass 2): a button, 30px box */
     else if(!isToday) wxBody=h('span',{style:{fontSize:'var(--fs-2)',color:'var(--text-mut)'}},'No weather recorded for this day. Weather is saved only on the day itself.'); /* PP-EXT (UI revamp block 10b) */
     else if(this._weatherBusy) wxBody=h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}},'Locating…');
     else wxBody=h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
@@ -18436,7 +18898,10 @@ class Component extends DCLogic {
     /* needs-planning queue with inline Planned editing */
     const planned=h('div',{style:{display:'flex',flexDirection:'column',gap:'6px'}},
       unplanned.length ? unplanned.slice(0,30).map(t=>h('div',{key:t.id,style:{display:'flex',alignItems:'center',gap:'10px'}},
-        h('span',{onClick:()=>this.openDetail(t.id),style:{flex:1,minWidth:0,fontSize:'14px',color:'var(--text)',cursor:'pointer',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},t.name),
+        /* PP-EXT (targets pass 2): the name is a button that opens the task — a Tab stop (this list has no
+           selection) 30px tall, its margins keeping the 24px line */
+        h('button',{type:'button','data-planning-open':t.id,title:'Open “'+t.name+'”',onClick:()=>this.openDetail(t.id),style:{flex:1,minWidth:0,fontSize:'14px',color:'var(--text)',cursor:'pointer',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',
+          textAlign:'left',background:'none',border:'none',padding:0,font:'inherit',minHeight:this.HIT_BOX_PX+'px',margin:'-3px 0'}},t.name),
         h('span',{style:{fontSize:'14px',color:'var(--text-mut2)'}},'Planned'),
         h('input',{className:'pp-num',type:'text',key:'pl'+t.planned,defaultValue:this.fmtDur(t.planned),placeholder:'0:00',
           onBlur:e=>this.setPlanned(t.id,e.target.value),onKeyDown:e=>{if(e.key==='Enter')e.target.blur();},
@@ -18451,7 +18916,8 @@ class Component extends DCLogic {
     const collCard=(key,title,body,note,count)=>{
       const open=!jc[key];
       return h('div',{style:{background:'var(--sheet-bg)',border:'1px solid var(--divider)',borderRadius:'var(--r-3)',padding:'12px 14px',display:'flex',flexDirection:'column',gap:open?'10px':'0',minWidth:0}},
-        h('div',{onClick:()=>toggleCollapse(key),style:{display:'flex',alignItems:'center',cursor:'pointer',userSelect:'none',fontSize:'14px',fontWeight:600,color:'var(--text-mut2)',fontFamily:'var(--font-cond)'}}, /* PP-EXT (visual revamp): sentence-case condensed label */
+        /* PP-EXT (targets pass 2): the card's disclosure is a button (aria-expanded) with a 30px-tall box over its line */
+        h('button',{type:'button',className:'pp-hb','data-journal-coll':key,'aria-expanded':open,onClick:()=>toggleCollapse(key),style:{'--hb-w':'100%',width:'100%',display:'flex',alignItems:'center',cursor:'pointer',userSelect:'none',fontSize:'14px',fontWeight:600,color:'var(--text-mut2)',fontFamily:'var(--font-cond)'}}, /* PP-EXT (visual revamp): sentence-case condensed label */
           h('span',{style:{marginRight:'6px',fontSize:'13px',transform:open?'rotate(90deg)':'none',display:'inline-block',transition:'transform var(--dur-fast) var(--ease-standard)'}},'›'),
           title+(count?' ('+count+')':''), note?this.infoNote(note):null),
         open?body:null);
@@ -18529,13 +18995,14 @@ class Component extends DCLogic {
     /* /PP-EXT */
     const coreKey=parts[0]||null, secKey=parts[1]||null, leafKey=parts[2]||null;
     const info=this.moodInfo(mood);
-    const chip=(label,on,onClick,accent)=>h('div',{key:label,onClick,title:label,
-      style:{cursor:'pointer',padding:'5px 10px',borderRadius:'var(--r-pill)',fontSize:'14px',fontWeight:600,whiteSpace:'nowrap',
+    /* PP-EXT (targets pass 2): mood chips are toggle buttons with a 30px-tall hit box over their 27px look */
+    const chip=(label,on,onClick,accent)=>h('button',{key:label,type:'button',className:'pp-hba','aria-pressed':!!on,onClick,title:label,
+      style:{'--hb-w':'100%',fontFamily:'inherit',cursor:'pointer',padding:'5px 10px',borderRadius:'var(--r-pill)',fontSize:'14px',fontWeight:600,whiteSpace:'nowrap',
         border:'1px solid '+(on?accent:'var(--divider)'), background:on?accent+'22':'var(--chip-bg)', color:on?accent:'var(--text-2)'}}, label);
     const coreRow=h('div',{key:'core',style:{display:'flex',flexWrap:'wrap',gap:'6px'}},
       this.EMOTION_WHEEL.map(core=>{ const on=coreKey===core.k;
-        return h('div',{key:core.k,onClick:()=>this.setJournalMood(B, core.k),title:core.l,
-          style:{display:'flex',alignItems:'center',gap:'5px',cursor:'pointer',padding:'5px 10px',borderRadius:'var(--r-pill)',fontSize:'14px',fontWeight:700,
+        return h('button',{key:core.k,type:'button',className:'pp-hba','aria-pressed':on,'data-mood-core':core.k,onClick:()=>this.setJournalMood(B, core.k),title:core.l,
+          style:{'--hb-w':'100%',fontFamily:'inherit',display:'flex',alignItems:'center',gap:'5px',cursor:'pointer',padding:'5px 10px',borderRadius:'var(--r-pill)',fontSize:'14px',fontWeight:700,
             border:'1px solid '+(on?core.c:'var(--divider)'), background:on?core.c+'22':'var(--chip-bg)', color:on?core.c:'var(--text-2)'}},
           h('span',{style:{fontSize:'15px',lineHeight:1}},core.e), core.l); }));
     const rows=[coreRow];
@@ -18549,7 +19016,7 @@ class Component extends DCLogic {
       h('span',{style:{fontSize:'14px',color:'var(--text-faint)'}},'Feeling'),
       h('span',{style:{display:'flex',alignItems:'center',gap:'6px',fontSize:'14px',fontWeight:700,color:info.color}},
         info.emoji?h('span',{style:{fontSize:'15px'}},info.emoji):null, info.path.join(' › ')),
-      h('span',{onClick:()=>this.setJournalMood(B, mood),style:{cursor:'pointer',fontSize:'14px',color:'var(--text-faint)',textDecoration:'underline'}},'clear')):
+      h('button',{type:'button',className:'pp-hb',title:'Clear the mood',onClick:()=>this.setJournalMood(B, mood),style:{'--hb-w':'100%',cursor:'pointer',fontSize:'14px',color:'var(--text-faint)',textDecoration:'underline'}},'clear')): /* PP-EXT (targets pass 2) */
       h('div',{key:'badge',style:{fontSize:'14px',color:'var(--text-faint)'}},'Tap a core emotion, then refine.');
     return h('div',{style:{display:'flex',flexDirection:'column',gap:'10px'}}, badge, ...rows);
   }
@@ -18646,7 +19113,11 @@ class Component extends DCLogic {
       return h('div',{key:c.k,'data-colk':c.k,role:'columnheader' /* PP-EXT (UI revamp block 6) */,
         onMouseDown:c.lock?null:(e=>this.headPointerDown(e,c.k)),
         onClick:lockSort?(e=>{ e.preventDefault(); this.cycleSort(sk); }):null,
+        /* PP-EXT (targets pass 1): a sortable header is a Tab stop; Enter or Space sorts, as a click does. */
+        tabIndex:sortable?0:null, 'aria-sort':sortable?(this.sortArrow(sk)==='▲'?'ascending':this.sortArrow(sk)==='▼'?'descending':'none'):null,
+        onKeyDown:sortable?(e=>{ if((e.key==='Enter'||e.key===' ') && e.target===e.currentTarget){ e.preventDefault(); e.stopPropagation(); this.cycleSort(sk); } }):null,
         onContextMenu:e=>this.colCtx(e,c.k),
+
         /* PP-EXT V0.1: prefix the full column label so a narrow (ellipsis-truncated) header — "D…", "PLANN…",
            lone "S/today" — is always fully readable on hover (product-vision §10.3 / ROADMAP V0). */
         title:lockSort?'Priority — click to sort (P1 first, then reversed, then back to manual order)'
@@ -18694,7 +19165,9 @@ class Component extends DCLogic {
     this._secLayout=geo.secLayout; this._yTop=geo.yTop;
     /* PP-EXT (UI revamp block 6): the one row that is a Tab stop this render (see rovingRowId), and the
        positive search words to mark in titles. */
-    this._rovingId=this.rovingRowId(this.flattenSections(sections));
+    /* PP-EXT (targets pass 2): while a section header holds the keyboard cursor it is the sheet's one Tab stop. */
+    this._secRoving=(this._secFocusKey!=null && sections.some(s=>!s.flat && this.secKey(s.id)===this._secFocusKey)) ? this._secFocusKey : null;
+    this._rovingId=this._secRoving!=null ? null : this.rovingRowId(this.flattenSections(sections));
     this._hlTerms=this.searchActive() ? this.searchHighlightTerms(this.state.searchQuery) : null;
     const rows=[]; let rowIndex=0;
     sections.forEach((sec,si)=>{
@@ -18710,10 +19183,11 @@ class Component extends DCLogic {
 
     /* PP-EXT: replaces the removed always-on quick-add bar — a subtle full-width footer row that opens the
        same centered quick-add popup ("q" shortcut, renderQuickAddPopup). */
-    const addRow = h('div',{key:'addrow',onClick:()=>this.setState({quickOpen:true}),
+    /* PP-EXT (targets pass 1): a real button and a Tab stop (it is the sheet's own control, not a row's). */
+    const addRow = h('button',{key:'addrow',type:'button',className:'pp-hb','data-pp-addrow':'1',onClick:()=>this.setState({quickOpen:true}),
       onMouseEnter:e=>{e.currentTarget.style.background='var(--hover)';e.currentTarget.style.color='var(--text-mut2)';},
       onMouseLeave:e=>{e.currentTarget.style.background='transparent';e.currentTarget.style.color='var(--text-faint2)';},
-      style:{display:'flex',alignItems:'center',height:this.rowH+'px',minWidth:totalW+'px',padding:'0 9px',cursor:'pointer',
+      style:{display:'flex',alignItems:'center',height:this.rowH+'px',minWidth:totalW+'px',width:'100%',padding:'0 9px','--hb-w':'100%','--hb-h':'100%',
         color:'var(--text-faint2)',fontSize:'14px',transition:'background var(--dur-fast) var(--ease-standard),color var(--dur-fast) var(--ease-standard)'}},
       '+ Add task');
 
@@ -18729,7 +19203,7 @@ class Component extends DCLogic {
       style:{minWidth:totalW+'px',position:'relative'}}, header, ...rows, noMatch, noMatch?null:addRow,
       this.renderSectionDropBand());
 
-    return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),
+    return h('div',{ref:el=>{this.sheetScrollEl=el;}, onScroll:e=>this.syncFromSheet(e),'data-pp-sheetbody':'1', /* PP-EXT (targets pass 1): a surface, named for the target scan */
       onClick:e=>{ if(e.target===e.currentTarget) this.clearSelection(); },
       style:{flex:1,overflow:'auto',minHeight:0}}, inner);
   }
@@ -18768,13 +19242,18 @@ class Component extends DCLogic {
     const empty=this.sectionIsEmpty(sec);
     const headH=this.sectionHeaderH(sec);
 
-    const btn=(key,glyph,title,onClick,extra)=>h('div',{key,title,role:'button','aria-label':title,
+    /* PP-EXT (targets pass 1): real buttons, not Tab stops (the sheet's keyboard model, decision 31). Each
+       keeps its 24px look and gets a 30px hit box; `marginLeft` spaces ▲ ▼ ✕ 30px apart so the boxes meet
+       rather than overlap. An empty section is an 18px line (decision 30) that clips, so there the box is
+       the line's height. */
+    const btn=(key,glyph,title,onClick,extra)=>h('button',this.rowBtnProps({key,title,'aria-label':title,
       onMouseDown:e=>{e.stopPropagation();}, onClick:e=>{e.stopPropagation(); onClick();},
       style:Object.assign({width:this.HIT_MIN_PX+'px',height:empty?'100%':this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',
-        justifyContent:'center',cursor:'pointer',borderRadius:'var(--r-1)',flex:'none',
-        color:'var(--text-mut2)',fontSize:empty?'13px':'14px',letterSpacing:0,opacity:hov?0.95:0},extra||{}),
+        justifyContent:'center',borderRadius:'var(--r-1)',flex:'none',
+        color:'var(--text-mut2)',fontSize:empty?'13px':'14px',letterSpacing:0,opacity:hov?0.95:0},
+        empty?{'--hb-h':'100%'}:{'--hb-dy':'-3px',...(key==='up'?{}:{marginLeft:'4px'})},extra||{}),
       onMouseEnter:e=>e.currentTarget.style.background='var(--menu-hover)',
-      onMouseLeave:e=>e.currentTarget.style.background='transparent'}, glyph);
+      onMouseLeave:e=>e.currentTarget.style.background='transparent'}), glyph);
 
     const nameEl = editing
       ? h('input',{key:'secname',defaultValue:sec.name,autoFocus:true,
@@ -18789,10 +19268,14 @@ class Component extends DCLogic {
           style:{font:'inherit',fontSize:'14px',fontWeight:600,fontFamily:'var(--font-cond)', /* PP-EXT (visual revamp): sentence-case condensed label */
             color:'var(--text)',background:'var(--input-bg)',border:'1px solid '+this._accent,borderRadius:'var(--r-1)',
             padding:'1px 5px',minWidth:0,width:'170px',outline:'none'}})
-      : h('span',{key:'secname',style:{whiteSpace:'nowrap',cursor:isNone?'default':'text'},
-          onClick:isNone?null:(e=>{e.stopPropagation(); this.startSectionEdit(sec.id);}),
-          title:isNone?'Tasks not in any section':'Click to rename'},
-          isNone?'No section':sec.name);
+      : isNone ? h('span',{key:'secname',style:{whiteSpace:'nowrap',cursor:'default'},title:'Tasks not in any section'},'No section')
+      /* PP-EXT (targets pass 1): the name is a button that renames; its hit box is 30px tall on a 24px band. */
+      : h('button',this.rowBtnProps({key:'secname','data-section-name':String(sec.id),style:{whiteSpace:'nowrap',cursor:'text',
+          '--hb-w':'max(100%, 30px)','--hb-dx':'2px',...(empty?{'--hb-h':'100%'}:{'--hb-dy':'-3px'})},
+
+          onClick:e=>{e.stopPropagation(); this.startSectionEdit(sec.id);},
+          title:'Click to rename'}),
+          sec.name);
 
     /* PP-EXT V2.6b: drag feedback. A section being dragged dims; the slot it would land in gets an accent
        top rule.
@@ -18807,6 +19290,12 @@ class Component extends DCLogic {
 
     return h('div',{key:'section-'+(sec.id||'nosection')+'-'+si,'data-section-id':sec.id||'',
       'data-section-empty':empty?'1':null, /* PP-EXT (UI revamp block 6) */
+      /* PP-EXT (targets pass 2): a stop in the sheet's arrow-key walk (see sheetNavStops / secHeadKey). */
+      'data-pp-sechead':this.secKey(sec.id), role:'row', tabIndex:(this._secRoving===this.secKey(sec.id))?0:-1,
+      'aria-label':(isNone?'No section':sec.name)+' section'+(empty?', empty':(', '+sec.tasks.length+' task'+(sec.tasks.length===1?'':'s'))),
+      'aria-expanded':empty?undefined:(collapsed?'false':'true'),
+      'aria-keyshortcuts':'Enter F2 Alt+ArrowUp Alt+ArrowDown Delete Shift+F10',
+      onFocus:e=>{ if(e.target===e.currentTarget) this._secFocusKey=this.secKey(sec.id); }, /* /PP-EXT */
       onMouseEnter:()=>this.setState({hoverSection:this.secKey(sec.id)}),
       onMouseLeave:()=>this.setState({hoverSection:null}),
       onMouseDown:isNone?null:(e=>this.secPointerDown(e,sec.id,pos)),
@@ -18814,7 +19303,11 @@ class Component extends DCLogic {
          the selection, as a click below the last row does. Its controls stop propagation. */
       onClick:e=>{ if(!e.shiftKey && !e.ctrlKey && !e.metaKey && !this.state.secDrag) this.clearSelection(); },
       title:isNone?null:'Drag to reorder this section',
-      style:{display:'flex',alignItems:'center',gap:'2px',height:headH+'px',minWidth:totalW+'px',padding:'0 8px 0 4px',
+      /* PP-EXT (targets pass 1): 12px right padding keeps ✕'s hit box clear of the pane divider's. The band's
+         controls lift their 30px boxes 3px (--hb-dy) so they reach 6px into the row ABOVE and none into the
+         row below, whose title line is the more crowded of the two. */
+      style:{display:'flex',alignItems:'center',gap:'2px',height:headH+'px',minWidth:totalW+'px',padding:'0 12px 0 4px',
+
         cursor:isNone?'default':(beingDragged?'grabbing':'grab'), opacity:beingDragged?0.45:1,
         /* PP-EXT (owner 2026-08-13b): the band is a real surface now (--sec-head-bg, per theme), so a
            header is distinguishable from a task row at a glance without leaning on a hairline.
@@ -18828,15 +19321,23 @@ class Component extends DCLogic {
         borderTop:isSecTarget?('3px solid '+this._accent):(si?'1px solid var(--sec-head-border)':'none'),
         borderBottom:'1px solid var(--sec-head-border)',
         color:(isNone||empty)?'var(--text-mut2)':'var(--text-2)',fontSize:empty?'14px':'14px',fontWeight:600,
-        fontFamily:'var(--font-cond)',position:'relative',overflow:empty?'hidden':null}}, /* PP-EXT (visual revamp): sentence-case condensed label */
+        fontFamily:'var(--font-cond)',position:'relative',overflow:empty?'hidden':null,
+        /* PP-EXT (targets pass 1): above the rows on either side, so its controls' 30px hit boxes reach 3px
+           past the 24px band in both directions (the rows' sticky Actions cells sit at 2). */
+        zIndex:empty?null:3}}, /* PP-EXT (visual revamp): sentence-case condensed label */
+
       /* collapse caret is always visible — it is the section's primary affordance, not a hover extra.
          PP-EXT (UI revamp block 6): an empty section has nothing to collapse, so its caret slot is blank. */
       empty ? h('span',{key:'car','aria-hidden':'true',style:{width:this.HIT_MIN_PX+'px',flex:'none'}}) :
-      h('div',{key:'car',title:collapsed?'Expand section':'Collapse section',
+      /* PP-EXT (targets pass 1): a button with a 30px hit box. It rotates, and a square box rotates onto itself. */
+      h('button',this.rowBtnProps({key:'car',title:collapsed?'Expand section':'Collapse section','aria-expanded':collapsed?'false':'true',
+        'data-section-caret':String(sec.id==null?'':sec.id),
         onMouseDown:e=>e.stopPropagation(), onClick:e=>{e.stopPropagation(); this.toggleSectionCollapse(sec.id, collapsed);},
         style:{width:this.HIT_MIN_PX+'px',height:this.HIT_MIN_PX+'px',display:'flex',alignItems:'center',justifyContent:'center',
-          cursor:'pointer',flex:'none',color:'var(--text-faint)',fontSize:'13px',
-          transform:collapsed?'rotate(-90deg)':'none',transition:'transform 120ms ease'}},'▼'),
+          /* the shift is in the button's own frame, which turns −90° when collapsed: (3,−1) there is (−1,−3) on screen */
+          flex:'none',color:'var(--text-faint)',fontSize:'13px','--hb-dx':collapsed?'3px':'-1px','--hb-dy':collapsed?'-1px':'-3px',
+
+          transform:collapsed?'rotate(-90deg)':'none',transition:'transform 120ms ease'}}),'▼'),
       nameEl,
       empty ? h('span',{key:'n','data-section-add':String(sec.id==null?'':sec.id),role:'button',tabIndex:0,
           title:'Add a task to '+(isNone?'No section':sec.name),'aria-label':'Add a task to '+(isNone?'No section':sec.name),
@@ -18903,7 +19404,7 @@ class Component extends DCLogic {
       searchInp,
       (matchN!=null)?h('span',{key:'n','data-pp-search-count':String(matchN),className:'pp-label',
         style:{flex:'none',fontSize:'14px',color:matchN?'var(--text-mut2)':'var(--warn)'}}, matchN===0?'No match':String(matchN)):null,
-      (searching||draft)?h('button',{key:'x',type:'button',className:'pp-tool pp-tool--icon',onClick:()=>this.clearSearch(),
+      (searching||draft)?h('button',{key:'x',type:'button',className:'pp-tool pp-tool--icon pp-hba',onClick:()=>this.clearSearch(), /* PP-EXT (targets pass 2): + a 30px box */
         title:'Clear the search and restore your filters','aria-label':'Clear search',
         style:{width:'22px',height:'22px',minWidth:'22px',border:'none',background:'transparent',fontSize:'14px'}},'✕')
         :h('span',{key:'kbd',className:'pp-kbd',title:'Press / to search'},'/'));
@@ -19116,10 +19617,10 @@ class Component extends DCLogic {
        style still overrides color/border for the active-vs-accent state (dynamic, not tokenizable). */
     /* PP-EXT (owner 2026-09-10): `data-pp-chip` + `data-active` are the stable e2e hooks — the repo rule
        is to address a control by its attribute and never by its label text. */
-    const mkChip=(key,label,on,onClick,title,extra)=>h('span',{key,onClick,title,className:'pp-chip',
+    const mkChip=(key,label,on,onClick,title,extra)=>h('span',{key,onClick,title,className:'pp-chip pp-hba', /* PP-EXT (targets pass 2): a 30px-tall hit box over the 24px chip */
       role:'button',tabIndex:0,'aria-pressed':on?'true':'false',onKeyDown:kb(onClick),
       'data-pp-chip':key,'data-active':on?'1':null,
-      style:Object.assign({cursor:'pointer',userSelect:'none',fontWeight:600,padding:'0 10px',height:this.HIT_MIN_PX+'px',borderRadius:'var(--r-3)',
+      style:Object.assign({cursor:'pointer',userSelect:'none',fontWeight:600,padding:'0 10px',height:this.HIT_MIN_PX+'px',borderRadius:'var(--r-3)','--hb-w':'100%',
         border:'1px solid '+(on?'var(--accent)':'var(--divider)'),color:on?'var(--text-strong)':'var(--text-mut2)',
         background:on?'var(--accent-soft)':'var(--chip-bg)',whiteSpace:'nowrap'},extra||{})},label);
     /* One segmented control: exactly one notch can be active. While a search runs it is PARKED, not
@@ -19152,7 +19653,7 @@ class Component extends DCLogic {
       (!searching && filtCols.length)?h('div',{key:'frow',className:'pp-pop-row'},
         ...filtCols.map(k=>mkChip('cf-'+k, keyLabel(k)+' ✕', true, ()=>this.clearColFilter(k), 'Filter · click to clear'))):null,
       h('div',{key:'foot',style:{display:'flex',alignItems:'center',gap:'8px',borderTop:'1px solid var(--divider)',paddingTop:'8px'}},
-        h('button',{key:'arch',type:'button',className:'pp-link','data-pp-archived-link':'1',
+        h('button',{key:'arch',type:'button',className:'pp-link pp-hba','data-pp-archived-link':'1',style:{'--hb-w':'100%'}, /* PP-EXT (targets pass 2): + a 30px-tall box */
           onClick:()=>{ this.closeFilterPop(false); this.setView('archive'); }},'Archived tasks ('+nArch+')'),
         h('div',{key:'sp',style:{flex:1}}),
         anyActive ? mkChip('clr','Clear all', false,
@@ -19282,11 +19783,12 @@ class Component extends DCLogic {
        inventing an editor. The current recurrence occurrence is display-only; the picker retains the
        established task/occurrence mutation semantics. */
     const dateCell=(key,ms)=>{ const p=this.sheetDateParts(t,key,ms);
-      return h('div',{'data-date-cell':key,onMouseDown:e=>e.stopPropagation(),
+      /* PP-EXT (targets pass 1): a button the height of the row, so it is already a generous target. */
+      return h('button',this.rowBtnProps({'data-date-cell':key,onMouseDown:e=>e.stopPropagation(),
         onClick:e=>{e.stopPropagation();this.openDatePick(e,t.id,key);},
         title:'Edit '+(key==='start'?'start':'end')+' date',
-        style:{width:'100%',height:'100%',display:'flex',flexDirection:'column',justifyContent:'center',
-          cursor:'pointer',fontVariantNumeric:'tabular-nums',lineHeight:1.15,minWidth:0}},
+        style:{width:'100%',height:'100%',display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'stretch',
+          fontVariantNumeric:'tabular-nums',lineHeight:1.15,minWidth:0}}),
         h('span',{style:{fontSize:'14px',color:p.date==='—'?'var(--text-faint2)':'var(--text-2)',
           whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}},p.date),
         p.time?h('span',{'data-date-clock':'1',style:{fontSize:'13px',color:'var(--text-mut2)',
@@ -19317,11 +19819,12 @@ class Component extends DCLogic {
     // so name/date land in the `name`/`end` cells and stay pinned under their headers at any scroll position.
     if(this.isMilestone(t)){
       const mcol = crit ? 'var(--danger)' : pcol;
-      const diamond=h('div',{onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
-        title:'Milestone · click to complete',style:{cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flex:'none'}},
+      const diamond=h('button',this.rowBtnProps({onMouseDown:e=>e.stopPropagation(),onClick:e=>{e.stopPropagation();this.toggleDone(t.id);},onContextMenu:e=>{e.preventDefault();e.stopPropagation();this.cyclePriority(t.id);},
+        title:'Milestone · click to complete',style:{display:'flex',alignItems:'center',justifyContent:'center',flex:'none',width:'18px',height:'18px'}}), /* PP-EXT (targets pass 1) */
         h('div',{style:{width:'12px',height:'12px',background:done?mcol:'transparent',border:'2px solid '+mcol,transform:'rotate(45deg)',borderRadius:'var(--r-1)'}}));
-      const mgrip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
-        style:{cursor:'grab',color:'var(--text-faint)',fontSize:'14px',width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'\u283F');
+      const mgrip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row','data-pp-drag':'row',
+        className:'pp-hba', /* PP-EXT (targets pass 1): a drag handle, not a button — the whole row drags too */
+        style:{cursor:'grab',color:'var(--text-faint)',fontSize:'14px',width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none','--hb-w':'18px'}},'\u283F');
       const mrd=this.state.rowDrag;
       let mbsh = crit?'inset 3px 0 0 var(--danger)':(sel?'inset 2px 0 0 '+(this._accent||'#3b82f6'):'inset 3px 0 0 '+mcol); /* PP-EXT (B2): unify sel indicator on this._accent */
       if(this._glowIds && this._glowIds.has(t.id)) mbsh+=',inset 0 0 0 9999px rgba(245,181,54,0.18)'; /* PP-EXT: month-view day glow (Phase 6) */
@@ -19360,15 +19863,21 @@ class Component extends DCLogic {
     const circle=this.taskDoneCircle(t,_disp);
     const depChips=this.taskDepChips(t, byId);
     const descOpen = !!this.state.descOpen[t.id];
-    const descToggle = this.taskDescToggle(t, descOpen, ()=>this.toggleDescOpen(t.id));
+    const descToggle = this.taskDescToggle(t, descOpen, ()=>this.toggleDescOpen(t.id), (this._kids&&this._kids[t.id]&&this._kids[t.id].length)?10:0); /* PP-EXT (targets pass 1) */
     /* PP-EXT: subtasks — indent by depth; parents get a collapse caret (+N badge when collapsed) */
     const kidsN=((this._kids&&this._kids[t.id])||[]).length;
     const depth=(this._depth&&this._depth[t.id])||0;
     const collapsedHere=!!this.state.collapsed[t.id];
-    const caret = kidsN? h('span',{onClick:e=>{e.stopPropagation();this.toggleCollapse(t.id);},onMouseDown:e=>e.stopPropagation(),
-      title:(collapsedHere?'Expand ':'Collapse ')+kidsN+' subtask'+(kidsN>1?'s':'')+' (Tab/Shift+Tab indents rows)',
+    /* PP-EXT (targets pass 1): a button. Its hit box leans left into the cell's padding and the ☰ beside it
+       leans right over the row number, so the two 30px boxes meet instead of overlapping. */
+    const caret = kidsN? h('button',this.rowBtnProps({onClick:e=>{e.stopPropagation();this.toggleCollapse(t.id);},onMouseDown:e=>e.stopPropagation(),
+      title:(collapsedHere?'Expand ':'Collapse ')+kidsN+' subtask'+(kidsN>1?'s':'')+' (Tab/Shift+Tab indents rows)','aria-expanded':collapsedHere?'false':'true',
       /* PP-EXT: enlarged triangle so the collapse caret is clearly distinct from the ☰ description toggle */
-      style:{cursor:'pointer',marginRight:'4px',fontSize:'14px',lineHeight:1,color:'var(--text-mut2)',flex:'none',userSelect:'none'}},
+      style:{display:'inline-block',width:'13px',textAlign:'center',marginRight:'4px',fontSize:'14px',lineHeight:1,color:'var(--text-mut2)',flex:'none',userSelect:'none','--hb-dx':'-4px'}}),
+
+
+
+
       collapsedHere?'▸':'▾') : null;
     /* PP-EXT (owner report 2026-09-09): a row with no children RESERVES the caret's column instead of
        closing it up. Without this the indent lied: a leaf one level deeper than a parent started only
@@ -19403,12 +19912,16 @@ class Component extends DCLogic {
             h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums',fontSize:'14px'}}, seqOf[t.id]||''),
             this.renderInlineTitleInput(t))
         : h('div',{'data-pp-title':'1',onMouseEnter:this.titleTipOnHover(t.name),style:{fontSize:'14px',color:'var(--text)',textDecoration:'none'/* PP-EXT: completion changes only dates + gantt, not the name */,
-          whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:'100%'}},
+          /* PP-EXT (targets pass 1): `clip` with a 12px clip margin instead of `hidden`, so the caret's and ☰'s
+             30px hit boxes can reach past this one-line strip. The ellipsis still truncates the text at the
+             box's own edge, so nothing visible spills. */
+          whiteSpace:'nowrap',overflow:'clip',overflowClipMargin:'12px',textOverflow:'ellipsis',maxWidth:'100%'}},
+
         caretSlot, /* PP-EXT */
         descToggle,
         h('span',{style:{color:'var(--text-faint)',marginRight:'7px',fontVariantNumeric:'tabular-nums'}}, seqOf[t.id]||''),
         h('b',{'data-task-name':'1',style:{fontWeight:'inherit'}},this.renderTitleText(t.name)), kidBadge /* PP-EXT */),
-      h('div',{style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0,height:'18px',overflow:'hidden'}},
+      h('div',{className:'pp-chipline'/* PP-EXT (targets pass 1) */,style:{display:'flex',gap:'4px',alignItems:'center',minWidth:0,height:'18px',overflow:'hidden'}},
         dueRecurChip,
         snoozeDayChips,   /* PP-EXT (Task 19) */
         this.taskLinkChip(t),   /* PP-EXT (owner ask 2026-09-09) */
@@ -19420,8 +19933,14 @@ class Component extends DCLogic {
        so the sheet row and the Selection cards offer exactly the same actions. */
     const inclCell=this.taskInclControl(t);
     const running=this.isRunning(t.id);
-    const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row',
-      style:{cursor:'grab',color:'var(--text-faint)',fontSize:'14px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none'}},'⠿');
+    /* PP-EXT (targets pass 1): a drag handle, not a button (the whole row drags as well). Its hit box takes the
+       cell's left padding and stops where the circle's begins (18px, so 14 rendered): the circle is the
+       more-used of the two and keeps its full 30. */
+
+    const grip=h('div',{onMouseDown:e=>this.rowPointerDown(e,t.id,i),onClick:e=>e.stopPropagation(),title:'Drag to reorder row','data-pp-drag':'row',
+      className:'pp-hba',
+      style:{cursor:'grab',color:'var(--text-faint)',fontSize:'14px',lineHeight:1,width:'12px',textAlign:'center',userSelect:'none',opacity:hov?0.8:0.18,flex:'none',
+        '--hb-w':'16.5px','--hb-dx':'-6.75px'}},'⠿');
     const flowCell=this.taskFlowCell(t);
     const timerBtn=this.taskTimerBtn(t);
     const addTimeBtn=this.taskAddTimeBtn(t);
@@ -19433,7 +19952,8 @@ class Component extends DCLogic {
     const quiet=(el,on,key)=>el?h('span',{key,className:on?'pp-quiet':null,style:{display:'inline-flex',alignItems:'center',flex:'none'}},el):null;
     const snoozeSet=!this.isMilestone(t) && this.inclState(t)==='snoozed';
     const spentToday=+this.getSpentOn(t, this.startOfToday())||0;
-    const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:'5px',width:'100%'}},inclCell,
+    /* PP-EXT (targets pass 1): no gap — each control's own 30px box (or hit box) is its spacing. */
+    const actionsCell=h('div',{style:{display:'flex',alignItems:'center',justifyContent:'flex-end',gap:0,width:'100%'}},inclCell,
       quiet(this.taskSnoozeBtn(t),!snoozeSet,'sz'),quiet(timerBtn,!running,'tm'),quiet(addTimeBtn,spentToday<=0,'sp'));
     /* PP-EXT (owner 2026-08-15): the % Done cell. A slim bar carrying the same green-done / base-remainder
        rule as the Gantt, with the numeral drawn ON it rather than beside it — so the whole row height and
@@ -19447,8 +19967,14 @@ class Component extends DCLogic {
        still bubble to `rowClick` and open the detail sheet on every value change. */
     const pctNum=Math.max(0,Math.min(100,Math.round(+dispPct||0)));
     const pctFill=this.pctFillPaint(pctNum);
-    const pctCell=h('div',{'data-pct-cell':t.id,
+    /* PP-EXT (targets pass 1): a slider — the role this drag track always was. Not a Tab stop (decision 31);
+       when it does hold focus, ← → step it by PCT_STEP through the same `stepPct`. */
+    const pctCell=h('div',{'data-pct-cell':t.id,role:'slider',tabIndex:-1,'aria-label':'% done',
+      'aria-valuemin':0,'aria-valuemax':100,'aria-valuenow':pctNum,
+      onKeyDown:e=>{ const d=(e.key==='ArrowRight'||e.key==='ArrowUp')?1:(e.key==='ArrowLeft'||e.key==='ArrowDown')?-1:0;
+        if(d){ e.preventDefault(); e.stopPropagation(); this.stepPct(t.id,d); } },
       onMouseDown:e=>this.startPctDrag(e,t,recIdx,e.currentTarget,'set'),
+
       onClick:e=>e.stopPropagation(), onDoubleClick:e=>e.stopPropagation(),
       /* Deliberately NOT the bar's `% done: …` prefix: that string is the Gantt band's and caret's shared
          identity in `tests/e2e/pct-drag.spec.js`, and a second node answering to it made the sheet cell —
@@ -19498,9 +20024,12 @@ class Component extends DCLogic {
          derived one an outline, so routines (which store the decision) looked like a different control from
          every other clocked task. Exact is now always the accent outline on the soft accent wash; decided vs
          derived is carried by the italic face and `data-exact-src`, exactly as it is for Flexible. */
-      h('span',{'data-exact-cell':t.id,role:'button','aria-pressed':uncompOn,'data-exact-src':uncompSet?'set':'derived',
+      /* PP-EXT (targets pass 1): a button. The press still acts on mousedown; a keyboard click (detail 0)
+         acts on click. */
+      h('button',this.rowBtnProps({'data-exact-cell':t.id,'aria-pressed':uncompOn,'data-exact-src':uncompSet?'set':'derived',
         onMouseDown:e=>{ e.preventDefault(); e.stopPropagation(); this.setUncompressable(t.id, !uncompOn); },
-        onClick:e=>e.stopPropagation(), onDoubleClick:e=>e.stopPropagation(),
+        onClick:e=>{ e.stopPropagation(); if(e.detail===0) this.setUncompressable(t.id, !uncompOn); }, onDoubleClick:e=>e.stopPropagation(),
+
         title:'Time needed · '+(uncompOn?'Exact':'Flexible')+(uncompSet?'' : ' (from this task’s times — not set by you)')
           +' — click to '+(uncompOn?'let it compress':'reserve its full time'),
         style:{display:'inline-flex',alignItems:'center',justifyContent:'center',cursor:'pointer',
@@ -19510,7 +20039,7 @@ class Component extends DCLogic {
           color:uncompOn?(this._accent||'var(--accent)'):'var(--text-mut2)',
           background:uncompOn?'var(--accent-soft)':'var(--field-bg)',
           border:'1px solid '+(uncompOn?(this._accent||'var(--accent)'):'var(--field-border)'),
-          opacity:uncompSet?1:0.85}},
+          opacity:uncompSet?1:0.85}}),
         uncompOn?'Exact':'Flexible'));
     const content={
       check:h('div',{style:{display:'flex',alignItems:'center',gap:'3px'}},grip,circle),
@@ -20194,8 +20723,10 @@ class Component extends DCLogic {
       const mLeft=left+this.state.dayW/2-sz/2;
       const mPlan=this.ganttLabelPlan(t.name, sz, labRoom(mLeft+sz), {milestone:true});
       return h('div',Object.assign({key,onMouseDown:md('move'),onContextMenu:ctx,'data-gantt-tip':tipAttr,'data-gantt-milestone-id':t.id},hov,{
+          className:'pp-hba', /* PP-EXT (targets pass 1): a 30px hit box around the 20px diamond */
           style:{position:'absolute',left:mLeft+'px',top:top+'px',width:sz+'px',height:sz+'px',
           cursor:'grab',zIndex:5}}),
+
         /* PP-EXT (UI revamp block 8): a diamond is an outline, so it takes the hue at full strength (the
            toned body would vanish at 2px); done fills it with the same. */
         h('div',{key:'dia',style:{position:'absolute',inset:0,
@@ -20220,19 +20751,25 @@ class Component extends DCLogic {
     /* PP-EXT (owner 2026-08-15): the literal 7 became `BAR_GRIP_PX`, because `pctGrabZone` now has to
        reason about this exact width to keep the %-done band off the grips. Two copies of the number
        would have made the clearance rule silently wrong the first time either moved. */
-    const grip=(side)=>h('div',{onMouseDown:md(side==='l'?'start':'end'),'data-gantt-edge':side==='l'?'start':'end','data-gantt-edge-task':t.id,
-      style:{position:'absolute',top:0,bottom:0,[side==='l'?'left':'right']:0,width:this.BAR_GRIP_PX+'px',cursor:'ew-resize',zIndex:3}});
+    /* PP-EXT (targets pass 1): every bar target is GANTT_HIT_PX tall (24 rendered) on the 20px bar — `hitPad`
+       above and below. The outside extension is now the grip's CHILD (it used to be a sibling), so the grip
+       and its extension are one 30×30 target with one handler: the press on the extension bubbles to it. */
+    const hitPad=(this.GANTT_HIT_PX-this.barH)/2;
+    const grip=(side)=>h('div',{key:'g'+side,onMouseDown:md(side==='l'?'start':'end'),'data-gantt-edge':side==='l'?'start':'end','data-gantt-edge-task':t.id,
+      style:{position:'absolute',top:(-hitPad)+'px',bottom:(-hitPad)+'px',[side==='l'?'left':'right']:0,width:this.BAR_GRIP_PX+'px',cursor:'ew-resize',zIndex:3}},
+      gripExt(side));
     /* PP-EXT (UI revamp block 7, HIT_MIN_PX tenet): each grip gains an OUTSIDE extension so the edge target is
        GANTT_HIT_PX wide in all (renders at 24px; the 7px inside part is unchanged, so `pctGrabZone`'s clearance
        rule is untouched). It is gated on THIS bar being under the pointer (`barTip`), not on row hover or
        selection: at rest a press just beside a bar still belongs to the empty lane, and the extension is a
        child of the hover owner, so sliding from the bar onto it never drops the hover that enables it. */
     const extOn=barHovered||draggingMe;
-    const gripExt=(side)=>h('div',{key:'gx'+side,onMouseDown:md(side==='l'?'start':'end'),
+    const gripExt=(side)=>h('div',{key:'gx'+side,
       'data-gantt-edge-ext':side==='l'?'start':'end','data-gantt-edge-ext-task':t.id,
-      style:{position:'absolute',top:(-(this.GANTT_HIT_PX-this.barH)/2)+'px',height:this.GANTT_HIT_PX+'px',
-        [side==='l'?'right':'left']:'100%',width:this.BAR_GRIP_OUT_PX+'px',cursor:'ew-resize',zIndex:3,
+      style:{position:'absolute',top:0,bottom:0,
+        [side==='l'?'right':'left']:'100%',width:this.BAR_GRIP_OUT_PX+'px',cursor:'ew-resize',
         pointerEvents:extOn?'auto':'none'}});
+
     /* The name. PP-EXT (UI revamp block 8): ONE ink for the whole label (`ganttLabelInk`) — block 7's
        two-layer split at the fill edge read as a seam through the word. Where the body's ink is weak on the
        full-strength fill, a halo in the opposite ink carries it across. */
@@ -20250,6 +20787,10 @@ class Component extends DCLogic {
     }).call(this) : null;
     return h('div',Object.assign({key,'data-gantt-bar-id':t.id,'data-gantt-columns':String(geom.last-geom.first+1),'data-gantt-last-day':String(this.ganttDayAt(this._tl.start,geom.last)),
       'data-gantt-run-occurrences':(o.runOccIdxs||[o.idx]).join(',')},hov,{style:{position:'absolute',left:left+'px',top:top+'px',width:w+'px',height:this.barH+'px',zIndex:5}}),
+      /* PP-EXT (targets pass 1): the body's hit strip — the same press and right-click as the body, 5px above
+         and below it, under it in paint order so the body (and everything on it) still wins inside the bar. */
+      h('div',{key:'hit','data-gantt-bar-hit':t.id,'aria-hidden':'true',onMouseDown:md('move'),onContextMenu:ctx,
+        style:{position:'absolute',left:0,right:0,top:(-hitPad)+'px',bottom:(-hitPad)+'px',cursor:'grab'}}),
       h('div',{'data-gantt-bar-body':'1',onMouseDown:md('move'),onContextMenu:ctx,
         /* PP-EXT (owner 2026-08-13): `optedOutTitle` dropped with the rest of the not-in-today channel;
            `displacedTitle` stays — displacement is an unattributed background rewrite, not a user state
@@ -20299,7 +20840,7 @@ class Component extends DCLogic {
         top:this.barH+'px',height:0,borderTop:'2px dashed var(--warn)',pointerEvents:'none',zIndex:6}}):null,
       displaced?h('div',{key:'dispg',style:{position:'absolute',left:'-9px',top:'50%',transform:'translateY(-50%)',
         fontSize:'13px',lineHeight:1,color:'var(--warn)',pointerEvents:'none',zIndex:6}},'»'):null,
-      grip('l'), grip('r'), gripExt('l'), gripExt('r'), linkDot, linkDotIn,
+      grip('l'), grip('r'), linkDot, linkDotIn, /* PP-EXT (targets pass 1): the extensions ride inside the grips */
       (plan.mode==='outside') ? outsideLabel(plan.maxW, linkOn) : null, /* PP-EXT (UI revamp block 7) */
       /* PP-EXT (V1.5, owner 2026-07-26): the %-done handle moved OUT of the bar and UNDER it. It used to
          be a ringed disc sitting ON the fill at the progress boundary — at low % that put it near the
@@ -20340,13 +20881,14 @@ class Component extends DCLogic {
         return h('div',{key:'pctgrab','data-pct-grab':t.id,
           onMouseDown:e=>this.startPctDrag(e,t,o.idx,e.currentTarget.parentNode),
           title:'% done: '+pct+'% — drag to set, click to type',
-          style:{position:'absolute',left:z.left+'px',top:0,width:z.width+'px',height:this.barH+'px',
+          /* PP-EXT (targets pass 1): GANTT_HIT_PX tall like every bar target; the seam is still drawn on the bar. */
+          style:{position:'absolute',left:z.left+'px',top:(-hitPad)+'px',width:z.width+'px',height:this.GANTT_HIT_PX+'px',
             /* ew-resize, not grab: this band's gesture is horizontal and it is the only affordance that
                distinguishes it from the bar body underneath before the user commits to a press. */
             cursor:'ew-resize',zIndex:2,pointerEvents:'auto'}},
           /* The seam. Positioned at the true fill edge, which is NOT the band's centre once the band has
              been shifted clear of a grip — so it is placed relative to the bar, not to the band. */
-          h('div',{style:{position:'absolute',left:(z.centre-z.left-1)+'px',top:'2px',bottom:'2px',width:'2px',
+          h('div',{style:{position:'absolute',left:(z.centre-z.left-1)+'px',top:(hitPad+2)+'px',bottom:(hitPad+2)+'px',width:'2px',
             borderRadius:'var(--r-1)',background:'rgba(255,255,255,'+(hot?0.95:0.45)+')',
             boxShadow:hot?'0 0 0 1px rgba(0,0,0,0.35)':'none',pointerEvents:'none'}}));
       }).call(this),
@@ -20356,9 +20898,13 @@ class Component extends DCLogic {
          `startPctDrag`, still skipped on very short bars — only its primacy changed. */
       (w>28) ? h('div',{key:'pctcaret',onMouseDown:e=>this.startPctDrag(e,t,o.idx,e.currentTarget.parentNode),
         title:'% done: '+pct+'% — drag to set, click to type',
-        style:{position:'absolute',left:(Math.max(6,Math.min(w-6, w*pct/100))-this.HIT_MIN_PX/2)+'px',
-          top:this.barH+'px',width:this.HIT_MIN_PX+'px',height:((this.rowH-this.barH)/2+6)+'px',
-          cursor:'ew-resize',zIndex:7,
+        style:{position:'absolute',left:(Math.max(6,Math.min(w-6, w*pct/100))-this.GANTT_HIT_PX/2)+'px', /* PP-EXT (targets pass 1): GANTT_HIT_PX wide */
+          top:this.barH+'px',width:this.GANTT_HIT_PX+'px',height:((this.rowH-this.barH)/2+6)+'px',
+          /* PP-EXT (targets pass 1): below the grips (3) and the on-bar %-done band (2), which now reach 5px
+             under the bar: the resize and the band are the more-used targets, the caret is the fallback. */
+          cursor:'ew-resize',zIndex:1,
+
+
           /* A live %-drag pins the control visible even if the pointer has travelled off the bar's own
              hover region — otherwise the thing being dragged unmounts mid-gesture. */
           pointerEvents:(linkOn||pctDragging)?'auto':'none',opacity:(linkOn||pctDragging)?1:0}},
@@ -20618,6 +21164,7 @@ class Component extends DCLogic {
 
   renderMenu(){
     const h=React.createElement; const m=this.state.menu; const ids=m.ids;
+    if(m.sec!=null) return this.renderSecMenu(m); /* PP-EXT (targets pass 2) */
     const multi=ids.length>1;
     const tasks=this.state.tasks.filter(t=>ids.includes(t.id));
     const allDone=tasks.every(t=>t.pct>=100);
@@ -20942,7 +21489,7 @@ class Component extends DCLogic {
     const group=(id,title,...rows)=>h('section',{className:'pp-dgroup','aria-labelledby':id,'data-qa':'detail-group-'+id},
       h('h3',{id:'pp-dg-'+id,className:'pp-label pp-dgroup-h'},title), ...rows.filter(Boolean));
     const valTxt=(s,col)=>h('div',{style:{fontSize:'14px',color:col||'var(--text-2)',fontVariantNumeric:'tabular-nums',paddingTop:'4px'}},s);
-    const fieldInput={textAlign:'left',border:'1px solid var(--divider)',fontSize:'14px',minHeight:'28px',fontFamily:'var(--font-ui)'};
+    const fieldInput={textAlign:'left',border:'1px solid var(--divider)',fontSize:'14px',minHeight:this.HIT_BOX_PX+'px',fontFamily:'var(--font-ui)'}; /* PP-EXT (targets pass 2): 28 → HIT_BOX_PX, 24 rendered */
 
     /* ----- Schedule ----- */
     /* PP-EXT (owner ruling 2026-08-21): the When line — a date-parse DISPLAY that is also its own editor. On a

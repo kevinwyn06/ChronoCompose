@@ -263,10 +263,14 @@ test('the primary %-done target is a band ON the bar, centred on the fill edge (
   const c = ganttReady();
   const t = mkTask(c);
   const bar = c.ganttBlock(t, 0, occOf(t));
-  const band = pctNodes(c, bar).filter(n => px(styleOf(n).top) === 0)[0];
+  // Targets pass 1: every bar target is GANTT_HIT_PX tall, centred on the bar (top = -(GANTT_HIT_PX - barH)/2).
+  const hitPad = (c.GANTT_HIT_PX - c.barH) / 2;
+  const band = pctNodes(c, bar).filter(n => px(styleOf(n).top) === -hitPad)[0];
   assert.ok(band, 'the on-bar %-done band exists');
   const s = styleOf(band);
-  assert.strictEqual(px(s.height), c.barH, 'the band is the full height of the bar, not a sliver');
+  assert.strictEqual(px(s.height), c.GANTT_HIT_PX, 'the band covers the bar and its hit strip, not a sliver');
+  assert.ok(px(s.height) * c.SHELL_ZOOM >= c.HIT_MIN_PX, 'and renders at least HIT_MIN_PX tall');
+
   assert.strictEqual(px(s.width), c.PCT_GRAB_PX * 2, 'the band is 2×PCT_GRAB_PX wide');
   // It must sit UNDER the resize grips in stacking order, so a geometry bug can never cost the bar its
   // resize handles — defence in depth behind pctGrabZone's own clearance rule.

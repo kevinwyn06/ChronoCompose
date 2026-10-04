@@ -23,7 +23,7 @@ test('play → pill with name and ticking elapsed, tab title follows → pill St
   expect(await page.title()).toBe('ChronoCompose');
 
   await rows(page).nth(0).hover();
-  await rows(page).nth(0).locator('[data-cellk="actions"] span[title="Start timer"]').click();
+  await rows(page).nth(0).locator('[data-cellk="actions"] button[title="Start timer"]').click();
 
   await expect(pill(page)).toHaveCount(1);
   await expect(pill(page).locator('[data-timer-pill-name]')).toHaveText('Alpha task');

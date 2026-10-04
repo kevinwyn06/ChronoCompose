@@ -42,6 +42,20 @@ test('fresh workspace: welcome → "Finish the report by Friday 2pm" → quick a
     'it lands on TODAY\'s timeline').toBeVisible();
 });
 
+/* The constructor's once-migrations write `pp-tasks` before componentDidMount runs initRoutines, so only a
+   real mount proves the fresh-workspace branch is the one taken. A reload must not duplicate them. */
+test('fresh workspace seeds all five routines, exactly once', async ({ page }) => {
+  await page.addInitScript(() => { try { localStorage.setItem('pp-settings', JSON.stringify({ usageTracking: false })); } catch (e) {} });
+  const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('pp-tasks') || '[]').map(t => t.name).sort());
+  const ALL = ['Breakfast', 'Dinner', 'Lunch', 'Shut down', 'Wake up'];
+  await page.goto('/index.html');
+  await expect(page.locator('[data-pp-dialog="firstrun"]')).toBeVisible();
+  expect(await stored()).toEqual(ALL);
+  await page.reload();
+  await expect(page.locator('[data-pp-dialog="firstrun"]')).toBeVisible();
+  expect(await stored(), 'a second boot adds nothing').toEqual(ALL);
+});
+
 test('Load demo keeps the welcome for later, files the demo into sections, and nothing starts Unscheduled', async ({ page }) => {
   await page.clock.install({ time: AUDIT_DAY() });
   await page.addInitScript(() => { try { localStorage.setItem('pp-settings', JSON.stringify({ usageTracking: false })); } catch (e) {} });

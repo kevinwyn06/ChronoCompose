@@ -47,6 +47,34 @@ test('the hero shows the block under now; its Start and Stop drive the real time
   expect(errors).toEqual([]);
 });
 
+/* Pomodoro pause on stop: the unit layer covers every stop path; this is the live mount — real clicks
+   through React's own state updates — for the commonest one, the top-bar pill's Stop. */
+test('stopping the task from the top-bar pill pauses its focus ring; Resume restarts both', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(String(e)));
+  await bootSurface(page, { dashMode: 'focus' }, allDay);
+  const hero = page.locator(HERO);
+  await hero.locator(TOGGLE).click();
+  await expect(pill(page)).toHaveCount(1);
+  await hero.locator('[data-pomo-start]').click();
+  const panel = hero.locator('[data-pomo-mode="session"]');
+  await expect(panel).toHaveCount(1);
+
+  await pill(page).locator('[data-timer-pill-stop]').click();
+  await expect(pill(page)).toHaveCount(0);
+  await expect(panel).toHaveAttribute('data-pomo-paused', '1');
+  await expect(panel.locator('[data-pomo-ring-label]')).toHaveText('Paused');
+  const frozen = await panel.locator('[data-pomo-ring-text]').textContent();
+  await page.waitForTimeout(2200);
+  await expect(panel.locator('[data-pomo-ring-text]')).toHaveText(frozen);
+
+  await panel.locator('[data-pomo-resume]').click();
+  await expect(pill(page)).toHaveCount(1);
+  await expect(panel).not.toHaveAttribute('data-pomo-paused', '1');
+  await expect(panel.locator('[data-pomo-ring-label]')).toHaveText('Focus');
+  expect(errors).toEqual([]);
+});
+
 test('a running timer is the hero, whatever the timeline says', async ({ page }) => {
   await bootSurface(page, { dashMode: 'focus' }, { run: { 'e2e-2': 5 } });
   const hero = page.locator(HERO);

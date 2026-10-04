@@ -48,6 +48,12 @@ async function cellBox(page) {
 }
 
 test.describe('% Done column ⇄ Gantt bar', () => {
+  /* Targets pass 1: the Actions column grew to 156px so its four controls each get a HIT_MIN_PX box. At
+     the default 1280 viewport the sheet is narrower than its columns, and the sticky Actions column now
+     sits over the middle of this one (by design since block 11a: a narrow sheet compresses over its middle
+     columns). These tests are about the cell's pointer maths, so they run where the whole cell shows. */
+  test.use({ viewport: { width: 1600, height: 900 } });
+
   /* The HIT_MIN_PX tenet: the cell is the target, not the numeral drawn on it. Local px, because the
      board sits in a `zoom:0.8` wrapper and a client rect is 0.8× the CSS px the constants are written in. */
   test('the cell is a full-row hit target, not a small control', async ({ page }) => {

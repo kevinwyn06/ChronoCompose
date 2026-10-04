@@ -128,9 +128,12 @@ test.describe('Gantt %-done control vs bar drag', () => {
     await page.mouse.move(2, 2);
     const band = await page.locator(GRAB).first().boundingBox();
     if (!band) throw new Error('the %-done band has no box while the pointer is elsewhere');
-    /* Vertically inside the bar, not below it. */
-    expect(band.y).toBeGreaterThanOrEqual(bar.y - 1);
-    expect(band.y + band.height).toBeLessThanOrEqual(bar.y + bar.height + 1);
+    /* Centred ON the bar, not hanging below it. Targets pass 1: like every bar target it is GANTT_HIT_PX
+       tall, so it reaches a few px above and below the 16px bar and renders at HIT_MIN_PX (24). */
+    expect(Math.abs((band.y + band.height / 2) - (bar.y + bar.height / 2))).toBeLessThanOrEqual(1);
+    expect(band.height).toBeGreaterThanOrEqual(23.9);
+    expect(band.height).toBeLessThanOrEqual(bar.height + 10);
+
     const pe = await page.locator(GRAB).first().evaluate((el) => getComputedStyle(el).pointerEvents);
     expect(pe, 'always hit-testable, unlike the hover-gated caret').toBe('auto');
   });

@@ -72,7 +72,7 @@ test.describe('V2.4 → UI revamp block 6 — the timer lives on the play button
 
   test('the play button is where a timer starts, and starting another switches which task is active', async ({ page }) => {
     await boot(page);
-    const play = (i) => rows(page).nth(i).locator('[data-cellk="actions"] span[title="Start timer"]');
+    const play = (i) => rows(page).nth(i).locator('[data-cellk="actions"] button[title="Start timer"]');
     await rows(page).nth(0).hover();
     await play(0).click();
     await expect.poll(() => running(page), { message: 'the play button starts the task' }).toEqual(['e2e-1']);

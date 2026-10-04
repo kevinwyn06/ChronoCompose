@@ -71,6 +71,108 @@ what they RENDER at, and the zoom itself is not touched.
   `tests/e2e/a11y-sweep.spec.js` checks the rendered type floor on every main surface, a visible ring on
   real Tab presses, and that Actions and the plan header's Today / ‹ › are unclipped at 1024px and 800px.
 
+### Click targets on the Plan page (targets pass 1, 2026-10-04)
+
+The Plan page's sheet, toolbar, column headers and Gantt now meet `HIT_MIN_PX` as RENDERED px. A hit box
+is 30 CSS px, which renders at 24 under the 0.8 shell. Measured over the Plan page in both themes, the
+share of targets under 24 rendered px fell from 70.2% to 18.6%. The probe walks each control out from its
+centre with `elementFromPoint`, so it measures what a pointer actually hits.
+
+- **Real buttons.** Every clickable `div`/`span` on these surfaces is now a `<button type="button">`: the
+  circle, ☰, the subtask caret, the date cells, Time needed, the On-today box, snooze, play, the tag ×, link
+  and predecessor chips, the section caret, name and ▲ ▼ ✕, and "+ Add task". `rowBtnProps` builds a row
+  control: `type=button`, `tabIndex -1` (decision 31: the row menu carries the row's actions and the arrows
+  move the selection) and the `.pp-hb` class. After a pointer click it hands focus on to the focusable host
+  (the row, or a card), which is where a click on the old div left it, so the arrow keys keep working.
+  The % Done cell is `role="slider"` (`tabIndex -1`, ← → step it). Sortable column headers are Tab stops,
+  and Enter or Space sorts them (`aria-sort`). "+ Add task" is a Tab stop.
+- **`.pp-hb` / `.pp-hba`.** `.pp-hb` resets a button to look like the span it replaced. Both classes add a
+  transparent `::before` hit box. Its size is `--hb-w`/`--hb-h` (30px by default) and `--hb-dx`/`--hb-dy`
+  shift it. Each class declares its own defaults, so a sized parent's values never inherit. The glyph never
+  grows. Two places are packed tight, and their boxes are shifted so they meet rather than overlap:
+  - The check cell: the circle's box sits 1.5px left, and the drag dot keeps a 16.5px box in the cell's
+    padding. The whole row drags as well, and the circle is used more.
+  - The name line: the subtask caret leans left and ☰ leans right over the row number. ☰ drops 5.5px, so
+    its box runs from the row's top edge over the chip line. The chip line's own fields and buttons stack
+    above it (`.pp-chipline`, z 1).
+
+  The title line clips with `overflow:clip` and a 12px clip margin, not `hidden`, so those boxes can leave
+  the strip. The ellipsis still truncates the text at the box's own edge.
+- **Section headers** are z 3. Their controls lift their boxes 3px, so the boxes reach 6px into the row
+  above and none into the first row below. ▲ ▼ ✕ are spaced 30px apart. The right padding is 12, which
+  keeps ✕ clear of the pane divider's 30px hit area (`.pp-divider::before`, 6px into the sheet and 18px
+  over the plan pane).
+- **Actions** is 156px, up from 104. That fits On-today, snooze and play at 30px each and the worked field
+  at 48. At 104 the row overflowed the cell, and block 11a's clip hid the On-today checkbox entirely. The
+  worked field and the Planned field (`.pp-row .pp-num`) are 30px tall. The worked field still LOOKS 24px:
+  3px transparent borders, the paint clipped to the padding box, and its outline drawn as an inset shadow.
+- **Gantt.** Every bar target is `GANTT_HIT_PX` tall: a hit strip under the body (`data-gantt-bar-hit`,
+  the same press and right-click as the body), both grips, and the %-done band. The grip's outside
+  extension is now the grip's CHILD, so the grip and its extension are one 30×30 target with one handler.
+  `PCT_GRAB_PX` went from 12 to 15, so the band is 30 wide. A bar needs 44px to hold a band; a narrower
+  bar keeps the caret. The caret is z 1, below the band and the grips. The milestone diamond gets a 30px
+  `.pp-hba` box.
+- **Still under 24, on purpose:**
+  - Column resize grips (`.pp-rsz`): widening them takes the header's sort and reorder surface.
+  - The tag field, tag ×, snooze-day × and the % numeral: they live in 18px strips (the chip line, the %
+    track) that clip.
+  - The section band itself (24px, held by Gantt row alignment) and the empty-section line (18px,
+    decision 30).
+  - The hover-gated %-done caret under a bar.
+  - A one-day bar's body between its two grips.
+  - The first section's controls, where the sticky column header covers their upward reach.
+  - ☰ where an @ field sits directly under it.
+- **Tests.** `tests/plan-targets.test.js` fails on any clickable non-button, without role and tabIndex,
+  in the sheet, the toolbar, the pane header or a Gantt bar. It also pins decision 31's Tab rules.
+  `tests/e2e/plan-targets.spec.js` measures the rendered hit boxes and drives the keyboard. It proves that
+  a press on the hit strip drags a bar and that the row's drag dot still owns its centre.
+
+### Click targets everywhere else (targets pass 2, 2026-10-04)
+
+Pass 2 takes pass 1's machinery (`.pp-hb`, `.pp-hba`, `rowBtnProps`) to every other surface: the top bar,
+the Day / 4-Day / Week / Month / Agenda views, Focus, Review and Habits, the Journal, the Archive, Settings,
+the detail dialog, quick add and the filter popover. Same probe as pass 1, run over the whole app, 1600×900,
+both themes: see the before/after table in the pass's report.
+
+- **`HIT_BOX_PX`** (named constants) is `ceil(HIT_MIN_PX / SHELL_ZOOM)` = 30: the local size that RENDERS
+  at `HIT_MIN_PX`. Many controls were sized `HIT_MIN_PX` local px, which renders at 19.2. The timeline's left
+  control column (✕ ⧉ ↺ 💤), its bottom edge handle, the day-bound handles, the detail dialog's fields,
+  quick add's field, Settings' number fields and the Journal's list buttons now use it.
+- **Real buttons.** Timeline ▶ and the left controls, the agenda's ▶ and ✕, the Focus list's circle, name
+  and ▶, the "Not in today" band, the editor toolbar, Habits' day cells, Daily / Weekdays, weekday toggles
+  and unlink ✕, the Journal's disclosures, mood chips, "clear", ↻ and list rows, the archive row's name,
+  Settings' row density and column chips, "↺ Reset columns", the Day view's zoom toggle.
+- **Tab order.** Where a list has no row selection, its primary control is a Tab stop: the Focus list (circle,
+  name and ▶ — there is no row menu there, so all three), the archive row's name, the Journal's lists. Each
+  timeline view (the Day column, the whole 4-Day / Week grid, the Agenda list, Focus's timeline) is ONE Tab
+  stop, a roving tabindex (`blockKeyProps`, `tlNavNext`, `tlRovingPick`, `tlRovingFix`): tabIndex 0 on the
+  last-focused block, else the first block at or after now, -1 on the rest. ↑ / ↓ walk the day in time,
+  ← / → jump to the nearest-in-time block of the adjacent day that has any, Home / End the day's first /
+  last, Enter / Space open, Shift+F10 opens the row menu. Blocks render at -1 with `data-tl-nav` (start) and
+  `data-tl-nav-day`; `tlRovingFix` (mount / update) names the stop per view in the DOM. A block's small
+  controls are buttons with `tabIndex -1`, decision 31's rule for a row. A habit's 14-day strip is one Tab stop (the latest scheduled day) and ← / → walk it
+  (`habitCellKey`). The editor toolbar works from the keyboard too (a key press puts the caret back first).
+- **Section headers on the Plan sheet** are stops in the arrow-key walk (`sheetNavStops`, `sheetNavNext`,
+  `secHeadKey`). A plain ↑ from a section's first row lands on its header and clears the row selection;
+  ↓ goes back in. Shift and Ctrl arrows still walk rows only. On a header: Enter / Space collapse or expand
+  (an empty section: add a task to it), ← / → collapse / expand, F2 renames (focus returns to the header),
+  Alt+↑ / Alt+↓ move it, Delete deletes it (the ✕'s own delete: tasks go to No section, Undo toast, Ctrl+Z),
+  and Shift+F10 opens the section menu (`renderSecMenu`, `state.menu.sec`) with all of these. While a header
+  holds the cursor it is the sheet's one Tab stop. There was no delete confirm to reuse; the undo is the
+  safety net, as it is for ✕.
+- **Fitting without growing.** A field that must be 30px tall but sits on a shorter line gets negative
+  margins (`height:30px; margin:-4px 0`) so the line keeps its height. Where 30px boxes cannot all fit, the
+  box is the pitch and no more: a habit day cell's box is its 18px pitch wide (14 days on a 288px card) and
+  30 tall. A control inside a timeline block is clipped by the block, so the ▶ box is shifted inward
+  (`--hb-dx:-4px; --hb-dy:4px`) to sit wholly inside it.
+- **Still under 24, on purpose:** a timeline block's own height (it is its duration: a 15-minute chip is
+  20px), so its controls on a chip shorter than 30px; habit day cells' width; the Month view's "+N more"
+  where the cell clips below it; pass 1's list for the Plan sheet and Gantt.
+- **Tests.** `tests/app-targets.test.js` scans the render paths above for bare clickables, pins the Tab
+  rules and drives the section-header keys. `tests/e2e/app-targets.spec.js` measures a representative target
+  per surface, drives the top bar, Settings tabs, Focus hero, Review / Journal arrows, a timeline block and
+  the section headers with real keys, and proves a habit cell and a timeline block under the real mouse.
+
 ### Truthful settings and the first minute (UI revamp block 11b, 2026-10-04)
 
 - **Settings, signed out.** The Google Calendar section shows one line ("Sign in to your account to connect
@@ -168,7 +270,24 @@ fill is PROGRESS — worked today ÷ (worked + still drawn) — as a `TL_RUN_BAR
 session FOLLOWS the most recently started timer (`pomoBindRun`, applied in `startTimer` — phase and clock
 untouched), and with no session a running timer is MIRRORED (`pomoPanelModel` mode `mirror`): the task named,
 the ring counting its elapsed up against one focus interval, Start binding the session to that task without
-stopping it. Idle with nothing running is unchanged. **`T`** stops the timer the pill shows
+stopping it. Idle with nothing running is unchanged. A FOCUS phase **pauses when its task's timer stops**
+(decision 43 follow-up; a judgement call): every stop path — row ▶/■, pill Stop, `T`, the Focus hero's Stop
+and Done, completing, deleting or archiving — ends in `stopTimerAt`, which calls `pomoOnTimerStop`. That
+freezes the phase with `pp-pomo.pausedRemaining` (pure `pomoPause`/`pomoResume`; `pomoState` reports a
+paused phase as never done, so `pomoTick` cannot roll it and no pomodoro is counted). Starting any timer
+resumes it in `startTimer` (so switching tasks — stop A, start B — is pause-then-resume in one call, net
+untouched), as does the panel's **Resume** (`data-pomo-resume`; the panel carries `data-pomo-paused` and
+the label "Paused"). A break is not bound to a timer and keeps running; a standalone session (`taskId`
+null) ignores other timers; the session's own moves (roll to break, Stop) run under `_pomoApplying` and
+never leave a pause. Completing (`toggleDone`, `setPct` to 100), deleting (`deleteMulti`, the series
+delete) and archiving (`archiveMulti`) now stop the task's timer (`commitStoppingTimers`) — before, a
+timer outlived its task in `pp-run`. **One action, one Undo:** the credit happens inside the action's own
+`commit()` (same task snapshot), and the running map + Pomodoro session from before the action are pushed
+as a PAIRED `timers` record on the interleaved undo log (`_timersUndo`/`_timersRedo`, kind `'timers'`) —
+the mechanism `deleteSection` uses for its paired `sections` record. One Ctrl+Z (or the toast's Undo)
+restores the task, its timer from its original `startedAt` (credit and timer revert together, so no time is
+lost or double-counted) and the session; redo mirrors it. With no timer running among the ids it is a plain
+`commit`, one entry, as before. **`T`** stops the timer the pill shows
 (`stopActiveTimer`); stop only, inert when idle, listed in `SHORTCUTS()`. Everything rides the existing 1 s
 run tick — no separate ticker. Sheet rows still get no ambient running paint (2026-08-13 ruling): the pill
 and the block are not a second channel on the row, they are the timer's only presence off it.
@@ -250,8 +369,11 @@ legacy `stats` page view renders the same thing. Habits and Needs planning stay 
 **Review queues leave routines out.** `reviewSkip(t)` is true for routines (`isRoutineTask`), Points
 (`isPointTask`), and clock-only tasks (a written start clock on a task that does not compress,
 `isUncompressable`). Their time is their clock, not a Planned budget. `reviewUnplanned()` (the `unplanned` chip
-minus archived work and `reviewSkip`) feeds Review's and the Journal's Needs planning. `agingTasks` (the "Still
-relevant?" prompt) and `statsData.unplanned` skip them as well.
+minus archived work, milestones and `reviewSkip`) is the **only** builder of a Needs-planning list: Review's
+column, the Journal rail, `statsData.unplanned` and the morning summary (`morningSummaryData`) all read it. Do
+not filter the `unplanned` chip directly for a Needs-planning surface — the morning summary once did and kept
+listing the seeded routines on later days (`tests/morning-summary-planning.test.js`). `agingTasks` (the "Still
+relevant?" prompt) applies `reviewSkip` as well.
 
 **The Journal opens on "Your day".** `journalDayModel(B)` merges `journalActuals` and `journalAutoLog` into one
 row per task: `done`, `worked` or `planned` (today only). Rows run done → worked → planned, most time first.

@@ -192,12 +192,17 @@ the one every reader sees.
 from `initRoutines`, called in `componentDidMount` — NOT from `runOnceMigrations`, which runs inside the
 constructor before `state` exists and therefore cannot use `commit()`. Creating tasks needs both.
 
-It branches on whether the workspace is new: no persisted `pp-tasks` means a fresh workspace and
-`seedRoutines()` creates all five routines; anything else is an existing workspace and `migrateRoutines()`
+It branches on whether the workspace is new: no stored task rows (`loadTasks()` returns null — an absent,
+empty `[]`, or unreadable `pp-tasks`) means a fresh workspace and `seedRoutines()` creates all five routines; anything else is an existing workspace and `migrateRoutines()`
 carries **only Lunch and Dinner**, at whatever clocks the four deleted settings held. The narrowing is
 deliberate and is covered by a test: seeding Breakfast into an existing workspace would silently reserve 30
 minutes a day it never had, and the acceptance criterion for that migration is that `dayIntervals` output
 is minute-identical across it.
+
+The test is on rows, not on the key, because the key is never absent by mount time: the constructor's
+`recur-series-window` migration saves tasks unconditionally, so a first boot already holds `pp-tasks = []`.
+Testing key presence made every fresh workspace take the Lunch/Dinner path (fixed 2026-10-04; covered by
+`tests/routines-fresh-workspace.test.js` and the first-boot case in `tests/e2e/first-minute.spec.js`).
 
 The flag is what makes a deleted routine stay deleted — without it, a user who removes Lunch would find it
 back on the next load. E2E fixtures stamp `pp-mig-routines` in `tests/e2e/_seed.js` for the same reason the

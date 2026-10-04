@@ -239,13 +239,24 @@ test('each grip has an outside extension: together they render at HIT_MIN_PX, li
   const exts = (bar) => find(bar, (p) => p['data-gantt-edge-ext']);
   let bar = c.ganttBlock(t, 0, occOf(t));
   assert.equal(exts(bar).length, 2);
-  for (const e of exts(bar)) {
+  // Targets pass 1: the extension is the grip's CHILD (top/bottom 0), so the grip and its extension are one
+  // target: the press on the extension bubbles to the grip's own handler, and both are GANTT_HIT_PX tall.
+  const grips = find(bar, (p) => p['data-gantt-edge']);
+  assert.equal(grips.length, 2);
+  for (const g of grips) {
+    const e = exts(g)[0];
+    assert.ok(e, 'the extension rides inside its grip');
     assert.equal(px(e.props.style.width), c.BAR_GRIP_OUT_PX);
     assert.ok((c.BAR_GRIP_PX + c.BAR_GRIP_OUT_PX) * c.SHELL_ZOOM >= c.HIT_MIN_PX, 'inside + outside renders ≥ 24px');
-    assert.ok(px(e.props.style.height) * c.SHELL_ZOOM >= c.HIT_MIN_PX, 'and is at least as tall');
+    const gripH = c.barH - 2 * px(g.props.style.top);
+    assert.equal(px(g.props.style.top), px(g.props.style.bottom));
+    assert.ok(gripH * c.SHELL_ZOOM >= c.HIT_MIN_PX, 'and the grip (so its extension) is at least as tall');
+    assert.equal(e.props.style.top, 0); assert.equal(e.props.style.bottom, 0);
     assert.equal(e.props.style.pointerEvents, 'none', 'at rest a press beside a bar still belongs to the lane');
-    assert.equal(typeof e.props.onMouseDown, 'function');
+    assert.equal(typeof g.props.onMouseDown, 'function');
+    assert.equal(e.props.onMouseDown, undefined, 'one handler, on the grip');
   }
+
   // The inside grip is unchanged, so pctGrabZone's clearance rule is unchanged.
   assert.equal(find(bar, (p) => p['data-gantt-edge'] === 'end')[0].props.style.width, c.BAR_GRIP_PX + 'px');
   c.setState({ barTip: { id: 'a', idx: 0 } });

@@ -112,6 +112,11 @@ test('arrow keys move a focused row in screen order; Shift+F10 opens the row men
   await expect.poll(() => activeTaskId(page), { message: 'a clicked row takes focus' }).toBe('t2');
   await page.keyboard.press('ArrowDown');
   await expect.poll(() => selectedIds(page)).toEqual(['t4']);
+  /* Targets pass 2: ↓ out of a section stops on the next section's header first (its keys collapse,
+     rename, move and delete it), then a second ↓ enters the section. */
+  await page.keyboard.press('ArrowDown');
+  await expect.poll(() => page.evaluate(() => !!document.activeElement && document.activeElement.hasAttribute('data-pp-sechead')),
+    { message: '↓ lands on the next section header' }).toBe(true);
   await page.keyboard.press('ArrowDown');
   await expect.poll(() => selectedIds(page), { message: '↓ crosses into the next section' }).toEqual(['t1']);
   expect(await activeTaskId(page)).toBe('t1');
