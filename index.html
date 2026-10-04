@@ -14495,7 +14495,7 @@ class Component extends DCLogic {
   /* pure — should we (re-)assert watch channels? True when the selection changed, or we never have,
      or the periodic re-assert is due (cheap idempotent insurance against a channel we lost track of). */
   gcalWatchNeedsSync(prevIds, nextIds, lastAt, now, resyncMs){
-    const norm=a=>(a||[]).slice().sort().join(' ');
+    const norm=a=>(a||[]).slice().sort().join('\u0000') /* PP-EXT: escaped, a raw NUL byte made index.html read as binary */;
     if(!(nextIds||[]).length) return false;              /* nothing selected -> nothing to watch */
     if(!lastAt) return true;
     if(norm(prevIds)!==norm(nextIds)) return true;
