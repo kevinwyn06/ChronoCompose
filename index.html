@@ -8026,6 +8026,33 @@ class Component extends DCLogic {
   }
 
   setPriorityMulti(ids,p){ this.commit(tasks=>{ tasks.forEach(t=>{ if(ids.includes(t.id)) t.priority=p; }); }); this.closeMenu(); }
+  /* PP-EXT (owner ask 2026-10-07): BULK SNOOZE — the inclusion popover's three durations, applied to a
+     selection in one commit (one undo step). Each kind writes exactly what its single-task verb writes
+     (`snoozeToday` / `snoozeUntilText` / `snoozeIndefinitely`), so a bulk snooze and a one-at-a-time
+     snooze can never leave different state. Done, archived and milestone rows are skipped: none of them
+     is on today's list to be put away (the single-task Snooze control is hidden on milestones too).
+     `kind` is 'today' | 'until' (with `text`, parsed by parseSnoozeText) | 'relevant'. Returns false
+     without committing on an unparseable phrase, so the menu input keeps the draft, as the popover does. */
+  snoozeEligible(t){ return !!t && !t.archivedAt && !(t.pct>=100) && !this.isMilestone(t); }
+  snoozeMulti(ids, kind, text){
+    ids=ids||[];
+    const until = kind==='until' ? this.parseSnoozeText(text, this.state.nowTick||Date.now()) : null;
+    if(kind==='until' && until==null) return false;
+    const live=(this.state.tasks||[]).filter(t=>ids.includes(t.id) && this.snoozeEligible(t));
+    const skipped=ids.filter(id=>(this.state.tasks||[]).some(t=>t.id===id)).length-live.length;
+    this.closeMenu();
+    if(!live.length){ this.toast('Nothing to snooze — done, archived and milestone tasks are skipped'); return false; }
+    const set=new Set(live.map(t=>t.id)), now=Date.now(), tomorrow=this.startOfToday()+this.DAY;
+    this.commit(tasks=>{ tasks.forEach(t=>{ if(!set.has(t.id)) return;
+      if(kind==='relevant') t.snoozeIndef=true;
+      else t.snoozeUntil = kind==='today' ? tomorrow : until;
+      t.snoozedAt=now; t.onListSince=null; }); });
+    const when = kind==='relevant' ? " until it's relevant"
+      : kind==='today' ? ' for today'
+      : ' until '+this.fmtDate(until,{weekday:'short',month:'short',day:'numeric'});
+    this.toast(this.toastCount('Snoozed', live.map(t=>t.name))+when+(skipped?(' · '+skipped+' skipped'):''));
+    return true;
+  }
   completeMulti(ids){ ids=this.expandSubtrees(ids); /* PP-EXT: completing a parent completes its subtree */
     const allDone=this.state.tasks.filter(t=>ids.includes(t.id)).every(t=>t.pct>=100);
     this.commit(tasks=>{ const now=Date.now(); tasks.forEach(t=>{ if(ids.includes(t.id)){ if(allDone){ t.pct=0; t.completion=null; } else { t.pct=100; t.completion=now; } } });
@@ -19431,7 +19458,7 @@ class Component extends DCLogic {
   }
   /* ==== PP-EXT (UI revamp block 6): the bulk-action bar ====
      Count, then the whole-task operations people do to a batch: Complete, Move to section, Priority,
-     Archive, Delete, and Clear. Every action goes through the existing *Multi method (one commit, one
+     Snooze, Archive, Delete, and Clear. Every action goes through the existing *Multi method (one commit, one
      undo step) and confirms through the toast layer with Undo. The two pickers are native selects: they
      are keyboard-complete for free and read their options to a screen reader. */
   renderBulkBar(ids){
@@ -19458,6 +19485,11 @@ class Component extends DCLogic {
       btn('complete', allDone?'Mark not done':'Complete', ()=>this.bulkAction('complete',ids)),
       pick('section','Move to', secOpts, v=>this.bulkAction('section',ids,v.slice(2)||null)),
       pick('priority','Priority', priOpts, v=>this.bulkAction('priority',ids,+v)),
+      /* PP-EXT (owner ask 2026-10-07): bulk snooze. A select cannot take a typed phrase, so the free-form
+         "until…" is offered as two common presets; the row menu (Shift+F10) keeps the typed form. */
+      tasks.some(t=>this.snoozeEligible(t))
+        ? pick('snooze','Snooze', [{v:'today',l:'Today'},{v:'until:3 days',l:'3 days'},{v:'until:1 week',l:'1 week'},
+            {v:'relevant',l:"Until it's relevant"}], v=>this.bulkAction('snooze',ids,v)) : null,
       allArch ? btn('unarchive','Unarchive',()=>this.bulkAction('unarchive',ids))
               : btn('archive','Archive',()=>this.bulkAction('archive',ids)),
       btn('delete','Delete',()=>this.bulkAction('delete',ids),'Delete '+n+' tasks (Del)','pp-tool--danger'),
@@ -19473,6 +19505,11 @@ class Component extends DCLogic {
     if(kind==='archive'){ this.archiveMulti(ids); return; }
     if(kind==='unarchive'){ this.unarchiveMulti(ids); return; }
     if(kind==='delete'){ this.deleteMulti(ids); return; }
+    if(kind==='snooze'){ /* PP-EXT (owner ask 2026-10-07) */
+      const a=String(arg||'');
+      if(a.startsWith('until:')) this.snoozeMulti(ids,'until',a.slice(6)); else this.snoozeMulti(ids,a);
+      return;
+    }
     if(kind==='section'){
       const sid=(arg==null||arg==='')?null:arg;
       const sec=(this.state.sections||[]).find(s=>String(s.id)===String(sid));
@@ -21171,7 +21208,11 @@ class Component extends DCLogic {
     const vpc=this.uiViewport(); /* PP-EXT V1.4: clamp in the overlay's own px, not rendered px */
     /* PP-EXT V2.6: the section block adds up to ~210px (label + divider + the 168px scroll cap), so the
        vertical clamp has to grow with it or the menu runs off the bottom on a short viewport. */
-    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-590)); /* PP-EXT (owner 2026-09-10): the section block is unconditional now, so the tall clamp always applies */
+    /* PP-EXT (owner ask 2026-10-07): the Snooze block adds ~150px, so the clamp grows by it and the card
+       scrolls inside the viewport rather than running off a short one. */
+    const snoozable=tasks.some(t=>this.snoozeEligible(t));
+    const MENU_H=snoozable?740:590;
+    const W=246; const x=Math.min(m.x, vpc.w-W-8); const y=Math.max(8, Math.min(m.y, vpc.h-MENU_H)); /* PP-EXT (owner 2026-09-10): the section block is unconditional now, so the tall clamp always applies */
     /* ● when every selected task's subtree ROOT already sits in this section, ○ otherwise. */
     const rootSecOf=id=>{ const r=this.state.tasks.find(x=>x.id===this.sectionRootId(this.state.tasks,id)); return r?(r.sectionId||null):null; };
     const secMarkOf=sid=>(tasks.length && tasks.every(t=>rootSecOf(t.id)===sid)) ? '●' : '○';
@@ -21195,6 +21236,7 @@ class Component extends DCLogic {
       onMouseDown:e=>e.stopPropagation()/* PP-EXT: keep the overlay's mousedown from closing the menu before an item's click fires (row items like Delete) */,onClick:e=>e.stopPropagation(),onContextMenu:e=>{e.preventDefault();},
       style:{position:'fixed',left:x+'px',top:y+'px',width:W+'px',background:'var(--menu-bg)',border:'1px solid var(--divider)',
         borderRadius:'var(--r-3)',boxShadow:'var(--sh-2)',padding:'6px 0',zIndex:2100,
+        maxHeight:Math.max(160, vpc.h-y-8)+'px',overflowY:'auto', /* PP-EXT (owner ask 2026-10-07) */
         fontFamily:'inherit',outline:'none'}}),
       multi?label(ids.length+' tasks selected'):null,
       /* PP-EXT (UI revamp block 6, audit edit.md finding 10): "Edit · Ctrl E" had no handler and did the
@@ -21236,6 +21278,19 @@ class Component extends DCLogic {
           ()=>{ const s=this.newSectionInline(); this.setTaskSectionMulti(ids,s.id); }))
       ),
       divider,
+      /* PP-EXT (owner ask 2026-10-07): bulk snooze — the inclusion popover's three durations for the whole
+         selection (snoozeMulti). Offered only when some selected task can be snoozed. The input owns its
+         keys: without stopPropagation, menuKeyDown would eat Space and the arrows mid-phrase. */
+      snoozable?label('Snooze'):null,
+      snoozable?row([ic('💤'),'Today'],()=>this.snoozeMulti(ids,'today')):null,
+      snoozable?h('div',{key:'snz-until',style:{padding:'2px 14px 4px'}},
+        h('input',{className:'pp-num',type:'text','data-pp-snooze-until':'1','aria-label':'Snooze until',
+          placeholder:'Until… (e.g. "3 days")',style:{width:'100%',border:'1px solid var(--divider)'},
+          onClick:e=>e.stopPropagation(),
+          onKeyDown:e=>{ if(e.key==='Escape' || e.key==='Tab') return; e.stopPropagation();
+            if(e.key==='Enter'){ e.preventDefault(); this.snoozeMulti(ids,'until',e.target.value); } }})):null,
+      snoozable?row([ic('⏾'),"Until it's relevant"],()=>this.snoozeMulti(ids,'relevant')):null,
+      snoozable?divider:null,
       row([ic(allDone?'○':'✓'),allDone?'Mark incomplete':'Mark complete'],()=>this.completeMulti(ids)),
       /* PP-EXT (owner 2026-08-12): "There is no way to switch something from a milestone to a task and
          vice versa." The label reads the whole selection, so it can never offer "Convert to milestone"

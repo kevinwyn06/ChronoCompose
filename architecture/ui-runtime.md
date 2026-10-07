@@ -228,6 +228,14 @@ renames inline, Shift+F10 / the context-menu key open the row menu. The row and 
 focus to the toast's Undo. Two or more selected rows swap the sheet toolbar for the bulk-action bar
 (`renderBulkBar`, same `PLAN_STRIP_H`).
 
+**Bulk snooze (owner ask 2026-10-07).** The row menu (multi-select aware) carries a **Snooze** block —
+Today, a typed **Until…** box (`parseSnoozeText`), and **Until it's relevant** — and the bulk bar a
+**Snooze** picker (Today, 3 days, 1 week, Until it's relevant). Both call `snoozeMulti(ids, kind, text)`:
+one commit, one undo step, writing exactly what `snoozeToday` / `snoozeUntilText` / `snoozeIndefinitely`
+write per task. `snoozeEligible` skips done, archived and milestone rows, and the toast counts the skips.
+The typed box stops its own key events, or `menuKeyDown` would claim Space and Enter mid-phrase
+(`tests/e2e/bulk-snooze.spec.js`). The row menu now scrolls inside the viewport (`maxHeight`).
+
 Two mechanics that gesture map depends on, both fixed 2026-08-12 after the e2e layer caught them:
 
 - **The row's double-click does NOT come from the browser's `dblclick`.** The first click opens the
