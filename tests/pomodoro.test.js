@@ -1,4 +1,4 @@
-// Phase 10 (ROADMAP.md) — Pomodoro: pure phase math (pomoPhaseDur / pomoState / pomoAdvance) + the
+// Phase 10 — Pomodoro: pure phase math (pomoPhaseDur / pomoState / pomoAdvance) + the
 // control methods that bind the existing task timer (start/skip/stop/tick). Notifications no-op under
 // test (Notification is unsupported in the sandbox), so these exercise the timer binding + persistence.
 const test = require('node:test');

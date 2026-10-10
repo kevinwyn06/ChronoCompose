@@ -42,7 +42,5 @@ Verification has two layers. `tests/*.test.js` (Node VM + mocked DOM) owns every
 browser. `tests/e2e/*.spec.js` (Playwright, real Chromium) owns only what the mock DOM structurally
 cannot reach — trusted pointer input and a live mount. The boundary is deliberate: the mock DOM has no
 hit-testing or pointer capture, so a gesture threshold cannot be proved there, and a dispatched
-`MouseEvent` only looks like proof. See "Run and verify" in `AGENTS.md`.
+`MouseEvent` only looks like proof.
 
-For detail not yet distilled here, locate the exact heading in
-`archive/docs/architecture-through-2026-07.md` with `rg` and read only that bounded section.

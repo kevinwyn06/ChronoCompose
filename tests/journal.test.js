@@ -1,4 +1,4 @@
-// Phase 9 PR4 (ROADMAP.md) — Journaling / next-day planning: per-day text store round-trip, the day's
+// Phase 9 PR4 — Journaling / next-day planning: per-day text store round-trip, the day's
 // actuals (allotted vs recorded), and the day-navigation clamp (never past today).
 const test = require('node:test');
 const assert = require('node:assert/strict');

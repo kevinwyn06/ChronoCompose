@@ -17,7 +17,6 @@
 // stored date. Rewording "Move the friday deploy to staging" leaves `friday` alone, because a re-parse
 // yielding the date the task already holds is not new information.
 //
-// Board: docs/superpowers/mockups/2026-08-21-date-editor-and-title-strip.md
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, withNow, FIXED_NOW, DAY } = require('./_load.js');

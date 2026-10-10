@@ -1,5 +1,5 @@
 // Spec-derived unit tests for Phase 8 — notifications.
-// Behavior derived from ROADMAP.md Phase 8 + CLAUDE.md invariants. Pure logic only
+// Behavior derived from Phase 8 + the app invariants. Pure logic only
 // (notifyPlan / morningSummaryData / notifyTick's summary path); the browser Notification
 // side of notifyTick is exercised via the 'unsupported' gate (no Notification global in the sandbox).
 const test = require('node:test');

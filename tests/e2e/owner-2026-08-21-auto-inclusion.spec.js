@@ -9,7 +9,6 @@ const { bootToday, bootPlan, task, timelineBlocks } = require('./_seed');
  * real commit, and the task turning up on a real rendered day surface. The bug was reported as "I typed
  * it and it wasn't there", and only a live mount can say "it is there".
  *
- * Diagnosis: docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md
  * Owner ruling 2026-08-21 (second, final), verbatim: "My default task duration for point tasks is wrong.
  * test today at 4pm should be no duration, marker at 4pm in both the schedule and timeline. We should
  * retain the point behaviour."

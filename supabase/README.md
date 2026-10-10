@@ -20,7 +20,7 @@ setup is in [`SETUP.md`](../SETUP.md).
 
 `config.toml` is **not committed here** — it holds your `project_id` and is created by
 `supabase link` in your own checkout. Don't commit it if it contains anything beyond the public ref;
-treat the DB password and `service_role` key as secrets (never in the repo or chat — CLAUDE.md rule 7).
+treat the DB password and `service_role` key as secrets (never in the repo).
 
 ## ⚠ ALWAYS reconcile history before `db push`
 
@@ -55,7 +55,7 @@ applying migrations only via `db push` so history stays honest.
 
 ## Applying (owner terminal steps — B0)
 
-Prereq: the owner's manual walkthrough steps 1–7 in `backend-migration-roadmap.md` are done
+Prereq: the Supabase project is set up as described in `SETUP.md`
 (project created, CLI installed, `supabase login`, `supabase link --project-ref <ref>`).
 
 ```sh

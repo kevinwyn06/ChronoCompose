@@ -9,7 +9,7 @@
  *   1. The leading dot is HIT-TESTABLE and the drag off it actually lands. It is hover-gated and sits
  *      outside the bar's left edge, next to a resize grip — the exact geometry that made the trailing
  *      dot unstartable in V1.5, found only by a real pointer. A dispatched MouseEvent skips hit-testing
- *      and pointer capture and is not evidence here (AGENTS.md), so everything below uses page.mouse.
+ *      and pointer capture and is not evidence here, so everything below uses page.mouse.
  *   2. That two arrows drawn on one chart really do get different geometry once the whole render has
  *      run — the lane assignment is a fact about the collected set, not about either edge alone.
  */

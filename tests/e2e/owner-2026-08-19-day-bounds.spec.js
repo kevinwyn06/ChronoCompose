@@ -9,7 +9,7 @@ const {
    Why e2e and not unit: the clamp, the mutator and the undo record are all pinned in
    `tests/owner-2026-08-19-freeze-past.test.js`. What only a real browser can show is that the handle is
    a genuine hit target under a TRUSTED pointer, that the drag crosses the 4px promotion threshold the
-   way every other timeline gesture does, and that Escape aborts it. Per AGENTS.md, dispatched
+   way every other timeline gesture does, and that Escape aborts it. By the testing rules, dispatched
    MouseEvents skip hit-testing and pointer capture and would prove none of that — so `page.mouse` only.
 
    ── Reading the window off the screen ─────────────────────────────────────────────────────────────

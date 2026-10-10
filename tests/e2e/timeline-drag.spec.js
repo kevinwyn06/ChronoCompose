@@ -222,7 +222,7 @@ test.describe('Today timeline: an unsplit task', () => {
 
 /* ══ Two defects 04v pinned as `test.fail()`, fixed by 04b — markers removed ══════════════════════
    Neither assertion was changed when the fix landed; only the `test.fail()` markers and the "OBSERVED"
-   notes went away. See `.orchestration/04b-drag-recovery.handoff.md`. */
+   notes went away. */
 
 test.describe('Today timeline: pointer fidelity and drop accounting', () => {
   test('a drop that overlaps an appointment does not grant the task extra minutes', async ({ page }) => {

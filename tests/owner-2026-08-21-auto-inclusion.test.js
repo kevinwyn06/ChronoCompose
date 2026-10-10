@@ -1,6 +1,5 @@
 // Owner reports 2026-08-21 — the auto-inclusion inversion.
 //
-// Diagnosis: docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md
 //
 // A quick-added `test today` did not appear on today's list, and turned up TOMORROW instead;
 // `test today at 4pm` appeared on no day at all; `test every day` skipped its first day; and a task

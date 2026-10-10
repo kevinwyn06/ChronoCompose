@@ -1,5 +1,5 @@
 // Independent, spec-derived unit tests for the core pure logic of the Component class.
-// Behavior is derived from CLAUDE.md + architecture.md; assertions target the SPEC.
+// Behavior is derived from the app invariants and architecture notes; assertions target the SPEC.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask, cleanDay, DAY } = require('./_load.js');

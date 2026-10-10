@@ -22,7 +22,7 @@
  * whole arithmetic invariant is that they keep agreeing across a sweep, a timer, and a drag.
  *
  * VERIFICATION BLOCK: defects found here are REPORTED in
- * `.orchestration/13-day-in-the-life.handoff.md`, never fixed. A fix in a review pass is unreviewed
+ * the review notes, never fixed. A fix in a review pass is unreviewed
  * production work, and it would destroy the evidence the next block consumes.
  */
 const { test, expect } = require('@playwright/test');

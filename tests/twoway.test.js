@@ -1,4 +1,4 @@
-// Phase 2 (ROADMAP.md) — two-way gcal sync, pure layer: RRULE serialization round-trips,
+// Phase 2 — two-way gcal sync, pure layer: RRULE serialization round-trips,
 // event bodies, outbound diff (computeOutboundOps), queue coalescing + tombstones, echo gating.
 const test = require('node:test');
 const assert = require('node:assert/strict');

@@ -8,7 +8,7 @@ const { make, activeTask, DAY } = require('./_load.js');
 const styleOf = n => (n && n.props && n.props.style) || {};
 
 // The component runs in a vm realm, so an array it CREATES is not `instanceof` this realm's Array and
-// assert.deepEqual fails on the prototype alone — the trap CURRENT.md records from the block that was cut
+// assert.deepEqual fails on the prototype alone — the trap the status notes records from the block that was cut
 // off mid-flight. Copy into a host array before comparing anything the component built.
 const host = a => [].concat(a == null ? [] : Array.prototype.slice.call(a));
 

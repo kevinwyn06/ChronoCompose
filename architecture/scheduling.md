@@ -974,7 +974,7 @@ rather than dropping it, which is the shortest-effort tenet and not a residue of
 
 Pinned in `tests/owner-2026-08-21-auto-inclusion.test.js` and
 `tests/e2e/owner-2026-08-21-auto-inclusion.spec.js`; diagnosis in
-`docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md`.
+
 
 ## The checkbox is the gesture (owner decision, 2026-08-20, spec A6)
 

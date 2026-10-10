@@ -787,7 +787,7 @@ drive the inclusion popover's copy, V2.1's `orderingSeam`, and `taskInclControl`
 calendar's day chips keep their own muted-chip treatment; that is a different surface, with no per-chip
 control on it to be redundant with.
 
-**The hatch collision logged in `tasks.md` is resolved by this deletion.** The two hatches read alike at a
+**The hatch collision logged in the backlog is resolved by this deletion.** The two hatches read alike at a
 glance and meant unrelated things — −45° accent = collapsed repeat, +45° gold = not in today. Deleting the
 gold one leaves exactly one hatch on the chart, so there is nothing left to confuse it with, and neither
 hatch had to be retuned.

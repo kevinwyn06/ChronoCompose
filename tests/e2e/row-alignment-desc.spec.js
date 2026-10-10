@@ -3,7 +3,7 @@
  *
  * Former manual item (ROADMAP): *"Sheet/Gantt rows stay aligned with an expanded description."*
  *
- * This is the one that had been measured BY HAND every verification pass, and written into `CURRENT.md`
+ * This is the one that had been measured BY HAND every verification pass, and written into the status notes
  * as a number ("row tops agreed within 0.016px"). A measurement a human repeats every pass, to three
  * decimal places, from a browser's dev tools, is the definition of a check that should not be manual.
  *
@@ -69,7 +69,7 @@ async function relativeTops(page) {
 /** The biggest disagreement between the two panes, in px. */
 const worstGap = (m) => Math.max(...m.sheet.map((v, i) => Math.abs(v - m.gantt[i])));
 
-/* The hand-measured figure recorded in CURRENT.md was 0.016px and 0.03px on different passes — sub-
+/* The hand-measured figure recorded in the status notes was 0.016px and 0.03px on different passes — sub-
    pixel residue from Chromium's 1/64px layout snapping, not drift. Half a pixel is therefore a
    generous ceiling that still fails loudly on a real misalignment: one dropped `descExtra` would put a
    row a whole panel-height out, tens of px, not fractions of one. */

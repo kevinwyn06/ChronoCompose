@@ -9,7 +9,7 @@ const { bootToday, task, settleTimeline, timelineBlocks } = require('./_seed');
  *
  * This has to be an e2e, and specifically a `page.mouse` one. The drag threshold and pointer capture
  * are exactly what a synthetic dispatched MouseEvent skips, so a dispatched event proves nothing about
- * whether the gesture started — the standing rule in AGENTS.md.
+ * whether the gesture started — the standing testing rule.
  *
  * Two build consequences the mockup states, both asserted: the drag handle is the PARENT row and a
  * child line never starts its own drag; and a dragged piece keeps its identity as part of the parent —

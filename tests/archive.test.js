@@ -1,4 +1,4 @@
-// Phase 3 (ROADMAP.md) — archive vs delete: sweep rule, view filtering, allotment exclusion,
+// Phase 3 — archive vs delete: sweep rule, view filtering, allotment exclusion,
 // prune exemption, and gcal interaction (archive = no-op remotely; delete = DELETE + tombstone).
 const test = require('node:test');
 const assert = require('node:assert/strict');

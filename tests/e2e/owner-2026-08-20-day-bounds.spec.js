@@ -1,8 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { bootToday, cleanDaySettings, settleTimeline, task } = require('./_seed');
 
-/* Chain A, Task 12 — the day-bound handles (spec C3, owner-approved mockup
-   `docs/superpowers/mockups/2026-08-20-task12-day-bound-handles.html`).
+/* Chain A, Task 12 — the day-bound handles (spec C3, owner-approved mockup.
 
    The owner's report was two defects in one gesture: "absolutely no drag preview", and "even worse when
    trying to expand". The second explains the first — there was no canvas past the bound to drag into, so

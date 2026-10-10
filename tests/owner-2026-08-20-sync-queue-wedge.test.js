@@ -133,7 +133,7 @@ test('syncRowForWrite still maps updatedAt -> updated_at (regression guard)', ()
 // 3 — one rejected row must not wedge the whole queue
 // =======================================================================
 // The pure decision is "given a bulk write that failed, what do we send next?". Keeping it pure keeps
-// it testable under Node, per AGENTS.md.
+// it testable under Node, per the testing rules.
 
 test('syncIsRowLevelReject recognises a Postgres data-shape rejection', () => {
   const c = make();

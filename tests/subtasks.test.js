@@ -1,4 +1,4 @@
-// Phase 4 (ROADMAP.md) — subtasks: tree helpers, order invariant, collapse filtering,
+// Phase 4 — subtasks: tree helpers, order invariant, collapse filtering,
 // parent-keeps-budget allotment distribution, timeline subdivision, cascades, indent/outdent.
 const test = require('node:test');
 const assert = require('node:assert/strict');

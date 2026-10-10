@@ -9,7 +9,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask } = require('./_load.js');
 
-// vm-realm arrays are not `instanceof` this realm's Array; copy before deepEqual. (CURRENT.md records this
+// vm-realm arrays are not `instanceof` this realm's Array; copy before deepEqual. (the status notes records this
 // trap from the block that was cut off mid-flight.)
 const host = a => [].concat(a == null ? [] : Array.prototype.slice.call(a));
 // runOnceMigrations runs inside the constructor, so every flag is already set on a fresh make(). A

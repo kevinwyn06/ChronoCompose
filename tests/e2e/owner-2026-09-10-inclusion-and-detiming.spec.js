@@ -9,7 +9,7 @@
  *  · the Gantt bar drag was the one date-writing path that never re-derived inclusion, because it
  *    persists through `saveTasks` instead of `commit()`. Whether it re-derives is a fact about a real
  *    drag — `dragMoved` is only set when pointer travel crosses a whole day column, so a dispatched
- *    MouseEvent proves nothing here (AGENTS.md).
+ *    MouseEvent proves nothing here.
  *  · "I can't delete the time" is a fact about the PICKER: the time field commits on blur and the task
  *    commits on Done, so the failure only appears when a real pointer moves between the two.
  */

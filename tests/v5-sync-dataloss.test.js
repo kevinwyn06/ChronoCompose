@@ -1,6 +1,6 @@
 // V5 review, block 16 — four silent data-loss defects in the sync/backup subsystem (F6-F9).
 // Each of these fails *invisibly* in the app: no error, no toast, no undo entry. Every test here was
-// demonstrated RED against the pre-fix line before the fix landed (see .orchestration/16-sync-dataloss.handoff.md).
+// demonstrated RED against the pre-fix line before the fix landed.
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { make } = require('./_load.js');

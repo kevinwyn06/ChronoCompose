@@ -5,7 +5,7 @@
  * one."*
  *
  * The owner's half of that is a decision and stays a decision (it is listed under Open concerns in
- * `CURRENT.md`). What was never automated is the FACT the decision is about — that `predicted` is a
+ * the status notes). What was never automated is the FACT the decision is about — that `predicted` is a
  * field on the task, so an edge-drag in tomorrow's column reaches back into today. `edge-drag.spec.js`
  * asserts only that the block in THAT column grew; it says nothing about the neighbouring days, so a
  * change that quietly made the override per-day would leave that file green and this decision moot

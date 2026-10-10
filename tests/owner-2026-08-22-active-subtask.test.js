@@ -15,7 +15,6 @@
 //     stays on whatever "now" is actually inside, and the timer keeps its own ▶/■ affordance. The two
 //     signals are allowed to point at different children: they answer different questions.
 //
-// Board: docs/superpowers/mockups/2026-08-21-subtasks-in-schedule-and-active-cue.md
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, withNow, FIXED_NOW, DAY } = require('./_load.js');

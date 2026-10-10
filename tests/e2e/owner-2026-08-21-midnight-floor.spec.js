@@ -12,7 +12,6 @@ const { bootToday, task, timelineBlocks } = require('./_seed');
  *
  * So the assertion that matters is a NEGATIVE one on the live surface: no Point marker, and a block.
  *
- * Diagnosis: docs/superpowers/findings/2026-08-21-bare-day-midnight-floor.md
  */
 
 const anchorTask = task('anchor', 'Anchor', { start: '0d+9h', end: '0d+10h', startClock: true, endClock: true });

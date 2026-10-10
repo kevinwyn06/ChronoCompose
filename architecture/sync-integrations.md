@@ -53,7 +53,7 @@ Three layers now hold the invariant, and each is load-bearing on its own:
 **Adding a numeric mirrored field means adding it to `INT_COLUMNS` too**, or the next fractional value
 repeats the wedge. `INT_COLUMNS` sits beside `SYNC_FIELDS` for exactly that reason.
 
-**Delete propagation and the ack ledger (owner 2026-08-20, `tasks.md` S1 — RESOLVED).** The reconcile used
+**Delete propagation and the ack ledger (owner 2026-08-20 — RESOLVED).** The reconcile used
 to treat "absent from the server" as "not pushed yet" unconditionally: `applyRemoteSnapshot` kept local-only
 rows and `syncInitialSync` re-`insert`ed them, and the kv branches stripped deletes from the diff. A device
 closed during a delete therefore resurrected the row for everyone. Tombstones are per-origin `localStorage`
@@ -129,7 +129,7 @@ task, producing two task ids sharing **one** `calendarId|eventId`. Once formed t
 the map is last-write-wins, so exactly one of the pair was ever updated again, and the prune path only
 removes tasks whose event is *missing* from the live calendar — which this one is not. The duplicate was
 invisible to both halves of sync and survived forever. See
-`docs/superpowers/findings/2026-08-20-gcal-double-import.md`.
+
 
 **Identity is now one thing.** `gcalKey(calendarId, eventId)` is the single spelling, and the merge index
 uses it, so the three call sites that disagreed (`byEid` on the bare `eventId`, `handled` on `cid|eid`,
@@ -205,7 +205,7 @@ The browser holds only a short-lived access token in memory. The refresh token i
 `public.gcal_tokens` and reachable only through the `gcal-oauth` Edge Function. `events.watch`
 notifications are content-free prompts to pull; they do not send calendar contents through the webhook.
 
-For OAuth QA, follow the account/origin restrictions in `AGENTS.md` and never reload mid-session.
+For OAuth QA, use a throwaway account and never reload mid-session.
 
 ### The display-only tier (2026-08-31)
 
@@ -411,7 +411,7 @@ refetches the same page forever and the returned promise never settles.
 Editing a task imported from a read-only calendar (Birthdays is one) queues a PATCH that Google answers
 403. `gcalFlushQueue` treats 400/403/404 as permanent and drops the op without retrying, so the queue
 cannot jam; a local *delete* still sticks, because the tombstone is cleared only on a successful DELETE.
-A local title/time edit, though, is simply lost at the next pull — see `tasks.md`.
+A local title/time edit, though, is simply lost at the next pull (a known gap).
 #### A fourth: reclassification was limited to the import window (2026-08-31)
 
 Owner report, after the three above were fixed: *"Why is Alex Rivera's birthday still shown as a row?"* —

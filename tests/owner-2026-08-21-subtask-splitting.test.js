@@ -14,7 +14,6 @@
 // OWNER RULING 2026-08-21 on ties: depth is a PRE-FILTER only; `orderingSeam` (active, priority, EDF,
 // longer-first) breaks ties within a depth, exactly as it does today.
 //
-// Board: docs/superpowers/mockups/2026-08-21-subtask-depth-and-splitting.md
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, withNow, FIXED_NOW } = require('./_load.js');

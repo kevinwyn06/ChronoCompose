@@ -438,7 +438,7 @@ test('bucket: the projection is ONE flat bucket map with counts, and the rows ar
 
 // ---------------------------------------------------------------------------
 // Task 9 — the two-column Selection layout (spec A5, owner-approved mockup
-// `docs/superpowers/mockups/2026-08-20-task9-selection-layout.html`).
+//.
 //
 // The layout is a PURE projection so the renderer and the left pane's width floor read the same rule.
 // Two copies of "which buckets are mounted, in which column" is exactly the drift this repo has paid for.

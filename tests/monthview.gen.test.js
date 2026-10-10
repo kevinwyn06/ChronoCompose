@@ -1,4 +1,4 @@
-// Phase 6 (ROADMAP.md) — month calendar view. Independent, spec-derived tests for the occurrence-aware
+// Phase 6 — month calendar view. Independent, spec-derived tests for the occurrence-aware
 // day↔task maps that drive the hover glow: tasksOnDay / daysOfTask / monthGrid.
 const test = require('node:test');
 const assert = require('node:assert');

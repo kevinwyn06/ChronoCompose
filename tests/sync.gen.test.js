@@ -1,5 +1,5 @@
 // Independent, spec-derived unit tests for the B1 offline-first Supabase sync layer.
-// Derived from plans/backend-migration-roadmap.md (sub-phase B1) + the pure Component methods:
+// Derived from the backend migration plan (sub-phase B1) + the pure Component methods:
 //   computeSyncOps, applyRemoteSnapshot, syncRowOf/rowToTask, syncEnqueue coalescing, stampUpdated,
 //   and the commit() funnel. All IO-free — called directly on plain task arrays, mirroring
 //   tests/calendar.gen.test.js. No network exists at B1.

@@ -1,8 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const { bootPlan, task } = require('./_seed');
 
-/* Chain A, Task 9 — the two-column Selection layout (spec A5, owner-approved mockup
-   `docs/superpowers/mockups/2026-08-20-task9-selection-layout.html`).
+/* Chain A, Task 9 — the two-column Selection layout (spec A5, owner-approved mockup.
 
    `selectionLayout` is unit-tested for order and collapse. What CANNOT be proven without a browser is
    the part the owner actually objected to: the geometry. Equal column widths, sections that size to

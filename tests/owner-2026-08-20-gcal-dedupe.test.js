@@ -4,7 +4,7 @@ const { make } = require('./_load.js');
 
 // Task 2 (Chain G) — the Google Calendar double import.
 //
-// Diagnosed mechanism (docs/superpowers/findings/2026-08-20-gcal-double-import.md, "M1"):
+// Diagnosed mechanism ("M1"):
 // `stampEventId` closes the insert loop by writing `eventId`/`calendarId` — both of which are in
 // SYNC_FIELDS — with a bare setState+saveTasks. It never stamps `updatedAt` and never feeds the
 // Supabase outbound funnel. So the link is invisible to the server, and the very next echo of the

@@ -5,11 +5,11 @@
 //
 // The paint is gated on TWO sources and needs BOTH:
 //   1. settings.criticalPath  — owned DEFAULT_SETTINGS key, default false (the user toggle)
-//   2. props.showCriticalPath — the Design prop, default true (the Design-side kill switch)
+//   2. props.showCriticalPath — the mount prop, default true (the app-wide kill switch)
 //
-// The two-flag shape is deliberate and these tests exist to stop a later agent "simplifying" it back
-// into one: the owner's default cannot live in the Design props JSON, because that JSON is Design-owned
-// and the next Direction B pull would restore default:true. See architecture/ui-runtime.md.
+// The two-flag shape is deliberate and these tests exist to stop a later change "simplifying" it back
+// into one: the prop asks whether the app may draw critical paths at all, the setting asks whether this
+// user wants them. See architecture/ui-runtime.md.
 //
 // NOTE for future test authors: `_load.js`'s `make()` passes showCriticalPath:true, which used to be
 // enough to paint. It no longer is. Any test that wants critical-path paint must OPT IN explicitly with
@@ -27,12 +27,12 @@ test('the shipped default is OFF', () => {
     'critical-path highlighting must ship off — owner decision 2026-08-13b');
 });
 
-test('a fresh boot does not paint the critical path, even with the Design prop on', () => {
+test('a fresh boot does not paint the critical path, even with the mount prop on', () => {
   const c = make(); // _load's make() passes showCriticalPath:true
-  assert.strictEqual(c.props.showCriticalPath, true, 'precondition: the Design prop is on');
+  assert.strictEqual(c.props.showCriticalPath, true, 'precondition: the mount prop is on');
   assert.strictEqual(c.state.settings.criticalPath, false, 'precondition: the user setting is off');
   assert.strictEqual(c.cpDisplayOn(), false,
-    'the Design prop alone must NOT be enough — the user setting is the second required source');
+    'the mount prop alone must NOT be enough — the user setting is the second required source');
 });
 
 test('turning the user setting on restores the paint', () => {
@@ -40,15 +40,15 @@ test('turning the user setting on restores the paint', () => {
   assert.strictEqual(c.cpDisplayOn(), true);
 });
 
-test('the Design prop stays a kill switch: prop off beats the user setting on', () => {
+test('the mount prop stays a kill switch: prop off beats the user setting on', () => {
   const Cls = loadComponent();
   const c = new Cls({ accent: '#3b82f6', showCriticalPath: false });
   c.state.settings.criticalPath = true;
   assert.strictEqual(c.cpDisplayOn(), false,
-    'an explicitly disabled Design prop must veto the user setting');
+    'an explicitly disabled mount prop must veto the user setting');
 });
 
-test('an ABSENT Design prop is treated as not-disabled, so the user setting decides', () => {
+test('an ABSENT mount prop is treated as not-disabled, so the user setting decides', () => {
   const Cls = loadComponent();
   const off = new Cls({ accent: '#3b82f6' });
   assert.strictEqual(off.cpDisplayOn(), false, 'no prop + setting off = off');

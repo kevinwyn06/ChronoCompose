@@ -15,7 +15,7 @@ const { seed, boot, bootSurface, task } = require('./_seed');
    place. I could not identify which historical code path produced the owner's value, so the guard has to
    be behavioural: drive the real gestures that write dates and assert the invariant holds after each.
 
-   Synthetic dispatched MouseEvents would prove nothing here (AGENTS.md): they skip hit-testing and
+   Synthetic dispatched MouseEvents would prove nothing here: they skip hit-testing and
    pointer capture, which is exactly what a drag threshold and a pointer-captured resize depend on.
 
    ── The invariant ───────────────────────────────────────────────────────────────────────────────────

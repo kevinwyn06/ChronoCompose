@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { make, DAY } = require('./_load.js');
 
 /* Chain A, Task 18 — the timeline block's hover card (spec D2, owner-approved mockup
- * `docs/superpowers/mockups/2026-08-20-task18-hover-tooltip.html`).
+ *.
  *
  * The interesting part of this feature is not the card, it is the CHOICE of countdown, and that choice
  * is a statement about who decided the time. `blockTooltipModel` is pure so the choice can be tested

@@ -1,4 +1,4 @@
-// S1 (tasks.md, raised 2026-08-20) — deletions never crossed origins.
+// Raised 2026-08-20 — deletions never crossed origins.
 //
 // Both sync funnels treated "absent from the server" as "this device has not pushed it yet", never as
 // "another device deleted it". `applyRemoteSnapshot` kept local-only rows and `syncInitialSync` then

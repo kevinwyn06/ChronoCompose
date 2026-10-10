@@ -15,7 +15,7 @@ const sched = chunks => chunks.filter(x => x.type === 'scheduled');
 const overlaps = (a, b) => a.start < b.end && b.start < a.end;
 
 // ---------------------------------------------------------------------------
-// Derived shapes (no pin fields) — see plans/2026-07-26-remove-schedule-pins.md
+// Derived shapes (no pin fields)
 // ---------------------------------------------------------------------------
 test('hasStartTime: derives from the timestamp, explicit flag wins', () => {
   const c = make();

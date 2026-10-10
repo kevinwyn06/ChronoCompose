@@ -226,7 +226,7 @@ test('the two themes tune the drop-band tokens separately', async ({ page }) => 
    section drop.
 
    The sweep below records, at five horizontal offsets across the band, whether the row was FILED into
-   the section or NESTED under the row above. `page.mouse` only: per AGENTS.md a dispatched MouseEvent
+   the section or NESTED under the row above. `page.mouse` only: per the testing rules, a dispatched MouseEvent
    skips hit-testing and pointer capture, and this test is precisely about a drag threshold.
 
    FINDING (measured 2026-08-19, both sweeps below).

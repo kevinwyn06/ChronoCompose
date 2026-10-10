@@ -1,4 +1,4 @@
-// Phase 9 PR2 (ROADMAP.md) — Stats page aggregation over the per-day spentByDay ledger.
+// Phase 9 PR2 — Stats page aggregation over the per-day spentByDay ledger.
 // statsData is pure over state.tasks; we assert the daily buckets, per-tag rollup, completion
 // counts (incl. archived tasks — the point of stats), and the backlog tallies.
 const test = require('node:test');

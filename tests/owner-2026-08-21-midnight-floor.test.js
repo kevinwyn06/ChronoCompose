@@ -1,6 +1,5 @@
 // Owner ruling 2026-08-21 — the bare-day midnight floor is MIDNIGHT-UNTIMED.
 //
-// Diagnosis: docs/superpowers/findings/2026-08-21-bare-day-midnight-floor.md
 //
 // The floor was skipped whenever `days?|weeks?|months?|hours?` matched `text`, the WHOLE raw title —
 // the same whole-string mistake the `dueCue` guard twenty lines below already fixed once. So

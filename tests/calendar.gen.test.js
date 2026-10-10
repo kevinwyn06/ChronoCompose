@@ -1,5 +1,5 @@
 // Independent, spec-derived unit tests for the Google Calendar logic.
-// Derived from CLAUDE.md + architecture.md + the Component methods in index.html:
+// Derived from the app invariants and architecture notes + the Component methods in index.html:
 //   rruleToRecur, parseEventMeta, calTag, mergeCalendarEvents, pruneDeletedEvents.
 // These are the pure helpers documented under "Google Calendar I/O". We call them
 // directly on plain task arrays (no React / no commit needed).

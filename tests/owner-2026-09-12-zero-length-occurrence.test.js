@@ -5,7 +5,7 @@
 // packed nor reported Unscheduled — the minutes were simply gone, which is the worst shape a
 // scheduling bug can take, because nothing on screen says anything is wrong.
 //
-// The cause is a zero-length occurrence (`recur.durMs: 0`, the open item CURRENT.md carried after the
+// The cause is a zero-length occurrence (`recur.durMs: 0`, the open item the status notes carried after the
 // 2026-09-09 Google Calendar sweep) meeting an explicit `uncompressable: true`. `isFixedOn` is the fork
 // both halves of the renderer read: `fixedBlocksToday` draws what it calls fixed, and
 // `buildDayTimeline`'s `flex` filter packs what it does not. Calling a zero-length occurrence an

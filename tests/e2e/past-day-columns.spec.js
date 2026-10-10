@@ -10,7 +10,7 @@
  *
  * WHY THE CLOCK IS PINNED. The Week view is Sunday-first and anchored on the week containing today, so
  * on a Sunday that week has no past column at all. A first draft guarded that case with `test.skip`,
- * which is the same wall-clock fragility `AGENTS.md` forbids in fixtures, only worse: instead of going
+ * which is the same wall-clock fragility the testing rules forbid in fixtures, only worse: instead of going
  * red it degrades to NO COVERAGE one day in seven, silently. (It did exactly that on the run that was
  * first reported.) `page.clock.install` pins "today" to a known WEDNESDAY before the first navigation,
  * so the anchored week always contains three past columns, today, and three future ones — and the `-3d`

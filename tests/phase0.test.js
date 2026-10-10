@@ -1,4 +1,4 @@
-// Phase 0 (ROADMAP.md) — bug-fix bundle: normalizeTask numeric defaults, undo/redo cap symmetry,
+// Phase 0 — bug-fix bundle: normalizeTask numeric defaults, undo/redo cap symmetry,
 // EDF-uses-current-occurrence, timer accounting (stopTimerAt/timerHeartbeat — timers persist across
 // a closed tab / sleep), JSON backup round-trip.
 const test = require('node:test');

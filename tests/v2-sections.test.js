@@ -2,8 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { make, activeTask } = require('./_load');
 
-/* V2.6 — sections as a first-class entity.
-   Spec: docs/superpowers/specs/2026-08-03-sections-and-triage-design.md §1-§2. */
+/* V2.6 — sections as a first-class entity.. */
 
 const secs = c => [
   c.normalizeSection({ id:'s1', name:'Research', order:0 }),

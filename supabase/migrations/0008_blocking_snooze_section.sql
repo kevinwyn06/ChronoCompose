@@ -1,6 +1,6 @@
 -- ChronoCompose backend — the BATCHED task-field migration (2026-08-06, serial chain block 10).
 --
--- tasks.md carries a standing instruction: batch the deliberately local-only task fields into ONE
+-- A standing instruction: batch the deliberately local-only task fields into ONE
 -- schema/sync migration rather than shipping a one-off per field. This is that batch. Three columns
 -- land together so public.tasks never needs a fourth additive migration for fields already written.
 --
@@ -23,7 +23,7 @@
 alter table public.tasks add column if not exists blocking boolean;
 
 -- snoozeUntil: date-only epoch ms; null = no active snooze. Previously local-only and named in the
--- tasks.md batching instruction by name. Enters SYNC_FIELDS with this migration.
+-- batching instruction by name. Enters SYNC_FIELDS with this migration.
 alter table public.tasks add column if not exists "snoozeUntil" bigint;
 
 -- sectionId: id into the pp-sections store. The COLUMN is created here so the tasks table is done,

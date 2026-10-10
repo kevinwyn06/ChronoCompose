@@ -849,7 +849,7 @@ test('04b: regroupTask re-joins a split task into one block without changing the
 });
 
 // ── V4.2: edge-drag = a sticky manual `allotted` override ────────────────────────────────────────
-// The gesture itself (a real pointer on a real edge handle) is e2e-only by the AGENTS.md split; what
+// The gesture itself (a real pointer on a real edge handle) is e2e-only by the unit/e2e split; what
 // belongs here is the arithmetic underneath it: what an edge-drag writes, what it does to everybody
 // else's minutes, and whether it survives the next pack.
 

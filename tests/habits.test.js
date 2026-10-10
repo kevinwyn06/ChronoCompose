@@ -1,4 +1,4 @@
-// Phase 9 PR3 (ROADMAP.md) — Habits entity: scheduling (daily/weekdays), auto-done from linked tasks,
+// Phase 9 PR3 — Habits entity: scheduling (daily/weekdays), auto-done from linked tasks,
 // streak (grace for today, break on an earlier miss), and consistency over a window.
 const test = require('node:test');
 const assert = require('node:assert/strict');

@@ -1,5 +1,5 @@
 // Spec-derived unit tests for Phase 7 — sort / filter / smart-chip core.
-// Behavior derived from ROADMAP.md Phase 7 owner decisions (2026-07-05) + CLAUDE.md invariants.
+// Behavior derived from Phase 7 owner decisions (2026-07-05) + the app invariants.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { make, activeTask, DAY } = require('./_load.js');

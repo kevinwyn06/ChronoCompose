@@ -94,9 +94,9 @@ test.describe('critical-path highlighting is a user toggle, default off', () => 
     expect(m.reds, 'the slack task stays off the critical path').not.toContain('Pick paint colours');
   });
 
-  /* The OTHER half of the gate — the Design prop `showCriticalPath` vetoing the user's opt-in — is
+  /* The OTHER half of the gate — the mount prop `showCriticalPath` vetoing the user's opt-in — is
      pinned in the unit layer's truth table (`tests/critical-path-toggle.test.js`) rather than here. It
-     is not reachable from e2e without rewriting the Design `data-props` JSON between parse and boot,
+     is not reachable from e2e without changing the bootstrap's APP_PROPS,
      and the veto is pure boolean logic in `cpDisplayOn()` with nothing browser-shaped about it. What
      needs a real browser is the PAINT, which is what this file covers. */
 

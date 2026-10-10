@@ -7,7 +7,7 @@
  * This has to be a browser test and cannot be a unit test. The clamp is a property of a live pointer
  * gesture — `startBarDrag` captures the floor on a real mousedown, `onMouseMove` applies it per move, and
  * the barrier is only in the DOM WHILE the button is held. A dispatched MouseEvent skips hit-testing and
- * pointer capture, so it is not evidence here (AGENTS.md); everything below uses `page.mouse`.
+ * pointer capture, so it is not evidence here; everything below uses `page.mouse`.
  *
  * The unit layer separately proves the clamp computes the same floor `autoSchedule` enforces
  * (`tests/dep-scheduling.test.js`), which is the invariant that keeps the affordance from becoming a

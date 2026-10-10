@@ -1,4 +1,4 @@
--- ChronoCompose backend — B0 initial schema (backend-migration-roadmap.md → sub-phase B0).
+-- ChronoCompose backend — initial schema.
 --
 -- Mirrors normalizeTask() in index.html 1:1 (mechanical translation, not a redesign).
 -- Column names are QUOTED camelCase so they match the JS task-object keys exactly — the sync

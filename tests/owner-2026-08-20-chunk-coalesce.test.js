@@ -8,8 +8,6 @@ const { make, DAY } = require('./_load.js');
  * The owner's shape, verbatim: a fixed task 09:00–16:00 with a routine lunch 12:00–13:00 sitting inside
  * it. The bar looks like one bar. The gate is `mineHere.length > 1`, so if two chunks carry that task's
  * id the control appears whether or not there is a visible gap between them.
- *
- * The finding is written up in `docs/superpowers/findings/2026-08-20-regroup-on-unsplit.md`.
  */
 
 const H = 3600000;

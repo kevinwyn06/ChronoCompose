@@ -1,5 +1,4 @@
 // Life Planner — local configuration.
-// This file is NOT part of the Claude Design and is never overwritten by design re-syncs.
 //
 // Paste your Google OAuth Client ID below ONCE to enable one-click "Sign in with Google"
 // (no more typing it into the app). An OAuth Client ID is PUBLIC and safe to commit — it is
@@ -13,7 +12,7 @@
 // Edge Function: `supabase secrets set GCAL_CLIENT_SECRET=<secret>` (see SETUP.md → Google Calendar
 // setup). Persistent gcal also requires being signed into your account.
 
-// Supabase backend (offline-first cloud sync, backend-migration-roadmap.md → sub-phase B2).
+// Supabase backend (offline-first cloud sync).
 // Both values below are PUBLIC and safe to commit — same rule as the Google Client ID above.
 // The Project URL and the "anon / public" key are shipped in every browser Supabase app; only the
 // `service_role` key is sensitive and must NEVER go here (it bypasses Row-Level Security).

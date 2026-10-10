@@ -566,7 +566,7 @@ class Component extends AppLogic {
     /* PP-EXT: active per-account workspace ('anon' or a Supabase uid) — MUST be set before the first
        scoped localStorage read (this.loadNotify() below routes through lsGet). pp-workspace is our
        synchronous proxy for the last session; the async Supabase session restore confirms/switches it
-       later in syncOnAuth. See plans/account-namespacing-plan.md. */
+       later in syncOnAuth. */
     try{ this._workspace = localStorage.getItem('pp-workspace') || 'anon'; }catch(e){ this._workspace = 'anon'; }
     this.installA11yNames(); /* PP-EXT (UI revamp block 11a): icon-only controls are named by their title */
     this.DAY = 86400000;
@@ -822,7 +822,7 @@ class Component extends AppLogic {
        `dblclick`. The FIRST click opens the detail modal, whose full-screen scrim/card is then under
        the cursor when the second press lands — a different event target, so Chromium resets the click
        count and never synthesises `dblclick` on the row. (Proved with trusted `page.mouse` input; a
-       dispatched MouseEvent fires the handler and hides the defect, exactly as AGENTS.md warns.)
+       dispatched MouseEvent fires the handler and hides the defect, which is why gesture tests use real pointer input.)
        So the second half is recognised on the modal instead, by time and distance from the first.
        These are the browser's own double-click tolerances, named rather than inlined. */
     this.ROW_DBLCLICK_MS = 400;      // max gap between the two presses
@@ -1196,9 +1196,8 @@ class Component extends AppLogic {
     multitask:false, /* PP-EXT V2.4: OFF = strict single timer (starting one stops every other). ON restores the legacy concurrent-timer behavior. Switching the ACTIVE task stops only the prior active either way. */
     criticalPath:false, /* PP-EXT (2026-08-13b): critical-path highlighting is OPT-IN. Owner: "I don't think
        critical paths are going to be helpful to the average user", and the Gantt bar already stacks five
-       paint channels. This owned key is one of TWO sources gating `_showCP` — the other is the Design prop
-       `showCriticalPath` (default true, declared in the data-props JSON). BOTH must be on to paint. The
-       default cannot live in the props JSON: that is Design-owned and a Direction B pull would clobber it.
+       paint channels. This key is one of TWO sources gating `_showCP` — the other is the mount prop
+       `showCriticalPath` (default true, in the bootstrap's APP_PROPS). BOTH must be on to paint.
        See architecture/ui-runtime.md § "Gantt bar legend". */
     journalWeather:true, /* PP-EXT Phase 9 (PR5): auto-fetch today's weather (Open-Meteo + geolocation) when the Journal opens; off = no location prompt */
     pomo:{ work:25, break:5, long:15, cycles:4 }, /* PP-EXT Phase 10: pomodoro interval minutes + work-sessions before a long break */
@@ -1214,8 +1213,7 @@ class Component extends AppLogic {
   /* PP-EXT: per-account localStorage namespacing (clean-switch isolation). Active workspace = 'anon'
      (signed-out/local-only, bare pp-* keys) or a Supabase uid (keys suffixed '::'+uid). Global keys
      (device UI pref, sign-in prefill, the workspace/account bookkeeping, and the Supabase-managed
-     session) never get suffixed. Anon == the legacy bare keys, so single-user needs no migration.
-     See plans/account-namespacing-plan.md. */
+     session) never get suffixed. Anon == the legacy bare keys, so single-user needs no migration. */
   WS_GLOBAL_KEYS(){ return {'pp-theme':1,'pp-sync':1,'pp-workspace':1,'pp-accounts':1,'pp-auth':1,
     'pp-anon-promote':1/* PP-EXT (17/F5): per-account anon-import decision ledger. MUST be global — it
        gates a namespace, so storing it inside one would make the answer unreadable from anon. */}; }
@@ -1468,7 +1466,7 @@ class Component extends AppLogic {
   /* PP-EXT (owner report 2026-09-12: "why is lunch and dinner not scheduled"): the OTHER end of the same
      mis-derivation. `migrateRecurWindow` computes `durMs = t.end - t.start`, so a legacy repeat stored
      with `end === start` became a repeat whose every occurrence lasts zero minutes. The period invariant
-     above cannot see these — zero is inside every period — which is why CURRENT.md carried `Lunch`,
+     above cannot see these — zero is inside every period — which is why the status notes carried `Lunch`,
      `Dinner`, `journal` and `Team Meeting` as an open item after that sweep.
      Repaired ONLY on positive evidence, in `migrateRecurOccLength`'s order and for its reasons: the
      `//planned-duration` line Todoist writes, else the task's own `planned` minutes. There is NO third
@@ -2237,7 +2235,7 @@ class Component extends AppLogic {
   markFirstRunSeen(){ this.setState({firstRunSeen:true}); this.savePrefs({firstRunSeen:true}); }
   /* Explicit opt-in: adds the sample tasks as a clearly-labeled demo. Fresh random ids (NOT the stable
      t1..t7) so a signed-in account loading the demo can't re-trigger the cross-account tasks.id collision
-     the namespacing work fixed (tasks.md → namespacing). All deps in buildSeed are empty, so re-id is safe. */
+     the namespacing work fixed. All deps in buildSeed are empty, so re-id is safe. */
   /* PP-EXT (UI revamp block 11b): the demo lands in REAL sections (Work / Study / Personal) instead of "No
      section", reusing a same-named section when one exists. The sections it had to create are remembered
      (pp-prefs `demoSectionIds`) so Clear demo removes them again once they are empty. Loading the demo no
@@ -3685,7 +3683,7 @@ class Component extends AppLogic {
   /* ==== /PP-EXT ==== */
   /* ==== PP-EXT (owner 2026-08-21): the today predicates ask for a WINDOW, not for two edges ====
      Owner report: a quick-added `test today` was absent from today's list and present on tomorrow's.
-     Diagnosis in docs/superpowers/findings/2026-08-21-parser-inclusion-defects.md; the root cause was
+     The root cause was
      that `isScheduled` was doing TWO jobs at once — "has a usable window" and "has two edges" — and the
      dateless exclusion had been riding on the conflation. Today was the one day in the app decided by a
      chain that consulted `isScheduled`; every other day went through `ghostSpan`, which handles a
@@ -6002,7 +6000,7 @@ class Component extends AppLogic {
   /* ==== /PP-EXT: archive ==== */
 
   /* ==== PP-EXT V2.6: Sections — a first-class, exclusive, ordered CONTAINER entity (own pp-sections store,
-     like pp-habits: no gcal/undo funnel). Spec: docs/superpowers/specs/2026-08-03-sections-and-triage-design.md.
+     like pp-habits: no gcal/undo funnel).
      Deliberately NOT derived from @tags — see tasksBySection.
      PP-EXT (owner 2026-08-15): **SYNCED**, no longer local-only. The store rides the kv blob funnel as
      the `sections` table (migration 0012) and `sectionId` is in `SYNC_FIELDS`. The owner found the gap by
@@ -6599,7 +6597,7 @@ class Component extends AppLogic {
   todayScratchLines(){ return this.scratchReviewLines().filter(l=>l.today); }
 
   /* ---- surface aging (V2 hook, landing here as ONE default prompt) ----------------------------
-     `plans/product-vision.md` §11: a task open for many days with zero progress should be SURFACED, never
+     Product vision: a task open for many days with zero progress should be SURFACED, never
      nagged about inline. Fully derived — no new persisted field, and nothing here mutates a task. A task
      with no start has no measurable age, so it is not "aging", it is merely undated: Extra/unplanned
      already surfaces those and double-nagging is the failure mode this prompt exists to avoid. */
@@ -8969,7 +8967,7 @@ class Component extends AppLogic {
      Pinned by `tests/e2e/pct-drag.spec.js`, in both directions. */
   /* PP-EXT (owner 2026-08-15): where the on-bar %-done grab band sits, in local px from the bar's left
      edge. PURE — width and pct in, {left,width,centre} or null out — so the extremes are provable in the
-     unit layer rather than by eye on a chart (CLAUDE.md "keep new logic pure").
+     unit layer rather than by eye on a chart (the "keep new logic pure" rule).
      The rule, in order:
        1. the band is 2·PCT_GRAB_PX wide and centred on the fill edge (w·pct/100);
        2. it is then SHIFTED, not clipped, until it clears both resize grips — so a 0% band starts exactly
@@ -11039,12 +11037,11 @@ class Component extends AppLogic {
      Both sources must agree before anything is painted red:
        1. `settings.criticalPath` — the OWNED DEFAULT_SETTINGS key, default FALSE. This is the user toggle
           (Settings › General › "Highlight critical path").
-       2. `props.showCriticalPath` — the DESIGN prop from the data-dc-script data-props JSON, default true.
-          It stays the Design-side kill switch.
+       2. `props.showCriticalPath` — the mount prop in the bootstrap's APP_PROPS, default true. It is the
+          app-wide kill switch.
 
-     DO NOT collapse this into one flag, and DO NOT move the owner's default into the props JSON instead:
-     that JSON is Design-owned, so the next Direction B pull (DESIGN_WORKFLOW.md) would restore
-     `default:true` and silently turn the channel back on for every user.
+     DO NOT collapse this into one flag: the prop asks whether the app may draw critical paths at all,
+     the setting asks whether this user wants them.
 
      Only DRAWING is gated. `computeCPM` still runs and `_cpm` is still built, so slack, ordering and
      scheduling are untouched. Consumers: the bar fill, the sheet row's left inset, the milestone diamond
@@ -11059,17 +11056,15 @@ class Component extends AppLogic {
   renderVals(){
     const accent = this.props.accent || '#3b82f6';
     /* PP-EXT (2026-08-13b): TWO-SOURCE GATE — critical-path paint requires BOTH the owned user setting
-       (`settings.criticalPath`, DEFAULT_SETTINGS default false) AND the Design prop not being explicitly
-       disabled. Do NOT collapse this into one flag and do NOT flip the props-JSON default instead: the
-       props JSON is Design-owned and the next Direction B pull would restore `default:true`, silently
-       turning the channel back on for everyone. The prop stays the Design-side kill switch; the setting is
+       (`settings.criticalPath`, DEFAULT_SETTINGS default false) AND the mount prop not being explicitly
+       disabled. Do NOT collapse this into one flag. The prop is the app-wide kill switch; the setting is
        the user's opt-in. Only DRAWING is gated — computeCPM/_cpm still run, so slack and ordering are
        unaffected. See architecture/ui-runtime.md § "Gantt bar legend". */
     const showCP = this.cpDisplayOn();
     this.rowH = this.ROWH[this.state.rowMode] || 40;
-    /* PP-EXT (visual revamp): the Design prop's stock default (#3b82f6) now resolves to the theme's own
-       accent token, so the accent tracks light/dark like every other colour. A non-default prop value (the
-       Design-side picker) still wins. Every consumer concatenates _accent into a CSS string, so a var()
+    /* PP-EXT (visual revamp): the accent prop's stock default (#3b82f6) resolves to the theme's own
+       accent token, so the accent tracks light/dark like every other colour. A non-default prop value
+       still wins. Every consumer concatenates _accent into a CSS string, so a var()
        is a drop-in. */
     this._accent = (!accent || String(accent).toLowerCase()==='#3b82f6') ? 'var(--accent)' : accent; this._showCP = showCP;
     /* PP-EXT: archived tasks are ALWAYS hidden from the board (they live on the Archive page). The filtered
@@ -12714,9 +12709,9 @@ class Component extends AppLogic {
          last-write-wins via updatedAt; tombstones block a just-deleted row from resurrecting.
        - pp-sync-queue / pp-sync-tombstones persistence + coalescing enqueue, echo-suppressed by
          _syncApplying. syncFlushQueue is a stub here (the network lands in B2).
-     All IO-free and unit-tested in tests/sync.gen.test.js (CLAUDE.md "keep new logic pure"). */
+     All IO-free and unit-tested in tests/sync.gen.test.js (the "keep new logic pure" rule). */
   /* PP-EXT (10): `snoozeUntil` and `blocking` join here TOGETHER, as one batch, satisfying the standing
-     tasks.md instruction not to ship a one-off migration per field. Both are self-contained scalars whose
+     instruction not to ship a one-off migration per field. Both are self-contained scalars whose
      meaning survives alone.
      PP-EXT (owner 2026-08-15): **`sectionId` now rides along too.** It was held out because its value is
      an id into `pp-sections` and that store had no Supabase table, so mirroring the reference alone would
@@ -12825,7 +12820,7 @@ class Component extends AppLogic {
       if(!l){ byId[r.id]=r; order.push(r.id); return; }
       if(this.syncTs(r.updatedAt) > this.syncTs(l.updatedAt)) byId[r.id]=this.mergeRemoteOverLocal(l, r);
     });
-    /* PP-EXT (owner 2026-08-20, tasks.md S1): a LOCAL row the server does not have is now two different
+    /* PP-EXT (owner 2026-08-20): a LOCAL row the server does not have is now two different
        situations, and this used to conflate them into one. See syncAbsentDecision. `opts` is optional so
        every pre-existing caller keeps the old keep-everything behaviour verbatim. */
     const o=opts||{};
@@ -12835,7 +12830,7 @@ class Component extends AppLogic {
     });
     return order.filter(id=>byId[id]).map(id=>byId[id]);
   }
-  /* PP-EXT (owner 2026-08-20, tasks.md S1): the one question the sync layer could not previously answer —
+  /* PP-EXT (owner 2026-08-20): the one question the sync layer could not previously answer —
      a row is on this device and NOT on the server; who is right?
        • we have positive evidence the backend once held this id (a pull returned it, or our push of it was
          accepted) and it is gone now  -> ANOTHER ORIGIN DELETED IT -> delete locally.
@@ -12846,7 +12841,7 @@ class Component extends AppLogic {
      ledger just stops it from also swallowing genuine deletes.
      A PENDING local write outranks the ack: an unflushed edit is a newer local intent than our knowledge
      of the delete, so the row is re-created rather than silently losing the user's work. That is the one
-     place this differs from server-side soft-delete (option A in tasks.md), which could compare clocks.
+     place this differs from server-side soft-delete (option A), which could compare clocks.
      Deliberately conservative in every ambiguous case — an over-kept row is visible and fixable, a
      wrongly deleted one is neither. */
   syncAbsentDecision(id, acked, pending){
@@ -12907,7 +12902,7 @@ class Component extends AppLogic {
   /* PURE: given the local value for an id (or undefined), an incoming remote value (null = a remote delete),
      and our tombstone ts for it (or null), decide the merge: 'set' (take remote), 'delete', or 'none'.
      Row-level LWW by updatedAt; a remote row older-or-equal to local, or not newer than our tombstone, loses. */
-  /* PURE (owner 2026-08-20, tasks.md S1): the kv counterpart of applyRemoteSnapshot. Merges a pulled map
+  /* PURE (owner 2026-08-20): the kv counterpart of applyRemoteSnapshot. Merges a pulled map
      into the local map by the existing row-level LWW, then applies the SAME absent-row rule so a section,
      habit or journal entry deleted on another origin stops coming back. Every reconcile branch used to
      open-code this merge inline and then strip deletes from the diff, which is how the three funnels
@@ -12940,7 +12935,7 @@ class Component extends AppLogic {
       Object.keys(t).forEach(k=>{ if(!(t[k]>cut)){ delete t[k]; ch=true; } });
       if(ch) this.saveSyncTombstones(t); return t; }catch(e){ return {}; } }
   saveSyncTombstones(t){ try{ this.lsSet('pp-sync-tombstones', JSON.stringify(t)); }catch(e){} }
-  /* PP-EXT (owner 2026-08-20, tasks.md S1): `pp-sync-acked` — per table, the set of ids the backend has
+  /* PP-EXT (owner 2026-08-20): `pp-sync-acked` — per table, the set of ids the backend has
      confirmed. This is what lets `syncAbsentDecision` tell "the server deleted it" from "we never pushed
      it", which is what makes deletions cross origins at all.
      A missing or CORRUPT ledger must read as "nothing acked", never as "everything acked": the empty
@@ -12990,7 +12985,7 @@ class Component extends AppLogic {
      harness (same as gcal's) — only the pure B1 diff/merge layer above is unit-tested. */
   syncConfigured(){ const c=window.PP_CONFIG||{}; return !!(c.supabaseUrl && c.supabaseAnonKey); }
   /* create the Supabase client once. persistSession:true persists the account session under the pp-auth
-     localStorage key (owner-approved override of the old in-memory-only policy — see CLAUDE.md rule 5), so
+     localStorage key (owner-approved override of the old in-memory-only policy), so
      you stay signed in across reloads; autoRefreshToken keeps it fresh. storageKey pins it to the pp-* name-
      space (Supabase also writes a transient pp-auth-code-verifier during the OTP/PKCE round-trip). Only the
      last-used email in pp-sync remains separate. detectSessionInUrl:true consumes the magic-link hash on load. */
@@ -13049,7 +13044,7 @@ class Component extends AppLogic {
     try{ const m=JSON.parse(localStorage.getItem('pp-accounts')||'{}');
       m[user.id]={email:user.email||'', seen:Date.now()}; localStorage.setItem('pp-accounts', JSON.stringify(m)); }catch(e){}
   }
-  /* PP-EXT: clean-switch namespacing helpers (plans/account-namespacing-plan.md). The scoped keys are the
+  /* PP-EXT: clean-switch namespacing helpers. The scoped keys are the
      per-account user data; the constructor reads them through lsGet/wsKey, so switching = persist the new
      workspace id and reload (the constructor then re-hydrates ALL state from that namespace). */
   WS_SCOPED_KEYS(){ return ['pp-tasks','pp-settings','pp-prefs','pp-gcal','pp-run','pp-pomo','pp-notify',
@@ -13411,7 +13406,7 @@ class Component extends AppLogic {
       .then(({data, error})=>{ if(error) throw error;
         const remote=(data||[]).map(r=>this.rowToTask(r));
         /* compute the merge locally (do NOT read this.state.tasks after setState — it's async in React) */
-        /* PP-EXT (owner 2026-08-20, tasks.md S1): the ack ledger + the pending set are what let this pull
+        /* PP-EXT (owner 2026-08-20): the ack ledger + the pending set are what let this pull
            DELETE a row another origin removed, instead of re-inserting it. Both are read BEFORE the merge:
            `syncPendingTaskIds` reads the queue as it stands now, and the merge itself enqueues into it. */
         const acked=this.loadSyncAcked();
@@ -13507,7 +13502,7 @@ class Component extends AppLogic {
       this.syncClearError();
       if(this.loadKvQueue().length) this.syncKvFlushSoon(); };
     let chain=Promise.resolve();
-    /* PP-EXT (owner 2026-08-20, tasks.md S1): record what the backend accepted, so the next reconcile can
+    /* PP-EXT (owner 2026-08-20): record what the backend accepted, so the next reconcile can
        tell "the server deleted it" from "we never pushed it". Ack after the upsert lands, un-ack after the
        delete lands — never before, or a failed write would leave evidence of a row that is not there. */
     this.KV_TABLES().forEach(t=>{ const g=byTable[t];
@@ -13529,7 +13524,7 @@ class Component extends AppLogic {
       const remoteMap={}; const tombFor={};
       (data||[]).forEach(r=>{ const inc=this.normalizeHabit(Object.assign({}, r.data||{}, {id:r.id}));
         remoteMap[r.id]=inc; tombFor[r.id]=tomb[this.kvTombKey('habits', r.id)]; });
-      /* PP-EXT (owner 2026-08-20, tasks.md S1): one shared merge for all three kv tables, and it can now
+      /* PP-EXT (owner 2026-08-20): one shared merge for all three kv tables, and it can now
          DELETE a row another origin removed instead of re-pushing it. Ordered map -> list afterwards. */
       const mergedMap=this.syncKvMergeMap(this.habitsToMap(this.state.habits), remoteMap, tombFor,
         { acked:acked.habits, pending:this.syncPendingKvIds('habits') });
@@ -13555,7 +13550,7 @@ class Component extends AppLogic {
        never-delete-on-first-reconcile rule — a section absent remotely meant "this device has not pushed
        it yet", never "deleted" — which mattered more here than for habits: a wrong delete orphans every
        task filed under it.
-       PP-EXT (owner 2026-08-20, tasks.md S1): that rule was ALSO swallowing genuine deletes, and it is why
+       PP-EXT (owner 2026-08-20): that rule was ALSO swallowing genuine deletes, and it is why
        the owner's two origins kept growing duplicate sections that no delete could remove. The protection
        is now conditional rather than absolute: `syncKvMergeMap` only deletes an absent row the ack ledger
        proves the backend once held, so a never-uploaded section is still kept and its tasks never orphan. */
@@ -13813,7 +13808,7 @@ class Component extends AppLogic {
      undo history and must not re-enter the outbound diff. */
   /* PP-EXT (owner 2026-08-20): closing the insert loop is a WRITE TO SYNC_FIELDS, and it used to be the
      one such write that skipped both funnels — a bare setState+saveTasks with no `updatedAt` and no push.
-     That is the double-import mechanism (docs/superpowers/findings/2026-08-20-gcal-double-import.md):
+     That is the double-import mechanism:
      the server never learned the link, and the very next echo of the row it DOES hold came back strictly
      newer (its touch_updated_at trigger guarantees that), so `mergeRemoteOverLocal` assigned eventId=null
      back over the stamp and the next commit queued a SECOND insert against the same task. Two Google
@@ -14656,7 +14651,7 @@ class Component extends AppLogic {
     const sy=this.state.sync;
     const paneIntegrations=tab!=='integrations'?null:h(React.Fragment,{},
       /* PP-EXT B2: Account & cloud sync — magic-link sign-in to Supabase (offline-first; local stays
-         authoritative). Session persists under pp-auth (see CLAUDE.md rule 5) so you stay signed in across
+         authoritative). Session persists under pp-auth so you stay signed in across
          reloads; the queue persists too. */
       secTitle('Account & cloud sync'),
       /* PP-EXT (UI revamp block 11b): user copy only. Developer note: sync turns on when config.js carries
@@ -14948,7 +14943,7 @@ class Component extends AppLogic {
      wraps it in an <svg> sized off the B0 type scale (default matches --fs-4) using stroke=currentColor so it
      inherits theme text color automatically (no separate light/dark asset). Content emoji (mood wheel, weather,
      habit-streak flame) are deliberately NOT in this map — those are user-facing data, not chrome, per the B1
-     scope note in plans/qa-polish-plan.md. */
+     QA-polish scope note. */
   PP_ICONS(){ return {
     gantt:   'M3 4h4v16H3zM10 9h4v11h-4zM17 6h4v14h-4z',
     day4:    'M4 5h16v15H4zM4 10h16M8 3v4M16 3v4',
@@ -17821,8 +17816,7 @@ class Component extends AppLogic {
      product-vision.md §4 rejected as over-prescribing how people use the app. (The §4/§11 amendment is
      still the owner's to write — see the spec's §7.1.)
 
-     PP-EXT (owner 2026-08-21, Task 9): the approved TWO-COLUMN layout, per
-     `docs/superpowers/mockups/2026-08-20-task9-selection-layout.html`. The buckets STACK inside a column
+     PP-EXT (owner 2026-08-21, Task 9): the approved TWO-COLUMN layout. The buckets STACK inside a column
      and each column is its own scroll container with sticky bucket headers, so a section is exactly as
      tall as its cards. Deliberately not equal vertical bands: that would starve a busy Continued to give
      an empty New the same space. Column widths are equal flex factors and read no count at all. */
@@ -20615,7 +20609,7 @@ class Component extends AppLogic {
        dedicated per-row control (`taskInclControl`) does not also get an ambient channel. The
        PREDICATES stay — `isOptedOut`/`inclState` still feed the popover copy, V2.1's `orderingSeam`,
        and the row control itself; only the paint is gone. Side effect worth naming: the gold +45° hatch
-       was the other half of the hatch collision logged in `tasks.md` (−45° accent = collapsed repeat),
+       was the other half of the hatch collision logged in the backlog (−45° accent = collapsed repeat),
        so that collision is resolved by deletion rather than by retuning either hatch. */
     const key='bk'+t.id+'_'+o.idx;
     const recurring=!!t.recur;

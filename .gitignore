@@ -46,5 +46,3 @@ supabase/.temp/
 # .jsonl files here. It is instrumentation of the owner's own sessions, not project data — never commit it.
 .telemetry/
 
-# Superpowers brainstorming scratch (visual companion mockups)
-.superpowers/
