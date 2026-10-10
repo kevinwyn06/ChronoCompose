@@ -1,8 +1,8 @@
-# supabase/ — ChronoCompose backend (Phase 12+ backend migration)
+# supabase/ — ChronoCompose backend
 
-Schema-as-migrations for the Supabase backend. See `plans/backend-migration-roadmap.md` for the full
-plan; this directory is the **B0** deliverable (schema + RLS + realtime), tracked in-repo so every
-schema change goes through a PR like the rest of the app.
+Schema-as-migrations for the Supabase backend (schema, row-level security, realtime) and the Edge
+Functions, tracked in-repo so every schema change goes through a PR like the rest of the app. Project
+setup is in [`SETUP.md`](../SETUP.md).
 
 ## Layout
 

@@ -5,12 +5,12 @@
 // (no more typing it into the app). An OAuth Client ID is PUBLIC and safe to commit — it is
 // shipped in every browser OAuth app; only a client *secret* is sensitive, and this flow uses none.
 //
-// How to get one (one time): see README.md → "Google Calendar setup".
+// How to get one (one time): see SETUP.md → "Google Calendar setup".
 // Remember to add your serve origin (e.g. http://localhost:8000) as an Authorized JavaScript origin.
 //
 // Durable Calendar sign-in (stays connected across reloads) uses the OAuth *auth-code* flow, which
 // needs the OAuth client SECRET. The secret is NEVER placed here — it lives only in the Supabase
-// Edge Function: `supabase secrets set GCAL_CLIENT_SECRET=<secret>` (see README → Google Calendar
+// Edge Function: `supabase secrets set GCAL_CLIENT_SECRET=<secret>` (see SETUP.md → Google Calendar
 // setup). Persistent gcal also requires being signed into your account.
 
 // Supabase backend (offline-first cloud sync, backend-migration-roadmap.md → sub-phase B2).
