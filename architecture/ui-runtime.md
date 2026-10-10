@@ -1,8 +1,19 @@
 # UI and runtime
 
-`index.html` contains the application and Design document. Never read it wholesale: locate a method or
-`PP-EXT` marker with `rg`, then inspect a bounded range. `support.js` is opaque and must not be edited.
-`Project Planner.dc.html` and its baseline are required three-way Design-sync artifacts.
+`index.html` contains the whole application. Never read it wholesale: locate a method or `PP-EXT` marker
+with `rg`, then inspect a bounded range.
+
+**Runtime.** React 18 UMD from a CDN; no build step. `<head>` carries the theme script (sets
+`<html data-theme>` before first paint) and the one stylesheet. `<script data-pp-app>` holds
+`class Component extends AppLogic`. The bootstrap after it mounts a React `Host` into `#pp-root`:
+`AppLogic.setState` merges into `this.state` **synchronously** and the host then re-renders, so code may
+read `this.state` straight after `setState`; `setState` from the constructor is a no-op. The host renders
+the shell (top bar, `role="main"` board, drawer) around the slots `renderVals()` returns (`topcontext`,
+`viewtoggle`, `drawertoggle`, `toggleSettings`, `board`, `drawer`), and a render error shows a fixed red
+`data-pp-app-error` box instead of unmounting. Props are fixed in the bootstrap's `APP_PROPS`. The unit
+loader (`tests/_load.js`) extracts the `data-pp-app` script and supplies its own `AppLogic`/`React` shims.
+Until 2026-10-09 this layer was the generated Design runtime `support.js`; it and the Design sync
+workflow were removed.
 
 Primary views include Gantt, Day/4-Day/Week/Month calendars, Today/Schedule, Focus, Review, Settings,
 Archive, habits, and journal. Shared state keys and Design `{{ }}` placeholders retain their names.
@@ -741,12 +752,10 @@ information" note above: one of the channels is now opt-in, so the default bar c
 
 - `settings.criticalPath` — the owned `DEFAULT_SETTINGS` key, default `false`, surfaced as *Highlight
   critical path* in Settings › General beside the other display switches.
-- `props.showCriticalPath` — the **Design** prop declared in the `data-dc-script data-props` JSON, whose
-  default is `true` and which stays the Design-side kill switch (an explicit `false` vetoes the setting).
+- `props.showCriticalPath` — the mount prop in the bootstrap's `APP_PROPS`, default `true`; an explicit
+  `false` vetoes the setting (an app-wide kill switch).
 
-**Do not collapse these into one flag**, and do not "simplify" the owner's default into the props JSON
-instead. That JSON is Design-owned, so the next Direction B pull (`DESIGN_WORKFLOW.md`) would restore
-`default:true` and silently turn the channel back on for every user. The two flags answer different
+**Do not collapse these into one flag.** The two flags answer different
 questions: the prop asks *may this app draw critical paths at all*, the setting asks *does this user want
 them*.
 

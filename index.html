@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- PP-EXT: standalone runtime — React + ReactDOM must load before support.js (DC runtime reads window.React/ReactDOM on DOMContentLoaded) -->
+<!-- React + ReactDOM (UMD) are the only UI runtime: the app bootstrap at the end of <body> mounts the Component class with them. -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <!-- PP-EXT: Google Identity Services for client-side Calendar OAuth -->
@@ -14,8 +14,7 @@
 <!-- PP-EXT: local config (Google Client ID, Supabase URL/anon key). Not overwritten by design re-syncs; safe to commit. -->
 <script src="./config.js"></script>
 <!-- Vendored chrono-node (natural-language date extraction). Built by tools/build-chrono.mjs from the
-     pinned chrono-node devDep; loaded the same no-build <script> way as React/Supabase. Lives OUTSIDE
-     the text/x-dc document, so it is not part of the Claude-Design sync. -->
+     pinned chrono-node devDep; loaded the same no-build <script> way as React/Supabase. -->
 <script src="./chrono.min.js"></script>
 <!-- Visual revamp 2026-10-04: Barlow (body) + Barlow Semi Condensed (labels, numerals, headings). A DIN-
      lineage grotesk: instrument-panel vernacular for a time tool, and narrower than the old Helvetica stack
@@ -24,11 +23,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Semi+Condensed:wght@500;600;700&display=swap">
 <!-- /PP-EXT -->
-<script src="./support.js"></script>
-</head>
-<body>
-<x-dc>
-<helmet>
+<!-- Theme before first paint: resolves pp-theme (or the OS preference) onto <html data-theme> so no frame paints in the wrong palette. -->
 <script>
 (function(){try{var s=localStorage.getItem('pp-theme');var t=(s==='light'||s==='dark')?s:((window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','dark');}})();
 </script>
@@ -547,55 +542,25 @@ mark.pp-hit{background:var(--accent-soft);color:var(--text-strong);border-radius
 /* /PP-EXT (UI revamp block 6) */
 
 </style>
-</helmet>
-<!-- PP-EXT (V5 block 23, F10): the shell is rendered inside `zoom`, which scales the USED height as
-     well as the contents — so a plain `height:100vh` asked for a full viewport and painted it into
-     80% of one, leaving a dead strip a fifth of the window tall at EVERY window size. The height rule
-     now divides by the same factor, so the shell fills the real window at any viewport. The zoom
-     factor is declared ONCE here as `--pp-shell-zoom` and consumed twice, so the two can never drift.
-     Do NOT retune or remove the zoom itself — every size unit in the app, including `uiPt` cursor
-     anchoring, was tuned inside it. De-zooming is a Design item for a later cycle. -->
-<div style="--pp-shell-zoom:0.8;display:flex;flex-direction:column;height:calc(100vh / var(--pp-shell-zoom));overflow:hidden;zoom:var(--pp-shell-zoom)"><!-- /PP-EXT -->
-
-  <!-- PP-EXT: decluttered top bar — dropped undo/redo/add-task/jump/zoom-preset/± (undo/redo stay reachable via
-       Ctrl+Z/Y, zoom via Ctrl+scroll, add-task via the "q" popup / sheet footer row). The context slot
-       ({{ topcontext }}) holds the ONE primary nav, Plan · Focus · Review · Journal (UI revamp block 1,
-       renderTopNav); it is identical on every page — day-nav and archive count live in their pages. -->
-  <!-- PP-EXT (UI revamp block 11a): landmarks — the top bar is the banner, the board is main (role attributes, not new elements, so the Design structure is unchanged) -->
-  <div role="banner" style="display:flex;align-items:center;gap:10px;padding:0 16px;height:46px;background:var(--top-bg);border-bottom:1px solid var(--top-border);flex:none">
-    <div style="display:flex;align-items:center;gap:10px">
-      <!-- PP-EXT (visual revamp 2026-10-04): the mark is a dial — a faint ring, a lume arc for "time
-           already composed", and one hand. No gradient; it inherits the theme through tokens. -->
-      <svg width="26" height="26" viewBox="0 0 26 26" fill="none" aria-hidden="true" style="flex:none">
-        <circle cx="13" cy="13" r="10.5" stroke="var(--divider)" stroke-width="2.2"></circle>
-        <path d="M13 2.5 A10.5 10.5 0 0 1 22.1 18.25" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round"></path>
-        <path d="M13 13 L13 6.6" stroke="var(--text-strong)" stroke-width="2.2" stroke-linecap="round"></path>
-        <path d="M13 13 L17.4 15.6" stroke="var(--text-strong)" stroke-width="2.2" stroke-linecap="round"></path>
-        <circle cx="13" cy="13" r="1.6" fill="var(--accent)"></circle>
-      </svg>
-      <div style="font-family:var(--font-cond);font-weight:600;font-size:var(--fs-5);color:var(--text-strong);letter-spacing:0.1px">ChronoCompose</div><!-- /PP-EXT -->
-    </div>
-    <div style="width:1px;height:24px;background:var(--divider);margin:0 2px"></div>
-    {{ topcontext }}
-
-    <div style="flex:1"></div>
-
-    {{ viewtoggle }}
-    {{ drawertoggle }}
-    <button class="pp-iconbtn" onClick="{{ toggleSettings }}" title="Settings" aria-label="Settings">⚙</button><!-- PP-EXT (UI revamp block 11a): named; size from .pp-iconbtn -->
-  </div>
-
-  <div role="main" style="display:flex;flex:1;min-height:0"><!-- PP-EXT (UI revamp block 11a) -->
-    {{ board }}
-  </div>
-
-  {{ drawer }}
-
-</div>
-
-</x-dc>
-<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:&quot;100%&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#3b82f6&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;options&quot;:[&quot;#3b82f6&quot;,&quot;#2f9e5f&quot;,&quot;#8957e5&quot;,&quot;#e5484d&quot;]},&quot;showCriticalPath&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;}}">
-class Component extends DCLogic {
+</head>
+<body>
+<div id="pp-root"></div>
+<script>
+/* The base class the app's Component extends. State lives on the instance and setState merges into it
+   SYNCHRONOUSLY (the app reads this.state right after setState throughout), while the React host in the
+   bootstrap below only re-renders. setState before mount is a no-op: the host attaches after construction. */
+class AppLogic {
+  constructor(props){ this.props = props || {}; this.state = {}; this.__host = null; }
+  setState(update, cb){ this.__host && this.__host.__setLogicState(update, cb); }
+  forceUpdate(){ this.__host && this.__host.forceUpdate(); }
+  componentDidMount(){}
+  componentDidUpdate(_prevProps){}
+  componentWillUnmount(){}
+  renderVals(){ return {}; }
+}
+</script>
+<script data-pp-app>
+class Component extends AppLogic {
   constructor(props){
     super(props);
     /* PP-EXT: active per-account workspace ('anon' or a Supabase uid) — MUST be set before the first
@@ -21893,6 +21858,87 @@ class Component extends DCLogic {
   }
   /* /PP-EXT (UI revamp block 4) */
 }
+</script>
+<script>
+/* App bootstrap: renders the shell (top bar + board + drawer) around the slot values Component.renderVals()
+   returns, and bridges AppLogic state to React. Mounts on DOMContentLoaded so the deferred Supabase client
+   has loaded before the Component constructor runs. */
+(function(){
+  const h = React.createElement;
+  // The props the app is mounted with.
+  const APP_PROPS = { accent:'#3b82f6', showCriticalPath:true };
+  const ERR_STYLE = { position:'fixed', top:8, left:8, zIndex:2147483647, maxWidth:'60ch', padding:'6px 10px',
+    background:'#b00020', color:'#fff', font:'12px/1.4 ui-monospace,monospace', borderRadius:4,
+    whiteSpace:'pre-wrap', pointerEvents:'none' };
+  const errorBox = (msg) => h('div', { role:'alert', 'data-pp-app-error':'', style:ERR_STYLE }, msg);
+  const stroke = (d, color, w) => h('path', { d, stroke:color, strokeWidth:w, strokeLinecap:'round' });
+
+  function Shell(v){
+    /* The shell is rendered inside `zoom`, which scales the USED height as well as the contents, so the
+       height divides by the same factor and the shell fills the real window at any viewport. The factor is
+       declared ONCE as --pp-shell-zoom and consumed twice. Do NOT retune or remove the zoom: every size unit
+       in the app, including `uiPt` cursor anchoring, was tuned inside it. */
+    return h('div', { style:{ '--pp-shell-zoom':0.8, display:'flex', flexDirection:'column',
+        height:'calc(100vh / var(--pp-shell-zoom))', overflow:'hidden', zoom:'var(--pp-shell-zoom)' } },
+      /* Top bar: brand, the ONE primary nav (topcontext: Plan / Focus / Review / Journal), view toggle,
+         drawer toggle, settings. The top bar is the banner landmark, the board is main. */
+      h('div', { role:'banner', style:{ display:'flex', alignItems:'center', gap:10, padding:'0 16px', height:46,
+          background:'var(--top-bg)', borderBottom:'1px solid var(--top-border)', flex:'none' } },
+        h('div', { style:{ display:'flex', alignItems:'center', gap:10 } },
+          // The mark is a dial: a faint ring, a lume arc for "time already composed", and one hand.
+          h('svg', { width:26, height:26, viewBox:'0 0 26 26', fill:'none', 'aria-hidden':'true', style:{ flex:'none' } },
+            h('circle', { cx:13, cy:13, r:10.5, stroke:'var(--divider)', strokeWidth:2.2 }),
+            stroke('M13 2.5 A10.5 10.5 0 0 1 22.1 18.25', 'var(--accent)', 2.6),
+            stroke('M13 13 L13 6.6', 'var(--text-strong)', 2.2),
+            stroke('M13 13 L17.4 15.6', 'var(--text-strong)', 2.2),
+            h('circle', { cx:13, cy:13, r:1.6, fill:'var(--accent)' })),
+          h('div', { style:{ fontFamily:'var(--font-cond)', fontWeight:600, fontSize:'var(--fs-5)',
+            color:'var(--text-strong)', letterSpacing:'0.1px' } }, 'ChronoCompose')),
+        h('div', { style:{ width:1, height:24, background:'var(--divider)', margin:'0 2px' } }),
+        v.topcontext,
+        h('div', { style:{ flex:1 } }),
+        v.viewtoggle,
+        v.drawertoggle,
+        h('button', { className:'pp-iconbtn', onClick:v.toggleSettings, title:'Settings', 'aria-label':'Settings' }, '\u2699')),
+      h('div', { role:'main', style:{ display:'flex', flex:1, minHeight:0 } }, v.board),
+      v.drawer);
+  }
+
+  class Host extends React.Component {
+    constructor(props){
+      super(props);
+      this.state = { v:0, err:null };
+      this.logic = new Component(props);
+      this.logic.__host = this;
+    }
+    // A render crash anywhere below shows the message instead of unmounting the page.
+    static getDerivedStateFromError(e){ return { err:(e && e.message) || String(e) }; }
+    componentDidCatch(e, info){ console.error('[app] render error:', e, (info && info.componentStack) || ''); }
+    __setLogicState(update, cb){
+      const prev = this.logic.state;
+      const patch = typeof update === 'function' ? update(prev) : update;
+      this.logic.state = Object.assign({}, prev, patch);
+      this.setState((s) => ({ v:s.v + 1 }), cb);
+    }
+    componentDidMount(){ try { this.logic.componentDidMount(); } catch(e){ console.error(e); } }
+    componentDidUpdate(prevProps){
+      this.logic.props = this.props;
+      try { this.logic.componentDidUpdate(prevProps); } catch(e){ console.error(e); }
+    }
+    componentWillUnmount(){ try { this.logic.componentWillUnmount(); } catch(e){ console.error(e); } }
+    render(){
+      if(this.state.err) return errorBox(this.state.err);
+      let vals = this.props, err = null;
+      try { vals = Object.assign({}, this.props, this.logic.renderVals() || {}); }
+      catch(e){ console.error(e); err = 'renderVals(): ' + ((e && e.message) || String(e)); }
+      return h(React.Fragment, null, err && errorBox(err), Shell(vals));
+    }
+  }
+
+  function mount(){ ReactDOM.createRoot(document.getElementById('pp-root')).render(h(Host, APP_PROPS)); }
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', mount);
+  else mount();
+})();
 </script>
 </body>
 </html>

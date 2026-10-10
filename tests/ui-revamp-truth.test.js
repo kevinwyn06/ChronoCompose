@@ -17,7 +17,7 @@ const { make, withNow } = require('./_load.js');
 
 const HTML = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
 const STYLE = HTML.slice(HTML.indexOf('<style>'), HTML.indexOf('</style>'));
-const SCRIPT = HTML.match(/data-dc-script[^>]*>([\s\S]*?)<\/script>/)[1];
+const SCRIPT = HTML.match(/<script data-pp-app>([\s\S]*?)<\/script>/)[1];
 
 const textOf = (n) => n == null || n === false ? '' : typeof n === 'string' || typeof n === 'number' ? String(n)
   : Array.isArray(n) ? n.map(textOf).join('') : textOf(n.children);

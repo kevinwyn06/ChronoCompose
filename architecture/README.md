@@ -1,7 +1,7 @@
 # Architecture map
 
-ChronoCompose is a single-page browser application in `index.html`, mounted as a Codex Design document by
-the opaque `support.js` runtime. Owned extensions are marked `PP-EXT`. It is local/offline first, with
+ChronoCompose is a single-page browser application in `index.html`: one `Component` class mounted with
+React by a small bootstrap at the end of `<body>`. Feature code is marked `PP-EXT`. It is local/offline first, with
 optional Supabase synchronization and Google Calendar integration.
 
 Read one page, not the whole set:
@@ -12,7 +12,7 @@ Read one page, not the whole set:
 | Allotment, dependencies, recurrence, daily packing | `scheduling.md` |
 | Natural-language date/task parsing | `parser.md` |
 | Supabase and Google Calendar | `sync-integrations.md` |
-| Design runtime, views, overlays, timers and UI conventions | `ui-runtime.md` |
+| App runtime, views, overlays, timers and UI conventions | `ui-runtime.md` |
 
 Cross-cutting invariants: task mutations use `commit()`; task shape enters through `normalizeTask`; pure
 helpers remain Node-VM testable; owned UI changes retain `PP-EXT` markers; new constants are named.

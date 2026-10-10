@@ -227,8 +227,9 @@ test('the document declares lang="en"', () => {
 });
 
 test('the shell exposes banner, navigation and main landmarks', () => {
-  assert.match(HTML, /role="banner"/, 'the top bar is the banner');
-  assert.match(HTML, /role="main"/, 'the board is main');
+  // The shell is built in the app bootstrap with React.createElement, so the role is a prop, not an attribute.
+  assert.match(HTML, /role:'banner'/, 'the top bar is the banner');
+  assert.match(HTML, /role:'main'/, 'the board is main');
   const c = make();
   const nav = c.renderTopNav();
   assert.equal(nav.type, 'nav', 'the page tabs sit in a <nav>');

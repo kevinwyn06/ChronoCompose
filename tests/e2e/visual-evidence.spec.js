@@ -189,7 +189,7 @@ test.describe('the app fills the window', () => {
       await bootToday(page, Object.assign(fullWeek(), { theme: 'dark' }));
       await settleTimeline(page);
       const m = await page.evaluate(() => {
-        const root = document.getElementById('dc-root') || document.body.firstElementChild;
+        const root = document.getElementById('pp-root') || document.body.firstElementChild;
         const r = root.getBoundingClientRect();
         return { top: r.top, bottom: r.bottom, inner: window.innerHeight };
       });

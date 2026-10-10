@@ -1,7 +1,6 @@
 // Regenerates the vendored browser bundle for chrono-node. Run: `npm run build-chrono`.
 // Output is an IIFE that assigns the chrono-node module to window.chrono, loaded via a plain
-// <script> in index.html's raw <head> — OUTSIDE the Claude-Design-synced text/x-dc document,
-// so it never enters the synced region (CLAUDE.md rules 1-3) and works offline like support.js.
+// <script> in index.html's <head>, and works offline once cached.
 import { build } from 'esbuild';
 
 await build({

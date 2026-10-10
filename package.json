@@ -9,7 +9,6 @@
     "test:e2e:ui": "playwright test --ui",
     "test:all": "npm test && npm run test:e2e",
     "serve": "node tools/static-server.mjs",
-    "build-design": "node tools/build-design-file.js",
     "build-chrono": "node tools/build-chrono.mjs"
   },
   "devDependencies": {

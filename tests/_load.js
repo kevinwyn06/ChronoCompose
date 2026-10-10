@@ -37,7 +37,7 @@ function withNow(ms, fn){
 
 function loadComponent(){
   const html = fs.readFileSync(path.resolve(__dirname, '..', 'index.html'), 'utf8');
-  const m = html.match(/data-dc-script[^>]*>([\s\S]*?)<\/script>/);
+  const m = html.match(/<script data-pp-app>([\s\S]*?)<\/script>/);
   if(!m) throw new Error('component script not found in index.html');
   const js = m[1];
   const store = {};
@@ -57,7 +57,7 @@ function loadComponent(){
     React: { createElement:(type, props, ...children)=>({ type, props:props||{}, children }) },
     setInterval:()=>0, clearInterval:()=>{},
     setTimeout:()=>0, clearTimeout:()=>{}, // two-way sync queue debounce is a no-op under test
-    DCLogic: class {
+    AppLogic: class {
       constructor(p){ this.props = p||{}; }
       setState(o){ if(typeof o==='function') o=o(this.state); Object.assign(this.state, o); }
       forceUpdate(){}

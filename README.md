@@ -26,14 +26,14 @@ Then open <http://localhost:8000/>.
 npm test        # node --test over tests/*.test.js — no dependencies to install
 ```
 
-Files that must sit next to each other: `index.html`, `support.js`, `config.js`. The app also loads React,
+Files that must sit next to each other: `index.html`, `config.js`, `chrono.min.js`. The app also loads React,
 ReactDOM, Google Identity Services, and the Supabase client from CDNs, so you need an internet connection
 on first load.
 
 ### Deploy it (Vercel — private repo, free)
 
 The app is a static site (no build) — Vercel serves it straight from the private GitHub repo. `vercel.json`
-assembles a `dist/` with **only the 3 runtime files** (`index.html`, `config.js`, `support.js`), so `plans/`,
+assembles a `dist/` with **only the 3 runtime files** (`index.html`, `config.js`, `chrono.min.js`), so `plans/`,
 `archive/`, `tests/`, and docs are never published. One-time setup:
 
 1. Vercel dashboard → **Add New… → Project** → import the `ChronoCompose` repo (authorize the Vercel GitHub app).
@@ -129,14 +129,10 @@ out; edits made while signed out queue and push on the next sign-in.
 
 | File | Purpose |
 |---|---|
-| `index.html` | The whole app (DC/React component). Our additions are wrapped in `PP-EXT` markers. |
-| `config.js` | Your local config (Google Client ID). Not part of the design; never overwritten by re-syncs. |
-| `support.js` | Claude Design (DC) runtime — mounts the component. **Never edit.** |
-| `Project Planner.dc.html` | Verbatim copy of the original design file (for easy diffing against future exports). |
-| `Project Planner.dc.baseline.html` | Same original, pinned as the merge baseline for re-syncs. |
+| `index.html` | The whole app: one React component class plus a small mount bootstrap. Feature code is wrapped in `PP-EXT` markers. |
+| `config.js` | Public config (Google Client ID, Supabase URL and publishable key). |
+| `chrono.min.js` | Vendored chrono-node date parser, built by `npm run build-chrono`. |
 | `architecture.md` | Technical reference (data model, algorithms, calendar flow, re-sync). |
-| `DESIGN_WORKFLOW.md` | How to push changes to / pull changes from Claude Design (two-way). |
-| `tools/build-design-file.js` | Generates the design-clean `Project Planner.dc.html` from `index.html`. |
 | `tests/` | Node unit tests (`npm test`) for scheduling, timers, allotment, and calendar import. |
 | `tasks.md` | Implementation backlog + what's deferred. |
 | `CLAUDE.md` | Guidance for future Claude Code sessions. |
