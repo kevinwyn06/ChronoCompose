@@ -3939,20 +3939,29 @@ class Component extends AppLogic {
        whose window opens today would wake it the same instant, and the snooze verbs would do nothing at
        all on precisely the tasks a person is most likely to use them on. A snooze set today survives
        today; from tomorrow the window's opening speaks. */
+    /* PP-EXT (owner report 2026-10-10): A REPEAT IS NOT WOKEN BY ITS OWN OCCURRENCES. Owner: daily tasks
+       snoozed for 7 days or indefinitely came back the next day — *"this shouldn't be the behaviour for
+       recurring tasks."* Every occurrence opens, starts and falls due; that is the routine, not new
+       information. For a repeat the date that can arrive is the SERIES opening (`t.start`), and the
+       occurrence rungs below ('start', 'due') do not apply. Explicit include and deps still wake it. */
+    const repeat = !!t.recur;
     const anySnooze = t.snoozeIndef || (t.snoozeUntil!=null && B<t.snoozeUntil);
     if(anySnooze && t.snoozedAt!=null && this.startOfDay(t.snoozedAt)<B){
-      const win=this.hasDate(t) ? this.todayWindow(t, B) : null;
-      if(win && win.ghostStart!==true && win.start!=null && this.startOfDay(win.start)===B) return 'date';
+      if(repeat){ if(t.start!=null && this.startOfDay(t.start)===B) return 'date'; }
+      else {
+        const win=this.hasDate(t) ? this.todayWindow(t, B) : null;
+        if(win && win.ghostStart!==true && win.start!=null && this.startOfDay(win.start)===B) return 'date';
+      }
     }
     if(!t.snoozeIndef) return null;   /* a DATED snooze has its own expiry; the rest is for the open one */
-    const oc=this.occOnDay(t, B) || this.occOf(t);
+    const oc=repeat ? null : (this.occOnDay(t, B) || this.occOf(t));   /* PP-EXT 2026-10-10: no occurrence rungs for a repeat */
     /* The `hasStartTime` gate STAYS, and the 2026-09-09 'date' reason above is why it can. Dropping it
        here would wake an indefinite snooze on any task whose window merely started at some point in the
        past — which is nearly all of them, making the verb inert on exactly the work people snooze. The
        new reason asks the narrower and more useful question: did the window OPEN today, on a day after
        the one the snooze was set. */
     if(oc && oc.start!=null && this.startOfDay(oc.start)<=B && this.hasStartTime(t)) return 'start';
-    if(t.end!=null && this.dueMsOf(t, B)<now) return 'due';
+    if(!repeat && t.end!=null && this.dueMsOf(t, B)<now) return 'due';
     const deps=(t.deps||[]);
     if(deps.length){ const byId={}; (this.state.tasks||[]).forEach(x=>byId[x.id]=x);
       if(deps.every(d=>{ const p=byId[this.depId(d)]; return !p || p.pct>=100; })) return 'deps'; }

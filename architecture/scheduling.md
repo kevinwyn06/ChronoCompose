@@ -797,6 +797,14 @@ reads as `new` (today brought it back), not as inherited work.
    without it the rule would defeat itself: putting away a task whose window opens today would wake it in
    the same breath, making the snooze verbs inert on exactly the work people use them on.
 
+**A repeat is not woken by its own occurrences (owner report 2026-10-10).** Owner: daily tasks snoozed
+for 7 days or indefinitely came back the next day — *"this shouldn't be the behaviour for recurring
+tasks."* Every occurrence of a repeat opens, starts and falls due, so the date-arriving rule and the
+`start`/`due` rungs woke every snooze on a daily task after one day. For a task with `recur`, the date
+that can arrive is the SERIES opening (`t.start`'s day, after `snoozedAt`); the `start` and `due` rungs do
+not apply. A dated snooze runs to its date; an indefinite one wakes on an explicit include or its
+dependencies. One-off tasks keep every rung (`tests/recurring-snooze-wake.test.js`).
+
 `snoozeActive(t, B, now)` is the ONE predicate every surface asks (`isOptedOut`, `inclState`,
 `autoIncludedToday`, `onListNow`, and — since 2026-09-11 — `isActiveOn`'s today branch). It replaced four hand-rolled copies of "snoozeUntil ahead, or
 snoozeIndef with no wake" — which is how a dated snooze and an open-ended one came to be answered
